@@ -1,0 +1,26 @@
+[package]
+name = "js-interpreter-eval"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Evaluation harness comparing JavaScript interpreters for the Plexus probe sandbox"
+license = "MIT"
+repository = "https://github.com/cortexkit/plexus"
+
+# Keep this evaluation outside plexus's workspace and dependency graph.
+[workspace]
+members = ["bellard-eval", "wasm-guest"]
+
+[dependencies]
+rquickjs = { version = "0.12.2", features = ["macro"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasmtime = { version = "=47.0.3", features = ["pulley"] }
+wasmtime-wasi = "=47.0.3"
+wat = "1.256.0"
+
+[features]
+production-pulley = []
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2 = "0.6.0"

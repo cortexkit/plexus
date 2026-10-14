@@ -1,0 +1,42 @@
+{
+  "method": "permissions.list",
+  "now_ms": 2800000,
+  "reply": {
+    "grants": [
+      {
+        "agent_id": "agent-alf",
+        "card_ref": "el_2",
+        "granted_at_ms": 1000000,
+        "group": "danger",
+        "holder": {
+          "agent_id": "agent-alf",
+          "kind": "agent"
+        },
+        "id": "grt_02",
+        "module": "cerebellum",
+        "scope": "whole_computer",
+        "scope_label": "the whole computer, including your mouse and keyboard",
+        "subject_label": "Whole computer"
+      },
+      {
+        "agent_id": "agent-alf",
+        "card_ref": "el_3",
+        "granted_at_ms": 1000000,
+        "holder": {
+          "agent_id": "agent-alf",
+          "kind": "agent"
+        },
+        "id": "grt_03",
+        "module": "cerebellum",
+        "scope": "site",
+        "scope_label": "the site github.com in the agent browser",
+        "subject_label": "github.com"
+      }
+    ]
+  },
+  "request": {},
+  "route": {
+    "principal": "reserved:cingulate"
+  },
+  "tag": "permissions-v1"
+}

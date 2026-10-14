@@ -1,0 +1,39 @@
+{
+  "issues": [
+    {
+      "number": 160051,
+      "title": "Imaginary paper kite workshop: lantern exercise 21",
+      "state": "OPEN",
+      "created_at": "2026-07-28T06:27:04Z",
+      "updated_at": "2026-08-01T03:39:41Z"
+    },
+    {
+      "number": 132960,
+      "title": "Imaginary paper kite workshop: lantern exercise 22",
+      "state": "OPEN",
+      "created_at": "2024-11-12T18:33:15Z",
+      "updated_at": "2026-08-01T06:46:21Z"
+    },
+    {
+      "number": 144690,
+      "title": "Imaginary paper kite workshop: lantern exercise 23",
+      "state": "CLOSED",
+      "created_at": "2025-07-30T16:36:11Z",
+      "updated_at": "2026-08-01T06:50:10Z"
+    },
+    {
+      "number": 133480,
+      "title": "Imaginary paper kite workshop: lantern exercise 24",
+      "state": "CLOSED",
+      "created_at": "2024-11-25T23:54:10Z",
+      "updated_at": "2026-08-01T07:27:40Z"
+    }
+  ],
+  "totalCount": 275,
+  "pageInfo": {
+    "hasNextPage": true,
+    "hasPreviousPage": false,
+    "startCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOC0wMVQwMzozOTo0MVrPAAAAASnDH9s=",
+    "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOC0wMVQwNzoyNzo0MFrOoH6gxA=="
+  }
+}

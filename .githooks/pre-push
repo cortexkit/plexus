@@ -1,0 +1,105 @@
+#!/bin/sh
+# Refuse to push a commit to main unless CI has already gone green on that exact
+# sha.
+#
+# Local tests cannot guarantee that CI will pass on its own runner and Cargo
+# cache. Requiring a successful CI run for the exact commit prevents a direct
+# push from leaving main on a failure the local gate could not observe.
+#
+# Server-side branch protection would be the better mechanism and is NOT
+# available: this private GitHub repository's subscription returns HTTP 403 for
+# the branch-protection API.
+# So the gate lives here, where it can at least be run.
+#
+# scripts/train.sh runs the gated landing flow: it pushes to train/<name>,
+# watches CI to completion on that sha, and fast-forwards main only on green. By
+# then the sha already has a successful run, so the train passes this hook
+# untouched. A direct push of a fresh commit has no run at all and is refused,
+# which is the entire point: the train becomes the only way onto main rather than
+# the preferred way.
+#
+# Deliberate bypass remains `git push --no-verify`, which is an explicit act
+# rather than an accident.
+
+set -eu
+
+# Check identity for every ref, including train/* branches, tags and deletions.
+# If a private repository is renamed and a public repository takes its old name,
+# green CI from the old history must not authorize a push to the new repository.
+repo_root="$(git rev-parse --show-toplevel)"
+. "$repo_root/scripts/lib/repository-identity.sh"
+repo_slug="$(require_github_repository "$repo_root" gh "${2:-}")" || exit 1
+
+remote_ref_is_main=0
+sha=""
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+    [ "$remote_ref" = "refs/heads/main" ] || continue
+    # A deletion pushes the all-zero sha and has nothing to verify.
+    case "$local_sha" in
+        *[!0]*) ;;
+        *) continue ;;
+    esac
+    remote_ref_is_main=1
+    sha="$local_sha"
+done
+
+[ "$remote_ref_is_main" -eq 1 ] || exit 0
+
+if ! command -v gh >/dev/null 2>&1; then
+    echo "pre-push: refusing — gh is required to check CI on $sha and is not on PATH." >&2
+    echo "  This hook cannot tell a green commit from a red one without it, and" >&2
+    echo "  'could not check' must not read as 'checked and fine'." >&2
+    echo "  Land through scripts/train.sh, or push with --no-verify deliberately." >&2
+    exit 1
+fi
+
+# Group by check NAME and take the LATEST run for each. A sha can carry both a
+# failure and a later success when a transient red is re-run, and the retry is
+# the authoritative result — my first version refused on any non-success and
+# would have blocked a commit that CI had genuinely passed on its second run.
+# This is the graded-sample shape: the newest sample per name decides, and older
+# samples are history rather than verdicts.
+#
+# Socket Security is excluded: it is a third-party app, not our gate, and its
+# verdict is not what "main is green" means here.
+if ! verdicts="$(gh api "repos/$repo_slug/commits/$sha/check-runs" \
+        --hostname github.com \
+        --jq '[.check_runs[] | select(.app.slug != "socket-security")]
+              | group_by(.name)
+              | map(sort_by(.started_at) | last | .conclusion // "pending")
+              | join(",")' 2>/dev/null)"; then
+    echo "pre-push: refusing — could not read CI results for $sha." >&2
+    echo "  Offline, unauthenticated, or the API refused. This is a check that" >&2
+    echo "  DID NOT RUN, not a clean result." >&2
+    echo "  Land through scripts/train.sh, or push with --no-verify deliberately." >&2
+    exit 1
+fi
+
+if [ -z "$verdicts" ]; then
+    echo "pre-push: refusing — no CI run exists for $sha." >&2
+    echo "  A commit reaches main only after CI has gone green on its exact sha." >&2
+    echo "  Land it with: scripts/train.sh <name>" >&2
+    exit 1
+fi
+
+# Every check's latest verdict must be success. One non-success is a refusal,
+# and the message names the whole set so the reader sees which check dissented.
+case ",$verdicts," in
+    *,success,*)
+        case "$verdicts" in
+            *failure*|*timed_out*|*cancelled*|*action_required*|*pending*|*neutral*|*skipped*|*stale*)
+                echo "pre-push: refusing — not every check is green on $sha (latest per check: $verdicts)." >&2
+                echo "  Land it with: scripts/train.sh <name>" >&2
+                exit 1
+                ;;
+        esac
+        exit 0
+        ;;
+esac
+
+# Reached when no check reported success at all: every latest verdict is pending,
+# neutral, skipped or failed. A run in progress is not a green run.
+echo "pre-push: refusing — no check is green on $sha (latest per check: $verdicts)." >&2
+echo "  A run in progress is not a green run. Wait for it, or land it with:" >&2
+echo "    scripts/train.sh <name>" >&2
+exit 1

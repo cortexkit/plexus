@@ -1,0 +1,35 @@
+# Build artifacts
+/target
+# ckdev-mutate proof, replay and broad-audit reports live under target/mutations/.
+/target/mutations/
+**/*.rs.bk
+# Cargo.lock is COMMITTED, deliberately — this workspace produces binaries
+# (ck-plexus, ck-plexus-admin), not a library.
+#
+# Without it, two builds at the same source commit can link different
+# dependency versions, and every deploy check we have — inode identity, build
+# commit, discriminator strings — establishes SOURCE identity only. Measured on
+# 2026-08-07: a single fresh resolve moved 11 packages, including rustls and
+# http, which are on the path that carries vendor credentials. Those moves
+# produce no git diff, so "same commit, different behaviour" would be
+# unanswerable exactly when someone is asking it during an incident.
+#
+# It also makes CI mean something: without a committed lock, CI resolves fresh
+# on every run and can attest a dependency set nobody ever built against.
+node_modules/
+dist/
+
+# CortexKit layout: .cortexkit/ holds local tool state and internal documents,
+# which are never committed. Only these shared, publishable paths are tracked.
+# scripts/check-cortexkit-layout.sh enforces this.
+/.cortexkit/*
+!/.cortexkit/release-notes/
+!/.cortexkit/skills/
+!/.cortexkit/rules/
+!/.cortexkit/WORKER.md
+
+# OS
+.DS_Store
+
+# cortexkit-store lease files (runtime artifacts from tests)
+*.lease

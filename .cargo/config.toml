@@ -1,0 +1,9 @@
+# Use cargo test --locked so local tests read the dependency graph recorded
+# in Cargo.lock rather than silently resolving a different one.
+[alias]
+t = "test --locked"
+
+[env]
+# Plexus does not use SQLite's global allocation statistics or heap limits.
+# Disable their shared mutex so independent connections do not contend on it.
+LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0"

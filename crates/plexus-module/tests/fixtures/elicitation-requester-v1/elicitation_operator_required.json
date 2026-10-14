@@ -1,0 +1,16 @@
+{
+  "error": {
+    "code": "elicitation_operator_required",
+    "message": "only an operator device can list cards"
+  },
+  "method": "elicitation.list_pending_for_user",
+  "request": {
+    "params": {},
+    "route": {
+      "operator": false,
+      "principal": "reserved:plexus",
+      "session": "provider-session"
+    }
+  },
+  "tag": "elicitation-requester-v1"
+}

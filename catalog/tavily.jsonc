@@ -1,0 +1,43 @@
+// Tavily.
+// S1 MCP-direct; read-only web search and content extraction. API-key custody
+// is self-service v1. No write actions — greens the read-only conformance path
+// alongside Exa for a second search vendor.
+{
+  "schema_version": 1,
+  "key": "tavily",
+  "name": "Tavily",
+  "description": "AI-optimized web search and content extraction.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official hosted MCP server; API-key auth; read-only surface maps directly to grants with no write governance needed.",
+  "tier": "S1",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://mcp.tavily.com/mcp/"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    { "name": "tavily_search", "risk": "read" },
+    { "name": "tavily_extract", "risk": "read" }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

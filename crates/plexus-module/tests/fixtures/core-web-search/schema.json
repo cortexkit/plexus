@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "include_domains": {
+      "description": "Only return results from these sites, as bare hostnames (example.com, not https://example.com/).",
+      "items": { "type": "string" },
+      "maxItems": 20,
+      "type": "array"
+    },
+    "max_results": {
+      "description": "How many results to return (default 8).",
+      "maximum": 20,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "query": {
+      "description": "What to search for.",
+      "maxLength": 500,
+      "minLength": 1,
+      "type": "string"
+    },
+    "recency": {
+      "description": "Only return pages published within this period.",
+      "enum": ["day", "week", "month", "year"],
+      "type": "string"
+    }
+  },
+  "required": ["query"],
+  "type": "object"
+}

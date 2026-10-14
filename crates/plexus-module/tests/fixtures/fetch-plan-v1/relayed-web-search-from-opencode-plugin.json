@@ -1,0 +1,12 @@
+{
+  "name": "web_search",
+  "arguments": {
+    "query": "RFC 8785 canonical JSON",
+    "max_results": 5,
+    "include_domains": [
+      "rfc-editor.org"
+    ],
+    "recency": "year"
+  },
+  "call_key": "pf:01JB3Y8A2B3C4D5E6F7G8H9J0K"
+}

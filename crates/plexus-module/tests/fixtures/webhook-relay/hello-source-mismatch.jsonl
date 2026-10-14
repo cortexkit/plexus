@@ -1,0 +1,1 @@
+{"name":"source-differs-from-dialled","dialled_source":"github","frame":{"type":"hello","v":1,"source":"stripe","account_id":"<account_id>","stream_id":"<stream_id>","next_seq":1,"oldest_seq":1,"last_acked_seq":0},"expect":"client_protocol_error"}

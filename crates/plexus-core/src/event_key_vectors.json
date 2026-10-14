@@ -1,0 +1,8 @@
+[
+  {"input":{"kind":"github_issue_changed","repo_id":101,"number":7,"updated_at":"2026-10-07T00:00:00Z"},"expected":"90408920809451f415f29865340b3b6d57d032c1d13f5a8d2062742300645740"},
+  {"input":{"kind":"github_pr_changed","repo_id":101,"number":8,"updated_at":"2026-10-07T00:00:01Z"},"expected":"8598eb2d30e7ce68eb09cec05635a6201b17ec796de087358ac2fea76d24747b"},
+  {"input":{"kind":"github_release_published","repo_id":101,"release_id":900},"expected":"28a132910512592b23356c0cf5c976c246b76f85038c66f102476e1aa3eb57b9"},
+  {"input":{"kind":"github_ci_job_failed","repo_id":101,"job_id":1001,"run_attempt":2,"conclusion":"failure"},"expected":"bf81531e3ddb9883965211f14f9bf45e4a2fdc6fb4e6d22d165978115434e9c9"},
+  {"input":{"kind":"github_ci_job_completed","repo_id":101,"job_id":1002,"run_attempt":2,"conclusion":"success"},"expected":"4eaeee997c545310a5509e7ba3f971dbd8aa52fb17f7f18731dcc2f532efa72e"},
+  {"input":{"kind":"github_ci_run_completed","repo_id":101,"run_id":500,"run_attempt":2,"conclusion":"startup_failure"},"expected":"3a13c72819c2d620f488189d6d6fc4e67eb26d2d0fa47ac154cbb270fd4918e8"}
+]

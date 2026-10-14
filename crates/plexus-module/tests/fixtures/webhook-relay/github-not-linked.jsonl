@@ -1,0 +1,1 @@
+{"name":"unlinked","request":{"method":"POST","path":"/v1/relay/github/connect"},"status":409,"body":"{\"error\":\"github_not_linked\",\"message\":\"The GitHub account you used is not linked to the CortexKit account that started this connection. Sign in to CortexKit with GitHub, or link GitHub to your account, then start again.\"}"}

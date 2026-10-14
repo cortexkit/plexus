@@ -1,0 +1,37 @@
+{
+  "method": "elicitation.request",
+  "reply": {
+    "elicitation_id": "@ELICITATION_ID@"
+  },
+  "request": {
+    "default": "deny",
+    "duration": "this call",
+    "expires_in_ms": 60000,
+    "kind": "consent",
+    "late_execution": "execute",
+    "material_damage": true,
+    "on_expiry": "deny",
+    "options": [
+      {
+        "effect": "grant",
+        "id": "transfer:chrome",
+        "label": "Copy from Chrome"
+      },
+      {
+        "effect": "decline",
+        "id": "deny",
+        "label": "Not now"
+      }
+    ],
+    "prompt": "May I copy your login?",
+    "scope": "github.com",
+    "session_ref": "ses_head",
+    "target": {
+      "kind": "site",
+      "label": "github.com"
+    },
+    "title": "Copy login",
+    "urgency": "normal"
+  },
+  "tag": "elicitation-requester-v1"
+}

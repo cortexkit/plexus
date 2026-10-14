@@ -1,0 +1,19 @@
+{
+  "error": {
+    "code": "elicitation_invalid_execution",
+    "message": "unknown execution outcome"
+  },
+  "method": "elicitation.report_execution",
+  "request": {
+    "params": {
+      "elicitation_id": "@ELICITATION_ID@",
+      "execution": "not_run"
+    },
+    "route": {
+      "operator": false,
+      "principal": "reserved:plexus",
+      "session": "provider-session"
+    }
+  },
+  "tag": "elicitation-requester-v1"
+}

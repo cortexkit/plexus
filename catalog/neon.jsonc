@@ -1,0 +1,89 @@
+// Neon. S3 is required because this connector provisions
+// database branches and runs arbitrary SQL; a mistaken statement can drop or
+// delete data. The vendor documents this hosted MCP server as PREVIEW, so
+// availability is gated rather than ga. Destructive project/branch tool names
+// not confirmed in the reviewed docs are intentionally omitted.
+{
+  "schema_version": 1,
+  "key": "neon",
+  "name": "Neon",
+  "description": "Neon projects, branches, connection strings, and SQL.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official Neon-hosted remote MCP server; API-key bearer authentication and reviewed tools map directly to grants.",
+  "tier": "S3",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://mcp.neon.tech/mcp"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": ["project_id"],
+    "optional": ["branch_id"],
+    "write_enabling": ["project_id", "branch_id"]
+  },
+  // Tool names confirmed from Neon MCP documentation. This useful subset
+  // covers project/branch reads, querying, schema work, and the documented
+  // branch/migration writes; the full preview surface is not claimed here.
+  "actions_baseline": [
+    { "name": "list_projects", "risk": "read" },
+    { "name": "describe_project", "risk": "read" },
+    { "name": "describe_branch", "risk": "read" },
+    { "name": "list_branch_computes", "risk": "read" },
+    { "name": "get_database_tables", "risk": "read" },
+    { "name": "describe_table_schema", "risk": "read" },
+    // Worst-case classification: run_sql can execute destructive SQL.
+    { "name": "run_sql", "risk": "destructive" },
+    { "name": "compare_database_schema", "risk": "read" },
+    { "name": "list_slow_queries", "risk": "read" },
+    { "name": "explain_sql_statement", "risk": "read" },
+    { "name": "get_connection_string", "risk": "read" },
+    { "name": "search", "risk": "read" },
+    { "name": "fetch", "risk": "read" },
+    {
+      "name": "create_branch",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["project_id", "branch_name", "time_window"],
+        "read_back_action": "describe_branch",
+        "timeout_s": 120
+      },
+      "idempotency": "none"
+    },
+    {
+      "name": "prepare_database_migration",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["project_id", "branch_id", "time_window"],
+        "read_back_action": "describe_branch",
+        "timeout_s": 180
+      },
+      "idempotency": "none"
+    },
+    {
+      "name": "complete_database_migration",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["project_id", "branch_id", "time_window"],
+        "read_back_action": "describe_branch",
+        "timeout_s": 180
+      },
+      "idempotency": "none"
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "gated"
+}

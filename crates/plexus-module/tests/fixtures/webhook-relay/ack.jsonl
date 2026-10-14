@@ -1,0 +1,12 @@
+{"name":"none-yet","frame":{"type":"ack","through_seq":0},"expect":"valid"}
+{"name":"cumulative","frame":{"type":"ack","through_seq":2},"expect":"valid"}
+{"name":"repeated","frame":{"type":"ack","through_seq":2},"expect":"valid"}
+{"name":"lower","frame":{"type":"ack","through_seq":1},"expect":"valid"}
+{"name":"max-safe-seq","frame":{"type":"ack","through_seq":9007199254740991},"expect":"valid"}
+{"name":"above-highest-sent","frame":{"type":"ack","through_seq":3},"expect":4400}
+{"name":"negative","frame":{"type":"ack","through_seq":-1},"expect":4400}
+{"name":"fractional","frame":{"type":"ack","through_seq":1.5},"expect":4400}
+{"name":"above-max-safe","frame":{"type":"ack","through_seq":9007199254740992},"expect":4400}
+{"name":"string","frame":{"type":"ack","through_seq":"1"},"expect":4400}
+{"name":"null","frame":{"type":"ack","through_seq":null},"expect":4400}
+{"name":"missing-through","frame":{"type":"ack"},"expect":4400}

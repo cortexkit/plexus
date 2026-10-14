@@ -1,0 +1,74 @@
+// Sentry.
+// S2 MCP-direct; first write actions (comment/assign/resolve) at low blast
+// radius. v1 custody uses the org token as a static API key (self-service);
+// OAuth is possible later but is not the v1 path.
+{
+  "schema_version": 1,
+  "key": "sentry",
+  "name": "Sentry",
+  "description": "Error monitoring: issues, events, and triage writes.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official hosted MCP server; tools map cleanly to grants.",
+  "tier": "S2",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://mcp.sentry.dev/mcp"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": ["org", "project"],
+    "optional": ["environment", "status"],
+    "write_enabling": ["project"]
+  },
+  "actions_baseline": [
+    { "name": "search_issues", "risk": "read" },
+    { "name": "get_issue", "risk": "read" },
+    { "name": "get_event", "risk": "read" },
+    {
+      "name": "comment_issue",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["issue_id", "body_hash", "time_window"],
+        "read_back_action": "get_issue",
+        "timeout_s": 120
+      },
+      "idempotency": "none"
+    },
+    {
+      "name": "assign_issue",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["issue_id", "assignee"],
+        "read_back_action": "get_issue",
+        "timeout_s": 60
+      },
+      "idempotency": "natural"
+    },
+    {
+      "name": "resolve_issue",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["issue_id", "target_status"],
+        "read_back_action": "get_issue",
+        "timeout_s": 60
+      },
+      "idempotency": "natural"
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

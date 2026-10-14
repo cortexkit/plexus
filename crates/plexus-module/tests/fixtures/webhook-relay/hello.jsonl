@@ -1,0 +1,5 @@
+{"name":"empty","frame":{"type":"hello","v":1,"source":"github","account_id":"<account_id>","stream_id":"<stream_id>","next_seq":1,"oldest_seq":1,"last_acked_seq":0},"expect":"emitted"}
+{"name":"buffered","frame":{"type":"hello","v":1,"source":"github","account_id":"<account_id>","stream_id":"<stream_id>","next_seq":2,"oldest_seq":1,"last_acked_seq":0},"expect":"emitted"}
+{"name":"last-acked-ahead-of-client","frame":{"type":"hello","v":1,"source":"github","account_id":"<account_id>","stream_id":"<stream_id>","next_seq":2,"oldest_seq":2,"last_acked_seq":1},"expect":"emitted"}
+{"name":"changed-stream-id","frame":{"type":"hello","v":1,"source":"github","account_id":"<account_id>","stream_id":"<stream_id>","next_seq":1,"oldest_seq":1,"last_acked_seq":0},"expect":"emitted"}
+{"name":"max-safe-seq","frame":{"type":"hello","v":1,"source":"github","account_id":"<account_id>","stream_id":"<stream_id>","next_seq":9007199254740991,"oldest_seq":9007199254740991,"last_acked_seq":0},"expect":"emitted"}

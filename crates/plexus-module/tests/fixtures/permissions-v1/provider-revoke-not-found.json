@@ -1,0 +1,14 @@
+{
+  "method": "permissions.revoke",
+  "now_ms": 1060000,
+  "reply": {
+    "outcome": "not_found"
+  },
+  "request": {
+    "id": "grt_99"
+  },
+  "route": {
+    "principal": "reserved:cingulate"
+  },
+  "tag": "permissions-v1"
+}

@@ -1,0 +1,285 @@
+use super::*;
+use crate::storage::{CatalogActionInput, GrantInput};
+use crate::test_scratch::Scratch;
+use crate::{MockTransport, StubCredentialSource};
+use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+
+#[test]
+#[ignore = "performance measurement"]
+fn measure_cached_search_authorization() {
+    let (engine, _) = granted_exa_engine("search-authorization-measurement");
+    engine
+        .store()
+        .set_web_search_limits(
+            "exa",
+            crate::storage::web_search_store::WebSearchLimits {
+                per_caller_per_minute: 10_000,
+                per_backend_per_minute: 10_000,
+            },
+        )
+        .unwrap();
+    let service =
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000));
+    let args = json!({"query":"rust async book"});
+    let query = WebSearchQuery::parse(args.as_object().unwrap()).unwrap();
+    service
+        .cache
+        .put(CacheKey::new("exa", &query), vec![], 1_790_000_000_000);
+    let started = std::time::Instant::now();
+    for _ in 0..1_000 {
+        assert!(
+            service
+                .search(&engine, "direct", args.as_object().unwrap())
+                .unwrap()
+                .cached
+        );
+    }
+    println!(
+        "1,000 cached searches with live authorization and audit: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn blocked_searches_keep_the_rate_budget() {
+    let (engine, _) = granted_exa_engine("blocked-search-budget");
+    let service =
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000));
+    let args = json!({"query":"rust async book"});
+    engine
+        .store()
+        .set_policy("direct", "exa", "search", "block", None)
+        .unwrap();
+    for _ in 0..200 {
+        assert_eq!(
+            service.search(&engine, "direct", args.as_object().unwrap()),
+            Err(WebSearchRefusal::NotGranted),
+            "blocked searches must not consume quota"
+        );
+    }
+    engine
+        .store()
+        .set_policy("direct", "exa", "search", "allow", None)
+        .unwrap();
+    let query = WebSearchQuery::parse(args.as_object().unwrap()).unwrap();
+    service
+        .cache
+        .put(CacheKey::new("exa", &query), vec![], 1_790_000_000_000);
+    assert!(
+        service
+            .search(&engine, "direct", args.as_object().unwrap())
+            .is_ok(),
+        "allowed caller retains quota after blocked calls"
+    );
+}
+
+/// An exa connection owned by `direct`, with `direct` holding a read grant
+/// for the search action.
+fn granted_exa_engine(
+    name: &str,
+) -> (
+    GovernanceEngine<StubCredentialSource, MockTransport>,
+    Arc<MockTransport>,
+) {
+    let (engine, transport, _path) = granted_exa_engine_with_path(name);
+    (engine, transport)
+}
+
+fn granted_exa_engine_with_path(
+    name: &str,
+) -> (
+    GovernanceEngine<StubCredentialSource, MockTransport>,
+    Arc<MockTransport>,
+    Scratch,
+) {
+    let path = Scratch::database(name);
+    let store = Arc::new(
+        PlexusStore::open(&StorageDescriptor {
+            module_id: "plexus".into(),
+            storage_namespace: name.into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+            },
+        })
+        .unwrap(),
+    );
+    store
+        .insert_connection(
+            "direct",
+            "exa",
+            "exa_rest",
+            "pending",
+            &json!({"required": [], "optional": [], "write_enabling": []}),
+        )
+        .unwrap();
+    let ticket = store
+        .create_binding_ticket("direct", "exa", b"test:exa")
+        .unwrap();
+    store
+        .connect_with_ticket("direct", &ticket.ticket_id)
+        .unwrap()
+        .unwrap();
+    let schema = json!({"type": "object"});
+    store
+        .upsert_catalog_action(&CatalogActionInput {
+            principal: "direct".into(),
+            connection_id: "exa".into(),
+            name: "search".into(),
+            title: None,
+            schema: schema.clone(),
+            schema_hash: crate::jcs_sha256(&schema).unwrap(),
+            risk: "read".into(),
+            severity: "S1".into(),
+            ask_first: false,
+            status: "active".into(),
+            quarantine_reason: None,
+            reconciliation: None,
+        })
+        .unwrap();
+    store
+        .insert_grant(&GrantInput {
+            principal: "direct".into(),
+            connection_id: "exa".into(),
+            grant_id: "web-search-grant".into(),
+            grantee_principal: "direct".into(),
+            risk_ceiling: "read".into(),
+            action_selectors: vec!["search".into()],
+            authority_kind: "invoke".into(),
+            expires_at: None,
+        })
+        .unwrap();
+    let transport = Arc::new(MockTransport::default());
+    let engine = GovernanceEngine::new(
+        store,
+        Arc::new(StubCredentialSource::default()),
+        transport.clone(),
+    );
+    (engine, transport, path)
+}
+
+#[test]
+fn policy_lookup_errors_keep_operator_diagnostics() {
+    const TEST: &str = "web_search::tests::policy_lookup_errors_keep_operator_diagnostics";
+    if std::env::var_os("PLEXUS_WEB_SEARCH_DIAGNOSTIC_CHILD").is_some() {
+        #[allow(dead_code)]
+        mod logging {
+            include!("../../tests/support/logging.rs");
+        }
+        logging::init_child();
+        let (engine, _, path) = granted_exa_engine_with_path("web-policy-diagnostic");
+        let sql = rusqlite::Connection::open(&*path).unwrap();
+        sql.execute("DROP TABLE policies", []).unwrap();
+        let service =
+            WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000));
+        assert!(service.would_ask(engine.store(), "direct").is_err());
+        return;
+    }
+    let output = crate::test_http::bounded::child_output(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env("PLEXUS_WEB_SEARCH_DIAGNOSTIC_CHILD", "1")
+            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+        std::time::Duration::from_secs(30),
+        "web search diagnostic child",
+    )
+    .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("web_search policy lookup failed:") && stderr.contains("policies"),
+        "policy error cause must reach operator logs: {stderr}"
+    );
+}
+
+#[test]
+fn cached_code_lookup_is_refused_before_cache_access() {
+    let (engine, transport) = granted_exa_engine("cached-code-lookup");
+    let now_ms = 1_790_000_000_000;
+    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(move || now_ms));
+    let result = WebSearchResult {
+        url: "https://example.org/cached".into(),
+        title: "Previously fetched result".into(),
+        excerpt: "A result already in the shared cache".into(),
+        published_at: None,
+        fetched_at: crate::poller::iso8601::format_millis(now_ms),
+    };
+    let allowed = json!({"query": "rust async book"});
+    let refused = json!({"query": "site:github.com/owner/repo/blob/main/lib.rs"});
+    // Seed both keys directly to model results cached before the source-lookup guard existed.
+    for arguments in [&allowed, &refused] {
+        let query = WebSearchQuery::parse(arguments.as_object().unwrap()).unwrap();
+        service
+            .cache
+            .put(CacheKey::new("exa", &query), vec![result.clone()], now_ms);
+    }
+    let response = service
+        .search(&engine, "direct", allowed.as_object().unwrap())
+        .unwrap();
+    assert!(
+        response.cached,
+        "the allowed control must reach the same live cache"
+    );
+    assert_eq!(response.results, vec![result]);
+    assert_eq!(
+        service.search(&engine, "direct", refused.as_object().unwrap(),),
+        Err(WebSearchRefusal::CodeLookup),
+        "a cached source-code query must be refused rather than served"
+    );
+    assert!(transport.requests().is_empty());
+}
+
+/// The backend rate bucket is shared by every caller, so a caller without a
+/// grant must be refused before it is charged. Otherwise a handful of
+/// ungranted principals could empty the bucket and lock out the granted one.
+#[test]
+fn ungranted_callers_cannot_drain_the_shared_backend_bucket() {
+    let (engine, transport) = granted_exa_engine("ungranted-bucket-drain");
+    let now_ms = 1_790_000_000_000;
+    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(move || now_ms));
+    let arguments = json!({"query": "rust async book"});
+    let query = WebSearchQuery::parse(arguments.as_object().unwrap()).unwrap();
+    // A cached answer lets the granted caller succeed without a vendor reply.
+    service
+        .cache
+        .put(CacheKey::new("exa", &query), Vec::new(), now_ms);
+    // Enough ungranted callers, each spending its whole per-caller allowance,
+    // to empty the backend bucket several times over.
+    let per_caller = super::limiter::DEFAULT_PER_CALLER_PER_MINUTE as usize;
+    let strangers = 2 * super::limiter::DEFAULT_PER_BACKEND_PER_MINUTE as usize / per_caller;
+    for stranger in 0..strangers {
+        let caller = format!("stranger-{stranger}");
+        for _ in 0..per_caller + 1 {
+            assert_eq!(
+                service.search(&engine, &caller, arguments.as_object().unwrap(),),
+                Err(WebSearchRefusal::NotGranted),
+                "an ungranted caller is refused as not granted, never rate limited"
+            );
+        }
+    }
+    let response = service
+        .search(&engine, "direct", arguments.as_object().unwrap())
+        .expect("the granted caller keeps its rate budget");
+    assert!(response.cached);
+    assert!(transport.requests().is_empty());
+}
+
+/// A grant refusal met inside the engine names the caller that asked as the
+/// grantee, the same target the pre-flight grant check reports.
+#[test]
+fn engine_grant_refusals_name_the_calling_module() {
+    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 0));
+    let cause = crate::grant_refusal::Cause::Missing;
+    let denial = Denial::GrantRefusal(crate::grant_refusal::GrantRefusal::new(
+        WebSearchService::grant_target("direct"),
+        cause,
+    ));
+    assert_eq!(
+        service.refusal_for_denial("direct", &denial),
+        WebSearchRefusal::Grant(crate::grant_refusal::GrantRefusal::new(
+            WebSearchService::grant_target("direct"),
+            cause,
+        )),
+        "the refusal must name the calling module as the grantee"
+    );
+}

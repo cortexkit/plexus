@@ -1,0 +1,48 @@
+// Context7.
+// S1 MCP-direct; read-only library documentation lookup. API-key custody is
+// self-service v1. No write actions — a pure retrieval vendor.
+{
+  "schema_version": 1,
+  "key": "context7",
+  "name": "Context7",
+  "description": "Library documentation lookup and query.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official hosted MCP server; API-key auth; read-only surface maps directly to grants with no write governance needed.",
+  "tier": "S1",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://mcp.context7.com/mcp"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "CONTEXT7_API_KEY",
+      "prefix": "",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  // Tool names are HYPHENATED, verified against a live tools/list rather than
+  // taken from documentation. They were declared with underscores here, which
+  // matched nothing: reconcile would have disabled both declared actions and
+  // quarantined both served ones, leaving an inert connector that looks
+  // configured. A name is an exact-match key, so a punctuation difference is a
+  // total failure rather than a cosmetic one.
+  "actions_baseline": [
+    { "name": "resolve-library-id", "risk": "read" },
+    { "name": "query-docs", "risk": "read" }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

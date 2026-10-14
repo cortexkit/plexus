@@ -1,0 +1,80 @@
+// Browserbase. S2 fits a cloud browser surface whose
+// navigation/extraction are reads, while `act` is a write: it drives a real
+// browser against third-party sites and can submit forms or change state that
+// Browserbase itself cannot predict. Session start/end are writes because they
+// create and close vendor-side browser state. The current documented MCP server
+// has no dedicated screenshot tool; this manifest does not invent one.
+{
+  "schema_version": 1,
+  "key": "browserbase",
+  "name": "Browserbase",
+  "description": "Cloud browser sessions, navigation, interaction, observation, and extraction.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official Browserbase-hosted remote MCP server; API-key authentication and reviewed browser actions map directly to grants.",
+  "tier": "S2",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://mcp.browserbase.com/mcp"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": ["domain_allowlist"],
+    "write_enabling": ["domain_allowlist"]
+  },
+  // Exact current tool IDs confirmed from Browserbase's hosted MCP
+  // documentation: start, end, navigate, act, observe, and extract. `act`
+  // covers click/type through natural-language actions; no screenshot tool is
+  // documented, so screenshot is intentionally not claimed here.
+  "actions_baseline": [
+    {
+      "name": "start",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["domain_allowlist", "time_window"],
+        "read_back_action": "observe",
+        "timeout_s": 120
+      },
+      "idempotency": "none"
+    },
+    {
+      "name": "end",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["session_id", "time_window"],
+        "read_back_action": "observe",
+        "timeout_s": 120
+      },
+      "idempotency": "natural"
+    },
+    { "name": "navigate", "risk": "read" },
+    {
+      "name": "act",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["domain_allowlist", "action", "time_window"],
+        "read_back_action": "observe",
+        "timeout_s": 120
+      },
+      "idempotency": "none"
+    },
+    { "name": "observe", "risk": "read" },
+    { "name": "extract", "risk": "read" }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

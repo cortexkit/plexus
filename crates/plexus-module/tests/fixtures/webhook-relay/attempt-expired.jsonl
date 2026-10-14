@@ -1,0 +1,1 @@
+{"name":"expired","request":{"method":"GET","path":"/v1/relay/github/connect/<attempt_id>"},"status":200,"body":"{\"attempt_id\":\"<attempt_id>\",\"state\":\"expired\",\"expires_at\":\"2030-10-08T09:15:00.000Z\",\"reason\":null,\"message\":null,\"installation_id\":null,\"account_login\":null,\"repository_count\":null}"}

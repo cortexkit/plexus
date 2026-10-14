@@ -1,0 +1,76 @@
+// Firecrawl.
+// S2 MCP-direct; web scraping, search, and document parsing.
+//
+// The action names here were re-read from the live server and no longer
+// match the ones this manifest was originally written against.
+// Firecrawl consolidated its MCP surface: `scrape`, `search`, `map`, `crawl`,
+// `extract`, `agent` and `interact` are all gone, replaced by three prefixed
+// tools. Crawling and extraction are now options on `firecrawl_scrape` and
+// `firecrawl_search` rather than separate tools, and the browser-driving
+// actions were withdrawn entirely.
+//
+// That drift is worth naming because it is SILENT until someone connects: a
+// manifest declaring actions the vendor no longer serves reconciles to a dead
+// connector — every declared action disabled for being absent, every live tool
+// quarantined for being undeclared — and nothing reports it beforehand. A
+// manifest is a claim about a remote surface at review time, and the vendor is
+// under no obligation to keep it true.
+{
+  "schema_version": 1,
+  "key": "firecrawl",
+  "name": "Firecrawl",
+  "description": "Web scraping, search, and document parsing.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official hosted MCP server; API-key auth; the three served tools map 1:1 to grants. All three are read-risk: they retrieve and transform content without mutating vendor-side state.",
+  "tier": "S2",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://mcp.firecrawl.dev/v2/mcp"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  // No write-enabling filter key, because this vendor serves no write action.
+  // Declaring one would be configuration nothing reads — and an unread
+  // declaration does not sit inert, it accumulates a meaning nobody checked.
+  // Writes are unreachable without a write-enabling key, which is the correct
+  // fail-closed posture for a read-only surface; if Firecrawl ever serves a
+  // mutating tool it arrives undeclared and is quarantined on sight.
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  // All three are read-risk, and the vendor's own annotations agree
+  // (readOnlyHint true, destructiveHint false on every tool). Outbound network
+  // fetches are not vendor-side writes: nothing here changes state that a later
+  // read would observe differently.
+  //
+  // The annotations are corroboration, not authority — a vendor's self-report
+  // is exactly the untrusted input the reviewed manifest exists to replace.
+  // They are recorded because they AGREE with the review; a disagreement would
+  // be the interesting case and would resolve toward the stricter reading.
+  "actions_baseline": [
+    { "name": "firecrawl_scrape", "risk": "read" },
+    { "name": "firecrawl_search", "risk": "read" },
+    // Parses a document into markdown/HTML/JSON. Read-risk for the same reason
+    // as the others: the "file" is one the caller hands the vendor, not
+    // anything the vendor reaches for itself, and this transport is remote HTTP
+    // so the server has no path to a local filesystem.
+    { "name": "firecrawl_parse", "risk": "read" }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

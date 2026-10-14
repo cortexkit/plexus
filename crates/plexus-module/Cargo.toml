@@ -1,0 +1,80 @@
+# plexus-module — the thin ck-plexus subc wire binary. Domain models,
+# migrations, and storage queries live in plexus-core.
+[package]
+name = "plexus-module"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+repository = "https://github.com/cortexkit/plexus"
+
+description = "The ck-plexus connectors-plane subc module"
+
+[features]
+test-support = ["plexus-core/test-support"]
+
+[[bin]]
+name = "ck-plexus"
+path = "src/main.rs"
+
+# The operator client for the privileged ceremony. Separate from the module
+# binary because it is a subc CLIENT of the running module, not a second way
+# into its store.
+[[bin]]
+name = "ck-plexus-admin"
+path = "src/bin/ck-plexus-admin.rs"
+
+[dependencies]
+cortexkit-log = { workspace = true }
+# The tool-provider role crate defines tool.catalog, capability tags, call
+# modes and the content/v1 result shape. Each release line is built against one
+# subc-protocol version (0.7.x pairs with 0.31), and mixing lines would put two
+# copies of the wire types in one build, so it moves only with the subc block.
+cortexkit-role-tool-provider = "=0.7.2"
+plexus-core = { path = "../plexus-core" }
+# `--smoke-probe` runs a guest through the probe sandbox directly. Already linked
+# through plexus-core, so this adds no new code to the binary.
+plexus-probe = { path = "../plexus-probe" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+subc-protocol = { workspace = true }
+subc-transport = { workspace = true }
+subc-jsonc = { workspace = true }
+cortexkit-store = { workspace = true }
+cortexkit-store-types = { workspace = true }
+subc-client-rs = { workspace = true }
+# The launch-nonce accessor HELLO reads through. subc-client-rs reads the same
+# cached accessor for its route opens, so both readers share one value; naming
+# the crate here makes the workspace's exact pin bind the version.
+subc-os = { workspace = true }
+zeroize = { workspace = true }
+cortexkit-bus-trait = "=0.3.0"
+cortexkit-bus-naming = "=0.2.0"
+cortexkit-bus-nats = "=0.3.0"
+async-nats = { version = "0.50", default-features = false, features = ["jetstream", "kv", "nkeys", "nuid", "ring", "server_2_10"] }
+async-trait = "0.1"
+base64 = "0.22"
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", features = ["sink"] }
+
+[dev-dependencies]
+plexus-core = { path = "../plexus-core", features = ["test-support"] }
+plexus-module = { path = ".", features = ["test-support"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+cortexkit-bus-inmemory = "=0.3.0"
+tokio = { workspace = true, features = ["test-util"] }
+cortexkit-test-support = "=0.1.3"
+# The daemon bootstrap the conformance harness spawns in-process; only the test
+# harness reaches for it here.
+subc-daemon = { workspace = true }
+rusqlite = { workspace = true }
+plexus-conformance = { path = "../plexus-conformance" }
+subc-control = { workspace = true }
+# Lets the provenance test compare the embedded digest against the real lock
+# file rather than only checking its shape. Already resolved in the workspace
+# lock, so this adds no new dependency to the linked set.
+sha2 = { workspace = true }

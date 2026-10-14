@@ -1,0 +1,40 @@
+// Exa is required by the fresh-install catalog-discovery assertion in this file.
+{
+  "schema_version": 1,
+  "key": "exa",
+  "name": "Exa",
+  "description": "Neural web search and content retrieval.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official MCP server; API-key auth; read-only surface maps directly to grants with no write governance needed.",
+  "tier": "S1",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://mcp.exa.ai/mcp"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": ["domain_allowlist", "domain_denylist", "content_category", "result_limit"],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    { "name": "web_search_exa", "risk": "read" },
+    { "name": "web_fetch_exa", "risk": "read" }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

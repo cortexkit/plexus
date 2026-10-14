@@ -1,0 +1,163 @@
+// Resend. S3 is appropriate because email is an external
+// side effect: `send-email` is destructive in the consequential sense that an
+// operator cannot unsend it, and `send-broadcast` is the highest-consequence
+// action here because it sends to a contact list. Contacts, domains, and draft
+// broadcasts remain writes even when they are more reversible.
+{
+  "schema_version": 1,
+  "key": "resend",
+  "name": "Resend",
+  "description": "Email delivery, contacts, domains, and broadcasts.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official Resend-hosted remote MCP server; API-key bearer authentication and reviewed tools map directly to grants.",
+  "tier": "S3",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://mcp.resend.com/mcp"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": ["from_domain"],
+    "write_enabling": ["from_domain"]
+  },
+  // Tool IDs confirmed from Resend's account MCP documentation. The subset
+  // covers email, contacts, domains, and broadcasts; the docs-only MCP server
+  // is a separate read-oriented service and is not this account connector.
+  "actions_baseline": [
+    { "name": "list-emails", "risk": "read" },
+    { "name": "get-email", "risk": "read" },
+    {
+      "name": "send-email",
+      "risk": "destructive",
+      "reconciliation": {
+        "correlation_fields": ["from_domain", "to", "subject", "time_window"],
+        "read_back_action": "get-email",
+        "timeout_s": 120
+      },
+      "idempotency": "none"
+    },
+    {
+      "name": "cancel-email",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["from_domain", "email_id", "time_window"],
+        "read_back_action": "get-email",
+        "timeout_s": 120
+      },
+      "idempotency": "natural"
+    },
+    { "name": "list-contacts", "risk": "read" },
+    { "name": "get-contact", "risk": "read" },
+    {
+      "name": "create-contact",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["from_domain", "email", "time_window"],
+        "read_back_action": "get-contact",
+        "timeout_s": 120
+      },
+      "idempotency": "none"
+    },
+    {
+      "name": "update-contact",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["from_domain", "email", "time_window"],
+        "read_back_action": "get-contact",
+        "timeout_s": 120
+      },
+      "idempotency": "natural"
+    },
+    {
+      "name": "remove-contact",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["from_domain", "email", "time_window"],
+        "read_back_action": "get-contact",
+        "timeout_s": 120
+      },
+      "idempotency": "natural"
+    },
+    { "name": "list-domains", "risk": "read" },
+    { "name": "get-domain", "risk": "read" },
+    {
+      "name": "create-domain",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["from_domain", "name", "time_window"],
+        "read_back_action": "get-domain",
+        "timeout_s": 180
+      },
+      "idempotency": "none"
+    },
+    {
+      "name": "verify-domain",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["from_domain", "domain_id", "time_window"],
+        "read_back_action": "get-domain",
+        "timeout_s": 180
+      },
+      "idempotency": "natural"
+    },
+    { "name": "list-broadcasts", "risk": "read" },
+    { "name": "get-broadcast", "risk": "read" },
+    {
+      "name": "create-broadcast",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["from_domain", "subject", "time_window"],
+        "read_back_action": "get-broadcast",
+        "timeout_s": 120
+      },
+      "idempotency": "none"
+    },
+    {
+      "name": "update-broadcast",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["from_domain", "broadcast_id", "time_window"],
+        "read_back_action": "get-broadcast",
+        "timeout_s": 120
+      },
+      "idempotency": "natural"
+    },
+    {
+      "name": "send-broadcast",
+      "risk": "destructive",
+      "reconciliation": {
+        "correlation_fields": ["from_domain", "broadcast_id", "time_window"],
+        "read_back_action": "get-broadcast",
+        "timeout_s": 180
+      },
+      "idempotency": "none"
+    },
+    {
+      "name": "remove-broadcast",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["from_domain", "broadcast_id", "time_window"],
+        "read_back_action": "get-broadcast",
+        "timeout_s": 120
+      },
+      "idempotency": "natural"
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

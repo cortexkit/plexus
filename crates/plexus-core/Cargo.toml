@@ -1,0 +1,50 @@
+# plexus-core — manifest/storage domain logic, governance and vendor transports.
+# Wire adapters use subc clients; pure schema and persistence tests need no daemon.
+[package]
+name = "plexus-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Plexus domain core: manifests, storage, governance, vendor transports, poller and scheduler"
+license = "MIT"
+repository = "https://github.com/cortexkit/plexus"
+
+[features]
+test-support = []
+
+[[example]]
+name = "migration_rehearsal"
+path = "examples/migration_rehearsal.rs"
+required-features = ["test-support"]
+test = true
+
+[dependencies]
+cortexkit-log = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
+ryu-js = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+zeroize = { workspace = true }
+rusqlite = { workspace = true }
+rustix = { version = "1", features = ["process"] }
+cortexkit-store = { workspace = true }
+cortexkit-store-types = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+zip = { version = "=9.0.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+httpdate = { workspace = true }
+subc-client-rs = { workspace = true }
+subc-protocol = { workspace = true }
+tokio = { workspace = true }
+plexus-probe = { path = "../plexus-probe" }
+
+[dev-dependencies]
+subc-jsonc = { workspace = true }
+# TLS loopback storage server for credentialless job-log redirect tests.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+plexus-core = { path = ".", features = ["test-support"] }
+# Independent oracle for exhaustive tests of the hand-written ISO-8601 parser.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }

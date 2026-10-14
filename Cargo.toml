@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/plexus-core",
+    "crates/plexus-probe",
+    "crates/plexus-module",
+    "crates/plexus-conformance",
+]
+
+# ck-plexus — the CortexKit connectors plane: a catalog-driven substrate for
+# credentialed access to external services through MCP, REST, local scripts,
+# and native helpers. This slice provides the pure manifest/storage domain core
+# and the thin ck-plexus wire module, plus MCP transport/catalog discovery and
+# the CKCRED route adapter.
+#
+# Shared dependencies come from crates.io. Update their pinned versions and
+# this workspace's lock together, deliberately; CI checks out this repo alone.
+[workspace.dependencies]
+# From crates.io, matching the source subc-daemon uses. Two copies would each
+# carry their own "installed logger" static, so the in-process test daemon would
+# log through a copy no subscriber was ever installed on, and go silent.
+cortexkit-log = "0.3.5"
+tracing = "0.1"
+# Exact pins, moved together on purpose. A caret on subc-daemon alone resolved
+# 0.20.25, which requires protocol 0.25 and control 0.18, and the lock then held
+# two copies of each wire crate: a type from one does not match the same type
+# from the other, and the in-process test daemon would speak a different
+# protocol from the module it tests. The pinned wire crates below all require
+# protocol 0.31; this workspace pins 0.31.0 for call modes and bus events.
+# When the protocol moves, move this whole block.
+subc-protocol = "=0.31.0"
+subc-os = "=0.1.15"
+subc-transport = "=0.12.0"
+subc-control = "=0.30.0"
+subc-daemon = "=0.34.0"
+subc-jsonc = "=0.1.2"
+subc-client-rs = "=0.28.0"
+
+# Exact pins, moved together. cortexkit-log already depends on the registry
+# cortexkit-store-types; a second copy from anywhere else would be a distinct
+# type to the compiler.
+cortexkit-store = { version = "=0.2.4", features = ["sqlite"] }
+cortexkit-store-types = "=0.2.2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+# Reports WHICH field a deserialization error came from. serde_json's own error
+# names the bad value and the expected type but never the path, so a one-field
+# typo in a reviewed vendor manifest produced "invalid type: string, expected
+# u32" with nothing saying where. Adds exactly one crate to the graph: its two
+# dependencies (itoa, serde_core) are already present via serde_json.
+serde_path_to_error = { version = "0.1" }
+ryu-js = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+httpdate = "1"
+zeroize = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+
+# The probe sandbox interprets guests with Wasmtime's Pulley interpreter (see
+# crates/plexus-probe). Unoptimized, that interpreter is slow enough that the
+# probe tests' heavy guest runs past the sandbox's 5 s deadline and reports a
+# timeout instead of the memory ceiling it exists to test. Optimizing just the
+# interpreter keeps test timings close to the release binary's; release builds
+# are already optimized and unaffected.
+[profile.dev.package.pulley-interpreter]
+opt-level = 3
+
+# The conformance harness runs subc-daemon in-process, so the daemon's
+# provenance probe hashes the test binary itself. On Linux that is a full
+# SHA-256 of an unstripped debug executable with embedded debug info, and
+# unoptimized sha2 makes that first provenance request take far longer than
+# the harness's control deadline. Optimizing sha2 in dev builds keeps it close
+# to release speed; release builds are already optimized and unaffected.
+[profile.dev.package.sha2]
+opt-level = 3

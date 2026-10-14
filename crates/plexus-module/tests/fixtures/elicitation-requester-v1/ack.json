@@ -1,0 +1,10 @@
+{
+  "method": "elicitation.ack",
+  "reply": {
+    "ok": true
+  },
+  "request": {
+    "cursor": 1
+  },
+  "tag": "elicitation-requester-v1"
+}

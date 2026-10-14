@@ -1,0 +1,34 @@
+[
+  {
+    "number": 308,
+    "updated_at": "2026-08-13T17:45:34Z",
+    "title": "Imaginary paper kite workshop: lantern exercise 25",
+    "state": "closed",
+    "merged": false,
+    "html_url": "https://github.com/cortexkit/magic-context/pull/308"
+  },
+  {
+    "number": 181,
+    "updated_at": "2026-08-12T12:51:40Z",
+    "title": "Imaginary paper kite workshop: lantern exercise 26",
+    "state": "open",
+    "merged": false,
+    "html_url": "https://github.com/cortexkit/magic-context/pull/181"
+  },
+  {
+    "number": 287,
+    "updated_at": "2026-08-10T21:32:26Z",
+    "title": "Imaginary paper kite workshop: lantern exercise 27",
+    "state": "closed",
+    "merged": false,
+    "html_url": "https://github.com/cortexkit/magic-context/pull/287"
+  },
+  {
+    "number": 288,
+    "updated_at": "2026-08-10T21:31:59Z",
+    "title": "Imaginary paper kite workshop: lantern exercise 28",
+    "state": "closed",
+    "merged": false,
+    "html_url": "https://github.com/cortexkit/magic-context/pull/288"
+  }
+]

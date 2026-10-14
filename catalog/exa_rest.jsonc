@@ -1,0 +1,124 @@
+// Exa REST — the live proof for reuse rung 2 (rest_api transport).
+//
+// This is deliberately the SAME VENDOR as catalog/exa.jsonc, which reaches Exa
+// over MCP. Two manifests, one vendor, one credential, two transports: it makes
+// the REST path provable against a real third-party API rather than only the
+// in-process stub, and any difference in governance behaviour between the two
+// is attributable to the transport rather than to the vendor.
+//
+// Auth uses the bare `x-api-key` header rather than `Authorization: Bearer`.
+// Exa accepts both; taking the bare form on purpose exercises a credential
+// binding with an empty prefix on the REST path, which the Bearer-shaped
+// manifests do not.
+//
+// Wire contract from Exa's published OpenAPI spec (openapi 3.1.0, "Exa Public
+// API" 2.0.0) at https://exa.ai/docs/reference/search — endpoint paths, the
+// x-api-key security scheme, and request field names are taken from there
+// rather than inferred.
+//
+// Every action is read-risk: these retrieve and synthesize content and mutate
+// no vendor-side state. Outbound crawling is not a write. There is deliberately
+// no write action, so the harness records an honest SKIP rather than a
+// fabricated write path.
+{
+  "schema_version": 1,
+  "key": "exa_rest",
+  "name": "Exa (REST)",
+  "description": "Neural web search, content retrieval, and answers over Exa's REST API.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Documented REST API with a published OpenAPI spec and static API-key auth; no vendor-side state to mutate, so every operation maps to a read grant.",
+  "tier": "S1",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://api.exa.ai"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "x-api-key",
+      "prefix": "",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/search",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string" },
+            "numResults": { "type": "integer" },
+            "type": { "type": "string" },
+            "category": { "type": "string" },
+            "includeDomains": { "type": "array", "items": { "type": "string" } },
+            "excludeDomains": { "type": "array", "items": { "type": "string" } },
+            // web_search's `recency` option sends this. Exa's spec for /search
+            // (https://exa.ai/docs/reference/search): "Only links with a
+            // published date after this will be returned. Must be specified in
+            // ISO 8601 format." A string with format date-time, or null.
+            "startPublishedDate": { "type": "string", "format": "date-time" },
+            // Content options are nested under `contents` on /search
+            // specifically; the /contents endpoint takes them at top level.
+            // Declaring the nesting here keeps the catalog's schema honest
+            // about which shape this action accepts.
+            "contents": { "type": "object" }
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "name": "get_contents",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/contents",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "urls": { "type": "array", "items": { "type": "string" } },
+            "text": { "type": "boolean" },
+            "highlights": { "type": "boolean" },
+            "summary": { "type": "boolean" }
+          },
+          "required": ["urls"]
+        }
+      }
+    },
+    {
+      "name": "find_similar",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/findSimilar",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "url": { "type": "string" },
+            "numResults": { "type": "integer" },
+            "excludeSourceDomain": { "type": "boolean" }
+          },
+          "required": ["url"]
+        }
+      }
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

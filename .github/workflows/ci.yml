@@ -1,0 +1,276 @@
+name: CI
+
+on:
+  push:
+    # train/** carries the CI-gated train flow: work rides a train branch,
+    # CI runs there, and main only ever fast-forwards to an already-green
+    # sha. Required status checks on main depend on this trigger existing -
+    # without it a train push gets no run and main becomes unpushable.
+    branches: [main, 'train/**']
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # The nightly schedule runs the full catalogue with --broad on main. A group
+  # shared with main pushes would let a push cancel that audit before it finishes.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # GitHub-hosted runners have little free disk, and a full workspace test
+  # build with debug info can run out of space. Debug info is most of the
+  # target directory and CI never reads it, and incremental state is useless
+  # in a fresh checkout.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+  MUTATE_RUNNER_REV: 0c99c7e16d8ae22b6e114136b6b7b68be6f1394e
+  # Official nats-io/nats-server v2.15.0 linux-amd64 release asset digest:
+  # https://api.github.com/repos/nats-io/nats-server/releases/assets/570234667
+  NATS_SERVER_VERSION: '2.15.0'
+  NATS_SERVER_LINUX_AMD64_SHA256: 5d2c51caca950333aba84911df7d377f826f3a59ec36061c6539105084f65c92
+
+jobs:
+  # Linux-only: plexus has no platform-specific code paths (catalog + store +
+  # subc wire). Every dependency comes from crates.io at an exact version, so
+  # the job checks out this repository alone.
+  #
+  # Runners are GitHub-hosted, so the workflow needs no third-party runner
+  # provider and runs the same way in any fork.
+  test:
+    name: Test (ubuntu)
+    outputs:
+      mutation-matrix: ${{ steps.mutation-plan.outputs.matrix }}
+      mutation-selection: ${{ steps.mutation-plan.outputs.selection }}
+      has-mutations: ${{ steps.mutation-plan.outputs.has-mutations }}
+    runs-on: ubuntu-24.04
+    # A wedged test must surface as a fast red run, not burn the runner for
+    # the 6-hour Actions default. Healthy runs finish well under 15 minutes.
+    # Catalogue name validation also compiles the selected test targets.
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: plexus
+    steps:
+      # The hosted image ships toolchains plexus never uses; removing them
+      # frees the disk the Rust build needs.
+      - name: Free runner disk
+        working-directory: /
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Checkout plexus
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          path: plexus
+          fetch-depth: 0
+          persist-credentials: false
+
+      # First: assert the train-flow
+      # preconditions still hold for this very file. Verified-by-hand facts
+      # expire while the file keeps being edited; this fails drift by name.
+      - name: Train preconditions
+        run: ./scripts/check-train-preconditions.sh
+
+      # Internal documents stay out of the published tree; see
+      # scripts/check-cortexkit-layout.sh for what it checks.
+      - name: CortexKit layout
+        run: ./scripts/check-cortexkit-layout.sh
+
+      - name: Plan nonempty mutation shards
+        id: mutation-plan
+        run: python3 scripts/mutation-plan.py --event "$GITHUB_EVENT_NAME" --ref "$GITHUB_REF" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install pinned nats-server
+        run: |
+          set -euo pipefail
+          install_dir="$(mktemp -d)"
+          trap 'rm -rf "$install_dir"' EXIT
+          archive="nats-server-v${NATS_SERVER_VERSION}-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 120 \
+            "https://github.com/nats-io/nats-server/releases/download/v${NATS_SERVER_VERSION}/${archive}" \
+            --output "$install_dir/$archive"
+          printf '%s  %s\n' "$NATS_SERVER_LINUX_AMD64_SHA256" "$install_dir/$archive" | sha256sum --check --strict -
+          tar -xzf "$install_dir/$archive" -C "$install_dir"
+          sudo install -m 0755 "$install_dir/nats-server-v${NATS_SERVER_VERSION}-linux-amd64/nats-server" /usr/local/bin/nats-server
+          nats-server --version
+
+      - name: Cache mutation runner
+        id: mutate-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/ckdev-mutate
+          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-${{ env.MUTATE_RUNNER_REV }}
+
+      - name: Install pinned mutation runner
+        if: steps.mutate-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked --git https://github.com/cortexkit/commons --rev "$MUTATE_RUNNER_REV" cortexkit-mutate
+
+      - name: Check mutation catalogue
+        run: |
+          ckdev-mutate --version
+          cargo --version
+          ckdev-mutate check
+
+      - name: Rust test gate (fmt, clippy -D warnings, workspace tests)
+        run: ./scripts/rust-test-gate.sh
+
+      # Conformance harness: list every known fixture, then run each. Fixtures
+      # are discovered from the binary so newly registered names are covered
+      # without editing this workflow.
+      #
+      # `--locked` matters MORE here than in the gate, because of the
+      # `!cancelled()` guard below: this step runs even when the gate failed,
+      # including when the gate failed BECAUSE the lock was stale. Without the
+      # flag, cargo would silently re-resolve and the fixtures would pass
+      # against the dependency set the gate had just rejected — a green
+      # connector result attesting a build nobody chose.
+      #
+      # `!cancelled()` runs this even when the gate above failed. Without it,
+      # GitHub skips every later step on a failure, so a formatting slip in the
+      # gate suppresses the conformance answer entirely and the job shows one
+      # red mark indistinguishable from "style problem, connectors fine". The
+      # setup steps above stay unguarded on purpose: a failed checkout or
+      # toolchain install makes this step impossible rather than skipped by
+      # policy, and running it anyway would report a fixture failure whose real
+      # cause is a missing dependency.
+      - name: Conformance fixtures
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          build_result="$(cargo build --locked -p plexus-conformance --bin plexus-conformance --message-format=json)"
+          harness="$(printf '%s\n' "$build_result" | python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin]; paths=[r["executable"] for r in rows if r.get("reason")=="compiler-artifact" and r.get("target",{}).get("name")=="plexus-conformance" and r.get("executable")]; assert len(paths)==1, paths; print(paths[0])')"
+          mapfile -t fixtures < <("$harness" list)
+          if [ "${#fixtures[@]}" -eq 0 ]; then
+            echo "::error::plexus-conformance list returned no fixtures"
+            exit 1
+          fi
+          echo "Fixtures: ${fixtures[*]}"
+          # Every fixture runs even after one fails: under `set -e` the first
+          # red fixture used to end the step, so the rest of the catalogue
+          # reported nothing and a second broken connector stayed hidden
+          # until the first was fixed. The step still fails, naming them all.
+          failed=()
+          for fixture in "${fixtures[@]}"; do
+            echo "==> plexus-conformance run --fixture ${fixture}"
+            if ! "$harness" run --fixture "$fixture"; then
+              echo "::error::conformance fixture ${fixture} failed"
+              failed+=("$fixture")
+            fi
+          done
+          echo "Conformance: $(( ${#fixtures[@]} - ${#failed[@]} )) of ${#fixtures[@]} fixtures passed"
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::failed fixtures: ${failed[*]}"
+            exit 1
+          fi
+
+  mutations:
+    name: Mutation proofs (${{ matrix.shard }}/4)
+    needs: test
+    # scripts/mutation-plan.py selects no mutation proofs for PR events. Exclude them
+    # here too, so fork PRs cannot allocate runners for empty replay jobs.
+    if: github.event_name != 'pull_request' && needs.test.outputs.has-mutations == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      # Every shard owns a separate checkout; never mutate a shared tree.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.test.outputs.mutation-matrix) }}
+    defaults:
+      run:
+        working-directory: plexus
+    steps:
+      # Each shard builds the workspace again; see the Test job.
+      - name: Free runner disk
+        working-directory: /
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Checkout plexus with train comparison base
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          path: plexus
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+
+      - name: Install pinned nats-server
+        run: |
+          set -euo pipefail
+          install_dir="$(mktemp -d)"
+          trap 'rm -rf "$install_dir"' EXIT
+          archive="nats-server-v${NATS_SERVER_VERSION}-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 120 \
+            "https://github.com/nats-io/nats-server/releases/download/v${NATS_SERVER_VERSION}/${archive}" \
+            --output "$install_dir/$archive"
+          printf '%s  %s\n' "$NATS_SERVER_LINUX_AMD64_SHA256" "$install_dir/$archive" | sha256sum --check --strict -
+          tar -xzf "$install_dir/$archive" -C "$install_dir"
+          sudo install -m 0755 "$install_dir/nats-server-v${NATS_SERVER_VERSION}-linux-amd64/nats-server" /usr/local/bin/nats-server
+          nats-server --version
+
+      - name: Cache mutation runner
+        id: mutate-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/ckdev-mutate
+          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-${{ env.MUTATE_RUNNER_REV }}
+
+      - name: Install pinned mutation runner
+        if: steps.mutate-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked --git https://github.com/cortexkit/commons --rev "$MUTATE_RUNNER_REV" cortexkit-mutate
+
+      # Each control deliberately breaks source and checks that a named test fails.
+      # Train replays controls whose source/test files or definitions
+      # changed; main/nightly replay the full catalogue.
+      # The Test job plans this selection before any shard runner is allocated.
+      - name: Replay selected mutation proofs
+        env:
+          MUTATION_SHARD: ${{ matrix.shard }}/4
+          MUTATION_SELECTION: ${{ needs.test.outputs.mutation-selection }}
+        run: |
+          set -euo pipefail
+          ckdev-mutate --version
+          cargo --version
+          read -ra selection <<< "$MUTATION_SELECTION"
+          mkdir -p target/mutations
+          status=0
+          ckdev-mutate run "${selection[@]}" --shard "$MUTATION_SHARD" \
+            --report target/mutations/replay.json || status=$?
+          # A broad catch means other test targets also fail. HUB requires a
+          # reviewed shared property and exactly the observed targets; narrow
+          # the break or document both before accepting a broad catch.
+          python3 - <<'PY' || status=$?
+          import collections, json, sys
+          with open('target/mutations/replay.json') as report:
+              rows = json.load(report)
+          print('Mutation verdicts:', dict(collections.Counter(r['outcome'] for r in rows)))
+          print('Selected controls:', len(rows))
+          findings = [r for r in rows if r['outcome'] not in ('CAUGHT', 'HUB')]
+          for row in findings:
+              print('Mutation finding:', row['id'], row['outcome'], row.get('reason'))
+          sys.exit(bool(findings))
+          PY
+          exit "$status"
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mutations-${{ github.event_name }}-${{ matrix.shard }}
+          path: plexus/target/mutations/*.json
+          if-no-files-found: warn
+          retention-days: 14

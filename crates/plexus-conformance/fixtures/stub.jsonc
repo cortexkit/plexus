@@ -1,0 +1,42 @@
+// Synthetic full-surface fixture for the conformance harness CI path.
+// Exercises read + ask-first write + resource filters + quarantine.
+{
+  "schema_version": 1,
+  "key": "stub",
+  "name": "Stub Connector",
+  "description": "In-process MCP stub used by the substrate conformance harness.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Harness fixture; no real vendor.",
+  "tier": "S2",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "http://127.0.0.1:0/mcp"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": ["team"],
+    "optional": [],
+    "write_enabling": ["team"]
+  },
+  "actions_baseline": [
+    { "name": "read_item", "risk": "read" },
+    { "name": "write_item", "risk": "write" },
+    { "name": "quarantine_candidate", "risk": "read" }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 60 }
+  },
+  "availability": "ga"
+}

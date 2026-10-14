@@ -1,0 +1,1 @@
+{"method":"permissions.revoke","now_ms":1060000,"reply":{"outcome":"revoked","stopping":true},"request":{"id":"grt_02"},"route":{"principal":"reserved:cingulate"},"tag":"permissions-v1"}

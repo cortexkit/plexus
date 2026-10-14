@@ -1,0 +1,34 @@
+# plexus-conformance: the connector conformance harness. Every connector must
+# pass the same ordered checklist (connect, discover, governed reads and writes,
+# denials, revoke, audit completeness and secret safety).
+# One runner, per-connector fixtures. The same binary later drives real vendors.
+[package]
+name = "plexus-conformance"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+repository = "https://github.com/cortexkit/plexus"
+
+description = "ck-plexus connector conformance harness"
+
+[[bin]]
+name = "plexus-conformance"
+path = "src/main.rs"
+
+[dependencies]
+plexus-core = { path = "../plexus-core", features = ["test-support"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+cortexkit-store-types = { workspace = true }
+subc-jsonc = { workspace = true }
+# Live-run support: bearer-handle zeroization, wire-trace redaction fingerprints,
+# and the subc bind identity used to connect the real vault credential route peer.
+zeroize = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+subc-protocol = { workspace = true }
+
+[dev-dependencies]
+plexus-core = { path = "../plexus-core", features = ["test-support"] }
+rusqlite = { workspace = true }

@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PLEXUS: The Connector Substrate</title>
+<style>
+  :root {
+    --bg:#0b0e14; --panel:#11161f; --panel2:#161c28; --line:#222b3a;
+    --txt:#d7dee9; --dim:#8a97a8; --faint:#5b687a;
+    --acc:#5cc8ff; --acc2:#7c8cff; --ok:#3ad29f; --warn:#ffb454; --hot:#ff6b8b;
+    --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; }
+  body { background:var(--bg); color:var(--txt); font-family:var(--sans); font-size:15px; line-height:1.6; display:flex; }
+  a { color:var(--acc); text-decoration:none; }
+
+  nav.side {
+    width:248px; flex:0 0 248px; height:100vh; position:sticky; top:0;
+    background:linear-gradient(180deg,#0d1119,#0b0e14); border-right:1px solid var(--line);
+    padding:22px 16px; overflow-y:auto;
+  }
+  .brand { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
+  .brand .dot { width:11px; height:11px; border-radius:50%; background:var(--acc); box-shadow:0 0 14px var(--acc); }
+  .brand b { font-size:18px; letter-spacing:.5px; }
+  .brand small { color:var(--faint); font-size:11px; display:block; margin:2px 0 18px 21px; letter-spacing:.4px; }
+  .nav-link {
+    display:flex; align-items:center; gap:10px; padding:9px 11px; border-radius:8px;
+    color:var(--dim); cursor:pointer; font-size:13.5px; margin-bottom:2px; border:1px solid transparent;
+  }
+  .nav-link:hover { background:var(--panel2); color:var(--txt); }
+  .nav-link.active { background:var(--panel2); color:var(--txt); border-color:var(--line); }
+  .nav-link .ix { width:20px; height:20px; border-radius:5px; background:#0c1119; border:1px solid var(--line);
+    display:flex; align-items:center; justify-content:center; font-size:11px; color:var(--acc); font-family:var(--mono); }
+
+  main { flex:1; min-width:0; max-width:1080px; padding:40px 56px 120px; }
+  section.page { display:none; }
+  section.page.show { display:block; }
+  h1 { font-size:30px; margin:0 0 6px; letter-spacing:-.3px; }
+  h2 { font-size:19px; margin:34px 0 12px; letter-spacing:-.2px; }
+  h3 { font-size:15px; margin:22px 0 8px; color:var(--txt); }
+  .eyebrow { color:var(--acc); font-family:var(--mono); font-size:11px; letter-spacing:1.6px; text-transform:uppercase; margin-bottom:10px; }
+  .lead { color:var(--dim); font-size:16px; margin:0 0 8px; }
+  p { margin:10px 0; }
+  code { font-family:var(--mono); font-size:12.5px; background:#0c1119; border:1px solid var(--line); padding:1px 5px; border-radius:4px; color:#b6c6da; }
+
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin:14px 0; }
+  .card h3 { margin-top:0; }
+  .grid { display:grid; gap:12px; }
+  .g2 { grid-template-columns:repeat(2,1fr); }
+  .g3 { grid-template-columns:repeat(3,1fr); }
+  .g4 { grid-template-columns:repeat(4,1fr); }
+  @media (max-width:900px){ .g2,.g3,.g4 { grid-template-columns:1fr; } }
+
+  .stat { background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .stat b { display:block; font-size:24px; font-family:var(--mono); color:var(--acc); line-height:1.2; }
+  .stat span { color:var(--faint); font-size:11.5px; letter-spacing:.3px; }
+
+  .chip { display:inline-block; font-family:var(--mono); font-size:10.5px; padding:2px 7px; border-radius:20px;
+    border:1px solid var(--line); color:var(--dim); background:#0c1119; margin-right:5px; }
+  .chip.ok { color:var(--ok); border-color:#1d4c3c; }
+  .chip.warn { color:var(--warn); border-color:#5a4526; }
+  .chip.hot { color:var(--hot); border-color:#5c2b38; }
+  .chip.acc { color:var(--acc); border-color:#1e4356; }
+
+  table { width:100%; border-collapse:collapse; margin:12px 0; font-size:13px; }
+  th { text-align:left; color:var(--faint); font-weight:600; font-size:11px; letter-spacing:.7px;
+    text-transform:uppercase; padding:8px 10px; border-bottom:1px solid var(--line); }
+  td { padding:8px 10px; border-bottom:1px solid #1a2130; vertical-align:top; }
+  td.mono, th.mono { font-family:var(--mono); font-size:12px; }
+  tr:hover td { background:#0e131c; }
+
+  .callout { border-left:3px solid var(--acc); background:#0e1622; padding:12px 16px; border-radius:0 8px 8px 0; margin:14px 0; }
+  .callout.warn { border-left-color:var(--warn); background:#191408; }
+  .callout.hot { border-left-color:var(--hot); background:#1a0e13; }
+  .callout.ok { border-left-color:var(--ok); background:#0b1a15; }
+  .callout b { color:var(--txt); }
+
+  .chain { display:flex; align-items:stretch; gap:0; margin:18px 0; flex-wrap:wrap; }
+  .link { flex:1; min-width:150px; background:var(--panel); border:1px solid var(--line); padding:12px 14px; position:relative; }
+  .link:first-child { border-radius:10px 0 0 10px; }
+  .link:last-child { border-radius:0 10px 10px 0; }
+  .link + .link { border-left:none; }
+  .link .n { font-family:var(--mono); font-size:10px; color:var(--faint); letter-spacing:1px; }
+  .link .t { font-weight:600; margin:3px 0 4px; font-size:13.5px; }
+  .link .d { color:var(--dim); font-size:12px; line-height:1.5; }
+  .link .w { font-family:var(--mono); font-size:10.5px; color:var(--acc); margin-top:6px; display:block; }
+
+  .flow-step { display:flex; gap:12px; padding:12px 0; border-bottom:1px solid #1a2130; }
+  .flow-step:last-child { border-bottom:none; }
+  .flow-step .num { flex:0 0 26px; height:26px; border-radius:7px; background:#0c1119; border:1px solid var(--line);
+    display:flex; align-items:center; justify-content:center; font-family:var(--mono); font-size:11px; color:var(--acc); }
+  .flow-step .body { flex:1; min-width:0; }
+  .flow-step .body b { font-size:13.5px; }
+  .flow-step .body p { margin:3px 0 0; color:var(--dim); font-size:12.5px; }
+
+  ul { margin:8px 0; padding-left:20px; }
+  li { margin:5px 0; color:var(--dim); font-size:13.5px; }
+  li b, li strong { color:var(--txt); }
+  .dim { color:var(--dim); }
+  .faint { color:var(--faint); font-size:12px; }
+  .foot { margin-top:40px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint); font-size:11.5px; }
+</style>
+</head>
+<body>
+
+<nav class="side">
+  <div class="brand"><span class="dot"></span><b>PLEXUS</b></div>
+  <small>connector substrate</small>
+  <div class="nav-link active" data-go="overview"><span class="ix">1</span> What it is</div>
+  <div class="nav-link" data-go="authority"><span class="ix">2</span> Authority chain</div>
+  <div class="nav-link" data-go="catalog"><span class="ix">3</span> The catalog</div>
+  <div class="nav-link" data-go="surface"><span class="ix">4</span> Tool surface</div>
+  <div class="nav-link" data-go="governance"><span class="ix">5</span> Every call, gated</div>
+  <div class="nav-link" data-go="triggers"><span class="ix">6</span> Watches</div>
+  <div class="nav-link" data-go="probes"><span class="ix">7</span> Probes</div>
+  <div class="nav-link" data-go="status"><span class="ix">8</span> Built &amp; limits</div>
+</nav>
+
+<main>
+
+<!-- ─────────────────────────── OVERVIEW ─────────────────────────── -->
+<section class="page show" id="overview">
+  <div class="eyebrow">Connector substrate</div>
+  <h1>PLEXUS</h1>
+  <p class="lead">One governed door between agents and every outside service. Connectors are reviewed <b>data</b>, not code.</p>
+
+  <div class="callout">
+    <b>The problem it exists for.</b> An agent is a language model. If it calls GitHub directly with your token,
+    then any confused reasoning or injected instruction can close issues, push commits, or comment as you.
+    Plexus puts a gate in front of every outside call: what may be called, by whom, at what risk, with which
+    credential, and with an audit row for each one.
+  </div>
+
+  <h2>The bet: connectors are catalog data</h2>
+  <p>Most connector platforms hand-write a wrapper per vendor, which is why their app counts are armies of code.
+  Plexus declares a vendor in a reviewed JSONC manifest — transport, auth shape, actions, risk per action — and
+  the same engine drives all of them. Adding a vendor is a reviewed file, not a release.</p>
+
+  <div class="grid g4">
+    <div class="stat"><b>18</b><span>REVIEWED MANIFESTS</span></div>
+    <div class="stat"><b>142</b><span>DECLARED ACTIONS</span></div>
+    <div class="stat"><b>0</b><span>LINES OF VENDOR CODE</span></div>
+    <div class="stat"><b>19</b><span>SCHEMA MIGRATIONS</span></div>
+  </div>
+
+  <h2>What is not negotiable</h2>
+  <ul>
+    <li><b>Credentials never enter a tool argument.</b> An agent cannot pass a secret to plexus; credential material
+      arrives only through an out-of-band operator ceremony. The guard is asserted at the wire, not just in a unit test.</li>
+    <li><b>Authority only narrows.</b> Four links, each a subset of the last. Overreach is refused, never clamped.</li>
+    <li><b>Every dispatch is mediated.</b> There is no path from an agent to a vendor that skips the governance pipeline.</li>
+    <li><b>Fail closed.</b> Missing grant, unknown action, unverified principal, unreachable decision plane — all refuse.</li>
+  </ul>
+
+  <h2>Four crates</h2>
+  <table>
+    <tr><th class="mono">crate</th><th>role</th><th class="mono">size</th></tr>
+    <tr><td class="mono">plexus-core</td><td>Domain, storage, governance, transports, poller. No wire protocol.</td><td class="mono">25.7k</td></tr>
+    <tr><td class="mono">plexus-module</td><td>The <code>ck-plexus</code> daemon and <code>ck-plexus-admin</code> operator CLI.</td><td class="mono">7.3k</td></tr>
+    <tr><td class="mono">plexus-probe</td><td>QuickJS-in-WASM sandbox for untrusted author-supplied scripts.</td><td class="mono">1.3k</td></tr>
+    <tr><td class="mono">plexus-conformance</td><td>Connector conformance harness and live vendor drift checker.</td><td class="mono">5.1k</td></tr>
+  </table>
+</section>
+
+<!-- ─────────────────────────── AUTHORITY ─────────────────────────── -->
+<section class="page" id="authority">
+  <div class="eyebrow">Narrowing by construction</div>
+  <h1>The authority chain</h1>
+  <p class="lead">Four links. Each must be a subset of the one before it. There is no widening operation anywhere.</p>
+
+  <div class="chain">
+    <div class="link">
+      <div class="n">LINK 1</div>
+      <div class="t">Manifest</div>
+      <div class="d">A reviewed file declares which actions exist at all, and the risk of each.</div>
+      <span class="w">catalog/*.jsonc</span>
+    </div>
+    <div class="link">
+      <div class="n">LINK 2</div>
+      <div class="t">Binding ticket</div>
+      <div class="d">An operator ceremony sets a permanent ceiling — risk and action set — and carries the encrypted credential.</div>
+      <span class="w">issue_ticket</span>
+    </div>
+    <div class="link">
+      <div class="n">LINK 3</div>
+      <div class="t">Connection</div>
+      <div class="d">Consuming the ticket fixes that ceiling onto a live connection. It is never widened afterwards.</div>
+      <span class="w">connections connect</span>
+    </div>
+    <div class="link">
+      <div class="n">LINK 4</div>
+      <div class="t">Grant</div>
+      <div class="d">A grant authorizes specific actions inside the connection ceiling, for one principal.</div>
+      <span class="w">admin.grant</span>
+    </div>
+  </div>
+
+  <div class="callout">
+    <b>Wildcards are expanded at mint time.</b> A grant for <code>*</code> is stored as the concrete list the ceiling
+    held on that day. So adding an action to a manifest next month cannot retroactively widen a grant minted today.
+  </div>
+
+  <h2>Four kinds of authority, deliberately separate</h2>
+  <table>
+    <tr><th class="mono">kind</th><th>authorizes</th><th>notes</th></tr>
+    <tr><td class="mono">invoke</td><td>An agent calling an action now, in a visible conversation.</td><td class="dim">Cannot poll.</td></tr>
+    <tr><td class="mono">poll</td><td>A background watch reading on a timer, unattended.</td><td class="dim">Cannot invoke.</td></tr>
+    <tr><td class="mono">connection_admin</td><td>Reconfiguring or revoking a connection.</td><td class="dim">Cannot read vendor data.</td></tr>
+    <tr><td class="mono">events_consume</td><td>Another principal reading and acking a connection's collected events.</td><td class="dim">Cross-principal; grants no polling.</td></tr>
+  </table>
+
+  <h2>Where privileged operations live</h2>
+  <p>Ticket issuance and grant minting sit on a <b>ManagementSurface</b> role, structurally unreachable from the MCP
+  gateway that serves agents. The handler additionally requires <code>Principal::Direct</code>, because the daemon
+  applies no principal check to management targets — so that check is load-bearing against other supervised modules,
+  not decoration.</p>
+
+  <div class="callout hot">
+    <b>Honest limit.</b> <code>Principal::Direct</code> means "any code running as this user", which is provenance
+    rather than authorization. An agent with shell access can already read the vault handles at <code>0600</code> and
+    act at a vendor without minting anything. An approval ceremony would not close this, so plexus does not ship
+    one: while an agent can act as the operator directly, an approval gate would only be theatre. See
+    <a data-jump="status">Built &amp; limits</a>.
+  </div>
+</section>
+
+<!-- ─────────────────────────── CATALOG ─────────────────────────── -->
+<section class="page" id="catalog">
+  <div class="eyebrow">18 vendors, 144 actions</div>
+  <h1>The catalog</h1>
+  <p class="lead">Every integration plexus can reach, what it can do there, and how each action is classified.</p>
+
+  <table>
+    <tr><th class="mono">vendor</th><th class="mono">transport</th><th class="mono">auth</th><th>actions</th><th>risk mix</th><th>pollable</th></tr>
+    <tr><td class="mono">github</td><td class="mono">mcp_remote</td><td class="mono">api_key</td><td>27</td><td><span class="chip ok">27 read</span></td><td><span class="chip acc">3 shapes</span></td></tr>
+    <tr><td class="mono">resend</td><td class="mono">mcp_remote</td><td class="mono">api_key</td><td>19</td><td><span class="chip ok">8 read</span><span class="chip warn">9 write</span><span class="chip hot">2 destructive</span></td><td>—</td></tr>
+    <tr><td class="mono">neon</td><td class="mono">mcp_remote</td><td class="mono">api_key</td><td>16</td><td><span class="chip ok">12 read</span><span class="chip warn">3 write</span><span class="chip hot">1 destructive</span></td><td>—</td></tr>
+    <tr><td class="mono">supabase</td><td class="mono">mcp_remote</td><td class="mono">api_key</td><td>16</td><td><span class="chip ok">13 read</span><span class="chip warn">1 write</span><span class="chip hot">2 destructive</span></td><td>—</td></tr>
+    <tr><td class="mono">huggingface</td><td class="mono">mcp_remote</td><td class="mono">api_key</td><td>13</td><td><span class="chip ok">13 read</span></td><td>—</td></tr>
+    <tr><td class="mono">posthog_rest</td><td class="mono">rest_api</td><td class="mono">api_key</td><td>10</td><td><span class="chip ok">10 read</span></td><td>—</td></tr>
+    <tr><td class="mono">browserbase</td><td class="mono">mcp_remote</td><td class="mono">api_key</td><td>6</td><td><span class="chip ok">3 read</span><span class="chip warn">3 write</span></td><td>—</td></tr>
+    <tr><td class="mono">sentry</td><td class="mono">mcp_remote</td><td class="mono">api_key</td><td>6</td><td><span class="chip ok">3 read</span><span class="chip warn">3 write</span></td><td>—</td></tr>
+    <tr><td class="mono">linear</td><td class="mono">mcp_remote</td><td class="mono">oauth</td><td>5</td><td><span class="chip ok">2 read</span><span class="chip warn">3 write</span></td><td>—</td></tr>
+    <tr><td class="mono">notion</td><td class="mono">mcp_remote</td><td class="mono">oauth</td><td>5</td><td><span class="chip ok">3 read</span><span class="chip warn">2 write</span></td><td>—</td></tr>
+    <tr><td class="mono">deepwiki</td><td class="mono">mcp_remote</td><td class="mono">none</td><td>3</td><td><span class="chip ok">3 read</span></td><td>—</td></tr>
+    <tr><td class="mono">exa_rest</td><td class="mono">rest_api</td><td class="mono">api_key</td><td>3</td><td><span class="chip ok">3 read</span></td><td>—</td></tr>
+    <tr><td class="mono">firecrawl</td><td class="mono">mcp_remote</td><td class="mono">api_key</td><td>3</td><td><span class="chip ok">3 read</span></td><td>—</td></tr>
+    <tr><td class="mono">gcal</td><td class="mono">mcp_remote</td><td class="mono">oauth</td><td>3</td><td><span class="chip ok">3 read</span></td><td>—</td></tr>
+    <tr><td class="mono">context7</td><td class="mono">mcp_remote</td><td class="mono">api_key</td><td>2</td><td><span class="chip ok">2 read</span></td><td>—</td></tr>
+    <tr><td class="mono">exa</td><td class="mono">mcp_remote</td><td class="mono">api_key</td><td>2</td><td><span class="chip ok">2 read</span></td><td>—</td></tr>
+    <tr><td class="mono">tavily</td><td class="mono">mcp_remote</td><td class="mono">api_key</td><td>2</td><td><span class="chip ok">2 read</span></td><td>—</td></tr>
+    <tr><td class="mono">github_rest</td><td class="mono">rest_api</td><td class="mono">app_install</td><td>1</td><td><span class="chip warn">1 write</span></td><td>—</td></tr>
+  </table>
+
+    <h2>Two transports serving, a third built and unreachable</h2>
+    <div class="grid g2">
+      <div class="card">
+        <h3>mcp_remote <span class="chip">15 vendors</span></h3>
+        <p class="dim">Speaks MCP over HTTPS directly to a vendor's server. Captures and replays the
+        <code>mcp-session-id</code> header, and unwraps JSON that arrives serialized inside a text content block —
+        which is how GitHub returns everything.</p>
+      </div>
+      <div class="card">
+        <h3>rest_api <span class="chip">3 vendors</span></h3>
+        <p class="dim">Hand-written REST against a declared base URL, with SSRF and path-traversal validation.
+        Used where a vendor has no usable MCP surface.</p>
+      </div>
+    </div>
+
+  <h2>Drift is checked, not assumed</h2>
+  <p>A manifest is a claim about a remote surface at review time, and vendors change. <code>plexus-conformance
+  drift</code> compares a live <code>tools/list</code> against each manifest and exits non-zero on mismatch —
+  <b>including when a vendor is merely unexamined</b>, because a partial sweep reading as clean is the failure this
+  check exists to prevent. It also validates that declared poll parameters actually exist in the vendor's schema.</p>
+</section>
+
+<!-- ─────────────────────────── SURFACE ─────────────────────────── -->
+<section class="page" id="surface">
+  <div class="eyebrow">5 agent tools · 4 operator ops</div>
+  <h1>The tool surface</h1>
+  <p class="lead">Deliberately small. Five tools an agent can see, and four operations only an operator can reach.</p>
+
+  <h2>Agent-facing facade</h2>
+  <table>
+    <tr><th class="mono">tool</th><th class="mono">ops</th><th>what it is for</th></tr>
+    <tr><td class="mono">catalog</td><td class="mono">apps · list · inspect</td><td>Discover connectable vendors and the actions available on a connection.</td></tr>
+    <tr><td class="mono">connections</td><td class="mono">connect · list · check · inspect · configure · revoke</td><td>Connection lifecycle and resource filters.</td></tr>
+    <tr><td class="mono">invoke</td><td class="mono">call</td><td>Execute one governed vendor action.</td></tr>
+    <tr><td class="mono">requests</td><td class="mono">list · inspect · approve · deny</td><td>The ask-first queue for actions that need a human decision.</td></tr>
+    <tr><td class="mono">events</td><td class="mono">subscribe · list · ack · unsubscribe · set_project · register_probe</td><td>Watches, their collected events, and probe registration.</td></tr>
+  </table>
+
+  <h2>Operator ceremony <span class="chip hot">ManagementSurface</span></h2>
+  <table>
+    <tr><th class="mono">operation</th><th>effect</th><th class="mono">direction</th></tr>
+    <tr><td class="mono">plexus.admin.issue_ticket</td><td>Encrypt a credential and set a permanent ceiling.</td><td><span class="chip warn">creates</span></td></tr>
+    <tr><td class="mono">plexus.admin.grant</td><td>Mint authority inside a connection ceiling.</td><td><span class="chip warn">creates</span></td></tr>
+    <tr><td class="mono">plexus.admin.revoke_grant</td><td>Remove a grant.</td><td><span class="chip ok">narrows</span></td></tr>
+    <tr><td class="mono">plexus.admin.list_grants</td><td>Every grant held, with vendor named and state derived.</td><td><span class="chip acc">reads</span></td></tr>
+  </table>
+
+  <p class="faint">Narrowing is deliberately frictionless. An operator who suspects compromise and meets an auth
+  ceremony either delays or gives up while the grant keeps serving — so gating revocation is itself a defect.</p>
+</section>
+
+<!-- ─────────────────────────── GOVERNANCE ─────────────────────────── -->
+<section class="page" id="governance">
+  <div class="eyebrow">Complete mediation</div>
+  <h1>Every call, gated</h1>
+  <p class="lead">RESERVE → REVALIDATE → DISPATCH. The gap between deciding and acting is where authority is re-checked.</p>
+
+  <div class="card">
+    <div class="flow-step"><div class="num">0</div><div class="body"><b>Secret-input refusal</b>
+      <p>Before anything else, the frame handler rejects arguments containing credential material — recursively,
+      including inside nested arrays. The test asserts both the refusal code and the <i>absence of the secret bytes
+      anywhere in the response</i>, because an error can be returned while still echoing the secret.</p></div></div>
+    <div class="flow-step"><div class="num">1</div><div class="body"><b>RESERVE — the gate chain</b>
+      <p>Connection health, catalog status, a matching grant, policy effect (allow / ask-first / block), decision-plane
+      verdict for high-risk actions, and connection resource filters. Any failure is a typed terminal denial.</p></div></div>
+    <div class="flow-step"><div class="num">2</div><div class="body"><b>Snapshot generations</b>
+      <p>The reservation records the exact generation of the connection, catalog, grant, and policy rows it was
+      authorized against, with a 60-second TTL.</p></div></div>
+    <div class="flow-step"><div class="num">3</div><div class="body"><b>REVALIDATE — claim or abort</b>
+      <p>Claiming the reservation re-checks those generations under a fence. If the authorizing grant was revoked
+      in the meantime, the dispatch aborts. The grant is pinned <i>by id</i>.</p></div></div>
+    <div class="flow-step"><div class="num">4</div><div class="body"><b>Credential resolution</b>
+      <p>A zeroizing payload is fetched from the vault at dispatch time. Nothing is cached, so an upstream permission
+      change takes effect on the next call with no restart.</p></div></div>
+    <div class="flow-step"><div class="num">5</div><div class="body"><b>DISPATCH and record</b>
+      <p>The transport router sends it, the outcome is reported to the decision plane if governed, and an append-only
+      audit row is written. Arguments are hashed, never stored raw.</p></div></div>
+  </div>
+
+  <h2>The audit journal</h2>
+  <p>Append-only, enforced by SQLite <code>BEFORE UPDATE</code> and <code>BEFORE DELETE</code> triggers rather than by
+  convention.</p>
+
+  <div class="callout ok">
+    <b>What plexus provides that a shell does not.</b> An agent with bash can reach GitHub directly, so plexus is not
+    a containment boundary on this host. What it provides is <b>custody and accountability</b>: every governed call is
+    journaled with arguments hashed, per-action risk gates apply, ask-first parks a human decision, and unattended
+    polling works when nobody is in session. The containment boundary is the machine, and honesty about that is why
+    the approval machinery is parked rather than shipped as theatre.
+  </div>
+</section>
+
+<!-- ─────────────────────────── TRIGGERS ─────────────────────────── -->
+<section class="page" id="triggers">
+  <div class="eyebrow">Outbound polling, no webhooks</div>
+  <h1>Watches</h1>
+  <p class="lead">Plexus polls vendors on a timer and collects what changed. It never exposes an inbound endpoint.</p>
+
+  <p>Webhooks would mean a public listener and an unauthenticated POST vector behind NAT. Outbound polling costs
+  latency and buys the absence of an attack surface.</p>
+
+  <h2>Five cursor strategies</h2>
+  <table>
+    <tr><th class="mono">strategy</th><th>how it advances</th><th>used for</th></tr>
+    <tr><td class="mono">sync_token</td><td>Vendor returns an opaque token naming everything since last time.</td><td class="dim">Highest fidelity; few vendors offer it.</td></tr>
+    <tr><td class="mono">ordered_timestamp</td><td>Ascending by update time with a <code>since</code> bound and an overlap window.</td><td class="dim">GitHub issues.</td></tr>
+    <tr><td class="mono">sorted_head</td><td>Descending head page, filtered against a stored watermark.</td><td class="dim">GitHub pull requests, which offer no <code>since</code>.</td></tr>
+    <tr><td class="mono">scalar_diff</td><td>Stores one value, fires on change, silent on first observation.</td><td class="dim">Release tags.</td></tr>
+    <tr><td class="mono">probe</td><td>Runs an author-supplied script and diffs its return.</td><td class="dim">Conditions no vendor field expresses.</td></tr>
+  </table>
+
+  <h2>Events, and what a gap means</h2>
+  <p>Deduplication is scoped to <code>(connection, subscription, vendor_event_id, payload_hash)</code>. The last
+  column matters: <b>an edited item is a new version and delivers again</b>, while identical content never re-delivers.</p>
+
+  <p>A <code>gap</code> row means coverage may have a hole: page saturation, a suspension window or a prune
+  interval. An edit to an already-delivered item is not a gap; it delivers as an event carrying the new content.</p>
+
+  <h2>Scheduler discipline</h2>
+  <ul>
+    <li><b>Sequential by design.</b> One poll runs at a time; concurrency would make a wedged pass finish faster
+      while every poll still failed.</li>
+    <li><b>Exponential backoff</b> at <code>cadence × 2ⁿ</code>, capped, with a circuit breaker suspending after 5
+      consecutive failures.</li>
+    <li><b>Transports registered at boot</b> before the scheduler starts, so the first pass can reach every
+      configured vendor.</li>
+    <li><b>Liveness is reported.</b> A drop guard flips <code>schedulerAlive</code> false if the task panics, because
+      a dead scheduler otherwise looks exactly like a quiet week.</li>
+  </ul>
+</section>
+
+<!-- ─────────────────────────── PROBES ─────────────────────────── -->
+<section class="page" id="probes">
+  <div class="eyebrow">Untrusted code, next to every credential</div>
+  <h1>Probes</h1>
+  <p class="lead">A small author-written script, run on a schedule, to answer questions no vendor field answers.</p>
+
+  <p>A watch can say "this issue changed". A probe can say "the open-issue count crossed ten" — the computation
+  between the vendor's answer and the verdict is what the script supplies. The scripts are written by a language
+  model from a user's prose, so they are <b>code nobody reviewed, running inside the process that holds every
+  vendor credential</b>. Every decision below follows from that sentence.</p>
+
+  <div class="grid g3">
+    <div class="stat"><b>1</b><span>HOST CAPABILITY</span></div>
+    <div class="stat"><b>5s</b><span>WALL TIMEOUT</span></div>
+    <div class="stat"><b>32<span style="font-size:14px">MiB</span></b><span>MEMORY CEILING</span></div>
+  </div>
+
+  <div class="callout hot">
+    <b>A WASM guest is not import-free by construction.</b> An earlier draft claimed it was. The compiled guest
+    imports WASI functions including <code>fd_*</code> and <code>environ_*</code>; its isolation depends on the
+    <i>host</i> supplying a context with no preopened directories and no inherited environment. So the conformance
+    test asserts the host configuration — adding a preopen fails a test rather than silently widening the sandbox.
+  </div>
+
+  <h2>The rules</h2>
+  <ul>
+    <li><b>One host function.</b> Invoke a declared action on this probe's connection. No filesystem, no fetch, no
+      spawn, no clock beyond the poll's timestamp. A test enumerates the global surface and fails if it grows.</li>
+    <li><b>The reachable action set is fixed at registration</b> and refused again at runtime, so reading a
+      registration tells you everything a probe can touch without reading its script.</li>
+    <li><b>A probe returns a value, never a message.</b> The return is a declared scalar or flat struct, validated on
+      <i>every run</i>. This closes an injection path: a probe's output flows into another agent's instruction
+      channel, and free prose there would let an authored script write instructions.</li>
+    <li><b>A malformed return never retires the watch.</b> It reports a reason code and leaves the subscription
+      active, because a buggy script silently killing the watch it serves is the failure the feature exists to prevent.</li>
+  </ul>
+
+  <div class="callout warn">
+    <b>The timeout does not bound the vendor call.</b> Epoch interruption preempts <i>guest</i> execution, so while
+    the host callback is dispatching a request nothing interrupts it. A hanging vendor request stalls the pass while
+    the 5s budget reports nothing wrong. Whatever wires a dispatch must carry its own deadline — this is documented
+    on the trait an implementer has to read.
+  </div>
+</section>
+
+<!-- ─────────────────────────── STATUS ─────────────────────────── -->
+<section class="page" id="status">
+  <div class="eyebrow">Honest inventory</div>
+  <h1>Built &amp; limits</h1>
+  <p class="lead">What works, and the limits it runs under.</p>
+
+  <h2>Shipped and running <span class="chip ok">deployed</span></h2>
+  <ul>
+    <li><b>Complete-mediation pipeline</b> — reserve, revalidate, dispatch, with generation-fenced reservations.</li>
+    <li><b>Four-link authority chain</b> with expanded wildcards and permanent connection ceilings.</li>
+    <li><b>18 reviewed manifests</b>, two transports, live drift checking.</li>
+    <li><b>Operator ceremony</b> — tickets, grants, revocation, and a grants listing for the app to render.</li>
+    <li><b>Trigger fleet</b> — five cursor strategies and cross-principal event consumption.</li>
+    <li><b>Probe sandbox and registration</b> — QuickJS-in-WASM, proven end to end against a live vendor.</li>
+    <li><b>Agent identity seam</b> — resolves an asserted agent to a GitHub identity, refusing rather than substituting.</li>
+    <li><b>Conformance harness</b> — per-connector fixtures, wire traces, live drift, shipped-manifest ingest tests.</li>
+  </ul>
+
+  <h2>Known limits, stated plainly</h2>
+  <ul>
+    <li><code>Principal::Direct</code> is provenance, not authorization — see <a data-jump="authority">Authority chain</a>.</li>
+    <li>The probe sandbox timeout does not bound a hanging vendor call.</li>
+    <li>Plexus holds no signing material and verifies no tokens; adding either is a gated decision, not a refactor.</li>
+  </ul>
+
+  <div class="foot">
+    Catalog counts come from <code>catalog/*.jsonc</code> and code sizes from the working tree at the time of
+    writing. Where a number here disagrees with the code, the code is right and this page is stale.
+  </div>
+</section>
+
+</main>
+
+<script>
+  const links = document.querySelectorAll('.nav-link');
+  function go(id) {
+    links.forEach(x => x.classList.toggle('active', x.dataset.go === id));
+    document.querySelectorAll('section.page').forEach(s => s.classList.toggle('show', s.id === id));
+    window.scrollTo({top:0});
+  }
+  links.forEach(l => l.addEventListener('click', () => go(l.dataset.go)));
+  document.querySelectorAll('[data-jump]').forEach(a =>
+    a.addEventListener('click', e => { e.preventDefault(); go(a.dataset.jump); }));
+</script>
+
+</body>
+</html>

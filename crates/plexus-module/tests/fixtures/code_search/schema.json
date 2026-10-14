@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["query"],
+  "properties": {
+    "query": {"type":"string", "minLength":1, "maxLength":500, "description":"Literal code pattern to find. Leading and trailing whitespace is trimmed; blank queries are refused."},
+    "regex": {"type":["boolean","null"], "default":false, "description":"Interpret query as a regular expression."},
+    "match_case": {"type":["boolean","null"], "default":false, "description":"Match letter case exactly."},
+    "whole_words": {"type":["boolean","null"], "default":false, "description":"Match whole words only."},
+    "repo": {"type":["string","null"], "maxLength":500, "description":"Restrict repositories by partial owner/repo name."},
+    "path": {"type":["string","null"], "maxLength":500, "description":"Restrict file paths by partial match."},
+    "language": {"type":["array","null"], "items":{"type":"string","maxLength":500}, "maxItems":10, "description":"Restrict to these language names, such as Rust or TypeScript."}
+  }
+}

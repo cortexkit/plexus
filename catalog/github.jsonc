@@ -1,0 +1,173 @@
+// GitHub.
+// S2 MCP-direct; read-only surface via GitHub's official /readonly MCP variant.
+// The /readonly suffix deliberately prevents mutation even with a broad-scoped
+// PAT. v1 custody uses a GitHub PAT as a static API key (self-service).
+//
+// Tool names confirmed from the default-readonly toolset documented at
+// https://github.com/github/github-mcp-server — context, repos, issues,
+// pull_requests, and users toolsets, all filtered to read-only.
+{
+  "schema_version": 1,
+  "key": "github",
+  "name": "GitHub",
+  "description": "Repositories, issues, pull requests, code search, and users (read-only via /readonly).",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official GitHub-hosted MCP server (readonly variant); tools map cleanly to read grants with no write governance needed.",
+  "tier": "S2",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://api.githubcopilot.com/mcp/readonly"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": ["owner", "repo"],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    // Context tools
+    { "name": "get_me", "risk": "read" },
+    { "name": "get_team_members", "risk": "read" },
+    { "name": "get_teams", "risk": "read" },
+    // Repository tools
+    { "name": "search_repositories", "risk": "read" },
+    { "name": "get_file_contents", "risk": "read" },
+    { "name": "search_code", "risk": "read" },
+    { "name": "search_commits", "risk": "read" },
+    { "name": "get_commit", "risk": "read" },
+    { "name": "list_branches", "risk": "read" },
+    { "name": "list_commits", "risk": "read" },
+    { "name": "list_releases", "risk": "read" },
+    // The second shipped poll shape, and the first of the scalar-diff kind.
+    //
+    // Measured against the live vendor: this tool accepts ONLY owner and repo --
+    // no bound, no pagination, no ordering -- because it returns one release.
+    // There is nothing to page and nothing to deduplicate, so a cursor cannot
+    // describe it. `tag_name` is the value worth comparing (the response also
+    // carries id and published_at; the tag is what a release condition is
+    // actually phrased against, e.g. "latest tag above v0.3.0").
+    //
+    // No request_constants: this shape sends no cursor arguments at all, so
+    // there is no ordering to review. The manifest model refuses stream fields
+    // here rather than ignoring them.
+    {
+      "name": "get_latest_release",
+      "risk": "read",
+      "poll": {
+        "item_kind": "release",
+        "cursor_kind": "scalar_diff",
+        "scalar_field": "tag_name"
+      }
+    },
+    { "name": "get_release_by_tag", "risk": "read" },
+    { "name": "get_tag", "risk": "read" },
+    { "name": "list_tags", "risk": "read" },
+    { "name": "list_repository_collaborators", "risk": "read" },
+    // Issue tools (read-only subset)
+    // Measured against api.githubcopilot.com/mcp/readonly,
+    // rather than copied from GitHub REST documentation (a different surface).
+    // orderBy/direction are load-bearing for cursor soundness, not cosmetic
+    // defaults: omitting them does not produce an ordered updated_at page.
+    {
+      "name": "list_issues",
+      "risk": "read",
+      "poll": {
+        "item_kind": "issue",
+        "cursor_kind": "ordered_timestamp",
+        "timestamp_field": "updated_at",
+        "tiebreaker_id_field": "number",
+        "items_field": "issues",
+        "request_since_field": "since",
+        "request_page_size_field": "perPage",
+        "pagination": {
+          "request_cursor_field": "after",
+          "response_cursor_pointer": "/pageInfo/endCursor"
+        },
+        "request_constants": {
+          "perPage": 30,
+          "orderBy": "UPDATED_AT",
+          "direction": "ASC"
+        }
+      }
+    },
+    { "name": "search_issues", "risk": "read" },
+    { "name": "issue_read", "risk": "read" },
+    { "name": "get_label", "risk": "read" },
+    { "name": "list_issue_fields", "risk": "read" },
+    { "name": "list_issue_types", "risk": "read" },
+    // Pull request tools (read-only subset)
+    // Pull requests are watchable, but NOT the way issues are. list_issues
+    // accepts a `since` bound, so it uses an ordered-timestamp cursor that asks
+    // the vendor for a window. list_pull_requests accepts sort and direction and
+    // NO time filter of any kind — measured against the live surface — so there
+    // is no bound to send and a windowed cursor cannot express it at all.
+    //
+    // sorted_head inverts the method: ask the vendor to ORDER, read the first
+    // page, and compare locally against the stored watermark. The constants
+    // below are what make that sound. `sort: updated` is the field the cursor
+    // reads, and `direction: desc` puts the newest first so the page that
+    // arrives is the head rather than the tail — with `asc` the first page would
+    // be the OLDEST pull requests, identical on every poll, and the watch would
+    // deliver nothing forever while looking healthy.
+    //
+    // `state: all` because a pull request that is merged or closed between polls
+    // has still changed, and omitting it would silently drop exactly the updates
+    // most worth seeing. perPage is the page depth the saturation guard measures
+    // against: after the first poll, a full page whose oldest timestamp is at
+    // or newer than the watermark records a coverage gap, because unseen changes
+    // may remain beyond the page, including edits tied at the boundary instant.
+    // A short page, or one reaching strictly before the watermark, records no gap.
+    {
+      "name": "list_pull_requests",
+      "risk": "read",
+      "poll": {
+        "item_kind": "pull_request",
+        "cursor_kind": "sorted_head",
+          "request_page_size_field": "perPage",
+        "timestamp_field": "updated_at",
+        "tiebreaker_id_field": "number",
+        "request_constants": {
+          "sort": "updated",
+          "direction": "desc",
+          "state": "all",
+          "perPage": 100
+        }
+      }
+    },
+    { "name": "pull_request_read", "risk": "read" },
+    { "name": "search_pull_requests", "risk": "read" },
+    // User tools
+    { "name": "search_users", "risk": "read" },
+    // Secret scanning. Classified `read` because risk here measures effect on
+    // VENDOR STATE and this changes none: it takes file contents or diff hunks
+    // as arguments and returns the secrets it found in them.
+    //
+    // Worth knowing before granting it, because it is unlike every other action
+    // here: the others fetch something GitHub already holds, while this one
+    // UPLOADS caller-supplied content, so its blast radius is set by the
+    // arguments rather than by what the token can already see. Sending a local
+    // private key to a scanning service to "check" it is not undone by the
+    // endpoint being read-only. That is a reason for an operator to decline the
+    // grant, not a reason to record a risk the action does not carry — the
+    // ladder is Read/Write/Destructive over vendor state, and overloading it to
+    // express an unrelated property would corrupt what those words mean
+    // everywhere else in the catalog.
+    { "name": "run_secret_scanning", "risk": "read" }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

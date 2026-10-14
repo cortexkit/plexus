@@ -1,0 +1,4 @@
+source: https://github.com/cortexkit/cortexkit-cloud
+commit: 908eba9f442e3cf1a95772bfae81808816074a4c
+path: test-vectors/webhook-relay/ and docs/designs/webhook-relay-spec.md (lines 242-422, in WIRE-CONTRACT.md)
+Deployed: hooks.cortexkit.io version aa3aa417 runs this commit.

@@ -1,0 +1,65 @@
+name: Bug report
+description: Something plexus does that it should not, with a reproduction.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every change to plexus starts as an issue that gets an explicit go. Please
+        do not open a pull request for this bug until a maintainer replies here;
+        CONTRIBUTING.md explains why.
+
+        **Do not post credentials or private data.** Remove tokens, API keys,
+        vault credential references, daemon connection files, store contents,
+        vendor account data and private repository content from everything
+        below. If the bug is a security vulnerability, do not file it here:
+        report it privately as described in SECURITY.md.
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened
+      description: The behaviour you observed, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >-
+        The commands you ran, or the command that would reproduce it. A claim we
+        can run is settled in minutes.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: What it printed, verbatim and redacted. Do not summarise errors.
+      render: text
+  - type: textarea
+    id: mechanism
+    attributes:
+      label: Mechanism, if you have it
+      description: >-
+        For example: "X returns Y because Z at file:line". Also say what you are
+        not claiming, if you measured one case and are inferring the rest.
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      description: The plexus commit, or the output of `ck-plexus --version`.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system, architecture and Rust version.
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: I removed credentials, tokens, vault references, connection files and private data from this issue.
+          required: true

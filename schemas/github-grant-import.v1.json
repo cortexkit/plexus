@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "github-grant-import.v1.json",
+  "title": "Operator-approved snapshot of existing GitHub agent grants",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "handles"],
+  "properties": {
+    "version": { "const": "github-grant-import.v1" },
+    "handles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["app_handle_id", "agent_id", "app_id", "installation_id", "credential_id", "status", "grants"],
+        "properties": {
+          "app_handle_id": { "type": "string", "minLength": 1 },
+          "agent_id": { "type": "string", "minLength": 1 },
+          "app_id": { "type": "integer", "minimum": 1 },
+          "installation_id": { "type": ["integer", "null"], "minimum": 1 },
+          "credential_id": { "type": "string", "pattern": "^github_app:[^:]+$" },
+          "status": { "enum": ["enabled", "disabled"] },
+          "grants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["action", "repository", "provenance", "policy"],
+              "properties": {
+                "action": { "type": "string", "minLength": 1 },
+                "repository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
+                "provenance": { "type": "string", "minLength": 1 },
+                "policy": { "enum": ["allow", "block"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

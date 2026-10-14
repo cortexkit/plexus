@@ -1,0 +1,239 @@
+// GitHub Actions uses the operator's personal access token, connected by an
+// `apikey:` vault reference.
+// Bot App installation tokens are not suitable: those Apps lack Actions: read.
+// Keep this read-only REST surface separate from the GitHub readonly MCP app.
+// Deploy the binary supporting ci_runs, HTTP request constants and credentialless_tail
+// before this catalog: older binaries deny the new manifest field. Restart tools
+// with the new github_read schema before enabling CI-watch job-log reads.
+{
+  "schema_version": 1,
+  "key": "github_actions",
+  "name": "GitHub Actions",
+  "description": "Read-only workflow run attempts, jobs, artifact files, and repository identity.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "GitHub's documented REST API exposes per-attempt Actions reads that the readonly MCP surface does not serve.",
+  "tier": "S2",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://api.github.com"
+  },
+  "auth": { "mode": "api_key" },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": ["owner", "repo"],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    {
+      // A job's status must be completed before requesting its log. Callers need
+      // grants for both get_job and github.actions.job_log on conn-github-actions.
+      // https://docs.github.com/en/rest/actions/workflow-jobs#get-a-job-for-a-workflow-run
+      "name": "get_job",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}/actions/jobs/{job_id}",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "owner": { "type": "string" }, "repo": { "type": "string" },
+            "job_id": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["owner", "repo", "job_id"], "additionalProperties": false
+        }
+      }
+    },
+    {
+      // GitHub returns a one-minute signed URL, not the log body:
+      // https://docs.github.com/en/rest/actions/workflow-jobs#download-job-logs-for-a-workflow-run
+      // GitHub documents these hosts for logs/storage traffic, not a fixed account:
+      // https://docs.github.com/en/actions/reference/runners/github-hosted-runners#communication-requirements-for-github-hosted-runners
+      // The wildcard matches exactly one storage-account label, not arbitrary
+      // descendants. Other destinations fail closed; enterprise storage needs review.
+      // Azure documents start/end ranges, not suffix ranges. The transport streams
+      // a bounded tail instead of depending on undocumented bytes=-N semantics:
+      // https://learn.microsoft.com/en-us/rest/api/storageservices/specifying-the-range-header-for-blob-service-operations
+      "name": "github.actions.job_log",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
+        "credentialless_tail": {
+          "allowed_hosts": ["*.blob.core.windows.net", "results-receiver.actions.githubusercontent.com"]
+        },
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "owner": { "type": "string" }, "repo": { "type": "string" },
+            "job_id": { "type": "integer", "minimum": 1 },
+            "max_bytes": { "type": "integer", "minimum": 1, "maximum": 262144, "default": 65536 }
+          },
+          "required": ["owner", "repo", "job_id"], "additionalProperties": false
+        }
+      }
+    },
+    {
+      // https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository
+      // GitHub returns newest-created runs first; this endpoint has no sort parameter.
+      // Response: {total_count: integer, workflow_runs: array of run objects}.
+      // created accepts GitHub's comparison/range syntax, including >=<timestamp>.
+      // Do not fix status: discovery must see completed runs as well as open ones.
+      "name": "list_workflow_runs",
+      "risk": "read",
+      "poll": {
+        "item_kind": "ci_run",
+        "cursor_kind": "ci_runs",
+        "items_field": "workflow_runs"
+      },
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}/actions/runs",
+        // Page size is a transport constant; callers cannot set per_page, even to 100.
+        "request_constants": { "per_page": 100 },
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "owner": { "type": "string" },
+            "repo": { "type": "string" },
+            "created": { "type": "string" },
+            "status": {
+              "type": "string",
+              "enum": ["completed", "action_required", "cancelled", "failure", "neutral", "skipped", "stale", "success", "timed_out", "in_progress", "queued", "requested", "waiting", "pending"]
+            },
+            "page": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["owner", "repo"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      // https://docs.github.com/en/rest/actions/workflow-runs#get-a-workflow-run-attempt
+      // Response is one run object (id, run_attempt, status, nullable conclusion,
+      // created_at, updated_at, head_branch, pull_requests, event, repository).
+      // Unlike a runs/jobs collection, this endpoint does not return total_count.
+      // Reading the attempt keeps an older attempt visible after a re-run starts.
+      "name": "get_workflow_run",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "owner": { "type": "string" },
+            "repo": { "type": "string" },
+            "run_id": { "type": "integer", "minimum": 1 },
+            "attempt_number": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["owner", "repo", "run_id", "attempt_number"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      // https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt
+      // Response: {total_count: integer, jobs: array of job objects}; jobs carry
+      // id, run_id, run_attempt, status, nullable conclusion and completed_at.
+      // The total count determines whether all pages fit the poll's request budget.
+      "name": "list_jobs_for_workflow_run_attempt",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs",
+        // Page size is a transport constant; callers cannot set per_page, even to 100.
+        "request_constants": { "per_page": 100 },
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "owner": { "type": "string" },
+            "repo": { "type": "string" },
+            "run_id": { "type": "integer", "minimum": 1 },
+            "attempt_number": { "type": "integer", "minimum": 1 },
+            "page": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["owner", "repo", "run_id", "attempt_number"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      // https://docs.github.com/en/rest/repos/repos#get-a-repository
+      // Response is one repository object; its integer id is the stable identity.
+      "name": "get_repository",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "owner": { "type": "string" },
+            "repo": { "type": "string" }
+          },
+          "required": ["owner", "repo"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      // Selection and download each require their own grant on conn-github-actions.
+      // https://docs.github.com/en/rest/actions/artifacts#list-workflow-run-artifacts
+      "name": "list_workflow_run_artifacts",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts",
+        "request_constants": { "per_page": 100 },
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "owner": { "type": "string" }, "repo": { "type": "string" },
+            "run_id": { "type": "integer", "minimum": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "page": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["owner", "repo", "run_id", "name"], "additionalProperties": false
+        }
+      }
+    },
+    {
+      // The transport uses the same credentialless hop as job logs, then reads a
+      // bounded ZIP in memory and returns only the named entry's text tail.
+      // https://docs.github.com/en/rest/actions/artifacts#download-an-artifact
+      "name": "github.actions.artifact_file",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip",
+        "credentialless_tail": {
+          "allowed_hosts": ["*.blob.core.windows.net", "results-receiver.actions.githubusercontent.com"]
+        },
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "owner": { "type": "string" }, "repo": { "type": "string" },
+            "artifact_id": { "type": "integer", "minimum": 1 },
+            "path": { "type": "string", "minLength": 1 },
+            "max_bytes": { "type": "integer", "minimum": 1, "maximum": 262144, "default": 65536 }
+          },
+          "required": ["owner", "repo", "artifact_id", "path"], "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 40 }
+  },
+  "availability": "ga"
+}

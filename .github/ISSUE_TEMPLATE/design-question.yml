@@ -1,0 +1,47 @@
+name: Design question
+description: Propose a change in behaviour or shape, or ask whether one belongs.
+labels: ["design discussion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Design questions are settled here before any code is written. A pull
+        request follows an explicit go on this issue, not the other way round;
+        CONTRIBUTING.md explains why.
+
+        **Do not post credentials or private data.** Remove tokens, API keys,
+        vault credential references, daemon connection files, store contents,
+        vendor account data and private repository content from everything
+        below. Report security vulnerabilities privately as described in
+        SECURITY.md, not here.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What the current shape prevents
+      description: >-
+        What you are trying to do and where plexus stops you. The problem is
+        more useful than a proposed patch, because it leaves room for a solution
+        neither of us has thought of.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >-
+        Commands, output (verbatim and redacted) or code references
+        (file:line) that show the current behaviour.
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal, if you have one
+      description: >-
+        The change you have in mind, and how it interacts with governance,
+        grants, credentials or the audit log if it touches them.
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: I removed credentials, tokens, vault references, connection files and private data from this issue.
+          required: true

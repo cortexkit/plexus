@@ -1,0 +1,82 @@
+// Supabase. S3 is appropriate because this connector can
+// apply database migrations, deploy Edge Functions, and run arbitrary SQL.
+// `execute_sql` and `apply_migration` are destructive: a query or migration can
+// contain DROP/DELETE/ALTER, and the connector has no argument-level risk
+// resolution to distinguish a harmless SELECT or migration.
+{
+  "schema_version": 1,
+  "key": "supabase",
+  "name": "Supabase",
+  "description": "Projects, SQL, logs, advisors, and Edge Functions.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official Supabase-hosted remote MCP server; PAT bearer authentication and reviewed tools map directly to grants.",
+  "tier": "S3",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://mcp.supabase.com/mcp"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": ["project_id"],
+    "optional": ["organization_id", "branch_id"],
+    "write_enabling": ["project_id"]
+  },
+  // Tool names confirmed from Supabase's hosted MCP documentation. The vendor
+  // also offers `https://mcp.supabase.com/mcp?read_only=true`; a future
+  // read-only Supabase connector can be a separate lower-tier manifest, like
+  // catalog/github.jsonc's /readonly server. This manifest intentionally keeps
+  // the write-capable endpoint and does not build that second manifest.
+  "actions_baseline": [
+    { "name": "list_tables", "risk": "read" },
+    { "name": "list_extensions", "risk": "read" },
+    { "name": "list_migrations", "risk": "read" },
+    // Worst-case classification: execute_sql can reach irreversible DDL/DML.
+    { "name": "execute_sql", "risk": "destructive" },
+    { "name": "get_logs", "risk": "read" },
+    { "name": "get_advisors", "risk": "read" },
+    { "name": "get_project_url", "risk": "read" },
+    { "name": "get_publishable_keys", "risk": "read" },
+    { "name": "generate_typescript_types", "risk": "read" },
+    { "name": "list_edge_functions", "risk": "read" },
+    { "name": "get_edge_function", "risk": "read" },
+    { "name": "search_docs", "risk": "read" },
+    { "name": "list_projects", "risk": "read" },
+    { "name": "get_project", "risk": "read" },
+    {
+      "name": "apply_migration",
+      "risk": "destructive",
+      "reconciliation": {
+        "correlation_fields": ["project_id", "name", "time_window"],
+        "read_back_action": "list_migrations",
+        "timeout_s": 180
+      },
+      "idempotency": "none"
+    },
+    {
+      "name": "deploy_edge_function",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["project_id", "function_slug", "time_window"],
+        "read_back_action": "get_edge_function",
+        "timeout_s": 180
+      },
+      "idempotency": "none"
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

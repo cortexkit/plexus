@@ -1,0 +1,121 @@
+{"corpus_line": 1, "query": "Lantern puzzle notes site:github.com/octo-lantern/paper-kite/", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 2, "query": "Lantern puzzle notes https://github.com/octo-lantern/paper-kite/", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 3, "query": "Lantern puzzle notes http://github.com/octo-lantern/paper-kite/", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 4, "query": "Lantern puzzle notes github.com/octo-lantern/paper-kite/", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 5, "query": "Lantern puzzle notes site:github.com/octo-lantern/paper-kite/blob/main/README.md", "rule": "GithubRepository", "documentation_or_discussion_candidate": true}
+{"corpus_line": 6, "query": "Lantern puzzle notes https://github.com/octo-lantern/paper-kite/blob/main/README.md", "rule": "GithubRepository", "documentation_or_discussion_candidate": true}
+{"corpus_line": 7, "query": "Lantern puzzle notes http://github.com/octo-lantern/paper-kite/blob/main/README.md", "rule": "GithubRepository", "documentation_or_discussion_candidate": true}
+{"corpus_line": 8, "query": "Lantern puzzle notes github.com/octo-lantern/paper-kite/blob/main/README.md", "rule": "GithubRepository", "documentation_or_discussion_candidate": true}
+{"corpus_line": 9, "query": "Lantern puzzle notes site:github.com/octo-lantern/paper-kite/tree/main/src", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 10, "query": "Lantern puzzle notes https://github.com/octo-lantern/paper-kite/tree/main/src", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 11, "query": "Lantern puzzle notes http://github.com/octo-lantern/paper-kite/tree/main/src", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 12, "query": "Lantern puzzle notes github.com/octo-lantern/paper-kite/tree/main/src", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 13, "query": "Lantern puzzle notes site:github.com/octo-lantern/paper-kite/raw/main/widget.rs", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 14, "query": "Lantern puzzle notes https://github.com/octo-lantern/paper-kite/raw/main/widget.rs", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 15, "query": "Lantern puzzle notes http://github.com/octo-lantern/paper-kite/raw/main/widget.rs", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 16, "query": "Lantern puzzle notes github.com/octo-lantern/paper-kite/raw/main/widget.rs", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 17, "query": "Lantern puzzle notes site:github.com/octo-lantern/paper-kite/commit/demo", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 18, "query": "Lantern puzzle notes https://github.com/octo-lantern/paper-kite/commit/demo", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 19, "query": "Lantern puzzle notes http://github.com/octo-lantern/paper-kite/commit/demo", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 20, "query": "Lantern puzzle notes github.com/octo-lantern/paper-kite/commit/demo", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 21, "query": "Lantern puzzle notes site:github.com/octo-lantern/paper-kite/commits/main", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 22, "query": "Lantern puzzle notes https://github.com/octo-lantern/paper-kite/commits/main", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 23, "query": "Lantern puzzle notes http://github.com/octo-lantern/paper-kite/commits/main", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 24, "query": "Lantern puzzle notes github.com/octo-lantern/paper-kite/commits/main", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 25, "query": "Lantern puzzle notes site:github.com/octo-lantern/paper-kite/compare/dawn...dusk", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 26, "query": "Lantern puzzle notes https://github.com/octo-lantern/paper-kite/compare/dawn...dusk", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 27, "query": "Lantern puzzle notes http://github.com/octo-lantern/paper-kite/compare/dawn...dusk", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 28, "query": "Lantern puzzle notes github.com/octo-lantern/paper-kite/compare/dawn...dusk", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 29, "query": "Paper kite reference site:raw.githubusercontent.com/octo-lantern/paper-kite/main/widget.rs", "rule": "raw.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 30, "query": "Paper kite reference site:raw.githubusercontent.com/octo-lantern/paper-kite/main/widget.rs?view=guide#overview", "rule": "raw.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 31, "query": "Paper kite reference https://raw.githubusercontent.com/octo-lantern/paper-kite/main/widget.rs", "rule": "raw.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 32, "query": "Paper kite reference https://raw.githubusercontent.com/octo-lantern/paper-kite/main/widget.rs?view=guide#overview", "rule": "raw.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 33, "query": "Paper kite reference http://raw.githubusercontent.com/octo-lantern/paper-kite/main/widget.rs", "rule": "raw.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 34, "query": "Paper kite reference http://raw.githubusercontent.com/octo-lantern/paper-kite/main/widget.rs?view=guide#overview", "rule": "raw.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 35, "query": "Paper kite reference raw.githubusercontent.com/octo-lantern/paper-kite/main/widget.rs", "rule": "raw.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 36, "query": "Paper kite reference raw.githubusercontent.com/octo-lantern/paper-kite/main/widget.rs?view=guide#overview", "rule": "raw.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 37, "query": "Paper kite reference site:gist.githubusercontent.com/octo-lantern/demo/raw/widget.rs", "rule": "gist.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 38, "query": "Paper kite reference site:gist.githubusercontent.com/octo-lantern/demo/raw/widget.rs?view=guide#overview", "rule": "gist.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 39, "query": "Paper kite reference https://gist.githubusercontent.com/octo-lantern/demo/raw/widget.rs", "rule": "gist.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 40, "query": "Paper kite reference https://gist.githubusercontent.com/octo-lantern/demo/raw/widget.rs?view=guide#overview", "rule": "gist.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 41, "query": "Paper kite reference http://gist.githubusercontent.com/octo-lantern/demo/raw/widget.rs", "rule": "gist.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 42, "query": "Paper kite reference http://gist.githubusercontent.com/octo-lantern/demo/raw/widget.rs?view=guide#overview", "rule": "gist.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 43, "query": "Paper kite reference gist.githubusercontent.com/octo-lantern/demo/raw/widget.rs", "rule": "gist.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 44, "query": "Paper kite reference gist.githubusercontent.com/octo-lantern/demo/raw/widget.rs?view=guide#overview", "rule": "gist.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 45, "query": "Paper kite reference site:docs.rs/paper-kite/latest/paper_kite/", "rule": "docs.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 46, "query": "Paper kite reference site:docs.rs/paper-kite/latest/paper_kite/?view=guide#overview", "rule": "docs.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 47, "query": "Paper kite reference https://docs.rs/paper-kite/latest/paper_kite/", "rule": "docs.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 48, "query": "Paper kite reference https://docs.rs/paper-kite/latest/paper_kite/?view=guide#overview", "rule": "docs.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 49, "query": "Paper kite reference http://docs.rs/paper-kite/latest/paper_kite/", "rule": "docs.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 50, "query": "Paper kite reference http://docs.rs/paper-kite/latest/paper_kite/?view=guide#overview", "rule": "docs.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 51, "query": "Paper kite reference docs.rs/paper-kite/latest/paper_kite/", "rule": "docs.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 52, "query": "Paper kite reference docs.rs/paper-kite/latest/paper_kite/?view=guide#overview", "rule": "docs.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 53, "query": "Paper kite reference site:crates.io/crates/paper-kite", "rule": "crates.io", "documentation_or_discussion_candidate": true}
+{"corpus_line": 54, "query": "Paper kite reference site:crates.io/crates/paper-kite?view=guide#overview", "rule": "crates.io", "documentation_or_discussion_candidate": true}
+{"corpus_line": 55, "query": "Paper kite reference https://crates.io/crates/paper-kite", "rule": "crates.io", "documentation_or_discussion_candidate": true}
+{"corpus_line": 56, "query": "Paper kite reference https://crates.io/crates/paper-kite?view=guide#overview", "rule": "crates.io", "documentation_or_discussion_candidate": true}
+{"corpus_line": 57, "query": "Paper kite reference http://crates.io/crates/paper-kite", "rule": "crates.io", "documentation_or_discussion_candidate": true}
+{"corpus_line": 58, "query": "Paper kite reference http://crates.io/crates/paper-kite?view=guide#overview", "rule": "crates.io", "documentation_or_discussion_candidate": true}
+{"corpus_line": 59, "query": "Paper kite reference crates.io/crates/paper-kite", "rule": "crates.io", "documentation_or_discussion_candidate": true}
+{"corpus_line": 60, "query": "Paper kite reference crates.io/crates/paper-kite?view=guide#overview", "rule": "crates.io", "documentation_or_discussion_candidate": true}
+{"corpus_line": 61, "query": "Paper kite reference site:lib.rs/crates/paper-kite", "rule": "lib.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 62, "query": "Paper kite reference site:lib.rs/crates/paper-kite?view=guide#overview", "rule": "lib.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 63, "query": "Paper kite reference https://lib.rs/crates/paper-kite", "rule": "lib.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 64, "query": "Paper kite reference https://lib.rs/crates/paper-kite?view=guide#overview", "rule": "lib.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 65, "query": "Paper kite reference http://lib.rs/crates/paper-kite", "rule": "lib.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 66, "query": "Paper kite reference http://lib.rs/crates/paper-kite?view=guide#overview", "rule": "lib.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 67, "query": "Paper kite reference lib.rs/crates/paper-kite", "rule": "lib.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 68, "query": "Paper kite reference lib.rs/crates/paper-kite?view=guide#overview", "rule": "lib.rs", "documentation_or_discussion_candidate": true}
+{"corpus_line": 69, "query": "Paper kite reference site:pkg.go.dev/example.com/paper-kite", "rule": "pkg.go.dev", "documentation_or_discussion_candidate": true}
+{"corpus_line": 70, "query": "Paper kite reference site:pkg.go.dev/example.com/paper-kite?view=guide#overview", "rule": "pkg.go.dev", "documentation_or_discussion_candidate": true}
+{"corpus_line": 71, "query": "Paper kite reference https://pkg.go.dev/example.com/paper-kite", "rule": "pkg.go.dev", "documentation_or_discussion_candidate": true}
+{"corpus_line": 72, "query": "Paper kite reference https://pkg.go.dev/example.com/paper-kite?view=guide#overview", "rule": "pkg.go.dev", "documentation_or_discussion_candidate": true}
+{"corpus_line": 73, "query": "Paper kite reference http://pkg.go.dev/example.com/paper-kite", "rule": "pkg.go.dev", "documentation_or_discussion_candidate": true}
+{"corpus_line": 74, "query": "Paper kite reference http://pkg.go.dev/example.com/paper-kite?view=guide#overview", "rule": "pkg.go.dev", "documentation_or_discussion_candidate": true}
+{"corpus_line": 75, "query": "Paper kite reference pkg.go.dev/example.com/paper-kite", "rule": "pkg.go.dev", "documentation_or_discussion_candidate": true}
+{"corpus_line": 76, "query": "Paper kite reference pkg.go.dev/example.com/paper-kite?view=guide#overview", "rule": "pkg.go.dev", "documentation_or_discussion_candidate": true}
+{"corpus_line": 77, "query": "Paper kite reference site:npmjs.com/package/paper-kite", "rule": "NpmPackage", "documentation_or_discussion_candidate": true}
+{"corpus_line": 78, "query": "Paper kite reference site:npmjs.com/package/paper-kite?view=guide#overview", "rule": "NpmPackage", "documentation_or_discussion_candidate": true}
+{"corpus_line": 79, "query": "Paper kite reference https://npmjs.com/package/paper-kite", "rule": "NpmPackage", "documentation_or_discussion_candidate": true}
+{"corpus_line": 80, "query": "Paper kite reference https://npmjs.com/package/paper-kite?view=guide#overview", "rule": "NpmPackage", "documentation_or_discussion_candidate": true}
+{"corpus_line": 81, "query": "Paper kite reference http://npmjs.com/package/paper-kite", "rule": "NpmPackage", "documentation_or_discussion_candidate": true}
+{"corpus_line": 82, "query": "Paper kite reference http://npmjs.com/package/paper-kite?view=guide#overview", "rule": "NpmPackage", "documentation_or_discussion_candidate": true}
+{"corpus_line": 83, "query": "Paper kite reference npmjs.com/package/paper-kite", "rule": "NpmPackage", "documentation_or_discussion_candidate": true}
+{"corpus_line": 84, "query": "Paper kite reference npmjs.com/package/paper-kite?view=guide#overview", "rule": "NpmPackage", "documentation_or_discussion_candidate": true}
+{"corpus_line": 85, "query": "Paper kite reference site:pypi.org/project/paper-kite/", "rule": "PypiProject", "documentation_or_discussion_candidate": true}
+{"corpus_line": 86, "query": "Paper kite reference site:pypi.org/project/paper-kite/?view=guide#overview", "rule": "PypiProject", "documentation_or_discussion_candidate": true}
+{"corpus_line": 87, "query": "Paper kite reference https://pypi.org/project/paper-kite/", "rule": "PypiProject", "documentation_or_discussion_candidate": true}
+{"corpus_line": 88, "query": "Paper kite reference https://pypi.org/project/paper-kite/?view=guide#overview", "rule": "PypiProject", "documentation_or_discussion_candidate": true}
+{"corpus_line": 89, "query": "Paper kite reference http://pypi.org/project/paper-kite/", "rule": "PypiProject", "documentation_or_discussion_candidate": true}
+{"corpus_line": 90, "query": "Paper kite reference http://pypi.org/project/paper-kite/?view=guide#overview", "rule": "PypiProject", "documentation_or_discussion_candidate": true}
+{"corpus_line": 91, "query": "Paper kite reference pypi.org/project/paper-kite/", "rule": "PypiProject", "documentation_or_discussion_candidate": true}
+{"corpus_line": 92, "query": "Paper kite reference pypi.org/project/paper-kite/?view=guide#overview", "rule": "PypiProject", "documentation_or_discussion_candidate": true}
+{"corpus_line": 159, "query": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "rule": "HexToken", "documentation_or_discussion_candidate": false}
+{"corpus_line": 160, "query": "revision (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)", "rule": "HexToken", "documentation_or_discussion_candidate": false}
+{"corpus_line": 161, "query": "checksum SHA256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "rule": "HexToken", "documentation_or_discussion_candidate": false}
+{"corpus_line": 162, "query": "token_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_end", "rule": "HexToken", "documentation_or_discussion_candidate": false}
+{"corpus_line": 163, "query": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "rule": "HexToken", "documentation_or_discussion_candidate": false}
+{"corpus_line": 164, "query": "revision (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)", "rule": "HexToken", "documentation_or_discussion_candidate": false}
+{"corpus_line": 165, "query": "checksum SHA256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "rule": "HexToken", "documentation_or_discussion_candidate": false}
+{"corpus_line": 166, "query": "token_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_end", "rule": "HexToken", "documentation_or_discussion_candidate": false}
+{"corpus_line": 191, "query": "https://github.com:443/octo-lantern/paper-kite/blob/main/widget.rs", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 193, "query": "https://reader@github.com/octo-lantern/paper-kite/blob/main/widget.rs", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 195, "query": "https://reader:ticket@github.com:8443/octo-lantern/paper-kite/blob/main/widget.rs", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 197, "query": "https://WWW.GITHUB.COM:443/octo-lantern/paper-kite/blob/main/widget.rs", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 201, "query": "How are paper kite examples organized?", "rule": "raw.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 202, "query": "How are lantern manuals indexed?", "rule": "raw.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 203, "query": "How are paper kite examples organized?", "rule": "gist.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 204, "query": "How are lantern manuals indexed?", "rule": "gist.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 205, "query": "How are paper kite examples organized?", "rule": "docs.rs", "documentation_or_discussion_candidate": false}
+{"corpus_line": 206, "query": "How are lantern manuals indexed?", "rule": "docs.rs", "documentation_or_discussion_candidate": false}
+{"corpus_line": 207, "query": "How are paper kite examples organized?", "rule": "crates.io", "documentation_or_discussion_candidate": false}
+{"corpus_line": 208, "query": "How are lantern manuals indexed?", "rule": "crates.io", "documentation_or_discussion_candidate": false}
+{"corpus_line": 209, "query": "How are paper kite examples organized?", "rule": "lib.rs", "documentation_or_discussion_candidate": false}
+{"corpus_line": 210, "query": "How are lantern manuals indexed?", "rule": "lib.rs", "documentation_or_discussion_candidate": false}
+{"corpus_line": 211, "query": "How are paper kite examples organized?", "rule": "pkg.go.dev", "documentation_or_discussion_candidate": false}
+{"corpus_line": 212, "query": "How are lantern manuals indexed?", "rule": "pkg.go.dev", "documentation_or_discussion_candidate": false}
+{"corpus_line": 217, "query": "A plain lantern question site:github.com/octo-lantern/paper-kite", "rule": "GithubRepository", "documentation_or_discussion_candidate": false}
+{"corpus_line": 219, "query": "site:docs.rs/paper-kite bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "rule": "raw.githubusercontent.com", "documentation_or_discussion_candidate": false}
+{"corpus_line": 220, "query": "site:crates.io/crates/paper-kite site:docs.rs/paper-kite", "rule": "crates.io", "documentation_or_discussion_candidate": false}
+{"corpus_line": 221, "query": "site:docs.rs/paper-kite bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "rule": "docs.rs", "documentation_or_discussion_candidate": false}
+{"corpus_line": 222, "query": "site:github.com/octo-lantern/paper-kite/issues/17 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "rule": "HexToken", "documentation_or_discussion_candidate": false}

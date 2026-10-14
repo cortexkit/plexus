@@ -1,0 +1,251 @@
+// PostHog REST — individually governed, read-only operations from PostHog's API.
+//
+// PostHog's hosted MCP endpoint places vendor operations behind one `exec`
+// command string, so grants and risk rules cannot distinguish a read from a
+// mutation there. This REST manifest names the documented HTTP operations
+// directly, letting governance apply to each action rather than to a command
+// interpreter.
+//
+// Wire contract from PostHog's published OpenAPI schema at
+// https://eu.posthog.com/api/schema/?format=json: endpoint paths and supported
+// query fields come from its declared operations, not from prose documentation.
+//
+// PostHog is region-partitioned: US and EU cloud are separate installations
+// with separate accounts, and a personal API key is valid on exactly one. The
+// wrong region returns 401 "Invalid API key" for a valid EU key, which looks
+// like a credential fault. This manifest targets EU cloud, so the transport
+// must remain on the EU host.
+//
+// PostHog also exposes mutation endpoints, but this connector deliberately
+// declares only verified GET reads. Its credential and integration are for
+// read-only access; adding mutations would broaden the governed surface.
+{
+  "schema_version": 1,
+  "key": "posthog_rest",
+  "name": "PostHog (REST)",
+  "description": "Read-only PostHog analytics, feature flag, error tracking, experiment, insight, and event retrieval.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "PostHog's published OpenAPI schema defines individual GET operations, allowing grants and risk classification to govern each read separately from mutations.",
+  "tier": "S2",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://eu.posthog.com"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  // `required` documents that every operation is scoped by a project. The
+  // governance engine enforces this list only for writes; read calls are pinned
+  // to a project by the connection's `values` allowlist, which operators set at
+  // connect time and which is evaluated for reads.
+  "resource_filters": {
+    "required": ["project_id"],
+    "optional": [],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    {
+      "name": "error_tracking_issues_list",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/api/projects/{project_id}/error_tracking/issues/",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": { "type": "string" },
+            "limit": { "type": "integer" },
+            "offset": { "type": "integer" }
+          },
+          "required": ["project_id"]
+        }
+      }
+    },
+    {
+      "name": "error_tracking_issue_get",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/api/projects/{project_id}/error_tracking/issues/{id}/",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": { "type": "string" },
+            "id": { "type": "string", "format": "uuid" }
+          },
+          "required": ["project_id", "id"]
+        }
+      }
+    },
+    {
+      "name": "feature_flags_list",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/api/projects/{project_id}/feature_flags/",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": { "type": "string" },
+            "limit": { "type": "integer" },
+            "offset": { "type": "integer" },
+            "key": { "type": "string" },
+            "search": { "type": "string" },
+            "active": { "type": "string" },
+            "type": { "type": "string" }
+          },
+          "required": ["project_id"]
+        }
+      }
+    },
+    {
+      "name": "feature_flag_get",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/api/projects/{project_id}/feature_flags/{id}/",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": { "type": "string" },
+            "id": { "type": "integer" }
+          },
+          "required": ["project_id", "id"]
+        }
+      }
+    },
+    {
+      "name": "experiments_list",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/api/projects/{project_id}/experiments/",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": { "type": "string" },
+            "limit": { "type": "integer" },
+            "offset": { "type": "integer" },
+            "search": { "type": "string" },
+            "order": { "type": "string" },
+            "status": { "type": "string" }
+          },
+          "required": ["project_id"]
+        }
+      }
+    },
+    {
+      "name": "experiment_get",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/api/projects/{project_id}/experiments/{id}/",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": { "type": "string" },
+            "id": { "type": "integer" }
+          },
+          "required": ["project_id", "id"]
+        }
+      }
+    },
+    {
+      "name": "insights_list",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/api/projects/{project_id}/insights/",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": { "type": "string" },
+            "limit": { "type": "integer" },
+            "offset": { "type": "integer" },
+            "search": { "type": "string" },
+            "short_id": { "type": "string" },
+            "date_from": { "type": "string" },
+            "date_to": { "type": "string" }
+          },
+          "required": ["project_id"]
+        }
+      }
+    },
+    {
+      "name": "insight_get",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/api/projects/{project_id}/insights/{id}/",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": { "type": "string" },
+            "id": {
+              "oneOf": [
+                { "type": "integer" },
+                { "type": "string" }
+              ]
+            }
+          },
+          "required": ["project_id", "id"]
+        }
+      }
+    },
+    {
+      "name": "events_list",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/api/projects/{project_id}/events/",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": { "type": "string" },
+            "limit": { "type": "integer" },
+            "offset": { "type": "integer" },
+            "after": { "type": "string" },
+            "before": { "type": "string" },
+            "event": { "type": "string" },
+            "distinct_id": { "type": "integer" }
+          },
+          "required": ["project_id"]
+        }
+      }
+    },
+    {
+      "name": "event_get",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/api/projects/{project_id}/events/{id}/",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": { "type": "string" },
+            "id": { "type": "string" }
+          },
+          "required": ["project_id", "id"]
+        }
+      }
+    }
+  ],
+  // The events endpoint's `after` and `before` filters have not produced an
+  // observable cursor contract: an empty project returns 200 for a bogus
+  // parameter too. A poll shape without a verified filter could silently replay
+  // the first page forever, so this manifest intentionally declares none.
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

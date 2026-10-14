@@ -1,0 +1,4 @@
+{"name":"unknown","frame":{"type":"future_frame"},"expect":4400}
+{"name":"server-hello","frame":{"type":"hello","v":1},"expect":4400}
+{"name":"server-event","frame":{"type":"event","seq":1},"expect":4400}
+{"name":"missing-type","frame":{"through_seq":1},"expect":4400}

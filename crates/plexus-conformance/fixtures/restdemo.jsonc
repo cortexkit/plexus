@@ -1,0 +1,88 @@
+// Synthetic REST fixture for the conformance harness: a hand-written rest_api
+// manifest run against an in-process REST stub. Exercises a GET with a path
+// parameter, a POST with a JSON body, and an ask-first gated write.
+{
+  "schema_version": 1,
+  "key": "restdemo",
+  "name": "REST Demo",
+  "description": "In-process REST stub used by the substrate conformance harness.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Harness fixture; hand-written REST manifest, no real vendor.",
+  "tier": "S2",
+  "transport": {
+    "kind": "rest_api",
+    "url": "http://127.0.0.1:0"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": ["team"],
+    "optional": [],
+    "write_enabling": ["team"]
+  },
+  "actions_baseline": [
+    {
+      "name": "get_issue",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/v1/issues/{issue_id}",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "issue_id": { "type": "string" },
+            "team": { "type": "string" }
+          },
+          "required": ["issue_id"]
+        }
+      }
+    },
+    {
+      "name": "create_issue",
+      "risk": "write",
+      "http": {
+        "method": "POST",
+        "path": "/v1/issues",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "team": { "type": "string" },
+            "title": { "type": "string" }
+          },
+          "required": ["team", "title"]
+        }
+      }
+    },
+    {
+      "name": "delete_issue",
+      "risk": "write",
+      "http": {
+        "method": "DELETE",
+        "path": "/v1/issues/{issue_id}",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "issue_id": { "type": "string" },
+            "team": { "type": "string" }
+          },
+          "required": ["issue_id"]
+        }
+      }
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 60 }
+  },
+  "availability": "ga"
+}

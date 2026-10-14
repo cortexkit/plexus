@@ -1,0 +1,72 @@
+// Notion.
+// S3 floor provider (deliberate): ordinary writes escalate to the external
+// decision plane. OAuth custody is operator-provisioned (ck auth + binding
+// ticket) until the vault-driven connect seam ships.
+{
+  "schema_version": 1,
+  "key": "notion",
+  "name": "Notion",
+  "description": "Workspace pages, databases, and blocks.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official hosted MCP server; tools map cleanly to grants.",
+  "tier": "S3",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://mcp.notion.com/mcp"
+  },
+  "auth": {
+    "mode": "oauth",
+    "oauth": {
+      // Reference into the claustrum vault's reviewed OAuth-profile
+      // registry: the manifest never carries endpoints, client credentials,
+      // or refresh parameters; the vault owns those.
+      "profile_id": "notion",
+      "profile_digest": "sha256:TBD-pinned-at-first-connect",
+      "requested_scopes": ["read", "update", "insert"]
+    }
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "access_token",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": ["workspace"],
+    "optional": ["page_allowlist", "database_allowlist", "property_filter"],
+    "write_enabling": ["parent_allowlist"]
+  },
+  "actions_baseline": [
+    { "name": "search", "risk": "read" },
+    { "name": "query_database", "risk": "read" },
+    { "name": "read_page", "risk": "read" },
+    {
+      "name": "create_page",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["title", "parent", "time_window"],
+        "read_back_action": "search",
+        "timeout_s": 120
+      },
+      "idempotency": "none"
+    },
+    {
+      "name": "append_block",
+      "risk": "write",
+      "reconciliation": {
+        "correlation_fields": ["page_id", "time_window"],
+        "read_back_action": "read_page",
+        "timeout_s": 120
+      },
+      "idempotency": "none"
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

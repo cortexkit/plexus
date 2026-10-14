@@ -1,0 +1,32 @@
+{
+  "requestId": "b5947044c4b78efa9552a7c89b306d95",
+  "results": [
+    {
+      "title": "A Comprehensive Overview of Large Language Models",
+      "url": "https://arxiv.org/pdf/2307.06435.pdf",
+      "publishedDate": "2023-11-16T01:36:32.547Z",
+      "author": "Humza  Naveed, University of Engineering and Technology (UET), Lahore, Pakistan",
+      "id": "https://arxiv.org/abs/2307.06435",
+      "image": "https://arxiv.org/pdf/2307.06435.pdf/page_1.png",
+      "favicon": "https://arxiv.org/favicon.ico",
+      "text": "Abstract Large Language Models (LLMs) have recently demonstrated remarkable capabilities...",
+      "highlights": ["Such requirements have limited their adoption..."],
+      "highlightScores": [0.4600165784358978],
+      "summary": "This overview paper on Large Language Models (LLMs) highlights key developments..."
+    },
+    {
+      "title": "Search",
+      "url": "https://exa.ai/docs/reference/search",
+      "id": "https://exa.ai/docs/reference/search",
+      "favicon": "https://exa.ai/favicon.ico",
+      "text": "Perform a search with an Exa prompt-engineered query and retrieve a list of relevant results. Optionally get contents."
+    }
+  ],
+  "resolvedSearchType": "neural",
+  "costDollars": {
+    "total": 0.007,
+    "search": {
+      "neural": 0.007
+    }
+  }
+}

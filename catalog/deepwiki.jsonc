@@ -1,0 +1,46 @@
+// DeepWiki.
+// S1 MCP-direct; AI-generated documentation for public GitHub repositories.
+//
+// This is the catalog's first credential-free vendor: the server is public and
+// takes no token, so `auth.mode` is `none` and there are no credential
+// bindings. Enrollment therefore cannot be rooted in credential possession the
+// way every other connector is — the operator-only ceremony surface is the
+// whole gate. That is acceptable here precisely because there is no secret to
+// protect and no vendor-side account to abuse: the worst an unintended
+// connection can do is read public documentation.
+//
+// Private repositories are served by a DIFFERENT endpoint (mcp.devin.ai) that
+// does require a token; that would be a separate manifest with its own auth
+// mode, never a mode switch on this one.
+{
+  "schema_version": 1,
+  "key": "deepwiki",
+  "name": "DeepWiki",
+  "description": "AI-generated documentation and Q&A for public GitHub repositories.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official public MCP server, no authentication; read-only documentation retrieval maps directly to read grants.",
+  "tier": "S1",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://mcp.deepwiki.com/mcp"
+  },
+  "auth": {
+    "mode": "none"
+  },
+  "credential_bindings": [],
+  "resource_filters": {
+    "required": [],
+    "optional": ["repo_allowlist"],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    { "name": "read_wiki_structure", "risk": "read" },
+    { "name": "read_wiki_contents", "risk": "read" },
+    { "name": "ask_question", "risk": "read" }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

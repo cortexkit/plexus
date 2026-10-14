@@ -1,0 +1,24 @@
+[package]
+name = "plexus-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Plexus probe sandbox: runs probe JavaScript in an embedded QuickJS/WASI guest on Wasmtime"
+license = "MIT"
+repository = "https://github.com/cortexkit/plexus"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `pulley` adds Wasmtime's portable bytecode interpreter. The sandbox executes
+# guests on it rather than as native machine code, because a binary signed with
+# macOS hardened runtime and no entitlements is killed the first time it runs
+# freshly generated native code. Cranelift compiles Wasm into Pulley bytecode.
+# WASI p1 requires p2/component support transitively in this Wasmtime release.
+# Parallel guest compilation keeps first-load latency close to the original
+# feature configuration; runtime execution still uses only Pulley bytecode.
+wasmtime = { version = "=47.0.3", default-features = false, features = ["cranelift", "parallel-compilation", "pulley", "runtime", "std"] }
+wasmtime-wasi = { version = "=47.0.3", default-features = false, features = ["p1"] }
+
+[dev-dependencies]
+wasmtime = { version = "=47.0.3", default-features = false, features = ["wat"] }

@@ -1,0 +1,500 @@
+// GitHub REST — the narrow write surface the MCP server does not serve, plus
+// the reads needed to check those writes at the vendor.
+//
+// WHY THIS EXISTS SEPARATELY FROM github.jsonc: GitHub's remote MCP server
+// serves 44 tools and NONE of them places a reaction (enumerated live against
+// api.githubcopilot.com/mcp/). The reactions endpoint is REST
+// only, so a seen-marker write cannot ride the MCP connection the read watches
+// already use — it is not a permission problem, the verb is simply absent.
+//
+  // Deliberately NARROW. This declares the shim-routed write verbs and the
+  // reads needed to check those writes. GitHub's REST surface is enormous, and
+  // a reviewed manifest is a claim about every action in it, so the scope is
+  // "the verb we need and nothing adjacent to it". Adding another action is a
+  // review, not an edit.
+  //
+  // THE REACTION FAMILY IS NOT UNIFORM ON PERMISSIONS, so do not add a second
+  // reaction action by analogy with the first. Verified against the current API
+  // version (2026-03-10) rather than an older docs table:
+  //
+  //   POST /repos/{o}/{r}/issues/{n}/reactions     -> Issues (write)     DECLARED HERE
+  //   POST /repos/{o}/{r}/comments/{id}/reactions  -> Contents (write)   NOT SUPPORTED
+  //
+  // The second is a COMMIT-comment reaction, and an App installed with
+  // contents:READ, the least privilege these bots need, gets a 403. Treat
+  // commit-comment reactions as unsupported until a permission round grants
+  // contents:write, and note that the two paths look similar enough that adding
+  // one "while we are here" is the likely mistake.
+  //
+  // Issue-comment reactions are a third path again and are not declared either;
+  // add_issue_comment below writes comments, it does not react to them.
+  //
+  // PILOT APP CANNOT MERGE, AND THAT IS EXPECTED RATHER THAN BROKEN. The App
+  // backing this connection is minted with issues:write, pull_requests:write,
+  // contents:read, metadata:read. GitHub requires contents:WRITE on the HEAD
+  // repository to merge on behalf of an App, so a merge through this connection
+  // returns 403 until someone deliberately widens the installation.
+  //
+  // Recorded here because that 403 is the kind of thing a future reader debugs
+  // as a defect. It is a deliberate choice: App permissions are editable later
+  // with one owner approval click, so under-asking costs a click while
+  // over-asking mints write authority broader than anything consumes. Merge also
+  // rides the ungoverned path today (agents merge their own PRs directly), so
+  // withholding it here forfeits nothing.
+  //
+  // A SEPARATE CEILING APPLIES AND IS NOT EDITABLE: a plexus connection's
+  // authority ceiling is fixed permanently at ticket issuance. Widening the App
+  // on GitHub's side does not widen the connection. Adding merge to the governed
+  // path needs a new ticket and a new connection, which is the correct way for a
+  // permanent grant to arrive.
+{
+  "schema_version": 1,
+  "key": "github_rest",
+  "name": "GitHub (REST)",
+  "description": "Narrow GitHub REST write endpoints and the vendor reads needed to check them.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "GitHub publishes a stable, documented REST API with a static bearer-token auth shape. The remote MCP server remains preferred for general reads; this manifest covers write verbs it does not expose and only the vendor reads needed to check those writes.",
+  "tier": "S1",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://api.github.com"
+  },
+  // Installation tokens from a GitHub App present exactly as a bearer token, so
+  // the dispatch path is identical to any other bearer credential. The mode
+  // describes how the credential was OBTAINED, which is a ceremony question;
+  // dispatch only asks whether a handle resolves.
+  "auth": {
+    "mode": "app_install"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "access_token",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  // `repo` is the write-enabling filter, and that is the load-bearing line in
+  // this file. A write connection must name the repositories it may mark, so an
+  // operator grants "may react on these repos" rather than "may react". Without
+  // a declared write_enabling key the write gate could be satisfied without
+  // narrowing anything, which is the whole point of the gate.
+  //
+  // `write_enabling` does not fence reads, so the read actions below are not
+  // repo-filtered by plexus. That is deliberate: the GitHub App installation
+  // bounds what this identity can read at the vendor, while `repo` continues to
+  // bound the more consequential write authority here.
+  "resource_filters": {
+    "required": [],
+    "optional": ["owner"],
+    "write_enabling": ["repo"]
+  },
+  // The writes intentionally have no `reconciliation` blocks yet. The current
+  // engine uses one `correlation_fields` list for two incompatible jobs: it
+  // constructs the read request from that list, then requires every listed
+  // field to be present in each response object. These REST reads need owner,
+  // repo, and an issue or comment identifier to form the path, but GitHub does
+  // not echo all of those fields in reaction and comment objects. A mismatch is
+  // reported as `not_found`, which could invite a duplicate retry after a write
+  // actually landed. List reads also need engine-side pagination. Keep the safe
+  // read surface declared, but do not wire it as reconciliation until request
+  // arguments and response correlation are expressed separately.
+  "actions_baseline": [
+    {
+      // WRITE, not read: it publishes a visible, attributable mark under an
+      // agent's identity on someone else's repository. Reversible — the
+      // reaction can be removed — which is why it is not destructive, but it is
+      // externally visible the moment it lands, so it must clear the write
+      // ceiling and the connection's write_enabling filter.
+      "name": "add_reaction",
+      "risk": "write",
+      "facade_only": true,
+      "http": {
+        "method": "POST",
+        "path": "/repos/{owner}/{repo}/issues/{issue_number}/reactions",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "owner": { "type": "string" },
+            "repo": { "type": "string" },
+            "issue_number": { "type": "integer" },
+            // GitHub's full reaction set, not only the seen-marker's eyes:
+            // agents also react on their own behalf, and they could already
+            // place any of these through gh.route before plexus served it.
+            // Still a closed list: the bot-request facade refuses any other
+            // value before dispatch, because nothing checks this schema on
+            // invoke and the REST transport would send whatever it is given.
+            "content": {
+              "type": "string",
+              "enum": ["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"]
+            }
+          },
+            "required": ["owner", "repo", "issue_number", "content"]
+          }
+        }
+      },
+      {
+        // ONE ACTION COVERS ISSUES AND PULL REQUESTS. GitHub's own words on this
+        // endpoint: "Every pull request is an issue, but not every issue is a
+        // pull request." A PR's conversation comments live on the issues path,
+        // so declaring a second pr_comment action would be two names for one
+        // endpoint — the three-names-for-one-thing shape that makes every later
+        // log line ambiguous about which was used.
+        //
+        // NOT the same as a PR REVIEW comment, which is a different endpoint
+        // (/pulls/{n}/comments), anchors to a diff line, and is deliberately not
+        // declared here. Review comments are a separate review if they are ever
+        // wanted.
+        //
+        // WRITE rather than destructive: a comment is externally visible and
+        // triggers notifications the moment it lands, but it is editable and
+        // deletable afterwards. Irreversibility is what separates the two tiers.
+        "name": "add_issue_comment",
+        "risk": "write",
+        "facade_only": true,
+        "http": {
+          "method": "POST",
+          "path": "/repos/{owner}/{repo}/issues/{issue_number}/comments",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "owner": { "type": "string" },
+              "repo": { "type": "string" },
+              "issue_number": { "type": "integer" },
+              // Deliberately unconstrained, unlike the reaction's content field.
+              // A reaction has a closed vocabulary and a marker's job is to place
+              // one of them; a comment is prose by nature and constraining it
+              // here would be theatre. What bounds this action is WHERE it may
+              // write (the repo write-enabling filter) and WHO may invoke it (the
+              // grant), not what it says.
+              "body": { "type": "string" }
+            },
+            "required": ["owner", "repo", "issue_number", "body"]
+          }
+        }
+      },
+      {
+        // Editing targets a COMMENT ID, not an issue number — a different
+        // addressing scheme from every other action here. Worth stating because
+        // a URI shaped around issues cannot express it, which is a real
+        // constraint on any surface that wraps these actions.
+        //
+        // Scoped to comments this identity authored in practice, but that is NOT
+        // enforced here: GitHub authorizes by token identity, so an App can only
+        // edit its own comments anyway. Recording the reason rather than implying
+        // a check this manifest does not make.
+        "name": "update_issue_comment",
+        "risk": "write",
+        "facade_only": true,
+        "http": {
+          "method": "PATCH",
+          "path": "/repos/{owner}/{repo}/issues/comments/{comment_id}",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "owner": { "type": "string" },
+              "repo": { "type": "string" },
+              "comment_id": { "type": "integer" },
+              "body": { "type": "string" }
+            },
+            "required": ["owner", "repo", "comment_id", "body"]
+          }
+        }
+      },
+      {
+        // GitHub can filter this collection by reaction content but not by the
+        // authenticated identity. Paging remains necessary because many people
+        // can place the same reaction on one issue.
+        "name": "list_issue_reactions",
+        "risk": "read",
+        "http": {
+          "method": "GET",
+          "path": "/repos/{owner}/{repo}/issues/{issue_number}/reactions",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "owner": { "type": "string" },
+              "repo": { "type": "string" },
+              "issue_number": { "type": "integer" },
+              "content": {
+                "type": "string",
+                "enum": ["eyes"]
+              },
+              "per_page": { "type": "integer" },
+              "page": { "type": "integer" }
+            },
+            "required": ["owner", "repo", "issue_number"]
+          }
+        }
+      },
+      {
+        // This endpoint returns comments in ascending ID order and offers no
+        // reverse-sort parameter. `since` can narrow by update time, while page
+        // and per_page let a caller walk every remaining candidate.
+        "name": "list_issue_comments",
+        "risk": "read",
+        "http": {
+          "method": "GET",
+          "path": "/repos/{owner}/{repo}/issues/{issue_number}/comments",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "owner": { "type": "string" },
+              "repo": { "type": "string" },
+              "issue_number": { "type": "integer" },
+              "since": { "type": "string" },
+              "per_page": { "type": "integer" },
+              "page": { "type": "integer" }
+            },
+            "required": ["owner", "repo", "issue_number"]
+          }
+        }
+      },
+      {
+        // An update already knows the globally unique comment ID, so this exact
+        // lookup is cleaner than searching the issue's comment collection.
+        "name": "get_issue_comment",
+        "risk": "read",
+        "http": {
+          "method": "GET",
+          "path": "/repos/{owner}/{repo}/issues/comments/{comment_id}",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "owner": { "type": "string" },
+              "repo": { "type": "string" },
+              "comment_id": { "type": "integer" }
+            },
+            "required": ["owner", "repo", "comment_id"]
+          }
+        }
+      },
+      {
+        "name": "github.issue.get",
+        "risk": "read", "ask_first": false,
+        "http": {
+          "method": "GET",
+          "path": "/repos/{owner}/{repo}/issues/{issue_number}",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "owner": {"type": "string"}, "repo": {"type": "string"},
+              "issue_number": {"type": "integer"}
+            },
+            "required": ["owner", "repo", "issue_number"]
+          }
+        }
+      },
+      {
+        "name": "github.issue_comment.get",
+        "risk": "read", "ask_first": false,
+        "http": {
+          "method": "GET",
+          "path": "/repos/{owner}/{repo}/issues/comments/{comment_id}",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "owner": {"type": "string"}, "repo": {"type": "string"},
+              "comment_id": {"type": "integer"}
+            },
+            "required": ["owner", "repo", "comment_id"]
+          }
+        }
+      },
+      {
+        "name": "github.issue_comments.list",
+        "risk": "read", "ask_first": false,
+        "http": {
+          "method": "GET",
+          "path": "/repos/{owner}/{repo}/issues/{issue_number}/comments",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "owner": {"type": "string"}, "repo": {"type": "string"},
+              "issue_number": {"type": "integer"},
+              "since": {"type": "string"}, "per_page": {"type": "integer"},
+              "page": {"type": "integer"}
+            },
+            "required": ["owner", "repo", "issue_number"]
+          }
+        }
+      },
+      {
+        // Who changed an issue or pull request when no comment says so: labels,
+        // title, state, assignees, merges, reviews and pushed commits all appear
+        // here and nowhere in the comment lists. The GitHub MCP server has no
+        // timeline method, so this REST read is the only source. PRs are issues,
+        // so the one path serves both. Entries arrive OLDEST first, so the
+        // newest activity is on the last page and a reader must walk to it.
+        "name": "github.issue_timeline.list",
+        "risk": "read", "ask_first": false,
+        "http": {
+          "method": "GET",
+          "path": "/repos/{owner}/{repo}/issues/{issue_number}/timeline",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "owner": {"type": "string"}, "repo": {"type": "string"},
+              "issue_number": {"type": "integer"},
+              "per_page": {"type": "integer"}, "page": {"type": "integer"}
+            },
+            "required": ["owner", "repo", "issue_number"]
+          }
+        }
+      },
+      {
+        // The resolver constructs repo qualifiers and filters returned results;
+        // raw caller-supplied search qualifiers cannot select another repository.
+        "name": "github.issue.search",
+        "risk": "read", "ask_first": false,
+        "http": {
+          "method": "GET",
+          "path": "/search/issues",
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "repositories": {"type": "array", "items": {"type": "string"}},
+              "terms": {"type": "string"},
+              "q": {"type": "string"},
+              "per_page": {"type": "integer"}, "page": {"type": "integer"}
+            },
+            "required": ["repositories", "terms"]
+          }
+        }
+      },
+      {
+        "name": "add_pr_review",
+        "risk": "write", "facade_only": true,
+        "http": {
+          "method": "POST", "path": "/repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+          "args_schema": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "pull_number": {"type": "integer"}, "body": {"type": "string"},
+            "event": {"type": "string", "enum": ["COMMENT", "APPROVE", "REQUEST_CHANGES"]}
+          }, "required": ["owner", "repo", "pull_number", "event"]}
+        }
+      },
+      {
+        "name": "close_issue",
+        "risk": "write", "facade_only": true,
+        "http": {
+          "method": "PATCH", "path": "/repos/{owner}/{repo}/issues/{issue_number}",
+          "args_schema": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "issue_number": {"type": "integer"},
+            "state": {"const": "closed"},
+            "state_reason": {"type": "string", "enum": ["completed", "not_planned"]}
+          }, "required": ["owner", "repo", "issue_number", "state"]}
+        }
+      },
+      {
+        "name": "reopen_issue",
+        "risk": "write", "facade_only": true,
+        "http": {
+          "method": "PATCH", "path": "/repos/{owner}/{repo}/issues/{issue_number}",
+          "args_schema": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "issue_number": {"type": "integer"}, "state": {"const": "open"}
+          }, "required": ["owner", "repo", "issue_number", "state"]}
+        }
+      },
+      {
+        "name": "create_issue",
+        "risk": "write", "facade_only": true,
+        "http": {
+          "method": "POST", "path": "/repos/{owner}/{repo}/issues",
+          "args_schema": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "title": {"type": "string"}, "body": {"type": "string"},
+            "labels": {"type": "array", "items": {"type": "string"}}
+          }, "required": ["owner", "repo", "title"]}
+        }
+      },
+      {
+        // Opens a pull request as the bot. GitHub REST reference:
+        // https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request
+        // (POST /repos/{owner}/{repo}/pulls, needs pull_requests:write).
+        //
+        // SAME-REPOSITORY ONLY. GitHub reads an `owner:branch` head as a branch
+        // in another repository of the fork network; the facade refuses any head
+        // containing `:` before dispatch, so the bot can only propose a branch of
+        // the repository it is bound to. The endpoint's other body fields are
+        // deliberately left out: `head_repo` names another repository,
+        // `maintainer_can_modify` only matters for fork heads, and `issue`
+        // converts an existing issue into this pull request. Opening a pull
+        // request is not merging it; merge is not declared here at all.
+        "name": "create_pull_request",
+        "risk": "write", "facade_only": true,
+        "http": {
+          "method": "POST", "path": "/repos/{owner}/{repo}/pulls",
+          "args_schema": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "title": {"type": "string"}, "head": {"type": "string"},
+            "base": {"type": "string"}, "body": {"type": "string"},
+            "draft": {"type": "boolean"}
+          }, "required": ["owner", "repo", "title", "head", "base"]}
+        }
+      },
+      {
+        // Only the issue's author may use the own-issue edit route. The facade
+        // checks authorship before any of these mutation legs is dispatched.
+        "name": "edit_issue",
+        "risk": "write", "facade_only": true,
+        "http": {
+          "method": "PATCH", "path": "/repos/{owner}/{repo}/issues/{issue_number}",
+          "args_schema": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "issue_number": {"type": "integer"},
+            "title": {"type": "string"}, "body": {"type": "string"},
+            "labels": {"type": "array", "items": {"type": "string"}},
+            "assignees": {"type": "array", "items": {"type": "string"}}
+          }, "required": ["owner", "repo", "issue_number"]}
+        }
+      },
+      {
+        "name": "add_issue_labels", "risk": "write", "facade_only": true,
+        "http": {"method": "POST", "path": "/repos/{owner}/{repo}/issues/{issue_number}/labels",
+          "args_schema": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "issue_number": {"type": "integer"},
+            "labels": {"type": "array", "items": {"type": "string"}}
+          }, "required": ["owner", "repo", "issue_number", "labels"]}}
+      },
+      {
+        "name": "remove_issue_label", "risk": "write", "facade_only": true,
+        "http": {"method": "DELETE", "path": "/repos/{owner}/{repo}/issues/{issue_number}/labels/{label}",
+          "args_schema": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "issue_number": {"type": "integer"}, "label": {"type": "string"}
+          }, "required": ["owner", "repo", "issue_number", "label"]}}
+      },
+      {
+        "name": "add_issue_assignees", "risk": "write", "facade_only": true,
+        "http": {"method": "POST", "path": "/repos/{owner}/{repo}/issues/{issue_number}/assignees",
+          "args_schema": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "issue_number": {"type": "integer"},
+            "assignees": {"type": "array", "items": {"type": "string"}}
+          }, "required": ["owner", "repo", "issue_number", "assignees"]}}
+      },
+      {
+        "name": "remove_issue_assignees", "risk": "write", "facade_only": true,
+        "http": {"method": "DELETE", "path": "/repos/{owner}/{repo}/issues/{issue_number}/assignees",
+          "args_schema": {"type": "object", "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "issue_number": {"type": "integer"},
+            "assignees": {"type": "array", "items": {"type": "string"}}
+          }, "required": ["owner", "repo", "issue_number", "assignees"]}}
+      }
+  ],
+  "defaults": {
+    // Marking is high-frequency and low-consequence: an agent acknowledging an
+    // event must not park an approval request for each one. The write ceiling,
+    // the per-action grant and the repo filter are what bound this; ask-first
+    // would make the feature unusable without making it safer.
+    "ask_first_risk": ["destructive"],
+    "rate_limit": { "calls_per_min": 60 }
+  },
+  "availability": "ga"
+}

@@ -1,0 +1,45 @@
+{
+  "error": {
+    "code": "elicitation_invalid_request",
+    "message": "expires_in_ms must be positive and at most 24 hours"
+  },
+  "method": "elicitation.request",
+  "request": {
+    "params": {
+      "default": "deny",
+      "duration": "this call",
+      "expires_in_ms": 0,
+      "kind": "consent",
+      "late_execution": "execute",
+      "material_damage": true,
+      "on_expiry": "deny",
+      "options": [
+        {
+          "effect": "grant",
+          "id": "transfer:chrome",
+          "label": "Copy from Chrome"
+        },
+        {
+          "effect": "decline",
+          "id": "deny",
+          "label": "Not now"
+        }
+      ],
+      "prompt": "May I copy your login?",
+      "scope": "github.com",
+      "session_ref": "ses_head",
+      "target": {
+        "kind": "site",
+        "label": "github.com"
+      },
+      "title": "Copy login",
+      "urgency": "normal"
+    },
+    "route": {
+      "operator": false,
+      "principal": "reserved:plexus",
+      "session": "provider-session"
+    }
+  },
+  "tag": "elicitation-requester-v1"
+}

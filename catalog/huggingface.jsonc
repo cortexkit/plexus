@@ -1,0 +1,59 @@
+// Hugging Face Hub.
+// S2 MCP-direct; model, dataset, space search and repository file reads.
+// API-key custody is self-service v1. All actions are read-risk: search and
+// retrieval do not mutate vendor-side state.
+{
+  "schema_version": 1,
+  "key": "huggingface",
+  "name": "Hugging Face",
+  "description": "Model, dataset, and space search plus repository file reads.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official hosted MCP server; API-key auth; read-only surface maps directly to grants with no write governance needed.",
+  "tier": "S2",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://huggingface.co/mcp"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  // Tool names confirmed from https://github.com/huggingface/hf-mcp-server
+  // (ALL_BUILTIN_TOOL_IDS in tool-ids.ts). Only the read-shaped subset is
+  // declared here; write-shaped tools (hf_create_repo, duplicate_space,
+  // hf_jobs, dynamic_space invoke, sandbox tools) are excluded from this
+  // connector's action surface intentionally.
+  "actions_baseline": [
+    { "name": "model_search", "risk": "read" },
+    { "name": "model_details", "risk": "read" },
+    { "name": "dataset_search", "risk": "read" },
+    { "name": "dataset_details", "risk": "read" },
+    { "name": "space_search", "risk": "read" },
+    { "name": "space_info", "risk": "read" },
+    { "name": "space_files", "risk": "read" },
+    { "name": "paper_search", "risk": "read" },
+    { "name": "hub_repo_search", "risk": "read" },
+    { "name": "hub_repo_details", "risk": "read" },
+    { "name": "hf_fs", "risk": "read" },
+    { "name": "hf_doc_search", "risk": "read" },
+    { "name": "hf_doc_fetch", "risk": "read" }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

@@ -1,0 +1,16 @@
+{
+  "error": {
+    "code": "permissions_operator_required",
+    "message": "permissions operations need reserved:cingulate or the local operator's direct route"
+  },
+  "method": "permissions.revoke",
+  "now_ms": 1060000,
+  "request": {
+    "id": "grt_01"
+  },
+  "route": {
+    "carried_agent_id": "agent-alf",
+    "principal": "reserved:plexus"
+  },
+  "tag": "permissions-v1"
+}

@@ -1,0 +1,11 @@
+[package]
+name = "quickjs-wasm-guest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "QuickJS-NG WASI guest used by the Plexus JavaScript interpreter evaluation"
+license = "MIT"
+repository = "https://github.com/cortexkit/plexus"
+
+[dependencies]
+rquickjs = { version = "0.12.2", features = ["macro"] }

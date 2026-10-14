@@ -1,0 +1,20 @@
+// Public, credential-free MCP code search. Enrollment and module grants remain required.
+{
+  "schema_version": 1,
+  "key": "grep_app",
+  "name": "grep.app",
+  "description": "Literal code search across public GitHub repositories.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Public MCP server with no authentication and one read-only search action.",
+  "tier": "S1",
+  "transport": { "kind": "mcp_remote", "url": "https://mcp.grep.app" },
+  "auth": { "mode": "none" },
+  "credential_bindings": [],
+  "resource_filters": { "required": [], "optional": [], "write_enabling": [] },
+  "actions_baseline": [{ "name": "searchGitHub", "risk": "read" }],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

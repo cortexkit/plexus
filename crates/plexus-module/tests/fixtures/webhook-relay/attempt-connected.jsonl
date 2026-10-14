@@ -1,0 +1,1 @@
+{"name":"connected","request":{"method":"GET","path":"/v1/relay/github/connect/BwcHBwcHBwcHBwcHBwcHBw"},"status":200,"body":"{\"attempt_id\":\"BwcHBwcHBwcHBwcHBwcHBw\",\"state\":\"connected\",\"expires_at\":\"2030-10-08T09:15:00.000Z\",\"reason\":null,\"message\":null,\"installation_id\":42,\"account_login\":\"test-owner\",\"repository_count\":2}"}

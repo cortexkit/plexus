@@ -1,0 +1,33 @@
+{
+  "base": {
+    "ref": "integration/windows",
+    "repo": {
+      "description": "Flow engine for the CortexKit fleet: approved, journaled, replay-safe automation scripts",
+      "full_name": "cortexkit/basal"
+    },
+    "sha": "e2beaaf77fc611e0f52620360a07844ab4beb1a3"
+  },
+  "body": "In the imaginary paper-kite workshop, the lantern ledger records each coloured.\n\nThis fictional example checks that every paper.\nThe pretend catalogue.\n## Fictional workshop notes\nThe toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points at.\n\n- The pretend catalogue describes folding steps, sample drawings and a repeatable tour of the miniature.\n- In the imaginary paper-kite workshop, the lantern ledger records each coloured ribbon before the parade.\n- The toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points.\n\nThe pretend catalogue describes folding steps, sample drawings and a repeatable tour of the miniature.\n\nThe toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy telescope points at painted stars while the cardboard bell marks the next rehearsal. The toy.\n\nThe pretend catalogue describes folding steps.\n\n",
+  "created_at": "2026-10-10T22:38:50Z",
+  "draft": true,
+  "head": {
+    "ref": "ci/windows-s10",
+    "repo": {
+      "description": "Flow engine for the CortexKit fleet: approved, journaled, replay-safe automation scripts",
+      "full_name": "cortexkit/basal"
+    },
+    "sha": "bae5a5dab6b252bd89790f9733e07b7b2d3ea24f"
+  },
+  "html_url": "https://github.com/cortexkit/basal/pull/13",
+  "merged": false,
+  "number": 13,
+  "state": "open",
+  "title": "Workshop only: paper kite checks, ribbon lists and lantern guides",
+  "updated_at": "2026-10-11T00:33:17Z",
+  "user": {
+    "avatar_url": "https://avatars.githubusercontent.com/u/271195168?v=4",
+    "id": 337845152,
+    "login": "basal-alfonso[bot]",
+    "profile_url": "https://github.com/apps/basal-alfonso"
+  }
+}

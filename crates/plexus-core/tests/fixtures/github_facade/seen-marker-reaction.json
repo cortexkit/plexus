@@ -1,0 +1,50 @@
+{
+  "caller_principal": "reserved:prefrontal-core",
+  "refusal": {
+    "repo_binding_generation": 1,
+    "result": {
+      "refusal_code": "delegating_scope_required",
+      "status": "refused"
+    }
+  },
+  "request": {
+    "request": {
+      "action": "issue reaction",
+      "body": {
+        "reaction": "eyes"
+      },
+      "gh_route_schema": 1,
+      "manifest_version": 14,
+      "metadata": {
+        "agent_id": "agent-fixture",
+        "pid": 6092
+      },
+      "operation": "gh.route",
+      "repository": "org/repo",
+      "rung_as_of_unix_secs": 1790209659,
+      "target": {
+        "number": "42"
+      }
+    },
+    "request_nonce": "seen-marker-nonce"
+  },
+  "success": {
+    "repo_binding_generation": 1,
+    "result": {
+      "result": {
+        "content": "eyes",
+        "id": 701
+      },
+      "status": "completed"
+    }
+  },
+  "scope": {
+    "owner": "reserved:prefrontal-core",
+    "ref": "fixture-session",
+    "scope_epoch": 1,
+    "kind": "head",
+    "agent_id": "agent-fixture",
+    "delegates": true,
+    "owner_authorized": true
+  }
+}

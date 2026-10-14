@@ -1,0 +1,3 @@
+{"name":"mint","request":{"method":"POST","path":"/v1/relay/stripe/credentials"},"status":404,"body":"{\"error\":\"unknown_source\"}"}
+{"name":"revoke","request":{"method":"DELETE","path":"/v1/relay/stripe/credentials/not-an-id"},"status":404,"body":"{\"error\":\"unknown_source\"}"}
+{"name":"ws","request":{"method":"GET","path":"/v1/relay/stripe/ws"},"status":404,"body":"{\"error\":\"unknown_source\"}"}
