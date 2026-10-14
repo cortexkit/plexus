@@ -381,7 +381,7 @@ mod tests {
             .tools
             .iter()
             .find(|tool| tool.name == "code_search")
-            .unwrap();
+            .expect("code_search capability must be published");
         assert_eq!(
             tool.capabilities,
             ["code.search.public/v1", "plexus:code.search/v1"],
@@ -593,7 +593,10 @@ mod tests {
         ] {
             let preflight = fetch(params.clone(), None, Some("head")).unwrap();
             let plan = fetch(params, Some(json!({"providers": []})), Some("head")).unwrap();
-            assert_eq!(preflight.tools, plan.tools);
+            assert_eq!(
+                preflight.tools, plan.tools,
+                "preflight and plan fetch must select identical tools"
+            );
         }
     }
 

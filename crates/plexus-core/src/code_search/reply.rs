@@ -228,9 +228,16 @@ pub(super) mod tests {
             truncated: false,
         };
         let filtered = render_with_repo_filter(&response, Some("golang/go"));
-        assert!(filtered.contains("A repository filter may match no indexed repository."));
-        assert!(filtered.contains("Check the owner/name or retry without the filter."));
-        assert!(filtered.contains("Zero matches do not prove the code does not exist."));
+        for sentence in [
+            "A repository filter may match no indexed repository.",
+            "Check the owner/name or retry without the filter.",
+            "Zero matches do not prove the code does not exist.",
+        ] {
+            assert!(
+                filtered.contains(sentence),
+                "repo-filtered zero matches must explain possible index mismatch: missing {sentence:?}"
+            );
+        }
         assert!(
             !render(&response).contains("A repository filter may match no indexed repository."),
             "unfiltered zero-match results should not imply a repository filter was used"
