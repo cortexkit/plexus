@@ -4313,7 +4313,10 @@ fn search_content_result(tool: &str, mut legacy: Value, code_search_repo: Option
             serde_json::from_value::<plexus_core::code_search::CodeSearchResponse>(parsed.clone())
                 .ok()
                 .map(|response| {
-                    plexus_core::code_search::reply::render(&response, code_search_repo)
+                    plexus_core::code_search::reply::render_with_repo_filter(
+                        &response,
+                        code_search_repo,
+                    )
                 })
                 .unwrap_or_else(|| pretty_json(&legacy))
         };
