@@ -17,6 +17,12 @@ use subc_protocol::{
 
 use crate::manifest::{self, CODE_SEARCH_CAPABILITY, CODE_SEARCH_TOOL, WEB_SEARCH_TOOL};
 
+/// Advertised in `role.describe` so a consumer sends `params.capabilities`
+/// only to a provider that selects tools by it. Present means preflight and
+/// plan fetch both answer exactly the tools carrying a requested tag, and a
+/// missing or empty list answers no tools.
+pub(crate) const CAPABILITY_FILTER: &str = "tool-catalog-capability-filter/v1";
+
 // Tags describe the tool's contract, not the caller's authority. Keep the
 // mapping explicit so grants can select tools without knowing their names.
 const TOOL_CAPABILITIES: &[(&str, &[&str])] = &[
@@ -256,7 +262,7 @@ pub(crate) fn reply(name: &str, arguments: &Map<String, Value>) -> Result<Value,
                 stability: "alpha".to_owned(),
             }],
             implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
-            capabilities: Vec::new(),
+            capabilities: vec![CAPABILITY_FILTER.to_owned()],
         })
         .expect("role description serializes"));
     }
@@ -986,5 +992,10 @@ mod tests {
         let body = serde_json::from_slice(&first.body).unwrap();
         let description = cortexkit_role_tool_provider::describe::check_describe(&body).unwrap();
         assert!(description.major("tool-provider/v1").unwrap().holds_calls());
+        assert_eq!(
+            body["capabilities"],
+            json!(["tool-catalog-capability-filter/v1"]),
+            "role.describe must advertise capability-tag selection"
+        );
     }
 }

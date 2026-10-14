@@ -9974,3 +9974,19 @@ expect_red = ["code_search::reply::tests::zero_match_repo_filter_explains_no_res
 expect_message = "repo-filtered zero matches must explain possible index mismatch"
 build_timeout_s = 3600
 timeout_s = 60
+
+[[control]]
+id = "tool-catalog-capability-filter-advertised"
+guards = "role.describe advertises capability-tag selection so consumers send the tag filter only to providers that honour it"
+file = "crates/plexus-module/src/tool_provider.rs"
+old = '''            capabilities: vec![CAPABILITY_FILTER.to_owned()],'''
+new = '''            capabilities: Vec::new(), // NON-VACUITY BREAK'''
+test_file = "crates/plexus-module/src/tool_provider.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tool_provider::tests::role_describe_route_lists_required_ops_and_is_cacheable"]
+expect_message = "role.describe must advertise capability-tag selection"
+build_timeout_s = 3600
+timeout_s = 60
