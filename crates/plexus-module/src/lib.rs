@@ -9830,6 +9830,7 @@ mod events_get_tests {
         );
         // A changed source body must not reconstruct or overwrite the envelope.
         assert_eq!(db.execute("UPDATE trigger_events SET payload='{\"number\":999,\"title\":\"changed after insert\"}' WHERE event_key=?1", [&key]).unwrap(), 1, "source-body mutation must touch one row");
+        assert_eq!(db.execute("UPDATE event_outbox SET body_v1='{\"number\":999,\"title\":\"changed after insert\"}' WHERE event_key=?1", [&key]).unwrap(), 1, "canonical-body mutation must touch one row");
         let v2 = execute_tool_call(
             store.clone(),
             core(),
@@ -10562,6 +10563,14 @@ mod approval_gate_tests {
                 Err(plexus_core::Denial::ActionRequestCreated { request_id }) => request_id,
                 other => panic!("operator approval was not parked: {other:?}"),
             };
+            let denial_body = denial_response(&plexus_core::Denial::ActionRequestCreated {
+                request_id: created_id.clone(),
+            });
+            assert_eq!(
+                denial_body["error"]["request_id"],
+                json!(created_id),
+                "the denial must name the parked request"
+            );
             let request_id = store
                 .list_action_requests("direct")
                 .expect("read requests")

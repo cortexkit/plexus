@@ -35,3 +35,12 @@ class PublicCiTests(unittest.TestCase):
         self.assertEqual(self.jobs["mutations"]["timeout-minutes"], "180")
         self.assertEqual(set(self.jobs), {"test", "mutations"})
         self.assertEqual(load_gates_module().precondition_failures(self.workflow), [])
+
+    def test_probe_replay_jobs_install_the_wasi_rust_target_with_the_pinned_toolchain(self):
+        for job_name in ("test", "mutations"):
+            toolchains = [step for step in self.jobs[job_name]["steps"]
+                          if step.get("uses", "").startswith("dtolnay/rust-toolchain@")]
+            self.assertEqual(len(toolchains), 1, job_name)
+            self.assertEqual(toolchains[0]["uses"],
+                             "dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249")
+            self.assertEqual(toolchains[0]["with"]["targets"], "wasm32-wasip1", job_name)

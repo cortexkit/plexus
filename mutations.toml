@@ -2307,12 +2307,13 @@ timeout_s = 60
 [[control]]
 id = "github-v2-fetch-no-v1-fallback"
 guards = "Version 2 refuses a pre-v2 row exactly like an unknown key and never serves its v1 source body"
-file = "crates/plexus-module/src/lib.rs"
-old = '''let (Some(body), Some(digest)) = (&event.envelope_v2, &event.digest_v2) else {
+edits = [
+  { file = "crates/plexus-core/src/store/event_outbox.rs", old = "if (version!=2 && event.digest.is_empty()) || (version==2 && (event.envelope_v2.is_none() || event.digest_v2.is_none())) {", new = "if (version!=2 && event.digest.is_empty()) { /* NON-VACUITY BREAK */" },
+  { file = "crates/plexus-module/src/lib.rs", old = '''let (Some(body), Some(digest)) = (&event.envelope_v2, &event.digest_v2) else {
                     return tool_error("event_not_visible", "event not visible");
-                };'''
-new = '''let body = event.envelope_v2.as_ref().unwrap_or(&event.body); /* NON-VACUITY BREAK */
-                let digest = event.digest_v2.as_ref().unwrap_or(&event.digest);'''
+                };''', new = '''let body = event.envelope_v2.as_ref().unwrap_or(&event.body); /* NON-VACUITY BREAK */
+                let digest = event.digest_v2.as_ref().unwrap_or(&event.digest);''' },
+]
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -3422,10 +3423,16 @@ build_timeout_s = 3600
 timeout_s = 120
 [[control]]
 id = "shared-redaction-screen-authorization"
-guards = "The one diagnostic redaction screen (used by the mock transport projection) covers authorization"
-file = "crates/plexus-core/src/http_support.rs"
-old = '        || key.contains("authorization")'
-new = "        /* NON-VACUITY BREAK */"
+guards = "The diagnostic redaction screen covers authorization through both the shared secret classifier and its substring screen"
+edits = [
+  { file = "crates/plexus-core/src/http_support.rs", old = '        || key.contains("authorization")', new = "        /* NON-VACUITY BREAK */" },
+  { file = "crates/plexus-core/src/secret_input.rs", old = '''    "authorization",
+    "proxyauthorization",''', new = '''    "proxyauthorization", /* NON-VACUITY BREAK */''' },
+  { file = "crates/plexus-core/src/secret_input.rs", old = '''    "cookie",
+    "authorization",
+];''', new = '''    "cookie",
+]; /* NON-VACUITY BREAK */''' },
+]
 test_file = "crates/plexus-core/src/transport.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -5493,9 +5500,10 @@ build_timeout_s = 3600
 [[control]]
 id = "outbox-full-batch-continuation"
 guards = "A full outbox batch schedules another immediate pass without a fresh insert wake"
-file = "crates/plexus-module/src/bus.rs"
-old = 'if published >= 50 {'
-new = 'if false && published >= 50 { /* NON-VACUITY BREAK */'
+edits = [
+  { file = "crates/plexus-module/src/bus.rs", old = "if published >= 50 {", new = "if false && published >= 50 { /* NON-VACUITY BREAK */" },
+  { file = "crates/plexus-module/src/bus.rs", old = "delay = if unpublishable.pending_more() {", new = "delay = if false && unpublishable.pending_more() { /* NON-VACUITY BREAK */" },
+]
 test_file = "crates/plexus-module/src/bus.rs"
 runner = "cargo"
 package = "plexus-module"

@@ -92,6 +92,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-wasip1
 
       - name: Install pinned nats-server
         run: |
@@ -207,6 +208,8 @@ jobs:
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: wasm32-wasip1
 
       - name: Install pinned nats-server
         run: |

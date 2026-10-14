@@ -584,19 +584,26 @@ mod tests {
     /// watch pair.
     #[tokio::test]
     async fn a_release_only_watch_receives_its_release_webhook() {
-        let store = PlexusStore::open(&StorageDescriptor {
-            module_id: "plexus".into(),
-            storage_namespace: new_id("relay-release-only"),
-            isolation: cortexkit_store_types::Isolation::Module,
-            backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: ":memory:".into(),
-            },
-        })
-        .unwrap();
-        store
-            .insert_connection("direct", "conn-1", "github", "active", &json!({}))
+        // Run SQLite on a blocking thread and check the saved wake only after
+        // commit completes. File-backed commits have taken about three seconds
+        // in parallel suites; ten seconds allows several store operations even
+        // at that latency, without charging their time to notification delivery.
+        let commit_wait = std::time::Duration::from_secs(10);
+        let wake_wait = std::time::Duration::from_secs(3);
+        let inserted = tokio::task::spawn_blocking(|| {
+            let store = PlexusStore::open(&StorageDescriptor {
+                module_id: "plexus".into(),
+                storage_namespace: new_id("relay-release-only"),
+                isolation: cortexkit_store_types::Isolation::Module,
+                backend: cortexkit_store_types::StorageBackend::Sqlite {
+                    path: ":memory:".into(),
+                },
+            })
             .unwrap();
-        store
+            store
+                .insert_connection("direct", "conn-1", "github", "active", &json!({}))
+                .unwrap();
+            store
             .inner
             .with_conn_fenced(|conn| {
                 conn.execute_batch(
@@ -608,29 +615,54 @@ mod tests {
                 )
             })
             .unwrap();
-        store
-            .relay_hello("github", &hello("stream", 2, 1, 0))
+            store
+                .relay_hello("github", &hello("stream", 2, 1, 0))
+                .unwrap();
+            let time = "2030-10-08T09:00:00.000Z";
+            let event: Event = serde_json::from_value(json!({
+                "seq": 1, "delivery_id": "release-1", "event": "release", "action": "published",
+                "installation_id": 42, "received_at": time, "stub": null,
+                "body": {"repository": {"id": 101, "full_name": "org/repo"},
+                         "release": {"id": 7, "published_at": time, "updated_at": time}}
+            }))
             .unwrap();
-        let time = "2030-10-08T09:00:00.000Z";
-        let event: Event = serde_json::from_value(json!({
-            "seq": 1, "delivery_id": "release-1", "event": "release", "action": "published",
-            "installation_id": 42, "received_at": time, "stub": null,
-            "body": {"repository": {"id": 101, "full_name": "org/repo"},
-                     "release": {"id": 7, "published_at": time, "updated_at": time}}
-        }))
-        .unwrap();
-        store
-            .commit_relay_event("github", "stream", &event)
+            store
+                .commit_relay_event("github", "stream", &event)
+                .unwrap();
+            let stored: Vec<String> = store
+                .inner
+                .with_conn(|conn| {
+                    conn.prepare("SELECT subscription_id FROM trigger_events")?
+                        .query_map([], |row| row.get(0))?
+                        .collect()
+                })
+                .unwrap();
+            assert_eq!(
+                stored,
+                vec!["release-watch".to_string()],
+                "a release-only watch must receive its release webhook"
+            );
+            (store, event)
+        });
+        let (store, event) = tokio::time::timeout(commit_wait, inserted)
+            .await
+            .expect("relay insert must finish within the durable-work budget")
             .unwrap();
-        tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            store.outbox_committed(),
+        tokio::time::timeout(wake_wait, store.outbox_committed())
+            .await
+            .expect("committed relay outbox row must wake the publisher");
+        let store = tokio::time::timeout(
+            commit_wait,
+            tokio::task::spawn_blocking(move || {
+                store
+                    .commit_relay_event("github", "stream", &event)
+                    .unwrap();
+                store
+            }),
         )
         .await
-        .expect("committed relay outbox row must wake the publisher");
-        store
-            .commit_relay_event("github", "stream", &event)
-            .unwrap();
+        .expect("relay replay must finish within the durable-work budget")
+        .unwrap();
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(20),
@@ -639,19 +671,6 @@ mod tests {
             .await
             .is_err(),
             "relay replay must not wake an idle drain"
-        );
-        let stored: Vec<String> = store
-            .inner
-            .with_conn(|conn| {
-                conn.prepare("SELECT subscription_id FROM trigger_events")?
-                    .query_map([], |row| row.get(0))?
-                    .collect()
-            })
-            .unwrap();
-        assert_eq!(
-            stored,
-            vec!["release-watch".to_string()],
-            "a release-only watch must receive its release webhook"
         );
     }
 
