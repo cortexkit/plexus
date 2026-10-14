@@ -1,0 +1,8 @@
+{
+  "preset": "reader",
+  "params": {
+    "capabilities": [
+      "plexus:github.facade/v1"
+    ]
+  }
+}

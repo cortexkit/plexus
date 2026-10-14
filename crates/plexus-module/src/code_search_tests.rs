@@ -166,6 +166,47 @@ async fn facade_maps_arguments_and_emits_readable_and_structured_matches() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn repo_filtered_zero_matches_explain_that_the_filter_may_be_too_narrow() {
+    let f = Fixture::new();
+    let data = include_str!("../../plexus-core/tests/fixtures/grep_app/empty.sse")
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap();
+    f.transport.set_response(MockResponse::Success(
+        serde_json::from_str::<Value>(data).unwrap()["result"].clone(),
+    ));
+
+    let filtered = f
+        .call(
+            Principal::Direct,
+            None,
+            json!({"query":"func NewReader(", "repo":"golang/go"}),
+        )
+        .await;
+    assert_eq!(filtered["isError"], false);
+    assert_eq!(
+        filtered["structuredContent"]["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let text = filtered["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("A repository filter may match no indexed repository."));
+    assert!(text.contains("Check the owner/name or retry without the filter."));
+    assert!(text.contains("Zero matches do not prove the code does not exist."));
+
+    let unfiltered = f
+        .call(Principal::Direct, None, json!({"query":"func NewReader("}))
+        .await;
+    assert_eq!(unfiltered["isError"], false);
+    assert!(!unfiltered["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("A repository filter may match no indexed repository."));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn basal_flow_is_admitted_and_unscoped_basal_is_refused() {
     let f = Fixture::new();
     let basal = Principal::Reserved {

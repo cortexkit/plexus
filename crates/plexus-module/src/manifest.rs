@@ -473,7 +473,7 @@ fn events_tool() -> Tool {
     }
 }
 
-const CODE_SEARCH_DESCRIPTION: &str = "Search literal code patterns across about a million public GitHub repositories. Searches the default branch only. It cannot search private repositories, including all CortexKit repositories, a pinned version or tag, or docs.rs. Read those from disk instead. Use query \"pub fn with_capacity\" with language [\"Rust\"], or query \"useState(\" with repo \"facebook/react\". Replies include repository, path and numbered lines. Caps are 20 file matches, 100 lines per file and 32 KiB of text.";
+const CODE_SEARCH_DESCRIPTION: &str = "Search literal code patterns across about a million public GitHub repositories. Searches the default branch only. It cannot search private repositories, a pinned version or tag, or docs.rs. Read those from disk instead. Use query \"pub fn with_capacity\" with language [\"Rust\"], or query \"func NewReader(\" with repo \"golang/go\". Replies include repository, path and numbered lines. Caps are 20 file matches, 100 lines per file and 32 KiB of text.";
 
 fn code_search_tool() -> Tool {
     Tool {

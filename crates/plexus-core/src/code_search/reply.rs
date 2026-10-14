@@ -128,8 +128,11 @@ pub fn parse_reply(body: &Value) -> Result<CodeSearchResponse, &'static str> {
 }
 
 /// The text and structured paths share the parsed matches; vendor prose is never forwarded.
-pub fn render(response: &CodeSearchResponse) -> String {
+pub fn render(response: &CodeSearchResponse, repo_filter: Option<&str>) -> String {
     let mut text = format!("{} code matches. Caps: {MAX_MATCHES} matches, {MAX_LINES_PER_MATCH} lines per match, {MAX_TEXT_BYTES} text bytes.\n", response.matches.len());
+    if response.matches.is_empty() && repo_filter.is_some() {
+        text.push_str("A repository filter may match no indexed repository. Check the owner/name or retry without the filter. Zero matches do not prove the code does not exist.\n");
+    }
     for hit in &response.matches {
         text.push_str(&format!("\n{} {}\n", hit.repo, hit.path));
         for line in &hit.lines {
@@ -162,7 +165,7 @@ pub(super) mod tests {
         let response = parse_reply(&captured_reply()).unwrap();
         let started = std::time::Instant::now();
         for _ in 0..10_000 {
-            std::hint::black_box(render(&response));
+            std::hint::black_box(render(&response, None));
         }
         println!("10,000 bounded code replies: {:?}", started.elapsed());
     }
@@ -201,7 +204,7 @@ pub(super) mod tests {
             .lines
             .iter()
             .any(|l| l.number == 213 && l.text.contains("pub fn with_capacity_in")));
-        let text = render(&response);
+        let text = render(&response, None);
         assert!(text.contains("rust-lang/rust library/std/src/collections/hash/set.rs\n164:"));
         assert!(text.contains("169:     pub fn with_capacity"));
         assert!(text.len() <= MAX_TEXT_BYTES);
@@ -214,12 +217,29 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn zero_match_repo_filter_explains_no_results() {
+        let response = CodeSearchResponse {
+            matches: Vec::new(),
+            truncated: false,
+        };
+        let filtered = render(&response, Some("golang/go"));
+        assert!(filtered.contains("A repository filter may match no indexed repository."));
+        assert!(filtered.contains("Check the owner/name or retry without the filter."));
+        assert!(filtered.contains("Zero matches do not prove the code does not exist."));
+        assert!(
+            !render(&response, None)
+                .contains("A repository filter may match no indexed repository."),
+            "unfiltered zero-match results should not imply a repository filter was used"
+        );
+    }
+
+    #[test]
     fn reply_caps_and_malformed_vendor_data_are_defended() {
         let first = captured_reply()["content"][0].clone();
         let response = parse_reply(&json!({"content":vec![first; 30]})).unwrap();
         assert!(response.truncated);
         assert!(response.matches.len() <= MAX_MATCHES);
-        assert!(render(&response).len() <= MAX_TEXT_BYTES);
+        assert!(render(&response, None).len() <= MAX_TEXT_BYTES);
         let body = json!({"content":[{"type":"text","text":format!("Repository: o/r\nPath: a.rs\n--- Snippet 1 (Line 1) ---\n{}", "é".repeat(40_000))}]});
         assert!(parse_reply(&body).unwrap().truncated);
         for body in [

@@ -2142,7 +2142,14 @@ async fn handle_tool_request(
         channel,
         epoch,
         correlation,
-        with_call_tool_result(tool, reply),
+        with_call_tool_result_with_repo(
+            tool,
+            reply,
+            object
+                .get("arguments")
+                .and_then(|arguments| arguments.get("repo"))
+                .and_then(Value::as_str),
+        ),
     )
     .await
 }
@@ -4237,7 +4244,11 @@ fn diagnostic_label(value: &str) -> String {
 ///
 /// Management-surface replies (`{method, params}`) do not pass through here;
 /// the operator's admin client reads them as they are.
-fn with_call_tool_result(tool: Option<&str>, mut reply: Value) -> Value {
+fn with_call_tool_result_with_repo(
+    tool: Option<&str>,
+    mut reply: Value,
+    code_search_repo: Option<&str>,
+) -> Value {
     if reply["error"]["code"] == "access_pending" {
         let text = reply["error"]["message"].as_str().unwrap_or_default();
         return json!({
@@ -4247,7 +4258,7 @@ fn with_call_tool_result(tool: Option<&str>, mut reply: Value) -> Value {
         });
     }
     if let Some(tool @ (manifest::WEB_SEARCH_TOOL | manifest::CODE_SEARCH_TOOL)) = tool {
-        return search_content_result(tool, reply);
+        return search_content_result(tool, reply, code_search_repo);
     }
     let original = reply.clone();
     let Some(fields) = reply.as_object_mut() else {
@@ -4273,7 +4284,12 @@ fn with_call_tool_result(tool: Option<&str>, mut reply: Value) -> Value {
     reply
 }
 
-fn search_content_result(tool: &str, mut legacy: Value) -> Value {
+#[cfg(test)]
+fn with_call_tool_result(tool: Option<&str>, reply: Value) -> Value {
+    with_call_tool_result_with_repo(tool, reply, None)
+}
+
+fn search_content_result(tool: &str, mut legacy: Value, code_search_repo: Option<&str>) -> Value {
     use cortexkit_role_tool_provider::result::{validate, ContentPart, ToolResult};
     let mut result = if let Some(error) = legacy.get("error") {
         let text = if tool == manifest::WEB_SEARCH_TOOL {
@@ -4296,7 +4312,9 @@ fn search_content_result(tool: &str, mut legacy: Value) -> Value {
         } else {
             serde_json::from_value::<plexus_core::code_search::CodeSearchResponse>(parsed.clone())
                 .ok()
-                .map(|response| plexus_core::code_search::reply::render(&response))
+                .map(|response| {
+                    plexus_core::code_search::reply::render(&response, code_search_repo)
+                })
                 .unwrap_or_else(|| pretty_json(&legacy))
         };
         let mut result = ToolResult::new(vec![ContentPart::text(text)]);

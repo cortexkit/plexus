@@ -1,0 +1,1 @@
+{"code":"invalid_request","detail":{"capability":"plexus:unserved/v1","field":"params.capabilities[0]"},"message":"plexus serves no capability plexus:unserved/v1"}
