@@ -2002,28 +2002,43 @@ mod tests {
 
     #[tokio::test]
     async fn poll_commit_wakes_only_after_success_and_keeps_a_permit() {
-        let store = store();
-        subscription(&store, "a", "probe");
-        let body = json!({"number": 7});
-        let h = headers("p");
-        let bad = KeyedPollEventInput {
-            event: PollEventInput {
-                vendor_event_id: "",
-                ..input(&body, KEY, &h).event
-            },
-            ..input(&body, KEY, &h)
-        };
-        assert!(store
-            .commit_keyed_poll_success(
-                "direct",
-                "a",
-                "a",
-                &json!({}),
-                &[input(&body, KEY, &h), bad],
-                1,
-                &[]
-            )
-            .is_err());
+        // Run SQLite on a blocking thread and check the saved wake only after
+        // commit completes. File-backed commits have taken about three seconds
+        // in parallel suites; ten seconds allows several store operations even
+        // at that latency, without charging their time to notification delivery.
+        let commit_wait = std::time::Duration::from_secs(10);
+        let wake_wait = std::time::Duration::from_secs(3);
+        let store = tokio::time::timeout(
+            commit_wait,
+            tokio::task::spawn_blocking(|| {
+                let store = store();
+                subscription(&store, "a", "probe");
+                let body = json!({"number": 7});
+                let h = headers("p");
+                let bad = KeyedPollEventInput {
+                    event: PollEventInput {
+                        vendor_event_id: "",
+                        ..input(&body, KEY, &h).event
+                    },
+                    ..input(&body, KEY, &h)
+                };
+                assert!(store
+                    .commit_keyed_poll_success(
+                        "direct",
+                        "a",
+                        "a",
+                        &json!({}),
+                        &[input(&body, KEY, &h), bad],
+                        1,
+                        &[]
+                    )
+                    .is_err());
+                store
+            }),
+        )
+        .await
+        .expect("poll rollback must finish within the durable-work budget")
+        .unwrap();
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(20),
@@ -2033,14 +2048,37 @@ mod tests {
             .is_err(),
             "rolled-back inserts must not wake the publisher"
         );
-        commit(&store, "a", &[input(&body, KEY, &h)]);
-        tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            store.outbox_committed(),
+        let store = tokio::time::timeout(
+            commit_wait,
+            tokio::task::spawn_blocking(move || {
+                commit(
+                    &store,
+                    "a",
+                    &[input(&json!({"number": 7}), KEY, &headers("p"))],
+                );
+                store
+            }),
         )
         .await
-        .expect("committed poll outbox row must store a wake permit");
-        commit(&store, "a", &[input(&body, KEY, &h)]);
+        .expect("poll insert must finish within the durable-work budget")
+        .unwrap();
+        tokio::time::timeout(wake_wait, store.outbox_committed())
+            .await
+            .expect("committed poll outbox row must store a wake permit");
+        let store = tokio::time::timeout(
+            commit_wait,
+            tokio::task::spawn_blocking(move || {
+                commit(
+                    &store,
+                    "a",
+                    &[input(&json!({"number": 7}), KEY, &headers("p"))],
+                );
+                store
+            }),
+        )
+        .await
+        .expect("duplicate poll commit must finish within the durable-work budget")
+        .unwrap();
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(20),
