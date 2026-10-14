@@ -1,0 +1,8 @@
+{
+  "preset": "reader",
+  "params": {
+    "capabilities": [
+      "plexus:unserved/v1"
+    ]
+  }
+}

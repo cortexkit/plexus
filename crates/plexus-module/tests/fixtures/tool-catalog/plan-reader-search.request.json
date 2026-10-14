@@ -1,0 +1,12 @@
+{
+  "preset": "reader",
+  "params": {
+    "capabilities": [
+      "code.search.public/v1",
+      "web.search/v1"
+    ]
+  },
+  "composition": {
+    "providers": []
+  }
+}

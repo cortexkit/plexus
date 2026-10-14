@@ -129,7 +129,15 @@ pub fn parse_reply(body: &Value) -> Result<CodeSearchResponse, &'static str> {
 
 /// The text and structured paths share the parsed matches; vendor prose is never forwarded.
 pub fn render(response: &CodeSearchResponse) -> String {
+    render_with_repo_filter(response, None)
+}
+
+/// Render matches and explain possible repository-filter misses on empty replies.
+pub fn render_with_repo_filter(response: &CodeSearchResponse, repo_filter: Option<&str>) -> String {
     let mut text = format!("{} code matches. Caps: {MAX_MATCHES} matches, {MAX_LINES_PER_MATCH} lines per match, {MAX_TEXT_BYTES} text bytes.\n", response.matches.len());
+    if response.matches.is_empty() && repo_filter.is_some() {
+        text.push_str("A repository filter may match no indexed repository. Check the owner/name or retry without the filter. Zero matches do not prove the code does not exist.\n");
+    }
     for hit in &response.matches {
         text.push_str(&format!("\n{} {}\n", hit.repo, hit.path));
         for line in &hit.lines {
@@ -211,6 +219,22 @@ pub(super) mod tests {
         .unwrap()
         .matches
         .is_empty());
+    }
+
+    #[test]
+    fn zero_match_repo_filter_explains_no_results() {
+        let response = CodeSearchResponse {
+            matches: Vec::new(),
+            truncated: false,
+        };
+        let filtered = render_with_repo_filter(&response, Some("golang/go"));
+        assert!(filtered.contains("A repository filter may match no indexed repository."));
+        assert!(filtered.contains("Check the owner/name or retry without the filter."));
+        assert!(filtered.contains("Zero matches do not prove the code does not exist."));
+        assert!(
+            !render(&response).contains("A repository filter may match no indexed repository."),
+            "unfiltered zero-match results should not imply a repository filter was used"
+        );
     }
 
     #[test]
