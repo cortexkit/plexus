@@ -31,6 +31,7 @@ call mode. In Flow mode:
 | `github_read` and legacy `github` / `read` | Check every string in `repository` (scalar or array). This includes issue reads, comments and repository-only issue search. On `github.issue.search`, caller-supplied `terms`, `q` or `query` refuse as an unresolved repository. |
 | CI `github.actions.job_log` | Same outer `repository`; the reader derives both `get_job` and job-log request targets from it. |
 | CI `github.actions.artifact_file` | Same outer `repository`; artifact listing, selection and file download use that repository. |
+| CI `github.actions.run.superseded` | Same outer `repository`; run metadata and newest workflow run use that repository. |
 | `invoke` / `call` | Resolve the invoke-visible connection, including owner-shared grants. For `github`, `github_rest` (imported bot handles), and `github_actions`, check all `args.repository`, `args.repositories`, and `args.owner`/`args.repo` selectors. Missing, malformed or empty selectors refuse. Any `terms`, `q` or `query` field within `args` refuses as an unresolved repository, regardless of the action or value. Non-GitHub connections retain their existing grant path. |
 | `github` / `bot_request` | Check `request.repository` before receipts or preflight. Existing bot identity and grant rules still apply. |
 | `github` / `bindings.read` | Refuse workspace calls: this projects stored repository bindings without a resolvable single repository selector. |

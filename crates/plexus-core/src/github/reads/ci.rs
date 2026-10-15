@@ -1,6 +1,21 @@
-//! Job-log and artifact reads restrict agent-stamped Basal flows to repositories
+//! CI reads restrict agent-stamped Basal flows to repositories
 //! bound to that agent's enabled bot, and authorize every API request independently.
 use super::*;
+
+/// Reserve one authenticated GitHub request immediately before dispatch. Storage
+/// HEAD/GET requests are credentialless and do not consume the operator token's quota.
+fn reserve(store: &PlexusStore, now: i64) -> Result<(), ReadError> {
+    match store
+        .reserve_github_actions_flow_read_quota(now)
+        .map_err(|_| ReadError::Denied(Denial::StoreFailure))?
+    {
+        crate::QuotaAdmission::Reserved { .. } => Ok(()),
+        crate::QuotaAdmission::Deferred { retry_at_ms } => Err(ReadError::QuotaExhausted {
+            retry_after_ms: retry_at_ms.saturating_sub(now),
+        }),
+        crate::QuotaAdmission::Inactive => Err(ReadError::Denied(Denial::StoreFailure)),
+    }
+}
 
 pub(super) fn repository(value: &Value, invalid: &'static str) -> Result<String, ReadError> {
     let name = value.as_str().ok_or(ReadError::Refused(invalid))?;
@@ -59,10 +74,45 @@ pub(super) fn invoke<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     let reservation = engine.authorize(request).map_err(ReadError::Denied)?;
     // Bindings can change during authorization; recheck before sending each leg.
     visible()?;
+    reserve(engine.store(), crate::storage::now_ms())?;
     match engine.revalidate_and_dispatch(&reservation).outcome {
         TransportOutcome::Completed {
             response: Some(value),
         } => Ok(value),
         other => Err(ReadError::Dispatch(other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_retry_uses_the_pollers_exact_expiry() {
+        let store = PlexusStore::open(&cortexkit_store_types::StorageDescriptor {
+            module_id: "plexus".into(),
+            storage_namespace: "ci-read-quota".into(),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: cortexkit_store_types::StorageBackend::Sqlite {
+                path: ":memory:".into(),
+            },
+        })
+        .unwrap();
+        for _ in 0..600 {
+            store
+                .reserve_github_actions_flow_read_quota(10_000)
+                .unwrap();
+        }
+        assert_eq!(
+            reserve(&store, 11_234),
+            Err(ReadError::QuotaExhausted {
+                retry_after_ms: 3_598_767
+            })
+        );
+        assert_eq!(
+            reserve(&store, 3_610_000),
+            Err(ReadError::QuotaExhausted { retry_after_ms: 1 })
+        );
+        assert_eq!(reserve(&store, 3_610_001), Ok(()));
     }
 }

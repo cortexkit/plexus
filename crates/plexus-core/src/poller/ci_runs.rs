@@ -789,6 +789,67 @@ mod tests {
     const HANDLE: &[u8] = b"test:ci-handle";
 
     #[test]
+    fn ci_polling_and_flow_read_bursts_share_the_hourly_ledger() {
+        let f = Fixture::new();
+        for _ in 0..591 {
+            assert!(matches!(
+                f.engine
+                    .store()
+                    .reserve_github_actions_flow_read_quota(f.now)
+                    .unwrap(),
+                QuotaAdmission::Reserved { .. }
+            ));
+        }
+        let poller = TestPoller::new(f.engine.clone());
+        assert!(matches!(
+            poller.poll_ci_runs_at(PRINCIPAL, &f.watch(), f.now),
+            PollCycle::Completed { .. }
+        ));
+        let used: i64 = f
+            .conn()
+            .query_row("SELECT SUM(requests) FROM github_actions_quota", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            used, 599,
+            "591 flow requests plus the unchanged eight-request cycle"
+        );
+        assert!(matches!(
+            f.engine
+                .store()
+                .reserve_github_actions_flow_read_quota(f.now)
+                .unwrap(),
+            QuotaAdmission::Reserved { .. }
+        ));
+        assert!(matches!(
+            f.engine
+                .store()
+                .reserve_github_actions_flow_read_quota(f.now)
+                .unwrap(),
+            QuotaAdmission::Deferred { .. }
+        ));
+        let before = f.requests().len();
+        assert!(matches!(
+            poller.poll_ci_runs_at(PRINCIPAL, &f.watch(), f.now + 300_000),
+            PollCycle::Deferred { .. }
+        ));
+        assert_eq!(
+            f.requests().len(),
+            before,
+            "polling defers without sending when flow reads filled its window"
+        );
+        assert_eq!(
+            f.conn()
+                .query_row("SELECT SUM(requests) FROM github_actions_quota", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap(),
+            600
+        );
+    }
+
+    #[test]
     fn deferred_ci_waits_without_admission_until_the_exact_deadline() {
         let f = Fixture::new();
         for id in 0..75 {

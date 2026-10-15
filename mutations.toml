@@ -10969,3 +10969,324 @@ expect_red = ["flow_audience::tests::explicit_null_audience_is_malformed"]
 expect_message = "explicit null audience must be malformed"
 build_timeout_s = 3600
 timeout_s = 90
+
+[[control]]
+id = "ci-flow-read-quota-before-dispatch"
+guards = "An exhausted request budget refuses before the next authenticated CI request is dispatched"
+file = "crates/plexus-core/src/github/reads/ci.rs"
+old = "    reserve(engine.store(), crate::storage::now_ms())?;"
+new = "    /* NON-VACUITY BREAK: skip the request reservation */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_first_request_quota_refusal_reports_millisecond_retry"]
+expect_message = "github_actions_quota_exhausted"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-flow-read-one-unit-per-request"
+guards = "Every authenticated CI flow request reserves exactly one unit in the shared ledger"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "        QuotaRequest::FlowRead => (1, GITHUB_ACTIONS_HOURLY_REQUESTS),"
+new = "        QuotaRequest::FlowRead => (8, GITHUB_ACTIONS_HOURLY_REQUESTS), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_reserve_one_unit_for_each_authenticated_request"]
+expect_message = "must reserve one unit per request"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-flow-read-quota-exact-milliseconds"
+guards = "Quota refusals preserve the poller's exact first admissible millisecond, not rounded seconds"
+file = "crates/plexus-core/src/github/reads/ci.rs"
+old = "retry_after_ms: retry_at_ms.saturating_sub(now),"
+new = "retry_after_ms: retry_at_ms.saturating_sub(now) / 1000, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/github/reads/ci.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["github::reads::ci::tests::quota_retry_uses_the_pollers_exact_expiry"]
+expect_message = "3598767"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-closed-arguments"
+guards = "Run comparisons refuse unknown argument keys instead of silently accepting them"
+file = "crates/plexus-core/src/github/reads/run_superseded.rs"
+old = "    if fields.keys().any(|key| key != \"run_id\") {"
+new = "    if false && fields.keys().any(|key| key != \"run_id\") { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::superseded_arguments_are_closed_and_positive"]
+expect_message = "run_arguments_invalid"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-positive-run-id"
+guards = "A run comparison requires a strictly positive integer run_id"
+file = "crates/plexus-core/src/github/reads/run_superseded.rs"
+old = '''        .filter(|id| *id > 0)
+        .ok_or(ReadError::Refused("run_arguments_invalid"))?;'''
+new = '''        .filter(|_| true) /* NON-VACUITY BREAK */
+        .ok_or(ReadError::Refused("run_arguments_invalid"))?;'''
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::superseded_arguments_are_closed_and_positive"]
+expect_message = "run_arguments_invalid"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-null-branch"
+guards = "A tag run with null head_branch refuses before the newest-run lookup"
+file = "crates/plexus-core/src/github/reads/run_superseded.rs"
+old = '''        Some(Value::Null) => return Err(ReadError::Refused("run_branch_unknown")),'''
+new = '''        Some(Value::Null) => "main", /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::superseded_null_branch_refuses_without_a_second_request"]
+expect_message = "run_branch_unknown"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-distinct-run"
+guards = "The requested run never supersedes itself even if comparison metadata is newer"
+file = "crates/plexus-core/src/github/reads/run_superseded.rs"
+old = "        if candidate_id != run_id"
+new = "        if true /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::superseded_comparison_uses_identity_timestamp_and_tie_break"]
+expect_message = "candidate"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-timestamp-precedes-number"
+guards = "Created time determines supersession before run number; an older run cannot win on number alone"
+file = "crates/plexus-core/src/github/reads/run_superseded.rs"
+old = "            && (candidate_created > created"
+new = "            && (candidate_number > number /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::superseded_comparison_uses_identity_timestamp_and_tie_break"]
+expect_message = "candidate"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-tie-break"
+guards = "Equal creation times supersede only when the candidate run number is greater"
+file = "crates/plexus-core/src/github/reads/run_superseded.rs"
+old = "candidate_created == created && candidate_number > number"
+new = "candidate_created == created && candidate_number >= number /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::superseded_comparison_uses_identity_timestamp_and_tie_break"]
+expect_message = "candidate"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-missing-run-refusal"
+guards = "A metadata 404 is exposed as run_not_found"
+file = "crates/plexus-core/src/github/reads/run_superseded.rs"
+old = '''            ReadError::Refused("run_not_found")'''
+new = '''            ReadError::Refused("run_read_failed") /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::superseded_missing_run_has_a_named_refusal"]
+expect_message = "run_not_found"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-bot-repository-visibility"
+guards = "An agent-stamped Basal flow cannot read CI metadata outside its enabled bot bindings"
+file = "crates/plexus-core/src/github/reads/ci.rs"
+old = '''            if !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == "enabled")'''
+new = '''            if false && !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == "enabled") /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::superseded_agent_flow_cannot_read_outside_its_bot"]
+expect_message = "repository_not_visible"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-flow-audience-repository"
+guards = "Workspace audiences fence run comparisons by their outer repository before reading"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = "        manifest::GITHUB_READ_TOOL => Some(args.get(\"repository\").cloned().unwrap_or(Value::Null)),"
+new = '''        manifest::GITHUB_READ_TOOL => if args.get("action").and_then(Value::as_str) == Some("github.actions.run.superseded") { None } else { Some(args.get("repository").cloned().unwrap_or(Value::Null)) }, /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::workspace_filter_covers_every_repository_operation_class"]
+expect_message = "flow_audience_excludes_repository"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-catalog-newest-only"
+guards = "The reviewed workflow branch lookup pins per_page to one"
+file = "catalog/github_actions.jsonc"
+old = '''        "request_constants": { "per_page": 1 },'''
+new = '''        "request_constants": { "per_page": 2 }, // NON-VACUITY BREAK'''
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::superseded_catalog_dispatches_the_two_reviewed_endpoints"]
+expect_message = "per_page"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-flow-read-shared-600-ceiling"
+guards = "Flow reads and polling share the same 600-request trailing-hour ceiling"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "        QuotaRequest::FlowRead => (1, GITHUB_ACTIONS_HOURLY_REQUESTS),"
+new = "        QuotaRequest::FlowRead => (1, GITHUB_ACTIONS_HOURLY_REQUESTS + 1), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/poller/ci_runs.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::ci_runs::tests::ci_polling_and_flow_read_bursts_share_the_hourly_ledger"]
+expect_message = "QuotaAdmission::Deferred"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-metadata-schema-closed"
+guards = "The reviewed run metadata action has a closed top-level argument schema"
+file = "catalog/github_actions.jsonc"
+old = '''          "required": ["owner", "repo", "run_id"], "additionalProperties": false'''
+new = '''          "required": ["owner", "repo", "run_id"], "additionalProperties": true // NON-VACUITY BREAK'''
+test_file = "crates/plexus-conformance/tests/it/shipped_catalog_ingests.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--test it"
+select = "expected"
+expect_red = ["shipped_catalog_ingests::github_actions_superseded_catalog_is_closed_and_read_only"]
+expect_message = "must have closed arguments"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-workflow-schema-closed"
+guards = "The reviewed newest-workflow-run action has a closed top-level argument schema"
+file = "catalog/github_actions.jsonc"
+old = '''          "required": ["owner", "repo", "workflow_id", "branch"], "additionalProperties": false'''
+new = '''          "required": ["owner", "repo", "workflow_id", "branch"], "additionalProperties": true // NON-VACUITY BREAK'''
+test_file = "crates/plexus-conformance/tests/it/shipped_catalog_ingests.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--test it"
+select = "expected"
+expect_red = ["shipped_catalog_ingests::github_actions_superseded_catalog_is_closed_and_read_only"]
+expect_message = "must have closed arguments"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-metadata-read-only"
+guards = "The run metadata catalog leg stays reviewed as read-only"
+file = "catalog/github_actions.jsonc"
+old = '''      "name": "get_workflow_run_metadata",
+      "risk": "read",'''
+new = '''      "name": "get_workflow_run_metadata",
+      "risk": "write", // NON-VACUITY BREAK'''
+test_file = "crates/plexus-conformance/tests/it/shipped_catalog_ingests.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--test it"
+select = "expected"
+expect_red = ["shipped_catalog_ingests::github_actions_superseded_catalog_is_closed_and_read_only"]
+expect_message = "must remain read-only"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-superseded-workflow-read-only"
+guards = "The newest workflow run catalog leg stays reviewed as read-only"
+file = "catalog/github_actions.jsonc"
+old = '''      "name": "list_workflow_runs_for_workflow",
+      "risk": "read",'''
+new = '''      "name": "list_workflow_runs_for_workflow",
+      "risk": "write", // NON-VACUITY BREAK'''
+test_file = "crates/plexus-conformance/tests/it/shipped_catalog_ingests.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--test it"
+select = "expected"
+expect_red = ["shipped_catalog_ingests::github_actions_superseded_catalog_is_closed_and_read_only"]
+expect_message = "must remain read-only"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-flow-read-later-request-quota"
+guards = "Quota exhaustion on a later CI request interrupts the read without dispatching that request or refunding earlier requests"
+file = "crates/plexus-core/src/github/reads/ci.rs"
+old = "    reserve(engine.store(), crate::storage::now_ms())?;"
+new = "    /* NON-VACUITY BREAK: skip the request reservation */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_later_request_quota_refusal_keeps_spent_units"]
+expect_message = "github_actions_quota_exhausted"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-artifact-listing-quota-interruption"
+guards = "Artifact pagination stops at the first unreserved page while earlier page requests remain spent"
+file = "crates/plexus-core/src/github/reads/ci.rs"
+old = "    reserve(engine.store(), crate::storage::now_ms())?;"
+new = "    /* NON-VACUITY BREAK: skip the request reservation */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::artifact_listing_quota_refusal_keeps_earlier_pages_spent"]
+expect_message = "github_actions_quota_exhausted"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-flow-read-quota-interruption-message"
+guards = "A quota refusal says the read was interrupted so not_sent is not mistaken for an all-or-nothing preflight refusal"
+file = "crates/plexus-module/src/lib.rs"
+old = "CI read interrupted before the next GitHub request; earlier requests may already have been sent"
+new = "GitHub request quota exhausted /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_later_request_quota_refusal_keeps_spent_units"]
+expect_message = "the refusal must describe an interrupted read"
+build_timeout_s = 3600
