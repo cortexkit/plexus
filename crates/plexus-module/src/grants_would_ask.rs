@@ -127,9 +127,26 @@ fn evaluate(
             }
         }
     }
+    // grants.would_ask predicts grants and policy without a repository argument.
+    // Like agent-owned flows, workspace flows check repository access on each
+    // real call rather than treating a grant prediction as repository authority.
+    let audience_refusal = if agent.is_none() {
+        state.runtime.flow_audiences.for_agentless_flow(flow).err()
+    } else {
+        None
+    };
     let results: Vec<Value> = items
         .iter()
         .map(|item| {
+            if let Some(refusal) = &audience_refusal {
+                let code = refusal["error"]["code"]
+                    .as_str()
+                    .expect("audience refusal code");
+                let mut result = verdict(item.clone(), "no", code);
+                result["code"] = json!(code);
+                result["detail"] = refusal["error"].clone();
+                return result;
+            }
             evaluate_item(
                 state,
                 agent,

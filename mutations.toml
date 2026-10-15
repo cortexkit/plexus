@@ -183,6 +183,7 @@ old = '''(manifest::EVENTS_TOOL, Some("get")) | (manifest::EVENTS_GET_TOOL, _) =
             arguments,
             &principal_key,
             route_scope.as_ref(),
+            audience.as_ref(),
         ),'''
 new = '''(manifest::EVENTS_TOOL, Some("get")) | (manifest::EVENTS_GET_TOOL, _) => {
             let mut event_scope = route_scope.clone();
@@ -191,7 +192,7 @@ new = '''(manifest::EVENTS_TOOL, Some("get")) | (manifest::EVENTS_GET_TOOL, _) =
                     scope.agent_id = None; /* NON-VACUITY BREAK */
                 }
             }
-            event_get_reply(state.store(), arguments, &principal_key, event_scope.as_ref())
+            event_get_reply(state.store(), arguments, &principal_key, event_scope.as_ref(), audience.as_ref())
         },'''
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
@@ -10080,3 +10081,165 @@ expect_red = ["tool_provider::tests::role_describe_route_lists_required_ops_and_
 expect_message = "role.describe must advertise capability-tag selection"
 build_timeout_s = 3600
 timeout_s = 60
+
+# Flows without an agent stamp must respect core's approved repository audience,
+# using answers cached for no more than 30 seconds.
+[[control]]
+id = "flow-audience-agentless-lookup"
+guards = "Agentless Basal routes consult core before dispatch"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = 'principal == "reserved:basal" && scope.flow_id.is_some() && scope.agent_id.is_none()'
+new = 'false /* NON-VACUITY BREAK */ && principal == "reserved:basal" && scope.flow_id.is_some() && scope.agent_id.is_none()'
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::agentless_routes_require_core_before_dispatch"]
+expect_message = "audience guard must refuse"
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-unavailable-not-global"
+guards = "Unavailable core answers never fall back to global reach"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = 'let answer = parse(flow_id, reply)?;'
+new = 'let answer = parse(flow_id, reply).unwrap_or_else(|_| Answer { flow_id: flow_id.into(), audience: Audience::Global, revision: "mutant".into() }); // NON-VACUITY BREAK'
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::unavailable_answers_never_become_global"]
+expect_message = "audience guard must refuse"
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-workspace-filter"
+guards = "A workspace flow cannot use Basal grants outside its projects"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = '.is_some_and(|project| project_ids.contains(&project))'
+new = '.is_some_and(|_project| { let _ = project_ids; true /* NON-VACUITY BREAK */ })'
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::workspace_filter_covers_every_repository_operation_class"]
+expect_message = "audience guard must refuse"
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-registered-projects-only"
+guards = "Hand-set project labels do not confer workspace repository reach"
+file = "crates/plexus-core/src/store/repository_ownership.rs"
+old = "AND s.project_source = 'entorhinal' AND s.project_id IS NOT NULL"
+new = "AND s.project_source IS NOT NULL AND s.project_id IS NOT NULL /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::hand_set_missing_and_conflicting_stamps_do_not_establish_reach"]
+expect_message = "audience guard must refuse"
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-cache-bound"
+guards = "Expired audience answers refresh to core's new revision and project set"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = 'now.duration_since(*at) < Duration::from_secs(30)'
+new = 'now.duration_since(*at) < Duration::MAX /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::cache_expires_and_observes_a_new_revision_and_project_set"]
+expect_message = "expired audience must be refreshed"
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-agent-mismatch"
+guards = "An agent audience cannot run under an agentless stamp"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = 'if matches!(answer.audience, Audience::Agent { .. }) {'
+new = 'if false && matches!(answer.audience, Audience::Agent { .. }) { // NON-VACUITY BREAK'
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::global_workspace_and_agent_audiences_preserve_their_authority"]
+expect_message = "audience guard must refuse"
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-event-visibility"
+guards = "An excluded event is invisible before any name or version disclosure"
+file = "crates/plexus-module/src/lib.rs"
+old = 'if audience.is_some_and(|audience| {'
+new = 'if false /* NON-VACUITY BREAK */ && audience.is_some_and(|audience| {'
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::events_use_stored_repository_and_hide_excluded_event_existence"]
+expect_message = "audience guard must refuse"
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-would-ask"
+guards = "Grant inspection fails closed on audience failures without changing grant semantics"
+file = "crates/plexus-module/src/grants_would_ask.rs"
+old = 'let audience_refusal = if agent.is_none() {'
+new = 'let audience_refusal = if false /* NON-VACUITY BREAK */ && agent.is_none() {'
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::would_ask_keeps_grant_semantics_but_checks_audience_once"]
+expect_message = '"no"'
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-conflicting-projects"
+guards = "Conflicting registry watch projects cannot confer repository reach"
+file = "crates/plexus-core/src/store/repository_ownership.rs"
+old = 'if projects.len() == 1 {'
+new = 'if !projects.is_empty() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::hand_set_missing_and_conflicting_stamps_do_not_establish_reach"]
+expect_message = "audience guard must refuse"
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-malformed-contract"
+guards = "Malformed success replies and mismatched flow IDs fail closed"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = 'if !valid {'
+new = 'if false /* NON-VACUITY BREAK */ && !valid {'
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::malformed_audience_contracts_fail_closed"]
+expect_message = "invalid audience reply must fail closed"
+build_timeout_s = 3600
+timeout_s = 90

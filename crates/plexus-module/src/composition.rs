@@ -110,6 +110,7 @@ pub struct ModuleRuntime {
     /// Registry lookup runs when an operator sets an explicit delivery target
     /// and in the scheduler's hourly sweep for retired agents' grants.
     pub agent_registry: Arc<dyn AgentRegistry>,
+    pub flow_audiences: crate::flow_audience::FlowAudiences,
     pub repository_registry: Option<Arc<dyn plexus_core::repository_ownership::RepositoryRegistry>>,
     pub github_handle_credentials: Option<Arc<dyn HandleCredentialProvider>>,
     /// Optional endpoint override used by the conformance harness when the
@@ -178,6 +179,10 @@ impl ModuleRuntime {
             mcp_route_transport,
             rest_transport,
             agent_registry,
+            flow_audiences: crate::flow_audience::FlowAudiences::new(
+                production_prefrontal_peer(connection_file)
+                    .map(|peer| peer.with_call_timeout(std::time::Duration::from_secs(3))),
+            ),
             repository_registry: production_repository_registry(connection_file),
             github_handle_credentials,
             endpoint_override: None,
@@ -220,6 +225,7 @@ impl ModuleRuntime {
             mcp_route_transport: None,
             rest_transport,
             agent_registry,
+            flow_audiences: crate::flow_audience::FlowAudiences::global_fixture(),
             repository_registry: None,
             github_handle_credentials: None,
             endpoint_override: None,
@@ -264,6 +270,7 @@ impl ModuleRuntime {
             mcp_route_transport: None,
             rest_transport,
             agent_registry,
+            flow_audiences: crate::flow_audience::FlowAudiences::global_fixture(),
             repository_registry: None,
             github_handle_credentials: None,
             endpoint_override,

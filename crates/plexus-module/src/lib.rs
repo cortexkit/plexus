@@ -2154,6 +2154,7 @@ async fn handle_tool_request(
     .await
 }
 
+pub mod flow_audience;
 mod grants_would_ask;
 mod permissions;
 
@@ -2351,6 +2352,19 @@ fn facade_tool_reply(
             Ok(answer) => answer,
             Err(error) => json!({"error": error}),
         });
+    }
+    let audience = match state
+        .runtime
+        .flow_audiences
+        .for_route(&principal_key, route_scope.as_ref())
+    {
+        Ok(audience) => audience,
+        Err(refusal) => return Ok(refusal),
+    };
+    if let Some(audience) = &audience {
+        if let Err(refusal) = flow_audience::check_call(state, audience, name, arguments) {
+            return Ok(refusal);
+        }
     }
     if name == manifest::GITHUB_READ_TOOL {
         let action = arguments
@@ -3127,6 +3141,7 @@ fn facade_tool_reply(
             arguments,
             &principal_key,
             route_scope.as_ref(),
+            audience.as_ref(),
         ),
         (manifest::EVENTS_TOOL, Some("resume")) => {
             let Some(subscription_id) = arguments
@@ -3519,6 +3534,7 @@ fn event_get_reply(
     arguments: &serde_json::Map<String, Value>,
     principal_key: &str,
     route_scope: Option<&CallScope>,
+    audience: Option<&flow_audience::Audience>,
 ) -> Value {
     let is_basal_flow = principal_key == "reserved:basal"
         && route_scope.is_some_and(|scope| scope.flow_id.is_some());
@@ -3596,6 +3612,11 @@ fn event_get_reply(
     };
     match store.event_by_key_version(event_key, reader, plexus_core::now_ms(), version as u8) {
         Ok(EventLookupOutcome::Found(event)) => {
+            if audience.is_some_and(|audience| {
+                !flow_audience::repository_allowed(store, audience, &event.headers.repo)
+            }) {
+                return tool_error("event_not_visible", "event not visible");
+            }
             let (body, digest, published_at) = if version == 2 {
                 let (Some(body), Some(digest)) = (&event.envelope_v2, &event.digest_v2) else {
                     return tool_error("event_not_visible", "event not visible");
@@ -9280,7 +9301,7 @@ mod events_get_tests {
         .expect("unbind repo");
     }
 
-    fn seed_test_events(path: &Path, store: &PlexusStore) -> (String, String) {
+    pub(super) fn seed_test_events(path: &Path, store: &PlexusStore) -> (String, String) {
         let conn = rusqlite::Connection::open(path).expect("open test db");
         conn.execute_batch(
             "INSERT INTO connections (connection_id, principal, app_key, status, created_at_ms, updated_at_ms)
@@ -10204,7 +10225,7 @@ mod events_get_tests {
             // events_get schema rejects this field before reaching the reader.
             let reply = event_get_reply(&store,
                 json!({"event_key":issue_key, "event_name":"github_issue_changed", "agent_id":argument}).as_object().unwrap(),
-                "reserved:basal", Some(&basal_flow_scope(Some(stamp))));
+                "reserved:basal", Some(&basal_flow_scope(Some(stamp))), None);
             if visible {
                 assert!(reply.get("result").is_some(), "{reply}");
             } else {
