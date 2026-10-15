@@ -6,10 +6,9 @@
 # cache. Requiring a successful CI run for the exact commit prevents a direct
 # push from leaving main on a failure the local gate could not observe.
 #
-# Server-side branch protection would be the better mechanism and is NOT
-# available: this private GitHub repository's subscription returns HTTP 403 for
-# the branch-protection API.
-# So the gate lives here, where it can at least be run.
+# The repository's main ruleset also requires the test job, but it lets
+# administrators bypass it, so this hook is still the gate for a maintainer's
+# own pushes.
 #
 # scripts/train.sh runs the gated landing flow: it pushes to train/<name>,
 # watches CI to completion on that sha, and fast-forwards main only on green. By
@@ -62,12 +61,12 @@ fi
 #
 # Socket Security is excluded: it is a third-party app, not our gate, and its
 # verdict is not what "main is green" means here.
-if ! verdicts="$(gh api "repos/$repo_slug/commits/$sha/check-runs" \
+if ! checks="$(gh api "repos/$repo_slug/commits/$sha/check-runs" \
         --hostname github.com \
         --jq '[.check_runs[] | select(.app.slug != "socket-security")]
               | group_by(.name)
-              | map(sort_by(.started_at) | last | .conclusion // "pending")
-              | join(",")' 2>/dev/null)"; then
+              | map(sort_by(.started_at) | last)
+              | .[] | "\(.name)\t\(.conclusion // "pending")"' 2>/dev/null)"; then
     echo "pre-push: refusing — could not read CI results for $sha." >&2
     echo "  Offline, unauthenticated, or the API refused. This is a check that" >&2
     echo "  DID NOT RUN, not a clean result." >&2
@@ -75,7 +74,30 @@ if ! verdicts="$(gh api "repos/$repo_slug/commits/$sha/check-runs" \
     exit 1
 fi
 
-if [ -z "$verdicts" ]; then
+# The mutation shards are skipped by design when a change touches no catalogue
+# row: the test job's planner decides that, and a failed planner fails the test
+# job itself. So a skipped shard counts as green only when that test job
+# succeeded. Any other skipped check, or a skipped shard beside a test job that
+# did not succeed, stays a refusal.
+tab="$(printf '\t')"
+tested=0
+verdicts=""
+while IFS="$tab" read -r check_name conclusion; do
+    [ "$check_name:$conclusion" = "Test (ubuntu):success" ] && tested=1
+done <<EOF
+$checks
+EOF
+while IFS="$tab" read -r check_name conclusion; do
+    [ -n "$check_name" ] || continue
+    case "$check_name:$conclusion" in
+        "Mutation proofs ("*:skipped) [ "$tested" -eq 1 ] && continue ;;
+    esac
+    verdicts="${verdicts:+$verdicts,}${conclusion:-pending}"
+done <<EOF
+$checks
+EOF
+
+if [ -z "$checks" ]; then
     echo "pre-push: refusing — no CI run exists for $sha." >&2
     echo "  A commit reaches main only after CI has gone green on its exact sha." >&2
     echo "  Land it with: scripts/train.sh <name>" >&2

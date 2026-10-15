@@ -29,7 +29,7 @@ class RepositoryIdentityTests(Scratch):
         write_executable(self.tools / "gh", '''#!/bin/sh
 printf '%s\n' "$*" >> "$GH_CALLS"
 case "$1:$2" in
-  api:repos/*/commits/*/check-runs) echo "${MOCK_VERDICTS:-success}" ;;
+  api:repos/*/commits/*/check-runs) printf '%b\n' "${MOCK_VERDICTS:-Test (ubuntu)\tsuccess}" ;;
   api:repos/*)
     [ "${MOCK_API_FAILURE:-0}" = 0 ] || exit 1
     case "$2" in
@@ -83,9 +83,27 @@ exec "{real_git}" "$@"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("repos/cortexkit/plexus --hostname github.com --jq .id", self.calls.read_text())
         self.assertIn(f"repos/cortexkit/plexus/commits/{'a' * 40}/check-runs", self.calls.read_text())
-        red = self.hook(MOCK_VERDICTS="failure")
+        red = self.hook(MOCK_VERDICTS="Test (ubuntu)\\tfailure")
         self.assertEqual(red.returncode, 1, red.stderr)
         self.assertIn("no check is green", red.stderr)
+
+    def test_hook_accepts_skipped_mutation_shards_only_beside_a_green_test_job(self):
+        shard = "Mutation proofs (${{ matrix.shard }}/4)\\tskipped"
+        accepted = self.hook(MOCK_VERDICTS=f"Test (ubuntu)\\tsuccess\\n{shard}")
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        for label, verdicts, message in [
+            ("test job failed", f"Test (ubuntu)\\tfailure\\n{shard}", "no check is green"),
+            ("no test job", shard, "no check is green"),
+            # Only the test job plans the shards, so another check's success
+            # must not excuse a skipped shard.
+            ("another green check but no test job", f"Lint\\tsuccess\\n{shard}", "not every check is green"),
+            ("another skipped check", "Test (ubuntu)\\tsuccess\\nLint\\tskipped", "not every check is green"),
+            ("a failed shard", "Test (ubuntu)\\tsuccess\\nMutation proofs (1/4)\\tfailure", "not every check is green"),
+        ]:
+            with self.subTest(label=label):
+                refused = self.hook(MOCK_VERDICTS=verdicts)
+                self.assertEqual(refused.returncode, 1, refused.stderr)
+                self.assertIn(message, refused.stderr)
 
     def test_hook_accepts_renamed_repository_with_the_same_id(self):
         for url in ["https://github.com/cortexkit/plexus-private.git",
