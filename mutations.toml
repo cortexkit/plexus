@@ -2564,6 +2564,26 @@ build_timeout_s = 3600
 timeout_s = 60
 
 [[control]]
+id = "github-v2-ci-job-workflow-name"
+guards = "New ci_job envelopes extract workflow_name from source jobs"
+file = "crates/plexus-core/src/event_envelope.rs"
+old = '''body["workflow_name"] = item["workflow_name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .map(|name| json!(name))
+            .unwrap_or(Value::Null);'''
+new = '''body["workflow_name"] = Value::Null; /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/event_envelope.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["event_envelope::tests::captured_webhook_job_constructed_wrapper_golden", "event_envelope::tests::captured_poll_job_golden"]
+expect_message = "every envelope field, including nulls"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
 id = "github-v2-fetch-no-v1-fallback"
 guards = "Version 2 refuses a pre-v2 row exactly like an unknown key and never serves its v1 source body"
 edits = [

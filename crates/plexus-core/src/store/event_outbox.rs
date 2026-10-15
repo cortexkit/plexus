@@ -2370,6 +2370,59 @@ mod tests {
     }
 
     #[test]
+    fn stored_ci_job_envelopes_include_workflow_name_from_webhooks_and_polls() {
+        let webhook: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/event-envelope-v2/webhook_ci_job.json"
+        ))
+        .unwrap();
+        let poll: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/event-envelope-v2/poll_ci_job.json"
+        ))
+        .unwrap();
+        let cases = [
+            (
+                "webhook",
+                &webhook,
+                crate::event_envelope::EnvelopeSource::Webhook(Some("completed".into())),
+                "Tests",
+            ),
+            (
+                "poll",
+                &poll,
+                crate::event_envelope::EnvelopeSource::Poll,
+                "Design gate",
+            ),
+        ];
+        for (subscription_id, item, source, expected_workflow_name) in cases {
+            let store = store();
+            subscription(&store, subscription_id, "sorted_head");
+            let event_headers = headers("owner/repo");
+            let actor = ActorAttribution::NotEnriched;
+            let mut keyed = input(item, KEY, &event_headers);
+            keyed.event.item_kind = Some("ci_job");
+            keyed.event.actor = &actor;
+            let identity = keyed.identity.as_mut().unwrap();
+            identity.event_name = "github_ci_job_completed";
+            identity.change = Some("completed");
+            keyed.envelope_context = crate::event_envelope::EnvelopeContext {
+                source,
+                comment: None,
+            };
+            commit(&store, subscription_id, &[keyed]);
+
+            let stored = store
+                .canonical_event_by_key(KEY)
+                .unwrap()
+                .unwrap()
+                .envelope_v2
+                .unwrap();
+            let envelope: Value = serde_json::from_str(&stored).unwrap();
+            assert_eq!(envelope["workflow_name"], expected_workflow_name);
+            assert!(stored.contains(&format!(r#""workflow_name":"{expected_workflow_name}""#)));
+        }
+    }
+
+    #[test]
     fn migration_47_forward_rollback_and_reforward_without_backfill() {
         let scratch = crate::test_scratch::Scratch::database("envelope-migration");
         let descriptor = StorageDescriptor {

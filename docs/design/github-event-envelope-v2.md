@@ -42,7 +42,9 @@ fetch returns that same string, without reconstructing it from the v1 body.
 
 Each field listed for a kind is always present. Unknown values are JSON `null`,
 not omitted. Fields belonging only to another kind are not included. There are
-no labels in the envelope, and normalization adds no GitHub requests.
+no labels in the envelope, and normalization adds no GitHub requests. CI-job
+envelopes stored before `workflow_name` was added do not contain that field; their
+stored bytes and digests remain unchanged.
 
 ## Fields
 
@@ -105,6 +107,12 @@ Each field is present in both kinds and nullable when the source lacks it:
 | `run_id` | integer |
 | `run_attempt` | integer |
 | `completed_at` | string |
+
+CI-job envelopes additionally always contain:
+
+| Field | Type (or null) | Source |
+| --- | --- | --- |
+| `workflow_name` | string | Webhooks: `workflow_job.workflow_name`; polling: `workflow_name` on the job object. Missing, empty, or non-string values are `null`. |
 
 ### Release
 
