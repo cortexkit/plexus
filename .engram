@@ -1,0 +1,3 @@
+# Files git does not hold that engram backs up nightly from bound checkouts.
+.cortexkit/internal-docs/
+.cortexkit/scripts/

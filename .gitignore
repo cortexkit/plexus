@@ -33,3 +33,6 @@ dist/
 
 # cortexkit-store lease files (runtime artifacts from tests)
 *.lease
+
+# Python bytecode from the script tests.
+__pycache__/
