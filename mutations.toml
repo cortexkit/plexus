@@ -10972,32 +10972,32 @@ timeout_s = 90
 
 [[control]]
 id = "ci-flow-read-quota-before-dispatch"
-guards = "An insufficient whole-read budget refuses before any CI flow request is dispatched"
+guards = "An exhausted request budget refuses before the next authenticated CI request is dispatched"
 file = "crates/plexus-core/src/github/reads/ci.rs"
-old = "    quota.reserve(engine.store())?;"
-new = "    let _ = quota; /* NON-VACUITY BREAK */"
+old = "    reserve(engine.store(), crate::storage::now_ms())?;"
+new = "    /* NON-VACUITY BREAK: skip the request reservation */"
 test_file = "crates/plexus-module/src/ci_read_tests.rs"
 runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_quota_refusal_is_atomic_and_reports_millisecond_retry"]
+expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_first_request_quota_refusal_reports_millisecond_retry"]
 expect_message = "github_actions_quota_exhausted"
 build_timeout_s = 3600
 
 [[control]]
-id = "ci-flow-read-quota-reserved-once"
-guards = "A CI flow read reserves its whole bound once rather than once per leg"
-file = "crates/plexus-core/src/github/reads/ci.rs"
-old = "        if !self.reserved {"
-new = "        if true { /* NON-VACUITY BREAK */"
+id = "ci-flow-read-one-unit-per-request"
+guards = "Every authenticated CI flow request reserves exactly one unit in the shared ledger"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "        QuotaRequest::FlowRead => (1, GITHUB_ACTIONS_HOURLY_REQUESTS),"
+new = "        QuotaRequest::FlowRead => (8, GITHUB_ACTIONS_HOURLY_REQUESTS), /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/ci_read_tests.rs"
 runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_reserve_the_whole_bound_once_in_the_ledger"]
-expect_message = "must reserve its entire bound only once"
+expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_reserve_one_unit_for_each_authenticated_request"]
+expect_message = "must reserve one unit per request"
 build_timeout_s = 3600
 
 [[control]]
@@ -11013,51 +11013,6 @@ target = "--lib"
 select = "expected"
 expect_red = ["github::reads::ci::tests::quota_retry_uses_the_pollers_exact_expiry"]
 expect_message = "3598767"
-build_timeout_s = 3600
-
-[[control]]
-id = "ci-job-log-whole-request-count"
-guards = "Job-log flow reads reserve both authenticated GitHub requests"
-file = "crates/plexus-core/src/github/reads/job_log.rs"
-old = "    let mut quota = ci::ReadQuota::new(2);"
-new = "    let mut quota = ci::ReadQuota::new(1); /* NON-VACUITY BREAK */"
-test_file = "crates/plexus-module/src/ci_read_tests.rs"
-runner = "cargo"
-package = "plexus-module"
-target = "--lib"
-select = "expected"
-expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_reserve_the_whole_bound_once_in_the_ledger"]
-expect_message = "must reserve its entire bound only once"
-build_timeout_s = 3600
-
-[[control]]
-id = "ci-artifact-whole-request-bound"
-guards = "Artifact flow reads reserve 100 listing pages plus the authenticated ZIP redirect before sending"
-file = "crates/plexus-core/src/github/reads/artifact_file.rs"
-old = "    let mut quota = ci::ReadQuota::new(101);"
-new = "    let mut quota = ci::ReadQuota::new(100); /* NON-VACUITY BREAK */"
-test_file = "crates/plexus-module/src/ci_read_tests.rs"
-runner = "cargo"
-package = "plexus-module"
-target = "--lib"
-select = "expected"
-expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_reserve_the_whole_bound_once_in_the_ledger"]
-expect_message = "must reserve its entire bound only once"
-build_timeout_s = 3600
-
-[[control]]
-id = "ci-superseded-whole-request-count"
-guards = "Run comparisons reserve both metadata reads before sending"
-file = "crates/plexus-core/src/github/reads/run_superseded.rs"
-old = "    let mut quota = ci::ReadQuota::new(2);"
-new = "    let mut quota = ci::ReadQuota::new(1); /* NON-VACUITY BREAK */"
-test_file = "crates/plexus-module/src/ci_read_tests.rs"
-runner = "cargo"
-package = "plexus-module"
-target = "--lib"
-select = "expected"
-expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_reserve_the_whole_bound_once_in_the_ledger"]
-expect_message = "must reserve its entire bound only once"
 build_timeout_s = 3600
 
 [[control]]
@@ -11216,12 +11171,8 @@ build_timeout_s = 3600
 id = "ci-flow-read-shared-600-ceiling"
 guards = "Flow reads and polling share the same 600-request trailing-hour ceiling"
 file = "crates/plexus-core/src/store/event_outbox.rs"
-old = '''        QuotaRequest::FlowRead { requests } => {
-            (i64::from(requests), GITHUB_ACTIONS_HOURLY_REQUESTS)
-        }'''
-new = '''        QuotaRequest::FlowRead { requests } => {
-            (i64::from(requests), GITHUB_ACTIONS_HOURLY_REQUESTS + 1) /* NON-VACUITY BREAK */
-        }'''
+old = "        QuotaRequest::FlowRead => (1, GITHUB_ACTIONS_HOURLY_REQUESTS),"
+new = "        QuotaRequest::FlowRead => (1, GITHUB_ACTIONS_HOURLY_REQUESTS + 1), /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/poller/ci_runs.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -11229,36 +11180,6 @@ target = "--lib"
 select = "expected"
 expect_red = ["poller::ci_runs::tests::ci_polling_and_flow_read_bursts_share_the_hourly_ledger"]
 expect_message = "QuotaAdmission::Deferred"
-build_timeout_s = 3600
-
-[[control]]
-id = "ci-flow-read-migration-preserves-ledger"
-guards = "Widening quota row counts preserves every existing committed reservation"
-file = "crates/plexus-core/src/storage.rs"
-old = "INSERT INTO github_actions_quota_v53 SELECT reservation_id, reserved_at_ms, requests FROM github_actions_quota;"
-new = "-- NON-VACUITY BREAK: omit the existing reservations"
-test_file = "crates/plexus-core/src/storage.rs"
-runner = "cargo"
-package = "plexus-core"
-target = "--lib"
-select = "expected"
-expect_red = ["storage::tests::migration_53_preserves_quota_and_accepts_bounded_flow_reservations"]
-expect_message = "Query returned no rows"
-build_timeout_s = 3600
-
-[[control]]
-id = "ci-flow-read-migration-bounded-counts"
-guards = "Quota ledger rows reject zero and over-ceiling reservation counts"
-file = "crates/plexus-core/src/storage.rs"
-old = "    requests INTEGER NOT NULL CHECK (requests BETWEEN 1 AND 600)"
-new = "    requests INTEGER NOT NULL CHECK (requests BETWEEN 0 AND 601) -- NON-VACUITY BREAK"
-test_file = "crates/plexus-core/src/storage.rs"
-runner = "cargo"
-package = "plexus-core"
-target = "--lib"
-select = "expected"
-expect_red = ["storage::tests::migration_53_preserves_quota_and_accepts_bounded_flow_reservations"]
-expect_message = "is_err()"
 build_timeout_s = 3600
 
 [[control]]
@@ -11323,4 +11244,49 @@ target = "--test it"
 select = "expected"
 expect_red = ["shipped_catalog_ingests::github_actions_superseded_catalog_is_closed_and_read_only"]
 expect_message = "must remain read-only"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-flow-read-later-request-quota"
+guards = "Quota exhaustion on a later CI request interrupts the read without dispatching that request or refunding earlier requests"
+file = "crates/plexus-core/src/github/reads/ci.rs"
+old = "    reserve(engine.store(), crate::storage::now_ms())?;"
+new = "    /* NON-VACUITY BREAK: skip the request reservation */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_later_request_quota_refusal_keeps_spent_units"]
+expect_message = "github_actions_quota_exhausted"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-artifact-listing-quota-interruption"
+guards = "Artifact pagination stops at the first unreserved page while earlier page requests remain spent"
+file = "crates/plexus-core/src/github/reads/ci.rs"
+old = "    reserve(engine.store(), crate::storage::now_ms())?;"
+new = "    /* NON-VACUITY BREAK: skip the request reservation */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::artifact_listing_quota_refusal_keeps_earlier_pages_spent"]
+expect_message = "github_actions_quota_exhausted"
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-flow-read-quota-interruption-message"
+guards = "A quota refusal says the read was interrupted so not_sent is not mistaken for an all-or-nothing preflight refusal"
+file = "crates/plexus-module/src/lib.rs"
+old = "CI read interrupted before the next GitHub request; earlier requests may already have been sent"
+new = "GitHub request quota exhausted /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ci_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_later_request_quota_refusal_keeps_spent_units"]
+expect_message = "the refusal must describe an interrupted read"
 build_timeout_s = 3600

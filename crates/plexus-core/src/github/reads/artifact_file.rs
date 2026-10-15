@@ -44,9 +44,7 @@ pub(super) fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             .filter(|bytes| (1..=262_144).contains(bytes))
             .ok_or(invalid)?,
     };
-    // Up to 100 listing pages and one authenticated ZIP redirect request.
-    let mut quota = ci::ReadQuota::new(101);
-    let mut invoke = |action: &str, args: Value| {
+    let invoke = |action: &str, args: Value| {
         ci::invoke(
             engine,
             principal,
@@ -55,7 +53,6 @@ pub(super) fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             args,
             scope,
             attributed_agent,
-            &mut quota,
         )
         .map_err(|error| match error {
             ReadError::Dispatch(TransportOutcome::VendorFailed { code, .. }) => {

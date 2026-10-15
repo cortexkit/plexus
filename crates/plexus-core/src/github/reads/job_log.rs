@@ -31,8 +31,7 @@ pub(super) fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             .filter(|bytes| (1..=262_144).contains(bytes))
             .ok_or(ReadError::Refused("job_log_arguments_invalid"))?,
     };
-    let mut quota = ci::ReadQuota::new(2);
-    let mut invoke = |action: &str, args: Value| -> Result<Value, ReadError> {
+    let invoke = |action: &str, args: Value| -> Result<Value, ReadError> {
         ci::invoke(
             engine,
             principal,
@@ -41,7 +40,6 @@ pub(super) fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             args,
             scope,
             attributed_agent,
-            &mut quota,
         )
         .map_err(|error| match error {
             ReadError::Dispatch(TransportOutcome::VendorFailed { code, .. }) => {

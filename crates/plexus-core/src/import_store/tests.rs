@@ -259,7 +259,6 @@ INSERT INTO web_search_limits (backend, per_caller_per_minute, per_backend_per_m
 INSERT INTO elicitation_answers_cursor (singleton, answers_cursor, updated_at_ms) VALUES (1, 42, 1);
 INSERT INTO github_repo_id_cache (repo, repo_id, last_attempt_at_ms, resolved_at_ms) VALUES ('org/repo', 101, 1, 1);
 INSERT INTO github_actions_quota (reservation_id, reserved_at_ms, requests) VALUES ('quota-1', 5, 8);
-INSERT INTO github_actions_quota (reservation_id, reserved_at_ms, requests) VALUES ('quota-flow', 6, 2), ('quota-artifact', 7, 101);
 INSERT INTO event_outbox_counters (name, value) VALUES ('dropped_on_delete', 3);
 "#;
     source.with_conn(|conn| conn.execute_batch(ROWS)).unwrap();
@@ -276,16 +275,7 @@ INSERT INTO event_outbox_counters (name, value) VALUES ('dropped_on_delete', 3);
             .iter()
             .find(|row| row.table == table)
             .unwrap_or_else(|| panic!("{table} must be carried"));
-        let expected = if table == "github_actions_quota" {
-            3
-        } else {
-            1
-        };
-        assert_eq!(
-            (row.read, row.carried),
-            (expected, expected),
-            "{table} must be carried"
-        );
+        assert_eq!((row.read, row.carried), (1, 1), "{table} must be carried");
     }
     let new = f.destination();
     assert_eq!(
@@ -310,18 +300,12 @@ INSERT INTO event_outbox_counters (name, value) VALUES ('dropped_on_delete', 3);
         101
     );
     assert_eq!(
-        scalar::<i64>(&new, "SELECT SUM(requests) FROM github_actions_quota"),
-        111
+        scalar::<i64>(
+            &new,
+            "SELECT requests FROM github_actions_quota WHERE reservation_id = 'quota-1'"
+        ),
+        8
     );
-    for (id, requests) in [("quota-1", 8), ("quota-flow", 2), ("quota-artifact", 101)] {
-        assert_eq!(
-            scalar::<i64>(
-                &new,
-                &format!("SELECT requests FROM github_actions_quota WHERE reservation_id='{id}'")
-            ),
-            requests
-        );
-    }
     assert_eq!(
         scalar::<i64>(
             &new,

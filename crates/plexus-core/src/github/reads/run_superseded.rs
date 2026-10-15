@@ -53,8 +53,7 @@ pub(super) fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         .and_then(Value::as_u64)
         .filter(|id| *id > 0)
         .ok_or(ReadError::Refused("run_arguments_invalid"))?;
-    let mut quota = ci::ReadQuota::new(2);
-    let mut invoke = |action, args| {
+    let invoke = |action, args| {
         ci::invoke(
             engine,
             principal,
@@ -63,7 +62,6 @@ pub(super) fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             args,
             scope,
             attributed_agent,
-            &mut quota,
         )
     };
     let run = invoke(

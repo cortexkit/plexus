@@ -2,44 +2,18 @@
 //! bound to that agent's enabled bot, and authorize every API request independently.
 use super::*;
 
-/// Reserve the entire read before its first dispatch, without refunding unused
-/// legs. Only authenticated GitHub API requests consume the token's quota;
-/// credentialless storage HEAD/GET requests do not use the operator token.
-pub(super) struct ReadQuota {
-    requests: u16,
-    reserved: bool,
-}
-
-impl ReadQuota {
-    pub(super) fn new(requests: u16) -> Self {
-        Self {
-            requests,
-            reserved: false,
-        }
-    }
-
-    fn reserve(&mut self, store: &PlexusStore) -> Result<(), ReadError> {
-        self.reserve_at(store, crate::storage::now_ms())
-    }
-
-    fn reserve_at(&mut self, store: &PlexusStore, now: i64) -> Result<(), ReadError> {
-        if !self.reserved {
-            match store
-                .reserve_github_actions_flow_read_quota(self.requests, now)
-                .map_err(|_| ReadError::Denied(Denial::StoreFailure))?
-            {
-                crate::QuotaAdmission::Reserved { .. } => self.reserved = true,
-                crate::QuotaAdmission::Deferred { retry_at_ms } => {
-                    return Err(ReadError::QuotaExhausted {
-                        retry_after_ms: retry_at_ms.saturating_sub(now),
-                    });
-                }
-                crate::QuotaAdmission::Inactive => {
-                    return Err(ReadError::Denied(Denial::StoreFailure))
-                }
-            }
-        }
-        Ok(())
+/// Reserve one authenticated GitHub request immediately before dispatch. Storage
+/// HEAD/GET requests are credentialless and do not consume the operator token's quota.
+fn reserve(store: &PlexusStore, now: i64) -> Result<(), ReadError> {
+    match store
+        .reserve_github_actions_flow_read_quota(now)
+        .map_err(|_| ReadError::Denied(Denial::StoreFailure))?
+    {
+        crate::QuotaAdmission::Reserved { .. } => Ok(()),
+        crate::QuotaAdmission::Deferred { retry_at_ms } => Err(ReadError::QuotaExhausted {
+            retry_after_ms: retry_at_ms.saturating_sub(now),
+        }),
+        crate::QuotaAdmission::Inactive => Err(ReadError::Denied(Denial::StoreFailure)),
     }
 }
 
@@ -61,7 +35,6 @@ pub(super) fn repository(value: &Value, invalid: &'static str) -> Result<String,
     Ok(name)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn invoke<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     engine: &GovernanceEngine<C, T>,
     principal: &str,
@@ -70,7 +43,6 @@ pub(super) fn invoke<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     args: Value,
     scope: Option<&crate::scope::CallScope>,
     attributed_agent: Option<&str>,
-    quota: &mut ReadQuota,
 ) -> Result<Value, ReadError> {
     let visible = || -> Result<(), ReadError> {
         if let Some(agent) = crate::scope::basal_flow_read_agent(principal, scope) {
@@ -102,7 +74,7 @@ pub(super) fn invoke<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     let reservation = engine.authorize(request).map_err(ReadError::Denied)?;
     // Bindings can change during authorization; recheck before sending each leg.
     visible()?;
-    quota.reserve(engine.store())?;
+    reserve(engine.store(), crate::storage::now_ms())?;
     match engine.revalidate_and_dispatch(&reservation).outcome {
         TransportOutcome::Completed {
             response: Some(value),
@@ -126,22 +98,21 @@ mod tests {
             },
         })
         .unwrap();
-        store
-            .reserve_github_actions_flow_read_quota(600, 10_000)
-            .unwrap();
-        for count in [2, 101, 2] {
-            let mut quota = ReadQuota::new(count);
-            assert_eq!(
-                quota.reserve_at(&store, 11_234),
-                Err(ReadError::QuotaExhausted {
-                    retry_after_ms: 3_598_767
-                })
-            );
-            assert_eq!(
-                quota.reserve_at(&store, 3_610_000),
-                Err(ReadError::QuotaExhausted { retry_after_ms: 1 })
-            );
+        for _ in 0..600 {
+            store
+                .reserve_github_actions_flow_read_quota(10_000)
+                .unwrap();
         }
-        assert_eq!(ReadQuota::new(2).reserve_at(&store, 3_610_001), Ok(()));
+        assert_eq!(
+            reserve(&store, 11_234),
+            Err(ReadError::QuotaExhausted {
+                retry_after_ms: 3_598_767
+            })
+        );
+        assert_eq!(
+            reserve(&store, 3_610_000),
+            Err(ReadError::QuotaExhausted { retry_after_ms: 1 })
+        );
+        assert_eq!(reserve(&store, 3_610_001), Ok(()));
     }
 }

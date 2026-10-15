@@ -2527,7 +2527,7 @@ fn facade_tool_reply(
                     Err(plexus_core::github::reads::ReadError::QuotaExhausted {
                         retry_after_ms,
                     }) => {
-                        json!({"error":{"code":"github_actions_quota_exhausted","transmission":"not_sent","detail":{"retry_after_ms":retry_after_ms}}})
+                        json!({"error":{"code":"github_actions_quota_exhausted","message":"CI read interrupted before the next GitHub request; earlier requests may already have been sent","transmission":"not_sent","detail":{"retry_after_ms":retry_after_ms}}})
                     }
                 }
             })

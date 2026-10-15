@@ -60,69 +60,57 @@ fn reads() -> [(&'static str, Value, i64); 3] {
         (
             "github.actions.artifact_file",
             json!({"run_id":42,"artifact":"shard","path":"log"}),
-            101,
+            2,
         ),
         (SUPERSEDED, json!({"run_id":42}), 2),
     ]
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ci_reads_reserve_the_whole_bound_once_in_the_ledger() {
+async fn ci_reads_reserve_one_unit_for_each_authenticated_request() {
     for (action, args, count) in reads() {
         let (runtime, _, transport, scratch) = setup();
         let reply = read(runtime, action, "o/x", args, Some("agent-x")).await;
         assert!(reply.get("result").is_some(), "{action}: {reply}");
         let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
-        let ledger: (i64, i64) = db
+        assert_eq!(
+            ledger(&db),
+            (count, count),
+            "{action} must reserve one unit per request"
+        );
+        let units: i64 = db
             .query_row(
-                "SELECT COUNT(*),SUM(requests) FROM github_actions_quota",
+                "SELECT COUNT(*) FROM github_actions_quota WHERE requests <> 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(
-            ledger,
-            (1, count),
-            "{action} must reserve its entire bound only once"
-        );
-        assert_eq!(transport.requests().len(), 2);
+        assert_eq!(units, 0);
+        assert_eq!(transport.requests().len(), count as usize);
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ci_reads_quota_refusal_is_atomic_and_reports_millisecond_retry() {
-    for (action, args, count) in reads() {
+async fn ci_reads_first_request_quota_refusal_reports_millisecond_retry() {
+    for (action, args, _) in reads() {
         let (runtime, _, transport, scratch) = setup();
         let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
         let reserved = plexus_core::storage::now_ms();
-        db.execute(
-            "INSERT INTO github_actions_quota VALUES ('used',?1,?2)",
-            (reserved, 601 - count),
-        )
-        .unwrap();
+        seed_quota(&db, 600, reserved);
+        let original = ledger(&db);
         let before = plexus_core::storage::now_ms();
         let reply = read(runtime, action, "o/x", args, Some("agent-x")).await;
         let after = plexus_core::storage::now_ms();
-        assert_eq!(
-            reply["error"]["code"], "github_actions_quota_exhausted",
-            "{action}: {reply}"
-        );
-        assert_eq!(reply["error"]["transmission"], "not_sent");
-        let retry = reply["error"]["detail"]["retry_after_ms"].as_i64().unwrap();
-        assert!(
-            (reserved + 3_600_001 - after..=reserved + 3_600_001 - before).contains(&retry),
-            "millisecond retry: {reply}"
-        );
+        assert_quota_refusal(&reply, reserved, before, after);
         assert!(
             transport.requests().is_empty(),
-            "an insufficient whole-read budget must send nothing"
+            "an exhausted request budget must send nothing"
         );
-        let rows: i64 = db
-            .query_row("SELECT COUNT(*) FROM github_actions_quota", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(rows, 1, "refusal must not leave a partial reservation");
+        assert_eq!(
+            ledger(&db),
+            original,
+            "refusing a request must not spend quota"
+        );
     }
 }
 
@@ -357,4 +345,169 @@ async fn superseded_both_legs_require_basals_invoke_grant() {
             usize::from(selector == "get_workflow_run_metadata")
         );
     }
+}
+
+fn seed_quota(db: &rusqlite::Connection, units: i64, reserved: i64) {
+    for (index, count) in std::iter::repeat_n(8, (units / 8) as usize)
+        .chain(std::iter::repeat_n(1, (units % 8) as usize))
+        .enumerate()
+    {
+        db.execute(
+            "INSERT INTO github_actions_quota VALUES (?1,?2,?3)",
+            (format!("seed-{index}"), reserved, count),
+        )
+        .unwrap();
+    }
+}
+
+fn ledger(db: &rusqlite::Connection) -> (i64, i64) {
+    db.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(requests),0) FROM github_actions_quota",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .unwrap()
+}
+
+fn assert_quota_refusal(reply: &Value, reserved: i64, before: i64, after: i64) {
+    assert_eq!(
+        reply["error"]["code"], "github_actions_quota_exhausted",
+        "{reply}"
+    );
+    assert_eq!(reply["error"]["transmission"], "not_sent");
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("interrupted"),
+        "the refusal must describe an interrupted read: {reply}"
+    );
+    assert!(
+        reply.get("result").is_none(),
+        "an interrupted read must not return a partial result"
+    );
+    let retry = reply["error"]["detail"]["retry_after_ms"].as_i64().unwrap();
+    assert!(
+        (reserved + 3_600_001 - after..=reserved + 3_600_001 - before).contains(&retry),
+        "millisecond retry: {reply}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ci_reads_later_request_quota_refusal_keeps_spent_units() {
+    for (action, args, _) in reads() {
+        let (runtime, _, transport, scratch) = setup();
+        let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+        let reserved = plexus_core::storage::now_ms();
+        seed_quota(&db, 599, reserved);
+        let original = ledger(&db);
+        let before = plexus_core::storage::now_ms();
+        let reply = read(runtime, action, "o/x", args, Some("agent-x")).await;
+        let after = plexus_core::storage::now_ms();
+        assert_quota_refusal(&reply, reserved, before, after);
+        assert_eq!(
+            transport.requests().len(),
+            1,
+            "{action} must stop before its second request"
+        );
+        assert_eq!(
+            ledger(&db),
+            (original.0 + 1, 600),
+            "only the first request remains spent"
+        );
+    }
+}
+
+fn artifact_page(total: u64, count: usize) -> Value {
+    let entry = json!({"id":7,"name":"shard","created_at":"2026-10-12T00:00:00Z","expired":false,"size_in_bytes":123});
+    json!({"total_count":total,"artifacts":vec![entry;count]})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn artifact_listing_quota_refusal_keeps_earlier_pages_spent() {
+    let (runtime, _, transport, scratch) = setup();
+    let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+    let reserved = plexus_core::storage::now_ms();
+    seed_quota(&db, 598, reserved);
+    let original = ledger(&db);
+    transport.set_response_for_method(
+        "list_workflow_run_artifacts",
+        "",
+        MockResponse::Success(artifact_page(201, 100)),
+    );
+    let before = plexus_core::storage::now_ms();
+    let reply = read(
+        runtime,
+        "github.actions.artifact_file",
+        "o/x",
+        json!({"run_id":42,"artifact":"shard","path":"log"}),
+        Some("agent-x"),
+    )
+    .await;
+    let after = plexus_core::storage::now_ms();
+    assert_quota_refusal(&reply, reserved, before, after);
+    let requests = transport.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "quota must interrupt listing before page three"
+    );
+    for (index, request) in requests.iter().enumerate() {
+        assert_eq!(request.action, "list_workflow_run_artifacts");
+        assert_eq!(request.args["page"], index + 1);
+    }
+    assert_eq!(
+        ledger(&db),
+        (original.0 + 2, 600),
+        "both earlier pages remain spent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn artifact_pages_and_redirect_each_reserve_one_unit() {
+    let (runtime, _, transport, scratch) = setup();
+    transport.set_response_for_method(
+        "list_workflow_run_artifacts",
+        "",
+        MockResponse::Success(artifact_page(2, 1)),
+    );
+    let reply = read(
+        runtime,
+        "github.actions.artifact_file",
+        "o/x",
+        json!({"run_id":42,"artifact":"shard","path":"log"}),
+        Some("agent-x"),
+    )
+    .await;
+    assert!(reply.get("result").is_some(), "{reply}");
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].args["page"], 1);
+    assert_eq!(requests[1].args["page"], 2);
+    assert_eq!(requests[2].action, "github.actions.artifact_file");
+    let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+    assert_eq!(
+        ledger(&db),
+        (3, 3),
+        "only two listing pages and the redirect are charged"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn six_small_artifact_reads_cost_twelve_units() {
+    let (runtime, _, transport, scratch) = setup();
+    for _ in 0..6 {
+        let reply = read(
+            runtime.clone(),
+            "github.actions.artifact_file",
+            "o/x",
+            json!({"run_id":42,"artifact":"shard","path":"log"}),
+            Some("agent-x"),
+        )
+        .await;
+        assert!(reply.get("result").is_some(), "{reply}");
+    }
+    let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+    assert_eq!(ledger(&db), (12, 12));
+    assert_eq!(transport.requests().len(), 12);
 }

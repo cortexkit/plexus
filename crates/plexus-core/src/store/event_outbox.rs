@@ -121,7 +121,7 @@ impl RepoIdCacheEntry {
 pub enum QuotaRequest {
     CiCycle,
     GetRepository,
-    FlowRead { requests: u16 },
+    FlowRead,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -560,11 +560,10 @@ impl PlexusStore {
     /// trailing-hour ledger and exact admission/expiry calculation.
     pub fn reserve_github_actions_flow_read_quota(
         &self,
-        requests: u16,
         now: i64,
     ) -> Result<QuotaAdmission, StoreError> {
         self.inner
-            .with_conn_fenced(|conn| quota_admit(conn, QuotaRequest::FlowRead { requests }, now))
+            .with_conn_fenced(|conn| quota_admit(conn, QuotaRequest::FlowRead, now))
     }
 
     /// Commit the last-attempt time for this case-insensitive owner/name and
@@ -866,9 +865,7 @@ fn quota_admit(
             (CI_CYCLE_REQUESTS, effective_ci_ceiling(conn)?)
         }
         QuotaRequest::GetRepository => (1, GITHUB_ACTIONS_HOURLY_REQUESTS),
-        QuotaRequest::FlowRead { requests } => {
-            (i64::from(requests), GITHUB_ACTIONS_HOURLY_REQUESTS)
-        }
+        QuotaRequest::FlowRead => (1, GITHUB_ACTIONS_HOURLY_REQUESTS),
     };
     if used + requests > ceiling {
         let mut remaining = used;

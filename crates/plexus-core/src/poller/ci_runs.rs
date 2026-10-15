@@ -791,14 +791,11 @@ mod tests {
     #[test]
     fn ci_polling_and_flow_read_bursts_share_the_hourly_ledger() {
         let f = Fixture::new();
-        for count in [101, 101, 101, 101, 101]
-            .into_iter()
-            .chain(std::iter::repeat_n(2, 43))
-        {
+        for _ in 0..591 {
             assert!(matches!(
                 f.engine
                     .store()
-                    .reserve_github_actions_flow_read_quota(count, f.now)
+                    .reserve_github_actions_flow_read_quota(f.now)
                     .unwrap(),
                 QuotaAdmission::Reserved { .. }
             ));
@@ -821,7 +818,14 @@ mod tests {
         assert!(matches!(
             f.engine
                 .store()
-                .reserve_github_actions_flow_read_quota(2, f.now)
+                .reserve_github_actions_flow_read_quota(f.now)
+                .unwrap(),
+            QuotaAdmission::Reserved { .. }
+        ));
+        assert!(matches!(
+            f.engine
+                .store()
+                .reserve_github_actions_flow_read_quota(f.now)
                 .unwrap(),
             QuotaAdmission::Deferred { .. }
         ));
@@ -841,7 +845,7 @@ mod tests {
                     r.get::<_, i64>(0)
                 })
                 .unwrap(),
-            599
+            600
         );
     }
 
