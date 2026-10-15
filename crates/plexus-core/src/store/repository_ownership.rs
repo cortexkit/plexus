@@ -14,6 +14,40 @@ pub(super) const WATCH_EXISTS_SQL: &str = "(s.status = 'active' OR (s.status = '
     AND COALESCE(s.suspended_reason, '') NOT IN ('repository_identity_changed', 'catalog_schema_mismatch')))";
 
 impl PlexusStore {
+    /// Resolve a repository's project from watch rows populated by entorhinal's
+    /// project registry. Operator-set project labels are annotations, not proof
+    /// that a workspace owns the repository, so they cannot grant access.
+    /// Retired rows preserve obsolete ownership; suspended rows still describe
+    /// the repository's current watches and must continue to participate.
+    pub fn entorhinal_repository_project(
+        &self,
+        repository: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let Ok((owner, repo)) = crate::github::resolver::split_repository(repository) else {
+            return Ok(None);
+        };
+        self.inner.with_read(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT DISTINCT s.project_id
+                FROM trigger_subscriptions s JOIN connections c
+                ON c.principal=s.principal AND c.connection_id=s.connection_id
+                WHERE c.app_key IN ('github','github_actions','github_rest')
+                AND s.status <> 'retired'
+                AND s.project_source = 'entorhinal' AND s.project_id IS NOT NULL
+                AND lower(json_extract(s.fixed_args,'$.owner'))=lower(?1)
+                AND lower(json_extract(s.fixed_args,'$.repo'))=lower(?2)",
+            )?;
+            let projects = statement
+                .query_map([owner, repo], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(if projects.len() == 1 {
+                projects.into_iter().next()
+            } else {
+                None
+            })
+        })
+    }
+
     /// Retain the history of obsolete automatic watches without leaving them
     /// resumable. Wait for a complete active replacement trio, including CI;
     /// operational pauses and manually managed release watches are not replaced.
