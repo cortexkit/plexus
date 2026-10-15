@@ -145,7 +145,8 @@ actually fetched plus the ZIP redirect. Credentialless storage requests do not
 consume the personal token's quota. The existing ledger constraint admits these
 one-unit reservations, so no store migration is required.
 
-The original four-read polling ceiling and grant below are unchanged. To enable
+The connection ceiling and poll grant set up later in this guide cover only the
+four reads CI polling uses, and this section doesn't change them. To enable
 CI flow reads, explicitly extend the connection ceiling and grant Basal invoke
 authority for their catalog legs: `get_job`, `github.actions.job_log`,
 `list_workflow_run_artifacts`, `github.actions.artifact_file`,

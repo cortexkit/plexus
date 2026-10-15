@@ -85,7 +85,8 @@ This local copy lets the catalog tests run when CI checks out only Plexus.
 
 ## Plexus frozen-preset catalog request
 
-`plexus-worker-catalog-request.json` vendors the `worker-tool-and-text` case
+`plexus-worker-catalog-request.json` is the catalog request a coding worker's
+session sends a provider, taken from the `worker-tool-and-text` case
 from `cortexkit/prefrontal`, `test-vectors/fetch-plan-v1/catalog-requests.json`,
 last changed at commit `4ab3e1ed69e1619cfdb700ae2aa543a657aba38e` (identical at
 `33141054d1bb308800195bec76657f00feb18ea9`). The original file's SHA-256 is

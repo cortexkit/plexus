@@ -1096,11 +1096,12 @@ mod tests {
         }
     }
 
-    /// Replays the exact frames Broca's own request builders produce for a
-    /// worker plan that includes plexus (see fixtures/broca-frames/README.md).
-    /// Plexus once refused these, so every mason launch that planned plexus
-    /// failed: these bytes, not a shape reconstructed from Broca's source, are
-    /// what must keep working.
+    /// Replays the exact requests Broca, the model runner, sends when a coding
+    /// worker's session includes plexus's search tools: the tool-catalog fetch
+    /// and a later web_search call (fixtures/broca-frames/README.md). Both carry
+    /// a top-level preset name. Plexus once refused that field, which stopped
+    /// every worker launch whose plan included plexus. These are the bytes Broca
+    /// really sends, not a request rebuilt from reading its source.
     #[tokio::test]
     async fn broca_worker_frames_are_served() {
         let catalog: Value = serde_json::from_str(include_str!(

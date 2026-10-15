@@ -556,8 +556,10 @@ impl PlexusStore {
         )
     }
 
-    /// Flow reads have no trigger subscription, but share the poller's committed
-    /// trailing-hour ledger and exact admission/expiry calculation.
+    /// Reserves one GitHub Actions request for a flow read. Flow reads belong to no
+    /// watch, but they spend the same operator token as CI polling, so they draw on
+    /// the same rolling one-hour request ledger and use the same admission and
+    /// retry-time calculation as `reserve_github_actions_quota`.
     pub fn reserve_github_actions_flow_read_quota(
         &self,
         now: i64,

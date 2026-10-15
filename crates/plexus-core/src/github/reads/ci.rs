@@ -1,5 +1,7 @@
-//! CI reads restrict agent-stamped Basal flows to repositories
-//! bound to that agent's enabled bot, and authorize every API request independently.
+//! Reads of GitHub Actions data (job logs, artifact files, run status) for
+//! automated flows. Flows are scheduled scripts run by the Basal module; a flow
+//! acting for an agent sees only repositories bound to that agent's enabled bot.
+//! Every GitHub request a read makes is authorized and quota-counted separately.
 use super::*;
 
 /// Reserve one authenticated GitHub request immediately before dispatch. Storage

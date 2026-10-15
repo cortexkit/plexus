@@ -2280,9 +2280,12 @@ fn facade_tool_reply_inner(
             "transmission": "not_sent"
         }}));
     }
-    // Broca carries the catalog's frozen preset on every call. Accept only
-    // served catalog presets; capabilities select tools at plan time, and the
-    // preset changes no per-call authority checks.
+    // Broca, the model runner, copies the preset name from the session's plan
+    // ("worker", "reader" or "head") onto every request it sends a provider, the
+    // catalog fetch and each later tool call alike. Accept the presets plexus's
+    // tool catalog serves and refuse any other. Which plexus tools a session gets
+    // is decided by capability tags when the plan is built, and every call is
+    // still authorized on its own, so the preset grants nothing.
     if let Some(preset) = object.get("preset") {
         if !preset.as_str().is_some_and(tool_provider::serves_preset) {
             return Ok(json!({"error":{"code":"invalid_request", "field":"preset",
@@ -9979,7 +9982,9 @@ mod events_get_tests {
             )
             .unwrap();
 
-        // This is the canonical v2 shape stored before ci_job gained workflow_name.
+        // A ci_job envelope exactly as plexus stored it before the envelope gained
+        // workflow_name. Stored envelopes are never rewritten, so fetching this
+        // event must return these bytes and their original digest unchanged.
         let historical = r#"{"action":"updated","actor_logins":null,"actor_unknown":null,"completed_at":"2026-10-11T00:45:44Z","conclusion":"failure","event_key":"0000000000000000000000000000000000000000000000000000000000000003","head_branch":"main","head_sha":"0123456789abcdef","id":703,"kind":"ci_job","name":"legacy CI job","repo":"owner/repo","run_attempt":1,"run_id":702,"status":"completed","url":"https://github.com/owner/repo/actions/runs/702/job/703"}"#;
         let digest = format!("{:x}", sha2::Sha256::digest(historical.as_bytes()));
         let db = rusqlite::Connection::open(&path).unwrap();
