@@ -535,7 +535,7 @@ async fn workspace_filter_covers_every_repository_operation_class() {
         ),
         (
             "invoke",
-            json!({"op":"call","connection":"github-handle-app-x","action":"github.issue.search","args":{"repositories":["o/x"],"terms":"issue"}}),
+            json!({"op":"call","connection":"github-handle-app-x","action":"github.issue.search","args":{"repositories":["o/x"]}}),
         ),
         (
             "github",
@@ -868,4 +868,161 @@ async fn inside_audience_still_requires_basal_grant() {
         &before[..3],
         "ungranted call must not reserve, park or claim a receipt"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retired_watch_projects_do_not_shadow_live_membership() {
+    let mut core = Core::new(workspace()).await;
+    let (state, _, transport, scratch) = setup(core.audiences());
+    let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+    db.execute("INSERT INTO trigger_subscriptions (subscription_id,principal,connection_id,action,cadence_s,cursor_kind,cursor_state,fixed_args,schema_hash,status,created_at_ms,project_id,project_source)
+        VALUES ('old-watch','direct','github-handle-app-x','list_issues',300,'ordered_timestamp','{}','{\"owner\":\"O\",\"repo\":\"X\"}','hash','retired',1,'pj-old','entorhinal')", []).unwrap();
+    for status in ["active", "suspended"] {
+        db.execute(
+            "UPDATE trigger_subscriptions SET status=?1 WHERE subscription_id='watch'",
+            [status],
+        )
+        .unwrap();
+        let reply = call(&state, "github_read", read_args("o/x"), Some(scope(None)));
+        assert!(
+            reply.get("result").is_some(),
+            "retired watch must not shadow live project: {reply}"
+        );
+    }
+    assert_eq!(transport.requests().len(), 2);
+    db.execute("UPDATE trigger_subscriptions SET project_id=CASE subscription_id WHEN 'watch' THEN 'pj-outside' ELSE 'pj-a' END", []).unwrap();
+    quiet_refusal(
+        &state,
+        &transport,
+        &scratch,
+        "github_read",
+        read_args("o/x"),
+        "flow_audience_excludes_repository",
+    );
+}
+
+fn grant_search(store: &PlexusStore) {
+    store
+        .insert_grant(&plexus_core::GrantInput {
+            grant_id: "basal-search".into(),
+            principal: "direct".into(),
+            connection_id: "github-handle-app-x".into(),
+            grantee_principal: "reserved:basal".into(),
+            risk_ceiling: "read".into(),
+            action_selectors: vec!["github.issue.search".into()],
+            authority_kind: "invoke".into(),
+            expires_at: None,
+        })
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_invoke_free_text_queries_are_unresolved() {
+    let mut core = Core::new(workspace()).await;
+    let (state, store, transport, scratch) = setup(core.audiences());
+    grant_search(&store);
+    let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+    // Model a discovered search schema accepting the query aliases, so a
+    // missing audience fence cannot be hidden by a vendor-schema refusal.
+    let schema = json!({"type":"object","properties":{"repositories":{"type":"array","items":{"type":"string"}}},"required":["repositories"],"additionalProperties":true});
+    db.execute("UPDATE catalog_actions SET schema_json=?1,schema_hash=?2 WHERE principal='direct' AND connection_id='github-handle-app-x' AND name='github.issue.search'",
+        [schema.to_string(), plexus_core::jcs_sha256(&schema).unwrap()]).unwrap();
+    let safe = json!({"op":"call","connection":"github-handle-app-x","action":"github.issue.search","args":{"repositories":["o/x"]}});
+    let reply = call(&state, "invoke", safe.clone(), Some(scope(None)));
+    assert!(
+        reply.get("result").is_some(),
+        "query-free invoke must reach its granted transport: {reply}"
+    );
+    assert_eq!(transport.requests().len(), 1);
+    for field in ["q", "query", "terms"] {
+        for value in [
+            json!("repo:other/secret"),
+            Value::Null,
+            json!({"text":"repo:other/secret"}),
+        ] {
+            let mut request = safe.clone();
+            request["args"][field] = value;
+            let reply = quiet_refusal(
+                &state,
+                &transport,
+                &scratch,
+                "invoke",
+                request,
+                "flow_audience_excludes_repository",
+            );
+            assert_eq!(reply["error"]["repository"], "<unresolved>");
+            assert_eq!(reply["error"]["transmission"], "not_sent");
+        }
+    }
+    for app in ["github", "github_rest", "github_actions"] {
+        db.execute(
+            "UPDATE connections SET app_key=?1 WHERE connection_id='github-handle-app-x'",
+            [app],
+        )
+        .unwrap();
+        for field in ["query", "q", "terms"] {
+            let mut request = json!({"op":"call","connection":"github-handle-app-x","action":"search_issues","args":{"owner":"o","repo":"x"}});
+            request["args"][field] = json!("repo:other/secret");
+            let reply = quiet_refusal(
+                &state,
+                &transport,
+                &scratch,
+                "invoke",
+                request,
+                "flow_audience_excludes_repository",
+            );
+            assert_eq!(reply["error"]["repository"], "<unresolved>");
+        }
+    }
+    let mut nested = safe;
+    nested["args"]["options"] = json!([{"query":"repo:other/secret"}]);
+    quiet_refusal(
+        &state,
+        &transport,
+        &scratch,
+        "invoke",
+        nested,
+        "flow_audience_excludes_repository",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_read_search_free_text_is_unresolved() {
+    let mut core = Core::new(workspace()).await;
+    let (state, store, transport, scratch) = setup(core.audiences());
+    grant_search(&store);
+    let safe = json!({"action":"github.issue.search","repository":["o/x"],"args":{}});
+    let reply = call(&state, "github_read", safe.clone(), Some(scope(None)));
+    assert!(
+        reply.get("result").is_some(),
+        "repository-only search must remain available: {reply}"
+    );
+    assert_eq!(transport.requests().len(), 1);
+    assert_eq!(transport.requests()[0].args["q"], "repo:o/x");
+    for name in ["github_read", "github"] {
+        for (field, value) in [
+            ("terms", json!("fix")),
+            ("terms", json!("repo:other/secret")),
+            ("terms", json!("\"repo:other/secret\"")),
+            ("q", json!("repo:other/secret")),
+            ("query", json!("repo:other/secret")),
+            ("terms", Value::Null),
+        ] {
+            let mut request = safe.clone();
+            if name == "github" {
+                request["op"] = json!("read");
+            }
+            request["args"][field] = value;
+            let reply = quiet_refusal(
+                &state,
+                &transport,
+                &scratch,
+                name,
+                request,
+                "flow_audience_excludes_repository",
+            );
+            assert_eq!(reply["error"]["repository"], "<unresolved>");
+            assert_eq!(reply["error"]["transmission"], "not_sent");
+        }
+    }
 }

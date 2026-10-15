@@ -10243,3 +10243,51 @@ expect_red = ["flow_audience::tests::malformed_audience_contracts_fail_closed"]
 expect_message = "invalid audience reply must fail closed"
 build_timeout_s = 3600
 timeout_s = 90
+
+[[control]]
+id = "flow-audience-ignore-retired-watches"
+guards = "Retired watch projects cannot shadow a repository's current live project"
+file = "crates/plexus-core/src/store/repository_ownership.rs"
+old = "AND s.status <> 'retired'"
+new = "AND 1=1 /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::retired_watch_projects_do_not_shadow_live_membership"]
+expect_message = "retired watch must not shadow live project"
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-invoke-free-text-query"
+guards = "A GitHub invoke's free-text query cannot escape a workspace's checked repository selectors"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = "if has_github_query_field(fields) {"
+new = "if false /* NON-VACUITY BREAK */ && has_github_query_field(fields) {"
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::github_invoke_free_text_queries_are_unresolved"]
+expect_message = "audience guard must refuse"
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-read-free-text-query"
+guards = "Workspace github_read searches use only checked repositories, never caller-provided free text"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = "if github_search_read"
+new = "if false /* NON-VACUITY BREAK */ && github_search_read"
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::github_read_search_free_text_is_unresolved"]
+expect_message = "audience guard must refuse"
+build_timeout_s = 3600
+timeout_s = 90

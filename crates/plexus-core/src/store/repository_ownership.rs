@@ -17,6 +17,8 @@ impl PlexusStore {
     /// Resolve a repository's project from watch rows populated by entorhinal's
     /// project registry. Operator-set project labels are annotations, not proof
     /// that a workspace owns the repository, so they cannot grant access.
+    /// Retired rows preserve obsolete ownership; suspended rows still describe
+    /// the repository's current watches and must continue to participate.
     pub fn entorhinal_repository_project(
         &self,
         repository: &str,
@@ -30,6 +32,7 @@ impl PlexusStore {
                 FROM trigger_subscriptions s JOIN connections c
                 ON c.principal=s.principal AND c.connection_id=s.connection_id
                 WHERE c.app_key IN ('github','github_actions','github_rest')
+                AND s.status <> 'retired'
                 AND s.project_source = 'entorhinal' AND s.project_id IS NOT NULL
                 AND lower(json_extract(s.fixed_args,'$.owner'))=lower(?1)
                 AND lower(json_extract(s.fixed_args,'$.repo'))=lower(?2)",

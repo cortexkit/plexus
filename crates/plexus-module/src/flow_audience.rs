@@ -185,6 +185,21 @@ fn excludes(repository: &str) -> Value {
         "message":"flow audience excludes repository", "transmission":"not_sent"}})
 }
 
+// The REST search catalog declares terms and q; MCP search schemas are
+// discovered at runtime, so query is rejected too. Free text can contain repository
+// qualifiers independent of an otherwise valid owner/repo selection.
+const GITHUB_QUERY_FIELDS: &[&str] = &["query", "q", "terms"];
+
+fn has_github_query_field(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            GITHUB_QUERY_FIELDS.contains(&key.as_str()) || has_github_query_field(value)
+        }),
+        Value::Array(values) => values.iter().any(has_github_query_field),
+        _ => false,
+    }
+}
+
 pub(crate) fn check_call(
     state: &ModuleState,
     audience: &Audience,
@@ -193,6 +208,13 @@ pub(crate) fn check_call(
 ) -> Result<(), Value> {
     if !matches!(audience, Audience::Workspace { .. }) {
         return Ok(());
+    }
+    let github_search_read = (name == manifest::GITHUB_READ_TOOL
+        || (name == manifest::GITHUB_TOOL
+            && args.get("op").and_then(Value::as_str) == Some("read")))
+        && args.get("action").and_then(Value::as_str) == Some("github.issue.search");
+    if github_search_read && args.get("args").is_some_and(has_github_query_field) {
+        return Err(excludes("<unresolved>"));
     }
     let repository = match name {
         manifest::GITHUB_READ_TOOL => Some(args.get("repository").cloned().unwrap_or(Value::Null)),
@@ -220,6 +242,9 @@ pub(crate) fn check_call(
                 )
             }) {
                 let fields = args.get("args").unwrap_or(&Value::Null);
+                if has_github_query_field(fields) {
+                    return Err(excludes("<unresolved>"));
+                }
                 // Handle-backed calls use repository/repositories, ordinary REST
                 // connections use owner/repo. Every supplied selector is checked.
                 let mut repositories = Vec::new();
