@@ -3998,10 +3998,11 @@ impl OriginRefusal {
 }
 
 /// Read and check a tool request's top-level `origin`: absent or `null` is
-/// no origin; otherwise it must be an object with exactly `carrier`, a
+/// no origin; otherwise it must be an object with `carrier`, a
 /// subc-protocol [`Principal`] object such as
 /// `{"kind": "reserved", "module_id": "broca"}`, and `call_key`, a string the
-/// protocol's call-key validator accepts. The carrier is returned in the
+/// protocol's call-key validator accepts, plus the protocol's optional
+/// `message_position`, which is checked and ignored. The carrier is returned in the
 /// stored principal form (`reserved:broca`), the same form as the carrier
 /// principal every record is keyed on.
 ///
@@ -4029,12 +4030,27 @@ fn relay_origin_of(
     };
     if origin
         .keys()
-        .any(|member| member != "carrier" && member != "call_key")
+        .any(|member| !matches!(member.as_str(), "carrier" | "call_key" | "message_position"))
     {
         return Err(OriginRefusal::new(
             ORIGIN_FIELD,
-            "origin must have only the members carrier and call_key",
+            "origin must have only the members carrier, call_key and message_position",
         ));
+    }
+    // The protocol's optional position of the call within the model message.
+    // Plexus orders nothing by it, so it is checked for shape and then ignored;
+    // a forwarder can send one origin shape to every module.
+    if let Some(position) = origin.get("message_position") {
+        let valid =
+            serde_json::from_value::<subc_protocol::tool_call::MessagePosition>(position.clone())
+                .ok()
+                .is_some_and(|position| validate_call_key(&position.message_id).is_ok());
+        if !valid {
+            return Err(OriginRefusal::new(
+                subc_protocol::tool_call::ORIGIN_MESSAGE_ID_FIELD,
+                "origin.message_position must be {message_id, index} with a valid message_id",
+            ));
+        }
     }
     let carrier = origin
         .get("carrier")

@@ -10080,3 +10080,38 @@ expect_red = ["tool_provider::tests::role_describe_route_lists_required_ops_and_
 expect_message = "role.describe must advertise capability-tag selection"
 build_timeout_s = 3600
 timeout_s = 60
+
+[[control]]
+id = "origin-message-position-accepted"
+guards = "the protocol's optional origin.message_position is accepted and ignored, so a forwarder can send one origin shape to every module"
+file = "crates/plexus-module/src/lib.rs"
+old = '''.any(|member| !matches!(member.as_str(), "carrier" | "call_key" | "message_position"))'''
+new = '''.any(|member| !matches!(member.as_str(), "carrier" | "call_key")) // NON-VACUITY BREAK'''
+test_file = "crates/plexus-module/src/web_search_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::an_origin_message_position_is_accepted_and_ignored"]
+expect_message = "a message position must not refuse the call"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "origin-message-position-checked"
+guards = "a malformed origin.message_position is refused by field rather than ignored"
+file = "crates/plexus-module/src/lib.rs"
+old = '''        if !valid {
+            return Err(OriginRefusal::new(
+                subc_protocol::tool_call::ORIGIN_MESSAGE_ID_FIELD,'''
+new = '''        if !valid && false {
+            return Err(OriginRefusal::new(
+                subc_protocol::tool_call::ORIGIN_MESSAGE_ID_FIELD,'''
+test_file = "crates/plexus-module/src/web_search_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::a_malformed_origin_is_refused_by_field_before_dispatch"]
+build_timeout_s = 3600
+timeout_s = 60

@@ -2328,6 +2328,23 @@ async fn a_malformed_origin_is_refused_by_field_before_dispatch() {
             json!({"carrier": reserved(format!("SENTINEL{}", "m".repeat(250))), "call_key": "k"}),
             "origin.carrier",
         ),
+        (
+            "a message position that is not an object",
+            json!({"carrier": reserved("broca".into()), "call_key": "k", "message_position": "SENTINEL"}),
+            "origin.message_position.message_id",
+        ),
+        (
+            "a message position with a bad message id",
+            json!({"carrier": reserved("broca".into()), "call_key": "k",
+                "message_position": {"message_id": "SENTINEL x", "index": 0}}),
+            "origin.message_position.message_id",
+        ),
+        (
+            "a message position with a negative index",
+            json!({"carrier": reserved("broca".into()), "call_key": "k",
+                "message_position": {"message_id": "msg_SENTINEL", "index": -1}}),
+            "origin.message_position.message_id",
+        ),
     ] {
         fixture
             .assert_refused(
@@ -2343,6 +2360,45 @@ async fn a_malformed_origin_is_refused_by_field_before_dispatch() {
             )
             .await;
     }
+}
+
+/// The protocol's optional `origin.message_position` is accepted and ignored,
+/// so a forwarder can send one origin shape to every module: the call runs and
+/// its audit rows record the same carrier and key as without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_origin_message_position_is_accepted_and_ignored() {
+    let fixture = Fixture::new("origin-message-position");
+    let reply = fixture
+        .send(
+            aft(),
+            json!({
+                "name": manifest::WEB_SEARCH_TOOL,
+                "arguments": {"query": "relayed"},
+                "call_key": "pf:1",
+                "origin": {
+                    "carrier": {"kind": "reserved", "module_id": "broca"},
+                    "call_key": "lin_7f3a9c2e",
+                    "message_position": {"message_id": "msg_01AbC", "index": 2},
+                },
+            }),
+        )
+        .await;
+    assert!(
+        reply.get("error").is_none(),
+        "a message position must not refuse the call: {reply}"
+    );
+    assert_eq!(fixture.requests(), 1, "{reply}");
+    assert!(
+        fixture
+            .origin_rows()
+            .iter()
+            .any(
+                |(_, carrier, key)| carrier.as_deref() == Some("reserved:broca")
+                    && key.as_deref() == Some("lin_7f3a9c2e")
+            ),
+        "origin is still recorded: {:?}",
+        fixture.origin_rows()
+    );
 }
 
 /// `origin.call_key` must pass the protocol's call-key validator: each key
