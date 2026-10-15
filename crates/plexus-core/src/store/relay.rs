@@ -286,7 +286,6 @@ fn admit(
         .flatten();
     if recorded.is_some_and(|old| old != repo_id) {
         event_outbox::record_repo_id_resolution_on_conn(conn, &repo, Some(repo_id), received)?;
-        diag!(warn relay: "repository identity changed; watches suspended");
         return Ok(Err(DropReason::RepositoryIdentityChanged));
     }
     if event.event == "issue_comment" && event.body["issue"].get("pull_request").is_some() {

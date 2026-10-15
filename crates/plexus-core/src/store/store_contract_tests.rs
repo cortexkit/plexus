@@ -1479,6 +1479,89 @@ fn webhook_identity_change_updates_cache_before_a_replacement_watch() {
 }
 
 #[test]
+fn relay_identity_changes_warn_once_per_new_id() {
+    if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
+        logging::init_child();
+        let store = fixture();
+        store
+            .record_repo_id_resolution("owner/repo", Some(1), 1000)
+            .unwrap();
+        store
+            .relay_hello(
+                "github",
+                &relay::Hello {
+                    v: 1,
+                    source: "github".into(),
+                    stream_id: "stream".into(),
+                    next_seq: 1,
+                    oldest_seq: 1,
+                    last_acked_seq: 0,
+                },
+            )
+            .unwrap();
+        for (seq, id) in [(1, 2), (2, 2), (3, 3), (4, 3)] {
+            store
+                .commit_relay_event(
+                    "github",
+                    "stream",
+                    &relay::Event {
+                        seq,
+                        delivery_id: format!("delivery-{seq}"),
+                        event: "issues".into(),
+                        action: None,
+                        installation_id: 1,
+                        received_at: "2026-10-14T16:00:00.000Z".into(),
+                        stub: None,
+                        body: json!({"repository":{"full_name":"owner/repo","id":id}}),
+                    },
+                )
+                .unwrap();
+        }
+        return;
+    }
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "storage::store_contract_tests::relay_identity_changes_warn_once_per_new_id",
+            "--nocapture",
+        ])
+        .env("PLEXUS_LOG_STDERR_CHILD", "1");
+    let output = bounded::child_output(
+        &mut command,
+        std::time::Duration::from_secs(10),
+        "identity change diagnostic child",
+    )
+    .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "identity change diagnostic child failed: {stderr}"
+    );
+    let warnings: Vec<_> = stderr
+        .lines()
+        .filter_map(|line| cortexkit_log::parse_line(line).ok())
+        .filter(|line| line.level == cortexkit_log::ParsedLevel::Warn)
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        2,
+        "one warning per identity change, not per webhook: {stderr}"
+    );
+    assert!(warnings.iter().all(|line| line.logger == "plexus.storage"));
+    for message in [
+        "identity changed from 1 to 2",
+        "identity changed from 2 to 3",
+    ] {
+        assert_eq!(
+            stderr.lines().filter(|line| line.contains(message)).count(),
+            1,
+            "identity warning must include old and new ids: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn expired_invoke_grants_do_not_widen_search_candidates() {
     let store = fixture();
     store

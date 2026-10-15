@@ -1,6 +1,96 @@
 # These controls break authority, crash-safety and wire-contract guards to prove that named tests detect their loss. See docs/mutations.md.
 # Each edit is temporary; ckdev-mutate restores source and verifies Cargo.lock.
 [[control]]
+id = "relay-identity-cache-through-ownership"
+guards = "A changed webhook identity commits the new shared cache id with suspension so ownership replacements survive the next webhook"
+file = "crates/plexus-core/src/store/relay.rs"
+old = 'event_outbox::record_repo_id_resolution_on_conn(conn, &repo, Some(repo_id), received)?;'
+new = '''conn.execute("UPDATE trigger_subscriptions SET status='suspended',suspended_reason='repository_identity_changed',generation=generation+1
+            WHERE status='active' AND lower(json_extract(fixed_args,'$.owner') || '/' || json_extract(fixed_args,'$.repo'))=lower(?1)", [&repo])?; /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/store/repository_ownership.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::repository_ownership_store::tests::webhook_identity_change_survives_ownership_and_later_delivery"]
+expect_message = "identity change must commit the new id and keep replacements active after the next webhook"
+build_timeout_s = 3600
+[[control]]
+id = "relay-identity-single-warning"
+guards = "The shared resolution helper is the sole warning source for each changed identity, not an additional relay warning"
+file = "crates/plexus-core/src/store/relay.rs"
+old = 'event_outbox::record_repo_id_resolution_on_conn(conn, &repo, Some(repo_id), received)?;'
+new = '''event_outbox::record_repo_id_resolution_on_conn(conn, &repo, Some(repo_id), received)?;
+        diag!(warn relay: "repository identity changed; watches suspended"); /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::store_contract_tests::relay_identity_changes_warn_once_per_new_id"]
+expect_message = "one warning per identity change, not per webhook"
+build_timeout_s = 3600
+[[control]]
+id = "ownership-retire-replaced-trio"
+guards = "Ownership retires identity-suspended predecessors even when the active replacement trio already exists"
+file = "crates/plexus-core/src/repository_ownership.rs"
+old = 'report.changed += store.retire_replaced_repository_watches()?;'
+new = '/* NON-VACUITY BREAK: leave replaced identity watches suspended. */'
+test_file = "crates/plexus-core/src/store/repository_ownership.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::repository_ownership_store::tests::identity_retirement_waits_for_trio_and_preserves_readable_events"]
+expect_message = "replaced identity-suspended watches must be retired without deletion"
+build_timeout_s = 3600
+[[control]]
+id = "ownership-retire-complete-trio"
+guards = "Identity predecessors remain suspended until all three active automatic replacements exist"
+file = "crates/plexus-core/src/store/repository_ownership.rs"
+old = 'GROUP BY repo_name HAVING count(DISTINCT action)=3'
+new = 'GROUP BY repo_name HAVING count(DISTINCT action)>=2 /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/store/repository_ownership.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::repository_ownership_store::tests::identity_retirement_waits_for_trio_and_preserves_readable_events"]
+expect_message = "identity retirement must wait for an active replacement trio"
+build_timeout_s = 3600
+[[control]]
+id = "ownership-retire-retains-events"
+guards = "Retirement is a state change, never destructive cleanup of events still visible by stored repository name"
+file = "crates/plexus-core/src/store/repository_ownership.rs"
+old = '''WHERE principal='direct' AND subscription_id=?1", [id])?;
+                    ownership_audit(conn, "direct", id, "retire",'''
+new = '''WHERE principal='direct' AND subscription_id=?1", [id])?;
+                    conn.execute("DELETE FROM trigger_events WHERE subscription_id=?1", [id])?; /* NON-VACUITY BREAK */
+                    ownership_audit(conn, "direct", id, "retire",'''
+test_file = "crates/plexus-core/src/store/repository_ownership.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::repository_ownership_store::tests::identity_retirement_waits_for_trio_and_preserves_readable_events"]
+expect_message = "retired watch events must remain readable through the stored repo name"
+build_timeout_s = 3600
+[[control]]
+id = "ownership-retire-audit-atomic"
+guards = "Identity retirement and its ownership audit are inseparable"
+file = "crates/plexus-core/src/store/repository_ownership.rs"
+old = '''ownership_audit(conn, "direct", id, "retire",
+                        &serde_json::json!({"reason":"repository_identity_changed","replacement":"active_trio"}).to_string())?;'''
+new = '/* NON-VACUITY BREAK: omit the retirement audit. */'
+test_file = "crates/plexus-core/src/store/repository_ownership.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::repository_ownership_store::tests::identity_retirement_waits_for_trio_and_preserves_readable_events"]
+expect_message = "retirement must fail when its audit cannot commit"
+build_timeout_s = 3600
+[[control]]
 id = "mcp-pool-sweep-cross-connection-concurrency"
 guards = "MCP pool maintenance skips a busy entry instead of waiting under the shared client map, so another connection can dispatch its RPC"
 file = "crates/plexus-core/src/mcp_remote.rs"
