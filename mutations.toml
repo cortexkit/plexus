@@ -1,6 +1,102 @@
 # These controls break authority, crash-safety and wire-contract guards to prove that named tests detect their loss. See docs/mutations.md.
 # Each edit is temporary; ckdev-mutate restores source and verifies Cargo.lock.
 [[control]]
+id = "frozen-preset-accepted"
+guards = "Served frozen presets reach catalog, role metadata and ordinary search authority checks"
+file = "crates/plexus-module/src/lib.rs"
+old = 'if !preset.as_str().is_some_and(tool_provider::serves_preset) {'
+new = 'if true || !preset.as_str().is_some_and(tool_provider::serves_preset) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/tool_provider.rs"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tool_provider::tests::frozen_catalog_presets_return_exactly_both_search_tools", "tool_provider::tests::frozen_preset_preserves_search_refusals_and_role_description"]
+runner = "cargo"
+build_timeout_s = 3600
+[[control]]
+id = "frozen-catalog-preset-agreement"
+guards = "The envelope and catalog argument presets must agree when both are present"
+file = "crates/plexus-module/src/lib.rs"
+old = 'if name == cortexkit_role_tool_provider::ops::TOOL_CATALOG'
+new = 'if false && name == cortexkit_role_tool_provider::ops::TOOL_CATALOG /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/tool_provider.rs"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tool_provider::tests::frozen_catalog_preset_must_match_argument_preset"]
+expect_message = "Error"
+runner = "cargo"
+build_timeout_s = 3600
+[[control]]
+id = "provider-refusal-warning"
+guards = "Metadata and top-level preset refusals emit one wire warning per call"
+file = "crates/plexus-module/src/lib.rs"
+old = 'log_tool_provider_refusal(frame, object, route_bindings, name, error)?;'
+new = 'if false { log_tool_provider_refusal(frame, object, route_bindings, name, error)?; } /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/tool_provider.rs"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tool_provider::tests::provider_refusals_warn_once_without_request_values"]
+expect_message = "each refusal must warn exactly once"
+runner = "cargo"
+build_timeout_s = 3600
+[[control]]
+id = "provider-refusal-key-only-warning"
+guards = "Refusal diagnostics list argument and params keys, never their values"
+file = "crates/plexus-module/src/lib.rs"
+old = '.map(|object| object.keys().map(|key| diagnostic_label(key)).collect())'
+new = '.map(|object| vec![format!("{object:?}")]) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/tool_provider.rs"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tool_provider::tests::provider_refusals_warn_once_without_request_values"]
+expect_message = "request values must not be logged"
+runner = "cargo"
+build_timeout_s = 3600
+[[control]]
+id = "provider-refusal-preset-log-validation"
+guards = "Only protocol-validated preset names may appear in refusal diagnostics"
+file = "crates/plexus-module/src/lib.rs"
+old = '.filter(|preset| subc_protocol::tool_call::validate_preset(preset).is_ok())'
+new = '.filter(|_| true) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/tool_provider.rs"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tool_provider::tests::provider_refusals_warn_once_without_request_values"]
+runner = "cargo"
+build_timeout_s = 3600
+[[control]]
+id = "provider-refusal-capability-redaction"
+guards = "Unserved capability values echoed in responses are not copied to logs"
+file = "crates/plexus-module/src/lib.rs"
+old = 'if error["detail"].get("capability").is_some() {'
+new = 'if false && error["detail"].get("capability").is_some() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/tool_provider.rs"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tool_provider::tests::provider_refusals_warn_once_without_request_values"]
+expect_message = "request values must not be logged"
+runner = "cargo"
+build_timeout_s = 3600
+[[control]]
+id = "provider-refusal-deserialization-redaction"
+guards = "Malformed catalog values in deserialization errors are not copied to logs"
+file = "crates/plexus-module/src/lib.rs"
+old = '} else if error["detail"]["field"] == "arguments" {'
+new = '} else if false && error["detail"]["field"] == "arguments" { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/tool_provider.rs"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tool_provider::tests::provider_refusals_warn_once_without_request_values"]
+expect_message = "request values must not be logged"
+runner = "cargo"
+build_timeout_s = 3600
+[[control]]
 id = "relay-identity-cache-through-ownership"
 guards = "A changed webhook identity commits the new shared cache id with suspension so ownership replacements survive the next webhook"
 file = "crates/plexus-core/src/store/relay.rs"
@@ -611,14 +707,14 @@ build_timeout_s = 3600
 
 [[control]]
 id = "preset-refuses-no-fallback"
-guards = "A present preset never falls back silently to the fixed facade"
+guards = "An unserved or malformed preset never falls back silently to the facade"
 file = "crates/plexus-module/src/lib.rs"
 old = "if let Some(preset) = object.get(\"preset\") {"
 new = "if let Some(preset) = object.get(\"ignored_preset\") { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/web_search_tests.rs"
 package = "plexus-module"
 target = "--lib"
-expect_red = ["web_search_tests::present_presets_refuse_by_name_before_dispatch_or_audit"]
+expect_red = ["web_search_tests::unserved_presets_refuse_by_name_before_dispatch_or_audit"]
 expect_message = "invalid_request"
 runner = "cargo"
 build_timeout_s = 3600

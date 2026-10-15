@@ -2182,6 +2182,67 @@ fn facade_tool_reply(
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
 ) -> Result<Value, ModuleError> {
+    let reply = facade_tool_reply_inner(frame, object, state, route_bindings)?;
+    let name = object.get("name").and_then(Value::as_str).unwrap_or("");
+    if let Some(error) = reply.get("error") {
+        if tool_provider::is_metadata_op(name)
+            || (object.contains_key("preset") && error["field"] == "preset")
+        {
+            log_tool_provider_refusal(frame, object, route_bindings, name, error)?;
+        }
+    }
+    Ok(reply)
+}
+
+fn log_tool_provider_refusal(
+    frame: &Frame,
+    object: &serde_json::Map<String, Value>,
+    route_bindings: &Arc<RouteBindings>,
+    name: &str,
+    error: &Value,
+) -> Result<(), ModuleError> {
+    fn keys(value: Option<&Value>) -> Vec<String> {
+        value
+            .and_then(Value::as_object)
+            .map(|object| object.keys().map(|key| diagnostic_label(key)).collect())
+            .unwrap_or_default()
+    }
+    let caller = route_bindings
+        .binding(frame.header.channel, frame.header.epoch)?
+        .map(|binding| principal::principal_key(&binding.principal))
+        .unwrap_or_else(|| "unbound".to_owned());
+    let arguments = object.get("arguments");
+    let argument_keys = keys(arguments);
+    let params_keys = keys(arguments.and_then(|arguments| arguments.get("params")));
+    let preset = object
+        .get("preset")
+        .and_then(Value::as_str)
+        .filter(|preset| subc_protocol::tool_call::validate_preset(preset).is_ok())
+        .map(|preset| format!(" preset={preset}"))
+        .unwrap_or_default();
+    // Catalog errors may echo a capability or a malformed JSON value to the
+    // caller. Logs retain the reason but must not copy those request values.
+    let message = if error["detail"].get("capability").is_some() {
+        "plexus serves no requested capability (value redacted)"
+    } else if error["detail"]["field"] == "arguments" {
+        "malformed catalog arguments (values redacted)"
+    } else {
+        error["message"].as_str().unwrap_or("request refused")
+    };
+    let op = diagnostic_label(name);
+    let caller = diagnostic_label(&caller);
+    let code = error["code"].as_str().unwrap_or("unknown");
+    let message = diagnostic_label(message);
+    eprintln!(warn wire: "tool call refused: op={op} caller={caller} code={code} message={message} argument_keys={argument_keys:?} params_keys={params_keys:?}{preset}");
+    Ok(())
+}
+
+fn facade_tool_reply_inner(
+    frame: &Frame,
+    object: &serde_json::Map<String, Value>,
+    state: &Arc<ModuleState>,
+    route_bindings: &Arc<RouteBindings>,
+) -> Result<Value, ModuleError> {
     let held_deadline = std::time::Instant::now() + plexus_core::consent_card::HELD_CALL_BUDGET;
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
@@ -2219,21 +2280,22 @@ fn facade_tool_reply(
             "transmission": "not_sent"
         }}));
     }
-    // Plexus serves one fixed facade: omission selects it explicitly. A named
-    // preset must never silently fall back to that facade.
+    // Broca carries the catalog's frozen preset on every call. Accept only
+    // served catalog presets; capabilities select tools at plan time, and the
+    // preset changes no per-call authority checks.
     if let Some(preset) = object.get("preset") {
-        let shape = match preset.as_str() {
-            Some(value) => subc_protocol::tool_call::validate_preset(value)
-                .err()
-                .map(|error| error.to_string()),
-            None => Some("preset must be a string".to_string()),
-        };
-        let message = match shape {
-            Some(reason) => format!("preset {preset} refused: {reason}; plexus serves no presets"),
-            None => format!("preset {preset} refused: plexus serves no presets"),
-        };
-        return Ok(json!({"error":{"code":"invalid_request", "field":"preset",
-            "preset":preset, "message":message}}));
+        if !preset.as_str().is_some_and(tool_provider::serves_preset) {
+            return Ok(json!({"error":{"code":"invalid_request", "field":"preset",
+                "preset":preset, "message":"unknown or malformed plexus preset"}}));
+        }
+        if name == cortexkit_role_tool_provider::ops::TOOL_CATALOG
+            && arguments
+                .get("preset")
+                .is_some_and(|argument| argument != preset)
+        {
+            return Ok(json!({"error":{"code":"invalid_request", "field":"preset",
+                "message":"top-level preset must equal arguments.preset"}}));
+        }
     }
     // `call_key` is the consumer's name for this call, a sibling of `name` and
     // `arguments`. Its shape is checked here, before any handler runs, so a

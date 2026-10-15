@@ -82,3 +82,20 @@ tools on a plan fetch, and then supply `params.capabilities` for the fixture's
 tools only from the capability params, not from the composition entry.
 
 This local copy lets the catalog tests run when CI checks out only Plexus.
+
+## Plexus frozen-preset catalog request
+
+`plexus-worker-catalog-request.json` vendors the `worker-tool-and-text` case
+from `cortexkit/prefrontal`, `test-vectors/fetch-plan-v1/catalog-requests.json`,
+last changed at commit `4ab3e1ed69e1619cfdb700ae2aa543a657aba38e` (identical at
+`33141054d1bb308800195bec76657f00feb18ea9`). The original file's SHA-256 is
+`b452afaa60085349bcc23f1531a0a720b5d6bcd7eafb5d6448aa2f812c3b13ab`.
+
+The provider and its composition tool item are replaced with Plexus and its two
+search tools; `params.exclude` becomes `params.capabilities` with the public code
+search and web search tags used by the prefrontal-core worker and reader plans.
+The AFT composition item and `step_transform_items` are unchanged. `system_text`
+is dropped because Plexus serves no system text and prefrontal-core gives it none. The
+request retains `preset`, `params`, and `composition`. Tests copy the request's
+preset to the top-level tool-call envelope, as Broca's catalog fetch does, and
+reuse the composition for the reader preset.
