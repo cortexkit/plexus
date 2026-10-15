@@ -286,6 +286,7 @@ pub fn reconcile_from(
         }
     }
     report.changed += store.reconcile_ci_cadence()?;
+    report.changed += store.retire_replaced_repository_watches()?;
     Ok(report)
 }
 

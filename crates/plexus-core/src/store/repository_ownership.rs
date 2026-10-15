@@ -14,6 +14,42 @@ pub(super) const WATCH_EXISTS_SQL: &str = "(s.status = 'active' OR (s.status = '
     AND COALESCE(s.suspended_reason, '') NOT IN ('repository_identity_changed', 'catalog_schema_mismatch')))";
 
 impl PlexusStore {
+    /// Retain the history of obsolete automatic watches without leaving them
+    /// resumable. Wait for a complete active replacement trio, including CI;
+    /// operational pauses and manually managed release watches are not replaced.
+    pub(crate) fn retire_replaced_repository_watches(&self) -> Result<usize, StoreError> {
+        self.inner.with_conn_fenced(|conn| {
+            atomic(conn, || {
+                let mut statement = conn.prepare(
+                    "WITH eligible AS (
+                        SELECT s.*, lower(json_extract(s.fixed_args,'$.owner') || '/' || json_extract(s.fixed_args,'$.repo')) AS repo_name
+                        FROM trigger_subscriptions s JOIN connections c
+                        ON c.principal=s.principal AND c.connection_id=s.connection_id
+                        WHERE s.principal='direct' AND c.status='active' AND (
+                            (s.connection_id='conn-github' AND c.app_key='github' AND s.action='list_issues') OR
+                            (s.connection_id='conn-github-prs' AND c.app_key='github' AND s.action='list_pull_requests') OR
+                            (s.connection_id='conn-github-actions' AND c.app_key='github_actions' AND s.action='list_workflow_runs'))
+                    ), replaced AS (
+                        SELECT repo_name FROM eligible WHERE status='active'
+                        GROUP BY repo_name HAVING count(DISTINCT action)=3
+                    )
+                    SELECT subscription_id FROM eligible WHERE status='suspended'
+                    AND suspended_reason='repository_identity_changed'
+                    AND repo_name IN (SELECT repo_name FROM replaced)",
+                )?;
+                let ids = statement.query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                for id in &ids {
+                    conn.execute("UPDATE trigger_subscriptions SET status='retired', generation=generation+1
+                        WHERE principal='direct' AND subscription_id=?1", [id])?;
+                    ownership_audit(conn, "direct", id, "retire",
+                        &serde_json::json!({"reason":"repository_identity_changed","replacement":"active_trio"}).to_string())?;
+                }
+                Ok(ids.len())
+            })
+        })
+    }
+
     pub(crate) fn repository_is_bot_bound(
         &self,
         owner: &str,
@@ -546,6 +582,10 @@ mod tests {
     }
 
     fn fixture(ci: bool) -> PlexusStore {
+        fixture_at(ci, ":memory:")
+    }
+
+    fn fixture_at(ci: bool, path: &str) -> PlexusStore {
         static ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let store = PlexusStore::open(&StorageDescriptor {
             module_id: "plexus".into(),
@@ -554,9 +594,7 @@ mod tests {
                 ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ),
             isolation: Isolation::Module,
-            backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
-            },
+            backend: StorageBackend::Sqlite { path: path.into() },
         })
         .unwrap();
         for source in [
@@ -1125,11 +1163,12 @@ mod tests {
         assert_eq!(replacement.cursor_state["open"], json!({}));
         for id in old_pair
             .iter()
+            .filter(|w| w.action != "get_latest_release")
             .map(|w| w.id.as_str())
             .chain([old_ci.subscription_id.as_str()])
         {
             let row = store.subscription("direct", id).unwrap().unwrap();
-            assert_eq!(row.status, "suspended");
+            assert_eq!(row.status, "retired");
             assert_eq!(
                 row.suspended_reason.as_deref(),
                 Some("repository_identity_changed")
@@ -1143,6 +1182,258 @@ mod tests {
         assert_eq!(
             release.suspended_reason.as_deref(),
             Some("repository_identity_changed")
+        );
+    }
+
+    fn webhook(seq: u64, repo_id: i64) -> super::super::relay::Event {
+        super::super::relay::Event {
+            seq,
+            delivery_id: format!("delivery-{seq}"),
+            event: "issues".into(),
+            action: Some("opened".into()),
+            installation_id: 1,
+            received_at: "2026-10-14T16:00:00.000Z".into(),
+            stub: None,
+            body: json!({"repository":{"full_name":"OWNER/Repo","id":repo_id},
+                "issue":{"number":seq,"created_at":"2026-10-14T16:00:00Z",
+                    "updated_at":"2026-10-14T16:00:00Z"},"sender":{"login":"alice"}}),
+        }
+    }
+
+    fn start_relay(store: &PlexusStore) {
+        store
+            .relay_hello(
+                "github",
+                &super::super::relay::Hello {
+                    v: 1,
+                    source: "github".into(),
+                    stream_id: "stream".into(),
+                    next_seq: 1,
+                    oldest_seq: 1,
+                    last_acked_seq: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    fn identity_counter(store: &PlexusStore, name: &str) -> i64 {
+        store
+            .inner
+            .with_read(|conn| {
+                conn.query_row(
+                    "SELECT COALESCE((SELECT value FROM event_outbox_counters WHERE name=?1),0)",
+                    [name],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn webhook_identity_change_survives_ownership_and_later_delivery() {
+        let scratch = crate::test_scratch::Scratch::database("identity-ownership");
+        let path = scratch.path().to_str().unwrap();
+        let store = fixture_at(true, path);
+        bind(&store);
+        let registry = Registry::owned();
+        assert_eq!(reconcile(&store, &registry, 1000).unwrap().created, 3);
+        store
+            .record_repo_id_resolution("owner/repo", Some(101), 1000)
+            .unwrap();
+        start_relay(&store);
+        store
+            .commit_relay_event("github", "stream", &webhook(1, 202))
+            .unwrap();
+        // A second connection observes committed state, not pending writes on the relay's connection.
+        let reader = rusqlite::Connection::open(path).unwrap();
+        let id: i64 = reader
+            .query_row(
+                "SELECT repo_id FROM github_repo_id_cache WHERE repo='owner/repo'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let suspended: i64 = reader.query_row("SELECT count(*) FROM trigger_subscriptions WHERE status='suspended' AND suspended_reason='repository_identity_changed' AND generation=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(suspended, 3, "cache and suspension must commit together");
+        assert_eq!(reconcile(&store, &registry, 3000).unwrap().created, 3);
+        let mut issue = webhook(2, 202);
+        store
+            .commit_relay_event("github", "stream", &issue)
+            .unwrap();
+        let active: i64 = reader
+            .query_row(
+                "SELECT count(*) FROM trigger_subscriptions WHERE status='active'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((id, active), (202, 3),
+            "identity change must commit the new id and keep replacements active after the next webhook");
+        issue.seq = 3;
+        issue.delivery_id = "pr".into();
+        issue.event = "pull_request".into();
+        issue.body["pull_request"] = issue.body["issue"].clone();
+        store
+            .commit_relay_event("github", "stream", &issue)
+            .unwrap();
+        issue.seq = 4;
+        issue.delivery_id = "ci".into();
+        issue.event = "workflow_run".into();
+        issue.body["workflow_run"] = json!({"id":55,"run_attempt":1,"status":"completed",
+            "conclusion":"success","updated_at":"2026-10-14T16:00:00Z"});
+        store
+            .commit_relay_event("github", "stream", &issue)
+            .unwrap();
+        assert_eq!(
+            store.drain_event_outbox(10).unwrap().len(),
+            3,
+            "later issue, PR and CI webhooks must be admitted to the outbox"
+        );
+        assert_eq!(
+            store
+                .record_repo_id_resolution("owner/repo", Some(202), 5000)
+                .unwrap(),
+            super::super::event_outbox::RepoIdUpdate::Resolved
+        );
+        assert_eq!(identity_counter(&store, "repository_identity_changed"), 1);
+        assert_eq!(
+            identity_counter(&store, "relay_drop_repository_identity_changed"),
+            1
+        );
+        assert_eq!(reconcile(&store, &registry, 6000).unwrap().created, 0);
+        for watch in store
+            .repository_watches()
+            .unwrap()
+            .into_iter()
+            .chain(store.ci_repository_watches().unwrap())
+        {
+            assert_eq!(
+                store
+                    .subscription("direct", &watch.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "active",
+                "fresh watches must survive same-id webhooks and poll resolution"
+            );
+        }
+        let total: i64 = reader
+            .query_row("SELECT count(*) FROM trigger_subscriptions", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(total, 6, "later ownership passes must not pile up watches");
+    }
+
+    #[test]
+    fn relay_identity_change_rolls_back_cache_and_suspension_on_commit_failure() {
+        let store = fixture(true);
+        bind(&store);
+        reconcile(&store, &Registry::owned(), 1000).unwrap();
+        store
+            .record_repo_id_resolution("owner/repo", Some(101), 1000)
+            .unwrap();
+        start_relay(&store);
+        store.inner.with_conn_fenced(|conn| conn.execute_batch(
+            "CREATE TRIGGER fail_cursor BEFORE UPDATE ON relay_cursor BEGIN SELECT RAISE(ABORT,'injected cursor failure'); END;"
+        )).unwrap();
+        assert!(store
+            .commit_relay_event("github", "stream", &webhook(1, 202))
+            .is_err());
+        assert_eq!(
+            store.repo_id_cache("owner/repo").unwrap().unwrap().repo_id,
+            Some(101)
+        );
+        assert_eq!(identity_counter(&store, "repository_identity_changed"), 0);
+        assert_eq!(
+            store.relay_cursor("github").unwrap().unwrap().committed_seq,
+            0
+        );
+        assert_eq!(store.repository_watches().unwrap().len(), 2);
+        assert_eq!(store.ci_repository_watches().unwrap().len(), 1);
+        store
+            .inner
+            .with_conn_fenced(|conn| conn.execute_batch("DROP TRIGGER fail_cursor"))
+            .unwrap();
+        store
+            .commit_relay_event("github", "stream", &webhook(1, 202))
+            .unwrap();
+        assert_eq!(identity_counter(&store, "repository_identity_changed"), 1);
+    }
+
+    #[test]
+    fn identity_retirement_waits_for_trio_and_preserves_readable_events() {
+        use super::super::event_outbox::{EventLookupOutcome, EventReader};
+        let store = fixture(true);
+        bind(&store);
+        let registry = Registry::owned();
+        reconcile(&store, &registry, 1000).unwrap();
+        store
+            .record_repo_id_resolution("owner/repo", Some(101), 1000)
+            .unwrap();
+        start_relay(&store);
+        store
+            .commit_relay_event("github", "stream", &webhook(1, 101))
+            .unwrap();
+        let retained = store.drain_event_outbox(10).unwrap().remove(0);
+        store
+            .commit_relay_event("github", "stream", &webhook(2, 202))
+            .unwrap();
+        store
+            .create_repository_watches("owner", "repo", "P", 3000)
+            .unwrap();
+        assert_eq!(
+            store.retire_replaced_repository_watches().unwrap(),
+            0,
+            "identity retirement must wait for an active replacement trio"
+        );
+        let issue = store
+            .repository_watches()
+            .unwrap()
+            .into_iter()
+            .find(|w| w.action == "list_issues")
+            .unwrap();
+        assert_eq!(
+            store.create_ci_repository_watch(&issue, 3000).unwrap(),
+            Some(1)
+        );
+        store.inner.with_conn_fenced(|conn| conn.execute_batch(
+            "CREATE TRIGGER fail_retire BEFORE INSERT ON audit_journal WHEN NEW.action='retire' BEGIN SELECT RAISE(ABORT,'injected retirement audit failure'); END;"
+        )).unwrap();
+        assert!(
+            store.retire_replaced_repository_watches().is_err(),
+            "retirement must fail when its audit cannot commit"
+        );
+        assert_eq!(audits(&store, "retire").len(), 0);
+        store
+            .inner
+            .with_conn_fenced(|conn| conn.execute_batch("DROP TRIGGER fail_retire"))
+            .unwrap();
+        assert_eq!(
+            reconcile(&store, &registry, 4000).unwrap().changed,
+            3,
+            "replaced identity-suspended watches must be retired without deletion"
+        );
+        assert_eq!(store.retire_replaced_repository_watches().unwrap(), 0);
+        assert_eq!(audits(&store, "retire").len(), 3);
+        assert_eq!(
+            store
+                .subscription("direct", &retained.subscription_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "retired"
+        );
+        assert_eq!(
+            store
+                .event_by_key(
+                    &retained.event_key,
+                    EventReader::Agent { agent_id: "agent" },
+                    4000
+                )
+                .unwrap(),
+            EventLookupOutcome::Found(Box::new(retained)),
+            "retired watch events must remain readable through the stored repo name"
         );
     }
 
