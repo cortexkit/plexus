@@ -1096,6 +1096,44 @@ mod tests {
         }
     }
 
+    /// Replays the exact frames Broca's own request builders produce for a
+    /// worker plan that includes plexus (see fixtures/broca-frames/README.md).
+    /// Plexus once refused these, so every mason launch that planned plexus
+    /// failed: these bytes, not a shape reconstructed from Broca's source, are
+    /// what must keep working.
+    #[tokio::test]
+    async fn broca_worker_frames_are_served() {
+        let catalog: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/broca-frames/catalog-fetch.json"
+        ))
+        .unwrap();
+        let frame = send_request(subc_protocol::Principal::Direct, catalog).await;
+        assert_eq!(
+            frame.header.ty,
+            subc_protocol::FrameType::Response,
+            "Broca's catalog fetch must be answered: {}",
+            String::from_utf8_lossy(&frame.body)
+        );
+        let answer: CatalogAnswer = serde_json::from_slice(&frame.body).unwrap();
+        assert_eq!(names(&answer), ["web_search", "code_search"]);
+
+        let call: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/broca-frames/web-search-call.json"
+        ))
+        .unwrap();
+        let mut plain = call.clone();
+        let plain_object = plain.as_object_mut().unwrap();
+        plain_object.remove("preset");
+        plain_object.remove("tool_call_id");
+        let with_preset = send_request(subc_protocol::Principal::Direct, call).await;
+        let without = send_request(subc_protocol::Principal::Direct, plain).await;
+        assert_eq!(
+            (with_preset.header.ty, &with_preset.body),
+            (without.header.ty, &without.body),
+            "Broca's frozen preset and tool_call_id must not change a search call's answer"
+        );
+    }
+
     #[tokio::test]
     async fn provider_refusals_warn_once_without_request_values() {
         const TEST: &str =
