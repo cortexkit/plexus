@@ -762,53 +762,120 @@ async fn would_ask_keeps_grant_semantics_but_checks_audience_once() {
     }
 }
 
-#[test]
-#[ignore = "vectors not yet vendored"]
-fn upstream_flow_audience_vectors_decode_through_plexus() {
-    fn decode(path: &Path, count: &mut usize) {
-        for entry in fs::read_dir(path).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                decode(&path, count);
-                continue;
-            }
-            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-                continue;
-            }
-            let vector: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            let flow_id = vector
-                .pointer("/request/params/flow_id")
-                .or_else(|| vector.pointer("/request/flow_id"))
-                .or_else(|| vector.get("flow_id"))
-                .and_then(Value::as_str)
-                .expect("vector must identify its requested flow");
-            let reply = vector
-                .get("reply")
-                .or_else(|| vector.get("response"))
-                .unwrap_or(&vector)
-                .clone();
-            let parsed = parse(flow_id, reply);
-            if let Some(code) = vector.pointer("/expected/code").and_then(Value::as_str) {
-                assert_eq!(
-                    parsed.unwrap_err()["error"]["code"],
-                    code,
-                    "{}",
-                    path.display()
-                );
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upstream_flow_audience_vectors_decode_through_plexus() {
+    let records: Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/flow-audience-v1/records.json"
+    ))
+    .unwrap();
+    assert_eq!(records["version"], 1);
+    let cases = records["cases"].as_array().expect("upstream cases array");
+    assert_eq!(cases.len(), 9, "every published v1 case must be exercised");
+    let mut core = Core::new(Value::Null).await;
+    let audiences = core.audiences();
+    let mut names = std::collections::BTreeSet::new();
+    for case in cases {
+        let name = case["name"].as_str().expect("vector name");
+        assert!(names.insert(name), "duplicate upstream case: {name}");
+        let flow_id = case["request"]["params"]["flow_id"]
+            .as_str()
+            .expect("requested flow_id");
+        core.behavior(json!({"reply":case["reply"]}));
+        audiences.cache.lock().unwrap().clear();
+        let parsed = audiences.lookup(flow_id);
+        let calls = core.calls();
+        let sent = calls.last().expect("Plexus request recorded by core");
+        assert_eq!(sent["method"], case["request"]["method"], "{name}");
+        assert_eq!(sent["params"], json!({"flow_id":flow_id}), "{name}");
+        if name == "unknown-field" {
+            // This negative vector describes a malformed core request, not a
+            // request Plexus sends. Never copy its extra field into the lookup.
+            assert_eq!(
+                case["request"]["params"],
+                json!({"flow_id":flow_id,"extra":true})
+            );
+            assert_ne!(sent["params"], case["request"]["params"]);
+        } else {
+            assert_eq!(sent["params"], case["request"]["params"], "{name}");
+        }
+        // caller is the identity upstream used to produce the recorded reply.
+        // caller-refused simulates Basal asking core directly; replaying that
+        // reply never makes Plexus impersonate Basal. Our real lookup always
+        // authenticates with Plexus's own verified identity.
+        assert_eq!(
+            case["caller"],
+            if name == "caller-refused" {
+                "reserved:basal"
             } else {
-                assert!(parsed.is_ok(), "{}: {parsed:?}", path.display());
+                "reserved:plexus"
             }
-            *count += 1;
+        );
+        match name {
+            "global" | "workspace" | "agent" => {
+                let answer =
+                    parsed.unwrap_or_else(|error| panic!("{name} vector must parse: {error}"));
+                let expected = match name {
+                    "global" => Audience::Global,
+                    "workspace" => Audience::Workspace {
+                        workspace_id: "ws-a".into(),
+                        project_ids: vec!["project-a".into(), "project-b".into()],
+                    },
+                    "agent" => Audience::Agent {
+                        agent_id: "ag_b".into(),
+                    },
+                    _ => unreachable!(),
+                };
+                assert_eq!(answer.audience, expected, "{name}");
+                assert_eq!(answer.flow_id, flow_id, "{name}");
+                assert_eq!(
+                    answer.revision,
+                    case["reply"]["result"]["revision"].as_str().unwrap(),
+                    "{name}"
+                );
+            }
+            "flow-unknown" | "flow-not-approved" | "flow-audience-conflict" => {
+                let expected = match name {
+                    "flow-unknown" => "flow_unknown",
+                    "flow-not-approved" => "flow_not_approved",
+                    "flow-audience-conflict" => "flow_audience_conflict",
+                    _ => unreachable!(),
+                };
+                let refusal = parsed.unwrap_err();
+                assert_eq!(refusal["error"]["code"], expected, "{name}");
+                assert_eq!(
+                    refusal["error"]["message"], case["reply"]["error"]["message"],
+                    "{name}"
+                );
+                assert_eq!(refusal["error"]["transmission"], "not_sent", "{name}");
+            }
+            "membership-unavailable" | "caller-refused" | "unknown-field" => {
+                let refusal = parsed.unwrap_err();
+                assert_eq!(
+                    refusal["error"]["code"], "flow_audience_unavailable",
+                    "{name}"
+                );
+                assert_eq!(refusal["error"]["transmission"], "not_sent", "{name}");
+                assert!(
+                    refusal["error"]["cause"]
+                        .as_str()
+                        .unwrap()
+                        .contains(case["reply"]["error"]["code"].as_str().unwrap()),
+                    "{name}: {refusal}"
+                );
+            }
+            _ => panic!("upstream case requires an explicit expectation: {name}"),
         }
     }
-    let directory =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-vectors/flow-audience-v1");
-    let mut count = 0;
-    decode(&directory, &mut count);
-    assert!(
-        count > 0,
-        "flow-audience-v1 must contain upstream JSON vectors"
-    );
+    assert_eq!(core.calls().len(), cases.len());
+    let binds: Value =
+        serde_json::from_slice(&fs::read(core.scratch.join("binds.json")).unwrap()).unwrap();
+    for bind in binds.as_array().unwrap() {
+        assert_eq!(
+            bind["principal"],
+            json!({"kind":"reserved","module_id":"plexus"})
+        );
+        assert!(bind.get("scope").is_none_or(Value::is_null));
+    }
 }
 
 #[test]
@@ -827,7 +894,9 @@ fn malformed_audience_contracts_fail_closed() {
         json!([]),
         json!(["pj-b", "pj-a"]),
         json!(["pj-a", "pj-a"]),
-        json!(["not-project"]),
+        json!([""]),
+        json!([null]),
+        json!([12]),
     ] {
         let mut reply = workspace();
         reply["audience"]["project_ids"] = projects;
@@ -1025,4 +1094,59 @@ async fn github_read_search_free_text_is_unresolved() {
             assert_eq!(reply["error"]["transmission"], "not_sent");
         }
     }
+}
+
+#[test]
+fn explicit_null_audience_is_malformed() {
+    let reply = json!({"flow_id":"flow-a","audience":null,"revision":"r1"});
+    for reply in [reply.clone(), json!({"result":reply})] {
+        let refusal = parse("flow-a", reply).expect_err("explicit null audience must be malformed");
+        assert_eq!(refusal["error"]["code"], "flow_audience_unavailable");
+        assert_eq!(refusal["error"]["transmission"], "not_sent");
+        assert!(refusal["error"]["cause"]
+            .as_str()
+            .unwrap()
+            .contains("malformed reply"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opaque_project_ids_require_exact_watch_membership() {
+    let mut answer = workspace();
+    answer["audience"]["project_ids"] = json!(["project-a", "project-b"]);
+    let mut core = Core::new(answer).await;
+    let (state, _, transport, scratch) = setup(core.audiences());
+    quiet_refusal(
+        &state,
+        &transport,
+        &scratch,
+        "github_read",
+        read_args("o/x"),
+        "flow_audience_excludes_repository",
+    );
+    let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+    db.execute(
+        "UPDATE trigger_subscriptions SET project_id='project-a'",
+        [],
+    )
+    .unwrap();
+    let reply = call(&state, "github_read", read_args("o/x"), Some(scope(None)));
+    assert!(
+        reply.get("result").is_some(),
+        "opaque project ID must authorize its exact watch stamp: {reply}"
+    );
+    assert_eq!(transport.requests().len(), 1);
+    db.execute(
+        "UPDATE trigger_subscriptions SET project_id='project-ab'",
+        [],
+    )
+    .unwrap();
+    quiet_refusal(
+        &state,
+        &transport,
+        &scratch,
+        "github_read",
+        read_args("o/x"),
+        "flow_audience_excludes_repository",
+    );
 }

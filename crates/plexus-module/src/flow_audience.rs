@@ -65,9 +65,7 @@ pub fn parse(flow_id: &str, reply: Value) -> Result<Answer, Value> {
             } => {
                 !workspace_id.is_empty()
                     && !project_ids.is_empty()
-                    && project_ids
-                        .iter()
-                        .all(|id| id.starts_with("pj-") && id.len() > 3)
+                    && project_ids.iter().all(|id| !id.is_empty())
                     && project_ids.windows(2).all(|ids| ids[0] < ids[1])
             }
         };

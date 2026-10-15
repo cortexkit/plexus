@@ -10291,3 +10291,35 @@ expect_red = ["flow_audience::tests::github_read_search_free_text_is_unresolved"
 expect_message = "audience guard must refuse"
 build_timeout_s = 3600
 timeout_s = 90
+
+[[control]]
+id = "flow-audience-opaque-project-ids"
+guards = "Published opaque project IDs are accepted without imposing a Plexus-specific prefix"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = '.all(|id| !id.is_empty())'
+new = '.all(|id| id.starts_with("pj-") && id.len() > 3 /* NON-VACUITY BREAK */)'
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::upstream_flow_audience_vectors_decode_through_plexus"]
+expect_message = "workspace vector must parse"
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "flow-audience-null-is-not-global"
+guards = "An explicit null audience is malformed, never a global audience"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = 'let answer: Answer = serde_json::from_value(reply.get("result").unwrap_or(&reply).clone())'
+new = 'let answer: Answer = serde_json::from_value({ let mut body = reply.get("result").unwrap_or(&reply).clone(); if body.get("audience") == Some(&Value::Null) { body["audience"] = json!({"kind":"global"}); } body }) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::explicit_null_audience_is_malformed"]
+expect_message = "explicit null audience must be malformed"
+build_timeout_s = 3600
+timeout_s = 90

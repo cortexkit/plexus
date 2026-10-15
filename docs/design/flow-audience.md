@@ -67,6 +67,9 @@ item as `no` on audience refusal or agent-audience mismatch. Otherwise it predic
 only grants and policy, as for agent-stamped flows. Repository reach is checked
 on the real call; an allowed workspace repository agrees with this prediction.
 
-Prefrontal-core's conformance vectors belong in `test-vectors/flow-audience-v1/`. Until they are
-published, the non-vacuous decoder harness is explicitly ignored; no upstream
-compatibility is claimed.
+Prefrontal's published v1 conformance vectors are vendored byte-for-byte in
+`crates/plexus-module/tests/fixtures/flow-audience-v1/`, with source provenance
+in `PLEXUS-README.md`. The decoder harness exercises every recorded case through
+Plexus's real subc lookup and parser and checks its outgoing request parameters.
+Project IDs are opaque nonempty strings, sorted and unique; repository access
+still requires an exact match with an entorhinal-set watch stamp.

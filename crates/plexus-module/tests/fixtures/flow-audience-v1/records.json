@@ -1,0 +1,165 @@
+{
+  "cases": [
+    {
+      "caller": "reserved:plexus",
+      "name": "global",
+      "reply": {
+        "result": {
+          "audience": {
+            "kind": "global"
+          },
+          "flow_id": "flow-x",
+          "revision": "sha256:187d848f31aa8a3f105dd2d025bba383ccf07678d4da1987012a925e9c15cd24"
+        }
+      },
+      "request": {
+        "method": "flow.audience",
+        "params": {
+          "flow_id": "flow-x"
+        }
+      }
+    },
+    {
+      "caller": "reserved:plexus",
+      "name": "workspace",
+      "reply": {
+        "result": {
+          "audience": {
+            "kind": "workspace",
+            "project_ids": [
+              "project-a",
+              "project-b"
+            ],
+            "workspace_id": "ws-a"
+          },
+          "flow_id": "flow-x",
+          "revision": "sha256:73dfc060aab929303dbe2afd1f620af5db098815c595742c2af7571e7872550d"
+        }
+      },
+      "request": {
+        "method": "flow.audience",
+        "params": {
+          "flow_id": "flow-x"
+        }
+      }
+    },
+    {
+      "caller": "reserved:plexus",
+      "name": "agent",
+      "reply": {
+        "result": {
+          "audience": {
+            "agent_id": "ag_b",
+            "kind": "agent"
+          },
+          "flow_id": "flow-x",
+          "revision": "sha256:1156dbfbe0d1684ef3de12765af869b9cff24fd6eb99d5502f98f4657981f1a9"
+        }
+      },
+      "request": {
+        "method": "flow.audience",
+        "params": {
+          "flow_id": "flow-x"
+        }
+      }
+    },
+    {
+      "caller": "reserved:basal",
+      "name": "caller-refused",
+      "reply": {
+        "error": {
+          "code": "flow_audience_caller_refused",
+          "message": "flow.audience requires reserved:plexus; caller was reserved:basal"
+        }
+      },
+      "request": {
+        "method": "flow.audience",
+        "params": {
+          "flow_id": "flow-x"
+        }
+      }
+    },
+    {
+      "caller": "reserved:plexus",
+      "name": "unknown-field",
+      "reply": {
+        "error": {
+          "code": "flow_audience_invalid_request",
+          "message": "unknown field extra"
+        }
+      },
+      "request": {
+        "method": "flow.audience",
+        "params": {
+          "extra": true,
+          "flow_id": "flow-x"
+        }
+      }
+    },
+    {
+      "caller": "reserved:plexus",
+      "name": "flow-unknown",
+      "reply": {
+        "error": {
+          "code": "flow_unknown",
+          "message": "flow missing-flow has no approved installation"
+        }
+      },
+      "request": {
+        "method": "flow.audience",
+        "params": {
+          "flow_id": "missing-flow"
+        }
+      }
+    },
+    {
+      "caller": "reserved:plexus",
+      "name": "flow-not-approved",
+      "reply": {
+        "error": {
+          "code": "flow_not_approved",
+          "message": "flow pending-flow has no approved installation"
+        }
+      },
+      "request": {
+        "method": "flow.audience",
+        "params": {
+          "flow_id": "pending-flow"
+        }
+      }
+    },
+    {
+      "caller": "reserved:plexus",
+      "name": "flow-audience-conflict",
+      "reply": {
+        "error": {
+          "code": "flow_audience_conflict",
+          "message": "approved versions disagree on audience: 1, 2"
+        }
+      },
+      "request": {
+        "method": "flow.audience",
+        "params": {
+          "flow_id": "flow-x"
+        }
+      }
+    },
+    {
+      "caller": "reserved:plexus",
+      "name": "membership-unavailable",
+      "reply": {
+        "error": {
+          "code": "flow_audience_unavailable",
+          "message": "workspace membership is unavailable"
+        }
+      },
+      "request": {
+        "method": "flow.audience",
+        "params": {
+          "flow_id": "flow-x"
+        }
+      }
+    }
+  ],
+  "version": 1
+}
