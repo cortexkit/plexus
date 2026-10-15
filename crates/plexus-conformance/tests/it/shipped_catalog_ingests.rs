@@ -123,7 +123,7 @@ fn github_actions_is_a_read_only_per_attempt_rest_catalog() {
     assert_eq!(binding.prefix, "Bearer ");
     assert!(binding.required);
 
-    assert_eq!(manifest.actions_baseline.len(), 8);
+    assert_eq!(manifest.actions_baseline.len(), 10);
     let job = &manifest.actions_baseline[0];
     assert_eq!(job.name, "get_job");
     assert_eq!(
@@ -223,6 +223,44 @@ fn github_actions_is_a_read_only_per_attempt_rest_catalog() {
         actions[3].http.as_ref().unwrap().args_schema["required"],
         json!(["owner", "repo"])
     );
+}
+
+#[test]
+fn github_actions_superseded_catalog_is_closed_and_read_only() {
+    use plexus_core::manifest::{HttpMethod, Risk};
+    use serde_json::json;
+
+    let source = std::fs::read_to_string(catalog_dir().join("github_actions.jsonc")).unwrap();
+    let normalized = subc_jsonc::jsonc_to_json(&source).unwrap();
+    let ingested = ingest_value(serde_json::from_str(&normalized).unwrap()).unwrap();
+    for (name, required) in [
+        (
+            "get_workflow_run_metadata",
+            json!(["owner", "repo", "run_id"]),
+        ),
+        (
+            "list_workflow_runs_for_workflow",
+            json!(["owner", "repo", "workflow_id", "branch"]),
+        ),
+    ] {
+        let action = ingested
+            .manifest
+            .actions_baseline
+            .iter()
+            .find(|action| action.name == name)
+            .unwrap();
+        assert_eq!(action.risk, Risk::Read, "{name} must remain read-only");
+        assert!(action.poll.is_none());
+        let http = action.http.as_ref().unwrap();
+        assert_eq!(http.method, HttpMethod::Get);
+        assert_eq!(http.args_schema["type"], "object");
+        assert_eq!(http.args_schema["required"], required);
+        assert_eq!(
+            http.args_schema["additionalProperties"], false,
+            "{name} must have closed arguments"
+        );
+        assert!(http.args_schema["properties"].get("per_page").is_none());
+    }
 }
 
 #[test]

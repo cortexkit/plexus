@@ -1124,7 +1124,7 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": [
-                        "github.issue.get", "github.issue_comments.list", "github.issue.search", "github.actions.job_log", "github.actions.artifact_file"
+                        "github.issue.get", "github.issue_comments.list", "github.issue.search", "github.actions.job_log", "github.actions.artifact_file", "github.actions.run.superseded"
                     ]},
                     "repository": {"oneOf": [
                         {"type": "string"},

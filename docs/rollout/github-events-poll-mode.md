@@ -132,6 +132,31 @@ Do not accept merely finding a new file on disk or a stale process's health.
 
 ## 3. Connect and grant (pending: run at deploy)
 
+### CI flow reads: restart window
+
+Deploying `github.actions.run.superseded` requires a restart window: the running
+module must advertise the new `github_read` action and load the updated
+`github_actions.jsonc` catalog. Store migration 53 preserves existing reservations
+and widens ledger row counts for whole flow reads. Alongside `github.actions.job_log` and
+`github.actions.artifact_file`, the new read uses `conn-github-actions` and the
+same committed 600-request trailing-hour ledger as polling. Job logs and run
+comparisons reserve two authenticated GitHub requests; artifact reads reserve
+101 (100 listing pages plus the ZIP redirect), even when fewer are used.
+Credentialless storage requests do not consume the personal token's quota.
+
+The original four-read polling ceiling and grant below are unchanged. To enable
+CI flow reads, explicitly extend the connection ceiling and grant Basal invoke
+authority for their catalog legs: `get_job`, `github.actions.job_log`,
+`list_workflow_run_artifacts`, `github.actions.artifact_file`,
+`get_workflow_run_metadata`, and `list_workflow_runs_for_workflow`. The last two
+are separate from the poller's attempt-specific `get_workflow_run` and
+repository-wide `list_workflow_runs`; do not replace those polling actions.
+After restart, verify the advertised action list, refreshed catalog and grants
+before enabling flows. A full ledger returns `github_actions_quota_exhausted`
+with `transmission: not_sent` and an exact `detail.retry_after_ms`; polling
+continues to defer on its existing schedule. No live store changes are needed
+while building or testing this change.
+
 Start the one-hour bus observer from step 4 in another terminal **before**
 connecting or minting poll authority here. That observer is the `python3`
 script that runs `nats sub` and stops it after 3,600 seconds of wall-clock

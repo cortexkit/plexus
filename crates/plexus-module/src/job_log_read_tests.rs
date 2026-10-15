@@ -21,7 +21,7 @@ pub(super) fn actions_runtime() -> (Arc<ModuleState>, Arc<PlexusStore>, Arc<Mock
     store.insert_grant(&plexus_core::GrantInput {
         grant_id: "basal-actions".into(), principal: "direct".into(), connection_id: CONNECTION.into(),
         grantee_principal: "reserved:basal".into(), risk_ceiling: "read".into(),
-        action_selectors: vec!["get_job".into(), "github.actions.job_log".into(), "list_workflow_run_artifacts".into(), "github.actions.artifact_file".into()], authority_kind: "invoke".into(), expires_at: None,
+        action_selectors: vec!["get_job".into(), "github.actions.job_log".into(), "list_workflow_run_artifacts".into(), "github.actions.artifact_file".into(), "get_workflow_run_metadata".into(), "list_workflow_runs_for_workflow".into()], authority_kind: "invoke".into(), expires_at: None,
     }).unwrap();
     transport.set_response_for_method("get_job", "", MockResponse::Success(json!({"status":"completed"})));
     transport.set_response_for_method("github.actions.job_log", "", MockResponse::Success(json!({"total_bytes":17,"truncated":false,"text":"test NAME FAILED\n"})));

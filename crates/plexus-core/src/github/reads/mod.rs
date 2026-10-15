@@ -22,6 +22,7 @@ pub const ACTIONS: &[&str] = &[
     BOT_ACTIONS[2],
     "github.actions.job_log",
     "github.actions.artifact_file",
+    "github.actions.run.superseded",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +34,7 @@ pub enum ReadError {
     PageBound,
     LeaseExpired,
     Refused(&'static str),
+    QuotaExhausted { retry_after_ms: i64 },
 }
 
 fn walk_error(error: pagination::WalkError) -> ReadError {
@@ -243,6 +245,9 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     if action == "github.actions.artifact_file" {
         return artifact_file::read(engine, principal, repository, args, scope, attributed_agent);
     }
+    if action == "github.actions.run.superseded" {
+        return run_superseded::read(engine, principal, repository, args, scope, attributed_agent);
+    }
     let (resolved, handle) =
         match resolve_read_with_handle(engine.store(), action, repository, args) {
             Ok(resolved) => resolved,
@@ -350,6 +355,7 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
 mod artifact_file;
 mod ci;
 mod job_log;
+mod run_superseded;
 
 #[cfg(test)]
 mod tests {

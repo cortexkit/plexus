@@ -523,6 +523,10 @@ async fn workspace_filter_covers_every_repository_operation_class() {
         ),
         (
             "github_read",
+            json!({"action":"github.actions.run.superseded","repository":"o/x","args":{"run_id":1}}),
+        ),
+        (
+            "github_read",
             json!({"action":"github.actions.artifact_file","repository":"o/x","args":{"run_id":1,"artifact_name":"x","path":"log.txt"}}),
         ),
         (

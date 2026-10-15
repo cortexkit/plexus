@@ -1045,6 +1045,20 @@ CREATE INDEX idx_binding_ticket_retention ON binding_tickets(settled_at_ms) WHER
 CREATE INDEX idx_github_receipt_unsettled_retention ON github_bot_receipt(updated_at) WHERE state IN ('outcome_unknown','pending','pending_approval');
 "#,
     },
+    Migration {
+        version: 53,
+        statements: r#"
+CREATE TABLE github_actions_quota_v53 (
+    reservation_id TEXT PRIMARY KEY,
+    reserved_at_ms INTEGER NOT NULL,
+    requests INTEGER NOT NULL CHECK (requests BETWEEN 1 AND 600)
+);
+INSERT INTO github_actions_quota_v53 SELECT reservation_id, reserved_at_ms, requests FROM github_actions_quota;
+DROP TABLE github_actions_quota;
+ALTER TABLE github_actions_quota_v53 RENAME TO github_actions_quota;
+CREATE INDEX idx_github_actions_quota_time ON github_actions_quota(reserved_at_ms);
+"#,
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
@@ -10441,6 +10455,46 @@ mod tests {
         assert!(grant.authorizes("read_other", now_ms()));
         assert!(!grant.authorizes("write_feed", now_ms()));
         assert!(!grant.authorizes("*", now_ms()));
+    }
+
+    #[test]
+    fn migration_53_preserves_quota_and_accepts_bounded_flow_reservations() {
+        let descriptor = StorageDescriptor {
+            module_id: "plexus".into(),
+            storage_namespace: "migration53".into(),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: ":memory:".into(),
+            },
+        };
+        let inner = open_sqlite(&descriptor).unwrap();
+        let previous = MIGRATIONS.iter().position(|m| m.version == 53).unwrap();
+        assert_eq!(
+            inner
+                .migrate("plexus", &MIGRATIONS[..previous])
+                .unwrap()
+                .recorded,
+            52
+        );
+        inner
+            .with_conn(|conn| {
+                conn.execute_batch("INSERT INTO github_actions_quota VALUES ('old', 123, 8)")
+            })
+            .unwrap();
+        assert_eq!(inner.migrate("plexus", MIGRATIONS).unwrap().recorded, 53);
+        inner.with_conn(|conn| {
+            let old: (i64, i64) = conn.query_row("SELECT reserved_at_ms, requests FROM github_actions_quota WHERE reservation_id='old'", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            assert_eq!(old, (123, 8));
+            for count in [1, 2, 8, 101, 600] {
+                conn.execute("INSERT INTO github_actions_quota VALUES (?1, 456, ?2)", (format!("new-{count}"), count))?;
+            }
+            for count in [0, -1, 601] {
+                assert!(conn.execute("INSERT INTO github_actions_quota VALUES ('invalid', 456, ?1)", [count]).is_err());
+            }
+            let indexed: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_github_actions_quota_time'", [], |r| r.get(0))?;
+            assert_eq!(indexed, 1);
+            Ok(())
+        }).unwrap();
     }
 
     #[test]

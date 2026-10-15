@@ -2391,6 +2391,12 @@ fn facade_tool_reply(
                         .is_some_and(|items| items.iter().all(Value::is_string))
             })
         {
+            if action == "github.actions.run.superseded" {
+                return Ok(tool_error(
+                    "run_arguments_invalid",
+                    "run.superseded requires repository and args containing only a positive run_id",
+                ));
+            }
             return Ok(tool_error("invalid_request", "github_read requires only action, repository (string or string array), and args (object)"));
         }
     }
@@ -2517,6 +2523,11 @@ fn facade_tool_reply(
                     }
                     Err(plexus_core::github::reads::ReadError::Refused(code)) => {
                         tool_error(code, code)
+                    }
+                    Err(plexus_core::github::reads::ReadError::QuotaExhausted {
+                        retry_after_ms,
+                    }) => {
+                        json!({"error":{"code":"github_actions_quota_exhausted","transmission":"not_sent","detail":{"retry_after_ms":retry_after_ms}}})
                     }
                 }
             })
@@ -12670,6 +12681,9 @@ mod stamp_invoke_tests {
 
 #[cfg(test)]
 mod github_read_frame_tests {
+    mod ci_read_tests {
+        include!("ci_read_tests.rs");
+    }
     mod job_log_tests {
         include!("job_log_read_tests.rs");
     }
