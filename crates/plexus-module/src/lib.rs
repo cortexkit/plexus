@@ -9844,6 +9844,107 @@ mod events_get_tests {
     }
 
     #[tokio::test]
+    async fn v2_fetch_preserves_pre_workflow_name_ci_job_envelope_and_digest() {
+        use sha2::Digest;
+
+        let (_scratch, store, path) = test_store("v2-old-ci-job-envelope");
+        seed_test_events(&path, &store);
+        store
+            .insert_grant(&GrantInput {
+                grant_id: "grant-core-ci-consume".into(),
+                principal: "direct".into(),
+                connection_id: "conn-github-actions".into(),
+                grantee_principal: "reserved:prefrontal-core".into(),
+                risk_ceiling: "read".into(),
+                action_selectors: vec!["list_workflow_runs".into()],
+                authority_kind: "events_consume".into(),
+                expires_at: Some(i64::MAX / 2),
+            })
+            .unwrap();
+
+        let key = "0000000000000000000000000000000000000000000000000000000000000003";
+        let payload = json!({
+            "id": 703,
+            "name": "legacy CI job",
+            "workflow_name": "workflow name from newer source",
+            "conclusion": "failure",
+            "status": "completed",
+            "head_branch": "main",
+            "head_sha": "0123456789abcdef",
+            "html_url": "https://github.com/owner/repo/actions/runs/702/job/703",
+            "run_id": 702,
+            "run_attempt": 1,
+            "completed_at": "2026-10-11T00:45:44Z",
+            "created_at": "2026-10-11T00:30:12Z",
+            "updated_at": "2026-10-11T00:45:44Z"
+        });
+        let event_headers = EventHeaders {
+            repo: "owner/repo".into(),
+            project: Some("project-1".into()),
+            pr: None,
+            branch: Some("main".into()),
+            conclusion: Some("failure".into()),
+        };
+        let actor = ActorAttribution::NotEnriched;
+        let job = KeyedPollEventInput {
+            event: PollEventInput {
+                vendor_event_id: "job-703",
+                payload: &payload,
+                observed_at_ms: plexus_core::now_ms(),
+                item_kind: Some("ci_job"),
+                activity_at_ms: Some(plexus_core::now_ms()),
+                actor: &actor,
+            },
+            identity: Some(KeyedEventIdentity {
+                event_key: key,
+                event_name: "github_ci_job_failed",
+                repo_id: 101,
+                change: Some("completed"),
+                headers: &event_headers,
+            }),
+            delivery_id: None,
+            envelope_context: Default::default(),
+        };
+        store
+            .commit_keyed_poll_success(
+                "direct",
+                "conn-github-actions",
+                "ci-sub-1",
+                &json!({"pinned": {}, "open": {}}),
+                &[job],
+                plexus_core::now_ms(),
+                &[],
+            )
+            .unwrap();
+
+        // This is the canonical v2 shape stored before ci_job gained workflow_name.
+        let historical = r#"{"action":"updated","actor_logins":null,"actor_unknown":null,"completed_at":"2026-10-11T00:45:44Z","conclusion":"failure","event_key":"0000000000000000000000000000000000000000000000000000000000000003","head_branch":"main","head_sha":"0123456789abcdef","id":703,"kind":"ci_job","name":"legacy CI job","repo":"owner/repo","run_attempt":1,"run_id":702,"status":"completed","url":"https://github.com/owner/repo/actions/runs/702/job/703"}"#;
+        let digest = format!("{:x}", sha2::Sha256::digest(historical.as_bytes()));
+        let db = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            db.execute(
+                "UPDATE event_outbox SET envelope_v2=?1,digest_v2=?2 WHERE event_key=?3",
+                rusqlite::params![historical, digest, key],
+            )
+            .unwrap(),
+            1
+        );
+
+        let result = execute_tool_call(
+            store,
+            Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+            None,
+            manifest::EVENTS_GET_TOOL,
+            json!({"event_key":key,"event_name":"github_ci_job_failed","version":2}),
+        )
+        .await;
+        assert_eq!(result["result"]["body"], historical);
+        assert_eq!(result["result"]["digest"], digest);
+    }
+
+    #[tokio::test]
     async fn v2_fetch_returns_stored_bytes_and_digest_without_recomputation() {
         use sha2::Digest;
         let (_scratch, store, path) = test_store("v2-stored-fetch");

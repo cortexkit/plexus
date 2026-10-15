@@ -75,6 +75,11 @@ pub(crate) fn envelope(
     if kind == "ci_run" {
         body["run_id"] = item["id"].clone();
     } else if kind == "ci_job" {
+        body["workflow_name"] = item["workflow_name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .map(|name| json!(name))
+            .unwrap_or(Value::Null);
         for field in ["run_id", "run_attempt", "head_branch"] {
             if body[field].is_null() {
                 body[field] = item["run"][field].clone();
@@ -168,6 +173,24 @@ mod tests {
                 Some(id),
                 "event envelope must preserve exact IDs"
             );
+        }
+    }
+
+    #[test]
+    fn ci_job_workflow_name_is_null_when_missing_or_empty() {
+        for item in [json!({}), json!({"workflow_name": ""})] {
+            let body = envelope(
+                KEY,
+                GITHUB_CI_JOB_COMPLETED,
+                "org/repo",
+                &item,
+                &ActorAttribution::NotEnriched,
+                &EnvelopeContext::default(),
+            )
+            .unwrap();
+            let parsed: Value = serde_json::from_str(&body).unwrap();
+            assert!(parsed["workflow_name"].is_null());
+            assert!(body.contains(r#""workflow_name":null"#));
         }
     }
 
@@ -353,7 +376,8 @@ mod tests {
                 "id":114349743680_i64,"name":"Search quality binary (Linux x64)","conclusion":"success","status":"completed",
                 "head_branch":"train/callgraph-dirty-restart","head_sha":"e56c0d525fa9f387dc8fa00354851e90cf52ed0e",
                 "url":"https://github.com/cortexkit/aft/actions/runs/38098639025/job/114349743680",
-                "run_id":38098639025_i64,"run_attempt":1,"completed_at":"2026-10-11T00:45:44Z"
+                "run_id":38098639025_i64,"run_attempt":1,"completed_at":"2026-10-11T00:45:44Z",
+                "workflow_name":"Tests"
             }),
         );
     }
@@ -369,7 +393,8 @@ mod tests {
                 "id":114305774943_i64,"name":"design-gate / design-approved-sync","conclusion":"skipped","status":"completed",
                 "head_branch":"fix/pi-model-discovery-readiness","head_sha":"f65b17d9d2bcd48126557b3afbe9df84691852e9",
                 "url":"https://github.com/cortexkit/magic-context/actions/runs/38083735257/job/114305774943",
-                "run_id":38083735257_i64,"run_attempt":1,"completed_at":"2026-10-10T20:26:10Z"
+                "run_id":38083735257_i64,"run_attempt":1,"completed_at":"2026-10-10T20:26:10Z",
+                "workflow_name":"Design gate"
             }),
         );
     }
