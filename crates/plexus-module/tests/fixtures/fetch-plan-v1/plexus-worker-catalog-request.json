@@ -1,0 +1,31 @@
+{
+  "worker-tool-and-text": {
+    "provider": "plexus",
+    "request": {
+      "preset": "worker",
+      "params": {
+        "capabilities": ["code.search.public/v1", "web.search/v1"]
+      },
+      "composition": {
+        "providers": [
+          {
+            "provider": "aft",
+            "tools": [
+              {"name": "bash", "capabilities": ["shell.exec/v1"]},
+              {"name": "edit", "capabilities": ["code.edit/v1"]},
+              {"name": "read", "capabilities": ["code.read/v1"]}
+            ]
+          },
+          {
+            "provider": "plexus",
+            "tools": [
+              {"name": "web_search", "capabilities": ["web.search/v1"]},
+              {"name": "code_search", "capabilities": ["code.search.public/v1"]}
+            ]
+          }
+        ],
+        "step_transform_items": []
+      }
+    }
+  }
+}

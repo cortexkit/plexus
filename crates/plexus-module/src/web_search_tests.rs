@@ -2561,8 +2561,9 @@ async fn an_origin_inside_arguments_is_still_an_undeclared_argument() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn present_presets_refuse_by_name_before_dispatch_or_audit() {
+async fn unserved_presets_refuse_by_name_before_dispatch_or_audit() {
     for preset in [
+        json!("mason"),
         json!("work"),
         json!("a0_-z9"),
         json!("a".repeat(64)),
@@ -2588,7 +2589,7 @@ async fn present_presets_refuse_by_name_before_dispatch_or_audit() {
         assert!(reply["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("plexus serves no presets"));
+            .contains("unknown or malformed plexus preset"));
         assert_eq!(fixture.requests(), 0);
         assert_eq!(fixture.reservations(), 0);
         assert!(fixture.store.list_audit("direct").unwrap().is_empty());

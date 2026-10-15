@@ -139,11 +139,15 @@ fn generation(tools: &[CatalogTool]) -> String {
     plexus_core::jcs_sha256(&definitions).expect("facade definitions are JCS-compatible")
 }
 
+pub(crate) fn serves_preset(preset: &str) -> bool {
+    matches!(preset, "head" | "worker" | "reader")
+}
+
 fn tools_for(
     preset: Option<&str>,
     params: &Map<String, Value>,
 ) -> Result<Vec<&'static str>, ErrorBody> {
-    if preset.is_some_and(|preset| !matches!(preset, "head" | "worker" | "reader")) {
+    if preset.is_some_and(|preset| !serves_preset(preset)) {
         return Err(invalid_request("preset", "unknown plexus catalog preset"));
     }
     if let Some(field) = params.keys().find(|field| field.as_str() != "capabilities") {
@@ -300,6 +304,13 @@ pub(crate) fn reply(name: &str, arguments: &Map<String, Value>) -> Result<Value,
 mod tests {
     use super::*;
     use serde_json::json;
+
+    mod diagnostic_logging {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../plexus-core/tests/support/logging.rs"
+        ));
+    }
 
     #[test]
     fn catalog_matches_every_advertised_definition() {
@@ -854,6 +865,13 @@ mod tests {
         name: &str,
         arguments: Value,
     ) -> subc_protocol::Frame {
+        send_request(principal, json!({"name": name, "arguments": arguments})).await
+    }
+
+    async fn send_request(
+        principal: subc_protocol::Principal,
+        request: Value,
+    ) -> subc_protocol::Frame {
         use std::sync::Arc;
         use subc_protocol::{Flags, Frame, FrameType, Priority, PROTOCOL_VERSION};
         let scratch = plexus_core::test_scratch::Scratch::database("tool-provider-route");
@@ -877,7 +895,7 @@ mod tests {
             41,
             1,
             7,
-            serde_json::to_vec(&json!({"name": name, "arguments": arguments})).unwrap(),
+            serde_json::to_vec(&request).unwrap(),
         )
         .unwrap();
         let (writer, mut responses) = tokio::sync::mpsc::channel(1);
@@ -997,5 +1015,180 @@ mod tests {
             json!(["tool-catalog-capability-filter/v1"]),
             "role.describe must advertise capability-tag selection"
         );
+    }
+
+    fn frozen_catalog_request(preset: &str) -> Value {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/fetch-plan-v1/plexus-worker-catalog-request.json"
+        ))
+        .unwrap();
+        let mut arguments = fixture["worker-tool-and-text"]["request"].clone();
+        arguments["preset"] = json!(preset);
+        json!({"name": ops::TOOL_CATALOG, "preset": preset, "arguments": arguments})
+    }
+
+    #[tokio::test]
+    async fn frozen_catalog_presets_return_exactly_both_search_tools() {
+        for preset in ["worker", "reader", "head"] {
+            let frame = send_request(
+                subc_protocol::Principal::Direct,
+                frozen_catalog_request(preset),
+            )
+            .await;
+            assert_eq!(
+                frame.header.ty,
+                subc_protocol::FrameType::Response,
+                "{preset}: {:?}",
+                frame.body
+            );
+            let answer: CatalogAnswer = serde_json::from_slice(&frame.body).unwrap();
+            assert_eq!(names(&answer), ["web_search", "code_search"], "{preset}");
+        }
+    }
+
+    #[tokio::test]
+    async fn frozen_catalog_preset_must_match_argument_preset() {
+        for argument in [json!("reader"), Value::Null, json!(17)] {
+            let mut request = frozen_catalog_request("worker");
+            request["arguments"]["preset"] = argument;
+            let frame = send_request(subc_protocol::Principal::Direct, request).await;
+            assert_eq!(frame.header.ty, subc_protocol::FrameType::Error);
+            let error: Value = serde_json::from_slice(&frame.body).unwrap();
+            assert_eq!(error["code"], "invalid_request");
+            assert_eq!(error["field"], "preset");
+            assert_eq!(
+                error["message"],
+                "top-level preset must equal arguments.preset"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn frozen_preset_preserves_search_refusals_and_role_description() {
+        for name in [WEB_SEARCH_TOOL, CODE_SEARCH_TOOL, ops::ROLE_DESCRIBE] {
+            let arguments = if name == ops::ROLE_DESCRIBE {
+                json!({})
+            } else {
+                json!({"query": "rust"})
+            };
+            let request = json!({"name": name, "arguments": arguments});
+            let plain = send_request(subc_protocol::Principal::Direct, request.clone()).await;
+            let mut frozen_request = request;
+            frozen_request["preset"] = json!("worker");
+            let frozen = send_request(subc_protocol::Principal::Direct, frozen_request).await;
+            assert_eq!(frozen.header.ty, plain.header.ty, "{name}");
+            assert_eq!(frozen.body, plain.body, "{name}");
+            let body: Value = serde_json::from_slice(&plain.body).unwrap();
+            if name == ops::ROLE_DESCRIBE {
+                assert_eq!(plain.header.ty, subc_protocol::FrameType::Response);
+                cortexkit_role_tool_provider::describe::check_describe(&body).unwrap();
+            } else {
+                let code = body["error"]["code"]
+                    .as_str()
+                    .or_else(|| body["errorCode"].as_str());
+                assert!(code.is_some(), "ungranted search must refuse: {body}");
+                assert_ne!(
+                    code,
+                    Some("invalid_request"),
+                    "search must reach authority checks: {body}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_refusals_warn_once_without_request_values() {
+        const TEST: &str =
+            "tool_provider::tests::provider_refusals_warn_once_without_request_values";
+        if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
+            let output = crate::bounded::child_output(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+                std::time::Duration::from_secs(30),
+                "provider refusal warning child",
+            )
+            .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stderr}");
+            let lines: Vec<_> = stderr
+                .lines()
+                .filter(|line| line.contains("tool call refused: op="))
+                .collect();
+            assert_eq!(
+                lines.len(),
+                7,
+                "each refusal must warn exactly once: {stderr}"
+            );
+            for secret in [
+                "composition-secret",
+                "argument-secret",
+                "parameter-secret",
+                "malformed.secret",
+                "capability-secret",
+                "serde-secret",
+                "object-secret",
+            ] {
+                assert!(
+                    !stderr.contains(secret),
+                    "request values must not be logged ({secret}): {stderr}"
+                );
+            }
+            let messages = [
+                "unknown catalog argument",
+                "role.describe takes no arguments",
+                "unknown or malformed plexus preset",
+                "unknown or malformed plexus preset",
+                "plexus serves no requested capability (value redacted)",
+                "malformed catalog arguments (values redacted)",
+                "unknown or malformed plexus preset",
+            ];
+            for (line, expected_message) in lines.iter().zip(messages) {
+                assert!(
+                    line.contains(&format!("message={expected_message} argument_keys=")),
+                    "{line}"
+                );
+                let message = &line[line.find("tool call refused:").unwrap()..];
+                diagnostic_logging::assert_diagnostic(
+                    line,
+                    cortexkit_log::ParsedLevel::Warn,
+                    "plexus.wire",
+                    message,
+                );
+                for field in [
+                    "caller=direct",
+                    "code=invalid_request",
+                    "message=",
+                    "argument_keys=",
+                    "params_keys=",
+                ] {
+                    assert!(line.contains(field), "missing {field}: {line}");
+                }
+            }
+            assert!(lines[0].contains("op=tool.catalog"));
+            assert!(lines[0].contains("composition") && lines[0].contains("capabilities"));
+            assert!(lines[1].contains("op=role.describe"));
+            assert!(lines[2].contains("op=web_search") && lines[2].contains("preset=mason"));
+            assert!(lines[3..].iter().all(|line| !line.contains(" preset=")));
+            return;
+        }
+        diagnostic_logging::init_child();
+        for request in [
+            json!({"name": ops::TOOL_CATALOG, "preset":"worker", "arguments":{
+                "preset":"worker", "unknown":"argument-secret",
+                "params":{"capabilities":"parameter-secret"},
+                "composition":{"anything":"composition-secret"}}}),
+            json!({"name": ops::ROLE_DESCRIBE, "preset":"reader", "arguments":{"unknown":"argument-secret"}}),
+            json!({"name": WEB_SEARCH_TOOL, "preset":"mason", "arguments":{}}),
+            json!({"name": WEB_SEARCH_TOOL, "preset":"malformed.secret", "arguments":{}}),
+            json!({"name": ops::TOOL_CATALOG, "arguments":{"params":{"capabilities":["capability-secret"]}}}),
+            json!({"name": ops::TOOL_CATALOG, "arguments":{"digest_only":"serde-secret"}}),
+            json!({"name": ops::ROLE_DESCRIBE, "preset":{"secret":"object-secret"}, "arguments":{}}),
+        ] {
+            let frame = send_request(subc_protocol::Principal::Direct, request).await;
+            let body: Value = serde_json::from_slice(&frame.body).unwrap();
+            let error = body.get("error").unwrap_or(&body);
+            assert_eq!(error["code"], "invalid_request");
+        }
     }
 }
