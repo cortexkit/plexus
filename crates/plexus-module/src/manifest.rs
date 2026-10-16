@@ -268,6 +268,11 @@ pub fn build_with_launch_nonce_source(
             concurrency: Concurrency::Serial,
             operations: vec![
                 ManagementOperation { name: crate::grants_would_ask::METHOD.to_string(), kind: ManagementOperationKind::Query, description: Some("Inspect proposed flow grants and policy without reserving or prompting; reserved:prefrontal-core and flow-scoped reserved:basal only".to_string()) },
+                // Cingulate finds permissions/v1 providers in the daemon's
+                // module catalog and calls only modules that also declare these
+                // two operations here, so the capability alone is not enough.
+                ManagementOperation { name: plexus_core::permissions::LIST_METHOD.to_string(), kind: ManagementOperationKind::Query, description: Some("List each agent's standing GitHub bot permissions for the operator's permissions page; reserved:cingulate and Direct only".to_string()) },
+                ManagementOperation { name: plexus_core::permissions::REVOKE_METHOD.to_string(), kind: ManagementOperationKind::Mutate, description: Some("Revoke one listed GitHub bot permission; reserved:cingulate and Direct only".to_string()) },
                 ManagementOperation { name: ADMIN_RECIPIENTS_ADD_OP.into(), kind: ManagementOperationKind::Mutate, description: Some("Widen send authority by adding a recipient; preview by default, Direct only".into()) },
                 ManagementOperation { name: ADMIN_RECIPIENTS_REMOVE_OP.into(), kind: ManagementOperationKind::Mutate, description: Some("Narrow send authority by removing a recipient; preview by default, Direct only".into()) },
                 ManagementOperation { name: ADMIN_RECIPIENTS_LIST_OP.into(), kind: ManagementOperationKind::Query, description: Some("Read one connection and agent's recipient allowlist; Direct only".into()) },
@@ -642,6 +647,10 @@ mod tests {
             .any(|value| value == "flow-scopes/v1"));
     }
 
+    /// Cingulate calls a permissions/v1 provider only when the module catalog
+    /// shows both the capability and the two operations on its management
+    /// surface; a provider missing either is reported unsupported and never
+    /// called.
     #[test]
     fn manifest_advertises_permissions_v1() {
         let wire = serde_json::to_value(build("plexus")).unwrap();
@@ -650,6 +659,31 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value == "permissions/v1"));
+        let manifest = build("plexus");
+        let operations: Vec<_> = manifest
+            .provides
+            .iter()
+            .filter_map(|role| match role {
+                ProviderRole::ManagementSurface { operations, .. } => Some(operations),
+                _ => None,
+            })
+            .flatten()
+            .map(|operation| (operation.name.as_str(), operation.kind.clone()))
+            .collect();
+        assert!(
+            operations.contains(&(
+                plexus_core::permissions::LIST_METHOD,
+                ManagementOperationKind::Query
+            )),
+            "cingulate needs permissions.list declared as a query"
+        );
+        assert!(
+            operations.contains(&(
+                plexus_core::permissions::REVOKE_METHOD,
+                ManagementOperationKind::Mutate
+            )),
+            "cingulate needs permissions.revoke declared"
+        );
     }
 
     #[test]
@@ -1199,6 +1233,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 crate::grants_would_ask::METHOD,
+                plexus_core::permissions::LIST_METHOD,
+                plexus_core::permissions::REVOKE_METHOD,
                 ADMIN_RECIPIENTS_ADD_OP,
                 ADMIN_RECIPIENTS_REMOVE_OP,
                 ADMIN_RECIPIENTS_LIST_OP,
