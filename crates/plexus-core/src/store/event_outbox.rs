@@ -2425,6 +2425,78 @@ mod tests {
     }
 
     #[test]
+    fn older_stored_ci_run_envelope_is_served_byte_identical() {
+        let store = store();
+        subscription(&store, "a", "ci_runs");
+        let item = json!({"id":7,"run_attempt":1,"status":"completed","conclusion":"success",
+            "updated_at":"2026-10-15T23:52:00Z"});
+        let event_headers = headers("owner/repo");
+        let make = || {
+            let mut keyed = input(&item, KEY, &event_headers);
+            keyed.event.item_kind = Some("ci_run");
+            keyed.identity.as_mut().unwrap().event_name = "github_ci_run_completed";
+            keyed
+        };
+        commit(&store, "a", &[make()]);
+        let inserted = store.canonical_event_by_key(KEY).unwrap().unwrap();
+        let new_envelope: Value =
+            serde_json::from_str(inserted.envelope_v2.as_ref().unwrap()).unwrap();
+        assert_eq!(new_envelope["completed_at"], "2026-10-15T23:52:00Z");
+        assert_eq!(inserted.body, serde_json::to_string(&item).unwrap());
+
+        // Model a run stored before completion-time normalization. Its v1
+        // source has updated_at, so rebuilding on read would change the bytes.
+        let old_envelope = String::from_utf8(
+            crate::jcs::canonicalize_exact_integers(&json!({
+                "event_key":KEY,"kind":"ci_run","repo":"owner/repo","action":"updated",
+                "actor_logins":null,"actor_unknown":null,"id":7,"name":null,
+                "conclusion":"success","status":"completed","head_branch":null,"head_sha":null,
+                "url":null,"run_id":7,"run_attempt":1,"completed_at":null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let old_digest = hex::encode(sha2::Sha256::digest(old_envelope.as_bytes()));
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE event_outbox SET envelope_v2=?1,digest_v2=?2 WHERE event_key=?3",
+                    (&old_envelope, &old_digest, KEY),
+                )
+            })
+            .unwrap();
+        commit(&store, "a", &[make()]);
+        grant(
+            &store,
+            "consume-a",
+            "consumer",
+            "a",
+            "direct",
+            "[\"list_issues\"]",
+            None,
+        );
+        let EventLookupOutcome::Found(served) = store
+            .event_by_key_version(
+                KEY,
+                EventReader::Consumer {
+                    principal: "consumer",
+                },
+                now_ms(),
+                2,
+            )
+            .unwrap()
+        else {
+            panic!("stored CI run must remain visible");
+        };
+        assert_eq!(served.envelope_v2.as_deref(), Some(old_envelope.as_str()));
+        assert_eq!(served.digest_v2.as_deref(), Some(old_digest.as_str()));
+        assert_eq!(served.body, inserted.body);
+        assert_eq!(served.digest, inserted.digest);
+        assert_eq!(served.event_key, inserted.event_key);
+    }
+
+    #[test]
     fn migration_47_forward_rollback_and_reforward_without_backfill() {
         let scratch = crate::test_scratch::Scratch::database("envelope-migration");
         let descriptor = StorageDescriptor {
