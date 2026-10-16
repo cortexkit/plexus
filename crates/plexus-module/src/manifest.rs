@@ -78,6 +78,7 @@ pub const WITHDRAW_TOOL: &str = "tool.withdraw";
 // pair of naming schemes.
 pub const ADMIN_ISSUE_TICKET_OP: &str = "plexus.admin.issue_ticket";
 pub const ADMIN_GRANT_OP: &str = "plexus.admin.grant";
+pub const ADMIN_WIDEN_CEILING_OP: &str = "plexus.admin.widen_ceiling";
 pub const ADMIN_REVOKE_GRANT_OP: &str = "plexus.admin.revoke_grant";
 /// Read-only: what authority currently exists. Separate from the mutating ops
 /// because an operator must be able to LOOK without being in a position to
@@ -293,12 +294,17 @@ pub fn build_with_launch_nonce_source(
                 ManagementOperation {
                     name: ADMIN_ISSUE_TICKET_OP.to_string(),
                     kind: ManagementOperationKind::Mutate,
-                    description: Some("Issue a single-use binding ticket that fixes a vendor connection's permanent risk and action ceiling".to_string()),
+                    description: Some("Issue a single-use binding ticket that sets a vendor connection's initial risk and action ceiling".to_string()),
                 },
                 ManagementOperation {
                     name: ADMIN_GRANT_OP.to_string(),
                     kind: ManagementOperationKind::Mutate,
                     description: Some("Mint an invoke, connection-admin, poll, or events-consume grant bounded by the connection ceiling".to_string()),
+                },
+                ManagementOperation {
+                    name: ADMIN_WIDEN_CEILING_OP.to_string(),
+                    kind: ManagementOperationKind::Mutate,
+                    description: Some("Add named active reviewed actions within a connection's risk ceiling; preview by default, Direct only; grants are separate".to_string()),
                 },
                 ManagementOperation {
                     name: ADMIN_REVOKE_GRANT_OP.to_string(),
@@ -1208,6 +1214,7 @@ mod tests {
                 GITHUB_UNBIND_OP,
                 ADMIN_ISSUE_TICKET_OP,
                 ADMIN_GRANT_OP,
+                ADMIN_WIDEN_CEILING_OP,
                 ADMIN_REVOKE_GRANT_OP,
                 ADMIN_LIST_GRANTS_OP,
                 ADMIN_SET_POLICY_OP,

@@ -1922,12 +1922,8 @@ impl PlexusStore {
                 return Ok(plan);
             }
             if !ceiling_additions.is_empty() {
-                let mut widened = ceiling.clone();
-                widened.extend(ceiling_additions.iter().cloned());
-                tx.execute(
-                    "UPDATE connections SET ceiling_selectors=?3, updated_at_ms=?4
-                     WHERE principal=?1 AND connection_id=?2",
-                    params![principal, connection_id, to_json(&widened)?, now],
+                super::ceiling_store::extend_connection_ceiling_on_conn(
+                    tx, &principal, &connection_id, &ceiling, &ceiling_additions, now,
                 )?;
             }
             // Mint-time bound, as for every other grant: each action a row is
@@ -2160,12 +2156,8 @@ impl PlexusStore {
                 return Ok(plan);
             }
             if !ceiling_additions.is_empty() {
-                let mut widened = ceiling.clone();
-                widened.extend(ceiling_additions.iter().cloned());
-                tx.execute(
-                    "UPDATE connections SET ceiling_selectors=?3, updated_at_ms=?4
-                     WHERE principal=?1 AND connection_id=?2",
-                    params![principal, connection_id, to_json(&widened)?, now],
+                super::ceiling_store::extend_connection_ceiling_on_conn(
+                    tx, &principal, &connection_id, &ceiling, &ceiling_additions, now,
                 )?;
             }
             // Mint-time bound, as for every other grant: each action the grant

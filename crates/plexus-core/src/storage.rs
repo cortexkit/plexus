@@ -1106,6 +1106,9 @@ mod repository_ownership_store;
 
 #[path = "store/recipients.rs"]
 mod recipients_store;
+
+#[path = "store/ceiling.rs"]
+mod ceiling_store;
 pub use recipients_store::RecipientChange;
 
 #[path = "store/web_search.rs"]
@@ -1384,14 +1387,16 @@ pub enum CeremonyRefusal {
     CeilingAbsent,
     /// An action the vendor's reviewed manifest never declares.
     UndeclaredAction(String),
+    UnreviewedAction(String),
+    ExplicitActionsRequired,
+    HandleCeilingRequiresHandleGrant,
     /// The action is declared by the vendor, but sits outside the ceiling this
     /// CONNECTION was created with.
     ///
     /// Separate from `UndeclaredAction` because the operator's next step differs
-    /// entirely: that one is a manifest problem, this one cannot be repaired on
-    /// the existing connection at all, since its ceiling is permanent from
-    /// ticket issuance. Naming the ceiling in the message saves the operator
-    /// from having to query the store to learn what they are bounded by.
+    /// entirely: that one is a manifest problem, this one needs an explicit
+    /// operator ceiling widening, not another ticket. Naming the ceiling saves
+    /// the operator from querying the store to learn what they are bounded by.
     OutsideConnectionCeiling {
         action: String,
         ceiling: Vec<String>,
@@ -1436,12 +1441,12 @@ impl std::fmt::Display for CeremonyRefusal {
                     "action '{action}' is not declared by the vendor manifest"
                 )
             }
-            // Names the ceiling, because the operator cannot widen it and needs
-            // to know what they are actually bounded by before deciding whether
-            // to issue a new ticket.
+            Self::UnreviewedAction(action) => write!(f, "action '{action}' has no active reviewed catalog row on this connection"),
+            Self::ExplicitActionsRequired => f.write_str("name each action explicitly; wildcard selectors are refused"),
+            Self::HandleCeilingRequiresHandleGrant => f.write_str("GitHub bot handle connections must use handle-grant to widen their ceiling"),
             Self::OutsideConnectionCeiling { action, ceiling } => write!(
                 f,
-                "action '{action}' is outside this connection's permanent ceiling [{}]",
+                "action '{action}' is outside this connection's ceiling [{}]",
                 ceiling.join(", ")
             ),
             Self::RiskAboveCeiling { requested, ceiling } => {
@@ -1449,7 +1454,7 @@ impl std::fmt::Display for CeremonyRefusal {
             }
             Self::InvalidRisk(value) => write!(f, "'{value}' is not a valid risk"),
             Self::EmptyActionSelectors => {
-                f.write_str("a grant must name at least one action within the connection's ceiling")
+                f.write_str("at least one action is required")
             }
             Self::ConnectionAppMismatch {
                 connection_app,
@@ -7420,10 +7425,8 @@ impl PlexusStore {
                     //
                     // The two also have completely different remedies. An undeclared
                     // action is fixed by editing a manifest; a ceiling breach cannot
-                    // be fixed at all, because the connection's ceiling is set
-                    // permanently at ticket issuance and is never widened. The
-                    // remedy is a new ticket and a new connection, which is a much
-                    // larger step than the wrong message implies.
+                    // be fixed by minting a grant or issuing another ticket. It
+                    // requires an explicit operator ceiling-widening ceremony.
                     return Ok(Err(CeremonyRefusal::OutsideConnectionCeiling {
                         action: outside.clone(),
                         ceiling: ceiling.action_selectors.clone(),
