@@ -43,6 +43,22 @@ pub struct Cursor {
     pub committed_seq: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoverageReset {
+    StreamChanged,
+    SequenceReset,
+    Gap,
+}
+impl CoverageReset {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::StreamChanged => "stream_changed",
+            Self::SequenceReset => "sequence_reset",
+            Self::Gap => "gap",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum DropReason {
     UnwatchedRepository,
@@ -87,6 +103,14 @@ fn reconcile(
     conn: &rusqlite::Connection,
     repository: Option<(&str, Option<i64>)>,
 ) -> rusqlite::Result<()> {
+    reconcile_backstop(conn, repository, true)
+}
+
+fn reconcile_backstop(
+    conn: &rusqlite::Connection,
+    repository: Option<(&str, Option<i64>)>,
+    include_releases: bool,
+) -> rusqlite::Result<()> {
     if let Some((repo, Some(id))) = repository {
         let recorded: Option<i64> = conn
             .query_row(
@@ -102,10 +126,11 @@ fn reconcile(
     }
     conn.execute("UPDATE trigger_subscriptions SET last_polled_at_ms=NULL
         WHERE status='active' AND action IN ('list_issues','list_pull_requests','get_latest_release','list_releases','list_workflow_runs')
+        AND (?2 OR action NOT IN ('get_latest_release','list_releases'))
         AND (?1 IS NULL OR lower(json_extract(fixed_args,'$.owner') || '/' || json_extract(fixed_args,'$.repo'))=lower(?1))
         AND EXISTS (SELECT 1 FROM connections c WHERE c.principal=trigger_subscriptions.principal
             AND c.connection_id=trigger_subscriptions.connection_id AND c.app_key IN ('github','github_actions'))",
-        [repository.map(|(name, _)| name)])?;
+        rusqlite::params![repository.map(|(name, _)| name), include_releases])?;
     Ok(())
 }
 
@@ -119,12 +144,22 @@ fn reread(conn: &rusqlite::Connection, event: &Event) -> rusqlite::Result<()> {
 }
 
 impl PlexusStore {
+    /// Reuse relay reconciliation after a lost connection. Releases are not
+    /// covered by the relay App, so their polling schedule is left alone.
+    pub fn relay_disconnected(&self) -> Result<(), StoreError> {
+        self.inner
+            .with_conn_fenced(|conn| reconcile_backstop(conn, None, false))
+    }
     #[cfg(any(test, feature = "test-support"))]
     pub fn relay_cursor(&self, source: &str) -> Result<Option<Cursor>, StoreError> {
         self.inner.with_read(|conn| cursor(conn, source))
     }
 
-    pub fn relay_hello(&self, source: &str, hello: &Hello) -> Result<(), StoreError> {
+    pub fn relay_hello(
+        &self,
+        source: &str,
+        hello: &Hello,
+    ) -> Result<Option<CoverageReset>, StoreError> {
         if hello.source != source
             || hello.v != 1
             || hello.stream_id.is_empty()
@@ -138,10 +173,12 @@ impl PlexusStore {
             return Err(StoreError::Backend("invalid relay hello".into()));
         }
         self.inner.with_conn_fenced(|conn| {
+            let mut reset = None;
             let old = cursor(conn, source)?;
             let changed = old.as_ref().is_some_and(|old| old.stream_id != hello.stream_id);
             let mut committed = old.as_ref().filter(|_| !changed).map_or(0, |c| c.committed_seq);
             if changed {
+                reset = Some(CoverageReset::StreamChanged);
                 diag!(warn relay: "relay {source} stream changed; full reconcile queued");
                 reconcile(conn, None)?;
             }
@@ -152,11 +189,13 @@ impl PlexusStore {
             // be discarded as already committed, so restart from what it still
             // holds and reconcile everything, as for a changed stream.
             if !changed && committed >= hello.next_seq {
+                reset = Some(CoverageReset::SequenceReset);
                 diag!(warn relay: "relay {source} sequence went back from committed {committed} to next {}; full reconcile queued", hello.next_seq);
                 reconcile(conn, None)?;
                 committed = floor.max(hello.last_acked_seq.min(hello.next_seq - 1));
             }
             if committed < floor || committed < hello.last_acked_seq {
+                reset = reset.or(Some(CoverageReset::Gap));
                 diag!(warn relay: "relay {source} gap {}..{}; full reconcile queued", committed + 1, floor.max(hello.last_acked_seq));
                 reconcile(conn, None)?;
                 committed = floor.max(hello.last_acked_seq);
@@ -164,7 +203,7 @@ impl PlexusStore {
             conn.execute("INSERT INTO relay_cursor(source,stream_id,committed_seq) VALUES (?1,?2,?3)
                 ON CONFLICT(source) DO UPDATE SET stream_id=excluded.stream_id,committed_seq=excluded.committed_seq",
                 (source, &hello.stream_id, committed))?;
-            Ok(())
+            Ok(reset)
         })
     }
 

@@ -60,7 +60,7 @@ impl TransportPanicRecoveries {
 type CredentialRepairSource = Box<dyn Fn() -> BTreeMap<String, String> + Send + Sync>;
 
 pub struct HealthState {
-    pub(crate) relay: crate::relay::Status,
+    pub(crate) relay: Arc<crate::relay::Status>,
     pub(crate) store_metrics: std::sync::Mutex<serde_json::Value>,
     publish_error: std::sync::Mutex<Option<String>>,
     started_at_ms: u64,
@@ -243,7 +243,7 @@ impl HealthState {
         let monotonic_origin = Instant::now();
         let now = now_ms();
         Self {
-            relay: crate::relay::Status::default(),
+            relay: Arc::new(crate::relay::Status::default()),
             store_metrics: std::sync::Mutex::new(serde_json::json!({})),
             publish_error: std::sync::Mutex::new(None),
             started_at_ms: now,
@@ -793,6 +793,7 @@ impl HealthState {
             status,
             detail,
             metrics: Some(json!({
+                "githubPolling": self.relay.polling_status(),
                 "heartbeatAgeMs": heartbeat_wall_age_ms,
                 "heartbeatThresholdMs": HEARTBEAT_STALE_MS,
                 "moduleLifetimeMs": lifetime_ms,

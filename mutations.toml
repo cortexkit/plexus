@@ -1934,7 +1934,7 @@ timeout_s = 60
 id = "ci-fleet-cadence"
 guards = "Every active CI watch follows the fleet cadence rather than a fixed five-minute interval"
 file = "crates/plexus-core/src/store/repository_ownership.rs"
-old = "let cadence=if cycles_per_hour == 0 { i64::MAX } else {\n                    (count.saturating_mul(3600).saturating_add(cycles_per_hour-1) / cycles_per_hour).max(300)\n                };"
+old = "let cadence = if cycles_per_hour == 0 {\n        i64::MAX\n    } else {\n        (count\n            .saturating_mul(3600)\n            .saturating_add(cycles_per_hour - 1)\n            / cycles_per_hour)\n            .max(300)\n    };"
 new = "let cadence = 300; /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/store/repository_ownership.rs"
 runner = "cargo"
@@ -6973,7 +6973,7 @@ timeout_s = 120
 id = "ci-effective-cadence"
 guards = "CI cadence reserves repository identity headroom instead of scheduling against all 600 requests"
 file = "crates/plexus-core/src/store/repository_ownership.rs"
-old = "let cycles_per_hour=effective_ci_ceiling(conn)? / CI_CYCLE_REQUESTS;"
+old = "let cycles_per_hour = effective_ci_ceiling(conn)? / CI_CYCLE_REQUESTS;"
 new = "let cycles_per_hour=super::event_outbox::GITHUB_ACTIONS_HOURLY_REQUESTS / CI_CYCLE_REQUESTS; /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
 runner = "cargo"
@@ -9110,12 +9110,10 @@ build_timeout_s = 3600
 id = "module-relay-local-store"
 guards = "A local hello store fault reconnects without blaming relay protocol with close 4400"
 file = "crates/plexus-module/src/relay.rs"
-old = '''if local_store_failed("hello", hello_result) {
-                            return Failure::Reconnecting;
-                        }'''
-new = '''if local_store_failed("hello", hello_result) {
-                            return protocol_error(&mut socket).await; /* NON-VACUITY BREAK */
-                        }'''
+old = '''local_store_failed("hello", failure);
+                                return Failure::Reconnecting;'''
+new = '''local_store_failed("hello", failure);
+                                return protocol_error(&mut socket).await; /* NON-VACUITY BREAK */'''
 test_file = "crates/plexus-module/src/relay_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -9159,8 +9157,8 @@ build_timeout_s = 3600
 id = "module-cadence-minimum"
 guards = "Health deliberately reports the shortest active CI cadence rather than an arbitrary row"
 file = "crates/plexus-module/src/lib.rs"
-old = "s.min(sub.cadence_s)"
-new = "s.max(sub.cadence_s) /* NON-VACUITY BREAK */"
+old = "s.min(cadence)"
+new = "s.max(cadence) /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/bus.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -11472,3 +11470,108 @@ expect_red = ["storage::ceiling_store::tests::widen_ceiling_requires_active_revi
 expect_message = "widening requires an active reviewed action"
 build_timeout_s = 3600
 timeout_s = 60
+
+[[control]]
+id = "relay-polling-healthy-hour"
+guards = "Relay slow polling needs a full uninterrupted healthy hour"
+file = "crates/plexus-module/src/relay.rs"
+old = "const HEALTHY_RELAY_WINDOW: Duration = Duration::from_secs(3600);"
+new = "const HEALTHY_RELAY_WINDOW: Duration = Duration::from_secs(3599); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_requires_one_unbroken_hour_and_reports_why"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-polling-release-exclusion"
+guards = "Release watches keep their cadence because the relay App does not serve releases"
+file = "crates/plexus-core/src/scheduler.rs"
+old = '"list_issues" | "list_pull_requests" | "list_workflow_runs"'
+new = '"list_issues" | "list_pull_requests" | "list_workflow_runs" | "get_latest_release" /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_scheduler_slows_issue_pr_ci_but_not_releases"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-polling-disconnect-catchup"
+guards = "Losing the relay immediately makes affected watches due for one catch-up poll"
+file = "crates/plexus-module/src/relay.rs"
+old = "tokio::task::spawn_blocking(move || db.relay_disconnected()).await"
+new = "tokio::task::spawn_blocking(move || { let _ = db; Ok::<(), cortexkit_store::StoreError>(()) /* NON-VACUITY BREAK */ }).await"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_disconnect_catches_up_once_and_reconnects_fresh"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-polling-ci-snapshot"
+guards = "A scheduler pass reads the shared CI quota cadence only once"
+file = "crates/plexus-core/src/scheduler.rs"
+old = 'let ci_floor = if subscription.cursor_kind == "ci_runs" {'
+new = 'self.ci_quota_cadence_s = None; /* NON-VACUITY BREAK */ let ci_floor = if subscription.cursor_kind == "ci_runs" {'
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_ci_spacing_keeps_the_shared_quota_floor"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-polling-connections-snapshot"
+guards = "Connection app membership is shared by every watch in a pass and refreshed next pass"
+file = "crates/plexus-core/src/scheduler.rs"
+old = "if !self\n                .github_connections\n                .contains_key(&subscription.principal)\n            {"
+new = 'if true { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_batches_connections_and_refreshes_them_next_pass"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-polling-normal-no-connections"
+guards = "Normal mode never loads connection membership for the relay cadence floor"
+file = "crates/plexus-core/src/scheduler.rs"
+old = 'let github_slow = if self.relay_slow {'
+new = 'let github_slow = if true { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/scheduler.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["scheduler::tests::cadence_inputs_skip_connections_in_normal_mode_and_reads_for_held_watches"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-polling-held-watch-no-reads"
+guards = "Watches already held by backoff do not trigger extra cadence database reads"
+file = "crates/plexus-core/src/scheduler.rs"
+old = 'if decision != DueDecision::Poll {'
+new = 'if decision == DueDecision::BreakerTripped { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/scheduler.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["scheduler::tests::cadence_inputs_skip_connections_in_normal_mode_and_reads_for_held_watches"]
+build_timeout_s = 3600
+timeout_s = 120
