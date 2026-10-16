@@ -28,7 +28,7 @@ call mode. In Flow mode:
 
 | Operation | Repository source and audience decision |
 | --- | --- |
-| `github_read` and legacy `github` / `read` | Check every string in `repository` (scalar or array). This includes issue reads, comments and repository-only issue search. On `github.issue.search`, caller-supplied `terms`, `q` or `query` refuse as an unresolved repository. |
+| `github_read` | Check every string in `repository` (scalar or array). This includes issue reads, comments and repository-only issue search. On `github.issue.search`, caller-supplied `terms`, `q` or `query` refuse as an unresolved repository. |
 | CI `github.actions.job_log` | Same outer `repository`; the reader derives both `get_job` and job-log request targets from it. |
 | CI `github.actions.artifact_file` | Same outer `repository`; artifact listing, selection and file download use that repository. |
 | CI `github.actions.run.superseded` | Same outer `repository`; run metadata and newest workflow run use that repository. |
@@ -56,8 +56,8 @@ no free-text fields, search builds its query from the checked repositories alone
 `connections`, `requests`, and `events` are Classic-only in the admission table,
 not Flow-mode tools. A Classic route with a flow stamp retains the existing
 flow restrictions (`events` permits only `get`; approval decisions refuse).
-The shared audience gate also covers legacy `events` / `get` and legacy GitHub
-reads on these stamped routes. Workspace calls to Classic-only `connections`
+The shared audience gate also covers legacy `events` / `get` and `github_read`
+on these stamped routes. Workspace calls to Classic-only `connections`
 and `requests` refuse because they can expose stored repository selectors
 without a resolvable target. Other management operations keep their existing
 principal/direct-only checks.

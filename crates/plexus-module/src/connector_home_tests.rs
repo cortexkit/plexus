@@ -94,7 +94,6 @@ fn unknown_refuses_every_facade_effect_before_dispatch() {
     for (name, op) in [
         ("invoke", "call"),
         ("github", "bot_request"),
-        ("github", "read"),
         ("github_read", ""),
         ("web_search", "search"),
         ("code_search", ""),
@@ -113,6 +112,10 @@ fn unknown_refuses_every_facade_effect_before_dispatch() {
     }
     assert_ne!(
         call_tool(&state, "connections", "list")["error"]["code"],
+        "connector_home_not_held"
+    );
+    assert_ne!(
+        call_tool(&state, "github", "bindings.read")["error"]["code"],
         "connector_home_not_held"
     );
 }

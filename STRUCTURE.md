@@ -22,6 +22,7 @@ scripts/                 Test gate, trains, release, staging, deploy acceptance
 
 - **A vendor:** a new `catalog/<vendor>.jsonc`. `crates/plexus-conformance/tests/shipped_catalog_ingests.rs` proves it parses.
 - **A wire tool or operation:** a handler in `crates/plexus-module/src/lib.rs`, declared in `crates/plexus-module/src/manifest.rs`.
+- **A GitHub read:** use the separate `github_read` tool and its shared GitHub read implementation; the `github` facade serves only `bot_request` and `bindings.read`.
 - **Agent identity:** daemon scope stamps in `crates/plexus-core/src/scope.rs`, carried by route bindings in `crates/plexus-module/src/lib.rs`. Bot writes resolve the stamped agent's bound handle in `github/facade/gates.rs`; identity-token arguments are refused centrally before tool dispatch.
 - **A governance gate:** `authorize` in `crates/plexus-core/src/governance.rs`.
 - **A table or column:** append a `Migration` to `MIGRATIONS` in `crates/plexus-core/src/storage.rs` and rehearse it with `examples/migration_rehearsal.rs`.

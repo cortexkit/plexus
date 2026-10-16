@@ -284,7 +284,7 @@ pub const TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     ("web_search", ToolEffect::Always),
     // Calls grep.app, a public backend outside this machine.
     ("code_search", ToolEffect::Always),
-    ("github", ToolEffect::Ops(&["bot_request", "read"])),
+    ("github", ToolEffect::Ops(&["bot_request"])),
     ("github_read", ToolEffect::Always),
     ("connections", ToolEffect::Ops(&["connect"])),
     ("requests", ToolEffect::Ops(&["approve", "deny"])),

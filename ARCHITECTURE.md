@@ -60,7 +60,7 @@ Plexus serves tool-provider/v1's `tool.catalog` with per-tool capability tags fr
 
 ## GitHub bot writes
 
-Every Alfonso's GitHub App bot speaks through plexus. The `github` tool has three operations: `bot_request` (writes and their pre-reads, sent by AFT's `gh` shim and by prefrontal's seen markers), `read` (prefrontal's issue reads, named by repository, never by connection) and `bindings.read`.
+GitHub App bot requests go through plexus. The `github` tool has two operations: `bot_request` (governed writes with ownership pre-reads, or recording an issue an agent has seen) and `bindings.read`. Repository-bound issue and CI reads use the separate `github_read` tool; the former `github`/`read` operation is no longer accepted.
 
 - **Handles.** One row per App (`github_app_handle`), keyed on its vault record `github_app:<slug>`. The installation id is informational. Each handle has its own `github-handle-<slug>` connection and is bound to its agent's repository (`github_repo_binding`); a bot only ever speaks as its own agent, and a write to another agent's repository refuses `agent_repository_conflict`.
 - **Stamp identity.** A bot write requires an authorized delegating scope naming an agent. Otherwise it refuses `delegating_scope_required` before handle lookup or credential access, with no fallback. The agent's bound bot is resolved from the store, and its scope is rechecked before each write.

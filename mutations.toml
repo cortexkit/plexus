@@ -11638,3 +11638,19 @@ select = "expected"
 expect_red = ["shipped_sources_never_call_removed_claim_operations"]
 expect_message = "removed claim operation in shipped source"
 build_timeout_s = 3600
+
+[[control]]
+id = "github-facade-removed-read-op"
+guards = "The retired github/read operation is refused by its operation name instead of reaching GitHub reads"
+file = "crates/plexus-module/src/lib.rs"
+old = 'if !matches!(operation, Some("bot_request" | "bindings.read")) {'
+new = 'if false && !matches!(operation, Some("bot_request" | "bindings.read")) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::github_facade_refuses_removed_read_op_by_name_and_keeps_bindings_read"]
+expect_message = "unknown_method"
+build_timeout_s = 3600
+timeout_s = 90

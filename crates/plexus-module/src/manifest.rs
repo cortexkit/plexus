@@ -244,9 +244,9 @@ pub fn build_with_launch_nonce_source(
                 ),
                 tool(
                     GITHUB_TOOL,
-                    "Route GitHub bot requests, inspect bindings, and serve repository-bound reads (also available through github_read).",
+                    "Route GitHub bot requests and inspect repository bindings. Repository-bound reads are available through github_read.",
                     ExecutionMode::Unfenceable,
-                    &["bot_request", "bindings.read", "read"],
+                    &["bot_request", "bindings.read"],
                 ),
                 github_read_tool(),
                 events_get_tool(),
@@ -806,6 +806,11 @@ mod tests {
         );
         assert_eq!(tools[1].execution_mode, ExecutionMode::Pure);
         assert_eq!(tools[2].execution_mode, ExecutionMode::Unfenceable);
+        assert_eq!(
+            tools[4].schema["properties"]["op"]["enum"],
+            json!(["bot_request", "bindings.read"]),
+            "the github facade only advertises bot requests and binding reads"
+        );
         assert_eq!(tools[8].execution_mode, ExecutionMode::Pure);
         assert_eq!(
             tools[8].schema["required"],
