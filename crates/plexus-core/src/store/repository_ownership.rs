@@ -13,7 +13,32 @@ use super::event_outbox::{effective_ci_ceiling, CI_CYCLE_REQUESTS};
 pub(super) const WATCH_EXISTS_SQL: &str = "(s.status = 'active' OR (s.status = 'suspended'
     AND COALESCE(s.suspended_reason, '') NOT IN ('repository_identity_changed', 'catalog_schema_mismatch')))";
 
+fn ci_schedule(conn: &rusqlite::Connection) -> rusqlite::Result<(i64, i64)> {
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM trigger_subscriptions WHERE status='active' AND cursor_kind='ci_runs'",
+        [], |row| row.get(0),
+    )?;
+    // Reserve repository lookups, then schedule only whole eight-request cycles
+    // inside the same trailing-hour ceiling used by quota admission.
+    let cycles_per_hour = effective_ci_ceiling(conn)? / CI_CYCLE_REQUESTS;
+    let cadence = if cycles_per_hour == 0 {
+        i64::MAX
+    } else {
+        (count
+            .saturating_mul(3600)
+            .saturating_add(cycles_per_hour - 1)
+            / cycles_per_hour)
+            .max(300)
+    };
+    Ok((count, cadence))
+}
+
 impl PlexusStore {
+    /// Current quota spacing, including watches not yet cadence-reconciled.
+    pub fn ci_quota_cadence_s(&self) -> Result<i64, StoreError> {
+        self.inner
+            .with_read(|conn| ci_schedule(conn).map(|(_, cadence)| cadence))
+    }
     /// Resolve a repository's project from watch rows populated by entorhinal's
     /// project registry. Operator-set project labels are annotations, not proof
     /// that a workspace owns the repository, so they cannot grant access.
@@ -180,17 +205,7 @@ impl PlexusStore {
     pub(crate) fn reconcile_ci_cadence(&self) -> Result<usize, StoreError> {
         self.inner.with_conn_fenced(|conn| {
             atomic(conn, || {
-                let count: i64 = conn.query_row(
-                    "SELECT count(*) FROM trigger_subscriptions WHERE status='active' AND cursor_kind='ci_runs'",
-                    [], |row| row.get(0),
-                )?;
-                // CI quota admission reserves requests for repository lookups.
-                // Schedule only whole eight-request cycles within the remaining
-                // trailing-hour budget, rounding the interval upward.
-                let cycles_per_hour=effective_ci_ceiling(conn)? / CI_CYCLE_REQUESTS;
-                let cadence=if cycles_per_hour == 0 { i64::MAX } else {
-                    (count.saturating_mul(3600).saturating_add(cycles_per_hour-1) / cycles_per_hour).max(300)
-                };
+                let (count, cadence) = ci_schedule(conn)?;
                 let mut statement = conn.prepare(
                     "SELECT principal, subscription_id, cadence_s FROM trigger_subscriptions
                      WHERE status='active' AND cursor_kind='ci_runs' AND cadence_s != ?1",

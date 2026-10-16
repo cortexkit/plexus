@@ -217,6 +217,22 @@ async fn replay_with_close(
     expected_ack: bool,
     expected_close: Option<u16>,
 ) -> Failure {
+    replay_using_status(
+        store,
+        frames,
+        expected_ack,
+        expected_close,
+        &Status::default(),
+    )
+    .await
+}
+async fn replay_using_status(
+    store: Arc<PlexusStore>,
+    frames: Vec<String>,
+    expected_ack: bool,
+    expected_close: Option<u16>,
+    status: &Status,
+) -> Failure {
     // Each acknowledgement follows a durable commit. Bound individual replies
     // separately from the whole exchange, which may contain 64 such commits.
     let ack_deadline = Duration::from_secs(20);
@@ -282,8 +298,7 @@ async fn replay_with_close(
     let socket = bounded(dial(&url, b"opaque-relay-token", &home))
         .await
         .unwrap();
-    let status = Status::default();
-    let failure = tokio::time::timeout(exchange_deadline, consume(socket, store, &status, &home))
+    let failure = tokio::time::timeout(exchange_deadline, consume(socket, store, status, &home))
         .await
         .expect("relay replay exchange deadline");
     bounded(server).await.unwrap();
@@ -2030,4 +2045,280 @@ async fn local_store_failures_log_the_underlying_cause() {
     sql(&scratch, "DROP TABLE relay_cursor");
     let result = tokio::task::spawn_blocking(move || store.relay_cursor("github")).await;
     assert!(local_store_failed("event commit", result));
+}
+
+fn age_relay(status: &Status, seconds: u64) {
+    let since = Instant::now()
+        .checked_sub(Duration::from_secs(seconds))
+        .unwrap();
+    let mut snapshot = status.0.lock().unwrap();
+    snapshot.connected_since = Some(since);
+    snapshot.healthy_since = Some(since);
+}
+
+fn relay_scheduler(
+    store: &Arc<PlexusStore>,
+    status: Arc<Status>,
+) -> plexus_core::Scheduler<StubCredentialSource, plexus_core::transport::MockTransport> {
+    let engine = plexus_core::GovernanceEngine::new(
+        store.clone(),
+        Arc::new(StubCredentialSource::default()),
+        Arc::new(plexus_core::transport::MockTransport::default()),
+    );
+    plexus_core::Scheduler::new(engine, 86_400_000).with_relay_health(status)
+}
+
+#[test]
+fn relay_polling_requires_one_unbroken_hour_and_reports_why() {
+    let health = crate::health::HealthState::new();
+    let status = &health.relay;
+    assert_eq!(status.polling_status()["mode"], "normal");
+    assert_eq!(
+        status.polling_status()["last_clock_reset"],
+        "process_started"
+    );
+    status.set(State::Connected);
+    let snapshot = status.0.lock().unwrap();
+    let start = snapshot.connected_since.unwrap();
+    assert!(!Status::slow_at(
+        &snapshot,
+        start + Duration::from_secs(3599)
+    ));
+    assert!(Status::slow_at(
+        &snapshot,
+        start + Duration::from_secs(3600)
+    ));
+    drop(snapshot);
+    age_relay(status, 3600);
+    let subc_protocol::session::ModuleControlResponse::HealthCheck {
+        metrics: Some(metrics),
+        ..
+    } = health.report()
+    else {
+        panic!("health metrics")
+    };
+    assert_eq!(metrics["githubPolling"]["mode"], "relay_slow");
+    assert_eq!(metrics["githubPolling"]["relay_state"], "connected");
+    assert!(
+        metrics["githubPolling"]["connected_for_ms"]
+            .as_u64()
+            .unwrap()
+            >= 3_600_000
+    );
+    status.reset_clock("overflow");
+    let polling = status.polling_status();
+    assert_eq!(polling["mode"], "normal");
+    assert_eq!(polling["last_clock_reset"], "overflow");
+    assert!(polling["healthy_for_ms"].as_u64().unwrap() < 1000);
+    assert!(polling["connected_for_ms"].as_u64().unwrap() >= 3_600_000);
+    status.set(State::Reconnecting);
+    assert_eq!(status.polling_status()["connected_for_ms"], Value::Null);
+    status.set(State::Connected);
+    let snapshot = status.0.lock().unwrap();
+    let reconnected = snapshot.connected_since.unwrap();
+    assert!(!Status::slow_at(
+        &snapshot,
+        reconnected + Duration::from_secs(3599)
+    ));
+    assert!(Status::slow_at(
+        &snapshot,
+        reconnected + Duration::from_secs(3600)
+    ));
+    drop(snapshot);
+    assert_eq!(status.polling_status()["last_clock_reset"], "reconnecting");
+    assert_eq!(Status::default().polling_status()["mode"], "normal");
+}
+
+#[test]
+fn relay_polling_scheduler_slows_issue_pr_ci_but_not_releases() {
+    let (scratch, store, issue) = fixture("relay-slow-scheduler");
+    let release = kind_watch(&store, "get_latest_release");
+    let ci = kind_watch(&store, "list_workflow_runs");
+    let now = now_ms();
+    sql(
+        &scratch,
+        &format!(
+            "UPDATE trigger_subscriptions SET last_polled_at_ms={};",
+            now - 300_000
+        ),
+    );
+    let status = Arc::new(Status::default());
+    status.set(State::Connected);
+    let scheduler = relay_scheduler(&store, status.clone());
+    let principals = ["direct".into()];
+    assert_eq!(scheduler.due_now(&principals, now).len(), 4);
+    age_relay(&status, 3600);
+    let due = scheduler.due_now(&principals, now);
+    assert_eq!(
+        due.iter().map(|s| &s.subscription_id).collect::<Vec<_>>(),
+        [&release]
+    );
+    assert_eq!(scheduler.due_now(&principals, now + 1_499_999).len(), 1);
+    assert_eq!(scheduler.due_now(&principals, now + 1_500_000).len(), 4);
+    for id in [&issue, &ci, &release, &"pr-watch".to_owned()] {
+        assert_eq!(
+            store.subscription("direct", id).unwrap().unwrap().cadence_s,
+            300
+        );
+    }
+    sql(
+        &scratch,
+        "UPDATE trigger_subscriptions SET cadence_s=2400 WHERE action='list_workflow_runs'",
+    );
+    assert_eq!(scheduler.due_now(&principals, now + 1_500_000).len(), 3);
+    sql(
+        &scratch,
+        "UPDATE connections SET app_key='another_provider' WHERE connection_id='conn-1'",
+    );
+    assert_eq!(
+        scheduler.due_now(&principals, now).len(),
+        3,
+        "other providers must keep their cadence"
+    );
+}
+
+#[test]
+fn relay_polling_ci_spacing_keeps_the_shared_quota_floor() {
+    let (scratch, store, _) = fixture("relay-ci-quota-floor");
+    let ci = kind_watch(&store, "list_workflow_runs");
+    sql(&scratch, "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<99)
+        INSERT INTO trigger_subscriptions(subscription_id,principal,connection_id,action,cadence_s,cursor_kind,schema_hash,status,created_at_ms,fixed_args)
+        SELECT 'ci-' || i,principal,connection_id,action,300,cursor_kind,schema_hash,'active',0,json_object('owner','org','repo','repo-' || i)
+        FROM trigger_subscriptions,n WHERE action='list_workflow_runs';");
+    let sub = store.subscription("direct", &ci).unwrap().unwrap();
+    assert_eq!(
+        store.ci_quota_cadence_s().unwrap(),
+        5807,
+        "100 watches share 62 whole eight-request cycles after repository lookups"
+    );
+    for slow in [false, true] {
+        assert_eq!(
+            plexus_core::scheduler::effective_cadence_s(&store, &sub, slow),
+            5807
+        );
+        let mut longer = sub.clone();
+        longer.cadence_s = 10_000;
+        assert_eq!(
+            plexus_core::scheduler::effective_cadence_s(&store, &longer, slow),
+            10_000
+        );
+    }
+}
+
+#[tokio::test]
+async fn relay_polling_gap_reset_and_overflow_restart_the_clock_and_catch_up() {
+    for reason in ["gap", "sequence_reset", "stream_changed", "overflow"] {
+        let (scratch, store, _) = fixture(&format!("relay-clock-{reason}"));
+        store
+            .relay_hello(
+                SOURCE,
+                &serde_json::from_str::<Hello>(&vector(HELLOS, "empty")).unwrap(),
+            )
+            .unwrap();
+        let status = Status::default();
+        status.set(State::Connected);
+        age_relay(&status, 3600);
+        assert_eq!(status.polling_status()["mode"], "relay_slow");
+        let mut greeting: Value = serde_json::from_str(&vector(HELLOS, "empty")).unwrap();
+        match reason {
+            "gap" => {
+                greeting["next_seq"] = json!(10);
+                greeting["oldest_seq"] = json!(3);
+            }
+            "sequence_reset" => sql(&scratch, "UPDATE relay_cursor SET committed_seq=8"),
+            "stream_changed" => greeting["stream_id"] = json!(RECREATED_STREAM),
+            _ => {}
+        }
+        let mut frames = vec![greeting.to_string()];
+        if reason == "overflow" {
+            let mut event: Value = serde_json::from_str(&full_event()).unwrap();
+            event["stub"] = json!("overflow");
+            frames.push(event.to_string());
+        }
+        replay_using_status(store.clone(), frames, reason == "overflow", None, &status).await;
+        assert_eq!(status.polling_status()["mode"], "normal", "{reason}");
+        assert_eq!(status.polling_status()["last_clock_reset"], reason);
+        assert_eq!(due(&scratch), 2, "{reason} must reuse reconciliation");
+        let scheduler = relay_scheduler(&store, Arc::new(status));
+        assert_eq!(scheduler.due_now(&["direct".into()], now_ms()).len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn relay_polling_disconnect_catches_up_once_and_reconnects_fresh() {
+    let (scratch, store, _) = fixture("relay-disconnect-catchup");
+    let release = kind_watch(&store, "get_latest_release");
+    kind_watch(&store, "list_workflow_runs");
+    sql(
+        &scratch,
+        "UPDATE trigger_subscriptions SET last_polled_at_ms=9999999999999",
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/relay/github/ws", listener.local_addr().unwrap());
+    let status = Arc::new(Status::default());
+    let scheduler = relay_scheduler(&store, status.clone());
+    let task_status = status.clone();
+    let task_store = store.clone();
+    let (stop, rx) = mpsc::channel(1);
+    let task = tokio::spawn(async move {
+        run(
+            &url,
+            task_store,
+            Arc::new(StubCredentialSource::with_default_success(
+                b"secret".to_vec(),
+            )),
+            Arc::new(ConnectorHome::test_admitted()),
+            &task_status,
+            rx,
+        )
+        .await;
+    });
+    let (tcp, _) = bounded(listener.accept()).await.unwrap();
+    let mut socket = accept_async(tcp).await.unwrap();
+    socket
+        .send(Message::Text(vector(HELLOS, "empty").into()))
+        .await
+        .unwrap();
+    wait_state(&status, State::Connected).await;
+    age_relay(&status, 3600);
+    assert_eq!(status.polling_status()["mode"], "relay_slow");
+    assert!(scheduler.due_now(&["direct".into()], now_ms()).is_empty());
+    socket.close(None).await.unwrap();
+    wait_state(&status, State::Reconnecting).await;
+    bounded(async {
+        while due(&scratch) != 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(status.polling_status()["mode"], "normal");
+    assert_eq!(status.polling_status()["last_clock_reset"], "reconnecting");
+    let now = now_ms();
+    let catchup = scheduler.due_now(&["direct".into()], now);
+    assert_eq!(
+        catchup.len(),
+        3,
+        "disconnect must immediately schedule issue, PR and CI"
+    );
+    assert!(!catchup.iter().any(|s| s.subscription_id == release));
+    for sub in catchup {
+        store
+            .record_poll_attempt("direct", &sub.subscription_id, now)
+            .unwrap();
+    }
+    assert!(
+        scheduler.due_now(&["direct".into()], now).is_empty(),
+        "catch-up must not repeat every pass"
+    );
+    let (tcp, _) = bounded(listener.accept()).await.unwrap();
+    let mut socket = accept_async(tcp).await.unwrap();
+    socket
+        .send(Message::Text(vector(HELLOS, "empty").into()))
+        .await
+        .unwrap();
+    wait_state(&status, State::Connected).await;
+    assert_eq!(status.polling_status()["mode"], "normal");
+    assert!(status.polling_status()["healthy_for_ms"].as_u64().unwrap() < 1000);
+    drop(stop);
+    bounded(task).await.unwrap();
 }

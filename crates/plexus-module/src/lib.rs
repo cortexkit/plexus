@@ -636,6 +636,7 @@ fn spawn_trigger_scheduler(
 ) -> tokio::task::JoinHandle<()> {
     let scheduler =
         plexus_core::Scheduler::new(state.runtime.engine.clone(), audit_retention_window_ms)
+            .with_relay_health(state.health.relay.clone())
             .with_agent_registry(Arc::clone(&state.runtime.agent_registry));
     let scheduler = match &state.runtime.repository_registry {
         Some(registry) => scheduler.with_repository_registry(Arc::clone(registry)),
@@ -3764,9 +3765,6 @@ fn connector_home_health(state: &ModuleState) -> ModuleControlResponse {
     report
 }
 
-const MIN_CI_CADENCE_S: i64 = 300;
-const CI_SECONDS_PER_REPOSITORY: i64 = 12;
-
 fn refresh_store_health(state: &ModuleState, principals: &[String]) {
     let mut metrics = json!({});
     match state.store().event_outbox_health() {
@@ -3779,9 +3777,14 @@ fn refresh_store_health(state: &ModuleState, principals: &[String]) {
         }
         Err(error) => eprintln!(warn health: "outbox health read failed: {error}"),
     }
-    let (r, stored_cadence) = effective_ci_cadence_from_store(state.store(), principals);
-    metrics["effectiveCiCadenceS"] = json!(stored_cadence
-        .unwrap_or_else(|| MIN_CI_CADENCE_S.max(r.saturating_mul(CI_SECONDS_PER_REPOSITORY))));
+    let (_, stored_cadence) = effective_ci_cadence_from_store(
+        state.store(),
+        principals,
+        plexus_core::scheduler::RelayPollingHealth::slow_polling(state.health.relay.as_ref()),
+    );
+    metrics["effectiveCiCadenceS"] =
+        json!(stored_cadence
+            .unwrap_or_else(|| state.store().ci_quota_cadence_s().unwrap_or(i64::MAX)));
     if let Ok(mut cached) = state.health.store_metrics.lock() {
         *cached = metrics;
     }
@@ -3790,6 +3793,7 @@ fn refresh_store_health(state: &ModuleState, principals: &[String]) {
 fn effective_ci_cadence_from_store(
     store: &PlexusStore,
     principals: &[String],
+    relay_slow: bool,
 ) -> (i64, Option<i64>) {
     let mut r_count = 0i64;
     let mut stored_cadence: Option<i64> = None;
@@ -3801,8 +3805,9 @@ fn effective_ci_cadence_from_store(
                         r_count += 1;
                         // The CI cadence reported is the shortest among active
                         // CI-run watches, since that watch is due soonest.
-                        stored_cadence =
-                            Some(stored_cadence.map_or(sub.cadence_s, |s| s.min(sub.cadence_s)));
+                        let cadence =
+                            plexus_core::scheduler::effective_cadence_s(store, &sub, relay_slow);
+                        stored_cadence = Some(stored_cadence.map_or(cadence, |s| s.min(cadence)));
                     }
                 }
             }

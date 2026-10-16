@@ -10,14 +10,12 @@
 //! - [`PlexusStore::due_subscriptions`](crate::storage::PlexusStore::due_subscriptions)
 //!   is the base cadence bound — `active` and either never polled or last polled
 //!   at least one `cadence_s` ago. It knows nothing about failures.
-//! - This module layers the failure policy on top of those rows: a failing
-//!   subscription is held back by an exponential backoff, and one that fails
-//!   past the circuit-breaker threshold is suspended rather than polled again.
+//! - This module layers quota and relay cadence floors and the failure policy
+//!   on top of those rows. A failing subscription waits out exponential backoff;
+//!   past the circuit-breaker threshold it is suspended rather than polled again.
 //!
-//! A healthy subscription (no consecutive vendor failures) is selected at
-//! exactly its declared cadence and nothing else. The failure policy only ever
-//! lengthens the wait or stops polling; it never makes a subscription poll
-//! faster than its cadence.
+//! Cadence floors and the failure policy only ever lengthen the wait or stop
+//! polling; they never make a subscription poll faster than its stored cadence.
 //!
 //! # One poll at a time, sequentially
 //!
@@ -110,6 +108,52 @@ const WAITING_APPROVAL_RETRIES_PER_PASS: usize = 16;
 /// again.
 const CREDENTIAL_REPAIR_RETRY_MS: i64 = 3_600_000;
 
+/// Whether an uninterrupted healthy relay connection permits less frequent
+/// polling. The module's health report uses the same process-local state.
+pub trait RelayPollingHealth: Send + Sync {
+    fn slow_polling(&self) -> bool;
+}
+
+/// After a healthy relay hour, affected GitHub watches wait at least 30 minutes
+/// between polls. Stored cadences and CI quota spacing remain lower bounds; this
+/// calculation never writes a subscription's cadence back to the store.
+pub fn effective_cadence_s(
+    store: &PlexusStore,
+    subscription: &TriggerSubscription,
+    relay_slow: bool,
+) -> i64 {
+    let cadence = if subscription.cursor_kind == "ci_runs" {
+        // If the quota spacing cannot be read, defer timed CI polls until a
+        // later read succeeds instead of risking requests beyond the budget.
+        subscription
+            .cadence_s
+            .max(store.ci_quota_cadence_s().unwrap_or_else(|error| {
+                eprintln!(warn scheduler: "CI cadence read failed: {error}");
+                i64::MAX
+            }))
+    } else {
+        subscription.cadence_s
+    };
+    let github = relay_slow
+        && store
+            .connection(&subscription.principal, &subscription.connection_id)
+            .ok()
+            .flatten()
+            .is_some_and(|connection| {
+                matches!(connection.app_key.as_str(), "github" | "github_actions")
+            });
+    if github
+        && matches!(
+            subscription.action.as_str(),
+            "list_issues" | "list_pull_requests" | "list_workflow_runs"
+        )
+    {
+        cadence.max(1800)
+    } else {
+        cadence
+    }
+}
+
 /// The scheduler's decision for one cadence-due subscription.
 ///
 /// The store query has already established the subscription is `active` and
@@ -154,6 +198,7 @@ where
     /// Watches waiting out [`CREDENTIAL_REPAIR_RETRY_MS`], by subscription id,
     /// with the pass time before which they are not polled.
     credential_repair_waits: Mutex<std::collections::HashMap<String, i64>>,
+    relay_health: Option<Arc<dyn RelayPollingHealth>>,
 }
 
 /// The outcome of one subscription within a scheduling pass.
@@ -212,7 +257,13 @@ where
             ownership_throttle: Default::default(),
             ownership_resume: Default::default(),
             credential_repair_waits: Mutex::new(Default::default()),
+            relay_health: None,
         }
+    }
+
+    pub fn with_relay_health(mut self, relay: Arc<dyn RelayPollingHealth>) -> Self {
+        self.relay_health = Some(relay);
+        self
     }
 
     /// Enable the hourly sweep that revokes grants of agents the registry
@@ -419,7 +470,13 @@ where
         subscription: &TriggerSubscription,
         now_ms: i64,
     ) -> DueDecision {
-        let decision = classify(subscription, now_ms);
+        let mut scheduled = subscription.clone();
+        let relay_slow = self
+            .relay_health
+            .as_ref()
+            .is_some_and(|relay| relay.slow_polling());
+        scheduled.cadence_s = effective_cadence_s(&self.store, subscription, relay_slow);
+        let decision = classify(&scheduled, now_ms);
         if decision == DueDecision::Poll
             && (self.waiting_for_credential_repair(&subscription.subscription_id, now_ms)
                 || self

@@ -2,14 +2,14 @@
 use crate::{connector_home::ConnectorHome, ModuleState};
 use futures_util::{SinkExt, StreamExt};
 use plexus_core::{
-    storage::relay::{Event, Hello},
+    storage::relay::{Event, Hello, Stub},
     CredentialSource, PlexusStore,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_tungstenite::{
@@ -36,6 +36,7 @@ const CREDENTIAL_RECHECK: Duration = Duration::from_secs(300);
 /// to five minutes after this machine regains the claim.
 const NOT_HOME_RECHECK: Duration = Duration::from_secs(30);
 const INITIAL_CREDENTIAL_RECHECK: Duration = Duration::from_secs(5);
+const HEALTHY_RELAY_WINDOW: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -82,6 +83,9 @@ struct Snapshot {
     state: State,
     last_event_at: Option<String>,
     superseded: bool,
+    connected_since: Option<Instant>,
+    healthy_since: Option<Instant>,
+    last_clock_reset: &'static str,
 }
 pub struct Status(Mutex<Snapshot>);
 impl Default for Status {
@@ -90,6 +94,9 @@ impl Default for Status {
             state: State::NoCredential,
             last_event_at: None,
             superseded: false,
+            connected_since: None,
+            healthy_since: None,
+            last_clock_reset: "process_started",
         }))
     }
 }
@@ -104,6 +111,16 @@ impl Status {
         let changed = {
             let mut status = self.0.lock().unwrap();
             let changed = status.state != state;
+            if changed {
+                if state == State::Connected {
+                    status.connected_since = Some(Instant::now());
+                    status.healthy_since = status.connected_since;
+                } else {
+                    status.connected_since = None;
+                    status.healthy_since = None;
+                    status.last_clock_reset = state.name();
+                }
+            }
             status.state = state;
             if state != State::Reconnecting {
                 status.superseded = false;
@@ -120,6 +137,9 @@ impl Status {
             let changed = status.state != State::Reconnecting;
             status.state = State::Reconnecting;
             status.superseded = true;
+            status.connected_since = None;
+            status.healthy_since = None;
+            status.last_clock_reset = "superseded";
             changed
         };
         if changed {
@@ -128,6 +148,28 @@ impl Status {
     }
     fn event(&self, received: String) {
         self.0.lock().unwrap().last_event_at = Some(received);
+    }
+    fn reset_clock(&self, reason: &'static str) {
+        let mut status = self.0.lock().unwrap();
+        status.healthy_since = status.connected_since.map(|_| Instant::now());
+        status.last_clock_reset = reason;
+    }
+    fn slow_at(status: &Snapshot, now: Instant) -> bool {
+        status.state == State::Connected
+            && status
+                .healthy_since
+                .is_some_and(|since| now.saturating_duration_since(since) >= HEALTHY_RELAY_WINDOW)
+    }
+    pub(crate) fn polling_status(&self) -> Value {
+        let s = self.0.lock().unwrap();
+        let now = Instant::now();
+        json!({
+            "mode": if Self::slow_at(&s, now) { "relay_slow" } else { "normal" },
+            "relay_state": s.state.name(),
+            "connected_for_ms": s.connected_since.map(|since| now.saturating_duration_since(since).as_millis()),
+            "healthy_for_ms": s.healthy_since.map(|since| now.saturating_duration_since(since).as_millis()),
+            "last_clock_reset": s.last_clock_reset,
+        })
     }
     pub fn status(&self) -> Value {
         let s = self.0.lock().unwrap();
@@ -139,6 +181,12 @@ impl Status {
         (snapshot.superseded || matches!(s, State::CredentialRejected | State::SourceNotServed))
             .then(|| s.message())
             .flatten()
+    }
+}
+
+impl plexus_core::scheduler::RelayPollingHealth for Status {
+    fn slow_polling(&self) -> bool {
+        Self::slow_at(&self.0.lock().unwrap(), Instant::now())
     }
 }
 
@@ -318,17 +366,25 @@ async fn consume(
                         let hello_result =
                             tokio::task::spawn_blocking(move || db.relay_hello(SOURCE, &hello))
                                 .await;
-                        if local_store_failed("hello", hello_result) {
-                            return Failure::Reconnecting;
-                        }
+                        let reset = match hello_result {
+                            Ok(Ok(reset)) => reset,
+                            failure => {
+                                local_store_failed("hello", failure);
+                                return Failure::Reconnecting;
+                            }
+                        };
                         stream = Some(stream_id);
                         status.set(State::Connected);
+                        if let Some(reset) = reset {
+                            status.reset_clock(reset.name());
+                        }
                     }
                     Frame::Event(event) if stream.is_some() => {
                         if event.seq != next {
                             return protocol_error(&mut socket).await;
                         }
                         let seq = event.seq;
+                        let overflow = matches!(event.stub, Some(Stub::Overflow));
                         let received = event.received_at.clone();
                         let stream_id = stream.as_ref().unwrap().clone();
                         let db = Arc::clone(&store);
@@ -340,6 +396,9 @@ async fn consume(
                         if !matches!(committed, Ok(Ok(()))) {
                             local_store_failed("event commit", committed);
                             return Failure::Reconnecting;
+                        }
+                        if overflow {
+                            status.reset_clock("overflow");
                         }
                         // No ack can leave the socket until the fenced store transaction has committed.
                         if socket
@@ -452,6 +511,7 @@ async fn run(
             } => result.unwrap_or_else(|failure| failure),
         };
         reset_failure_count(status.0.lock().unwrap().state, failure, &mut failures);
+        let was_connected = status.0.lock().unwrap().state == State::Connected;
         if status.0.lock().unwrap().state == State::Connected && failure != Failure::Superseded {
             credential_recheck = INITIAL_CREDENTIAL_RECHECK;
         }
@@ -490,6 +550,13 @@ async fn run(
                 failures = failures.saturating_add(1);
                 delay = backoff(failures);
             }
+        }
+        if was_connected {
+            let db = store.clone();
+            local_store_failed(
+                "disconnect reconcile",
+                tokio::task::spawn_blocking(move || db.relay_disconnected()).await,
+            );
         }
     }
 }
