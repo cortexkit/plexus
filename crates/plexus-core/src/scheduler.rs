@@ -12,7 +12,9 @@
 //!   at least one `cadence_s` ago. It knows nothing about failures.
 //! - This module layers quota and relay cadence floors and the failure policy
 //!   on top of those rows. A failing subscription waits out exponential backoff;
-//!   past the circuit-breaker threshold it is suspended rather than polled again.
+//!   after `CIRCUIT_BREAKER_FAILURES` consecutive failed polls it is suspended,
+//!   so a broken vendor or credential stops costing requests until an operator
+//!   resumes it.
 //!
 //! Cadence floors and the failure policy only ever lengthen the wait or stop
 //! polling; they never make a subscription poll faster than its stored cadence.
@@ -111,14 +113,18 @@ const WAITING_APPROVAL_RETRIES_PER_PASS: usize = 16;
 /// again.
 const CREDENTIAL_REPAIR_RETRY_MS: i64 = 3_600_000;
 
-/// Whether an uninterrupted healthy relay connection permits less frequent
-/// polling. The module's health report uses the same process-local state.
+/// Whether the GitHub webhook relay has stayed connected, with no gap or reset,
+/// long enough that polling can slow down. The module's health report reads the
+/// same in-memory relay status, so the mode it reports is the mode the
+/// scheduler is actually using.
 pub trait RelayPollingHealth: Send + Sync {
     fn slow_polling(&self) -> bool;
 }
 
-/// After a healthy relay hour, affected GitHub watches wait at least 30 minutes
-/// between polls. Stored cadences and CI quota spacing remain lower bounds; this
+/// After a healthy relay hour, GitHub issue, pull-request and CI-run watches
+/// (the kinds webhooks also deliver) wait at least 30 minutes between polls;
+/// release watches keep their cadence because the relay carries no release
+/// events. Stored cadences and CI quota spacing remain lower bounds; this
 /// calculation never writes a subscription's cadence back to the store.
 fn effective_cadence_s(
     subscription: &TriggerSubscription,

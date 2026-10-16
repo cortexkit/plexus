@@ -18,8 +18,10 @@ fn ci_schedule(conn: &rusqlite::Connection) -> rusqlite::Result<(i64, i64)> {
         "SELECT count(*) FROM trigger_subscriptions WHERE status='active' AND cursor_kind='ci_runs'",
         [], |row| row.get(0),
     )?;
-    // Reserve repository lookups, then schedule only whole eight-request cycles
-    // inside the same trailing-hour ceiling used by quota admission.
+    // The GitHub Actions hourly ceiling first sets aside one request per CI
+    // repository for looking up its numeric id. What remains is divided into
+    // whole CI poll cycles of CI_CYCLE_REQUESTS (8) requests each, the same
+    // trailing-hour ceiling quota admission enforces, so scheduled polls fit it.
     let cycles_per_hour = effective_ci_ceiling(conn)? / CI_CYCLE_REQUESTS;
     let cadence = if cycles_per_hour == 0 {
         i64::MAX
@@ -34,7 +36,9 @@ fn ci_schedule(conn: &rusqlite::Connection) -> rusqlite::Result<(i64, i64)> {
 }
 
 impl PlexusStore {
-    /// Current quota spacing, including watches not yet cadence-reconciled.
+    /// The minimum seconds between polls of one CI watch that keeps all active CI
+    /// watches inside the hourly Actions quota. It counts every active CI watch,
+    /// including ones the hourly pass hasn't yet stored a matching cadence for.
     pub fn ci_quota_cadence_s(&self) -> Result<i64, StoreError> {
         self.inner
             .with_read(|conn| ci_schedule(conn).map(|(_, cadence)| cadence))
