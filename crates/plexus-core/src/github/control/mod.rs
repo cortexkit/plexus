@@ -24,12 +24,15 @@ const WRITES: &[&str] = &[
     "update_issue_comment",
     "close_issue",
     "reopen_issue",
+    "mark_pull_request_ready",
+    "convert_pull_request_to_draft",
 ];
 const READS: &[&str] = &[
     "github.issue.get",
     "github.issue_comment.get",
     "github.issue_comments.list",
     "github.issue.search",
+    "github.pull_request.get",
 ];
 /// The reviewed reads a scheduled poll may be granted on a handle connection:
 /// the import's module reads plus the issue timeline, which actor enrichment

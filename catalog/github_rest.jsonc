@@ -1,4 +1,4 @@
-// GitHub REST — the narrow write surface the MCP server does not serve, plus
+// GitHub HTTP — the narrow write surface the MCP server does not serve, plus
 // the reads needed to check those writes at the vendor.
 //
 // WHY THIS EXISTS SEPARATELY FROM github.jsonc: GitHub's remote MCP server
@@ -51,7 +51,7 @@
   "schema_version": 1,
   "key": "github_rest",
   "name": "GitHub (REST)",
-  "description": "Narrow GitHub REST write endpoints and the vendor reads needed to check them.",
+  "description": "Narrow GitHub REST writes, fixed GraphQL PR draft-state mutations, and the vendor reads needed to check them.",
   "reuse_path": "openapi_shim",
   "reuse_rationale": "GitHub publishes a stable, documented REST API with a static bearer-token auth shape. The remote MCP server remains preferred for general reads; this manifest covers write verbs it does not expose and only the vendor reads needed to check those writes.",
   "tier": "S1",
@@ -101,6 +101,79 @@
   // read surface declared, but do not wire it as reconciliation until request
   // arguments and response correlation are expressed separately.
   "actions_baseline": [
+    {
+      "name": "github.pull_request.get",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}/pulls/{pull_number}",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "owner": { "type": "string" },
+            "repo": { "type": "string" },
+            "pull_number": { "type": "integer" }
+          },
+          "required": ["owner", "repo", "pull_number"]
+        }
+      }
+    },
+    {
+      // The facade proves authorship and obtains the node id from a REST read.
+      // owner/repo bind governance filters, but are not GraphQL body fields.
+      "name": "mark_pull_request_ready",
+      "risk": "write",
+      "facade_only": true,
+      "http": {
+        "method": "POST",
+        "path": "/graphql",
+        "request_constants": {
+          "query": "mutation($pullRequestId: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $pullRequestId}) { pullRequest { url number isDraft } } }"
+        },
+        "args_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": { "type": "string" },
+            "repo": { "type": "string" },
+            "variables": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": { "pullRequestId": { "type": "string" } },
+              "required": ["pullRequestId"]
+            }
+          },
+          "required": ["owner", "repo", "variables"]
+        }
+      }
+    },
+    {
+      "name": "convert_pull_request_to_draft",
+      "risk": "write",
+      "facade_only": true,
+      "http": {
+        "method": "POST",
+        "path": "/graphql",
+        "request_constants": {
+          "query": "mutation($pullRequestId: ID!) { convertPullRequestToDraft(input: {pullRequestId: $pullRequestId}) { pullRequest { url number isDraft } } }"
+        },
+        "args_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": { "type": "string" },
+            "repo": { "type": "string" },
+            "variables": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": { "pullRequestId": { "type": "string" } },
+              "required": ["pullRequestId"]
+            }
+          },
+          "required": ["owner", "repo", "variables"]
+        }
+      }
+    },
     {
       // WRITE, not read: it publishes a visible, attributable mark under an
       // agent's identity on someone else's repository. Reversible — the

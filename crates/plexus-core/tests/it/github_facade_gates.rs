@@ -979,6 +979,16 @@ fn g7_approval_names_its_carrier_and_a_reused_nonce_gets_a_fresh_one() {
 fn g3_shim_request_kinds_map_to_one_write_and_fixed_reads() {
     let fixtures = [
         (
+            r#"{"verb":"pr ready","repository":"org/repo","number":"7","undo":false,"manifest_version":19}"#,
+            "mark_pull_request_ready",
+            &["github.pull_request.get"][..],
+        ),
+        (
+            r#"{"verb":"pr ready","repository":"org/repo","number":"7","undo":true,"manifest_version":19}"#,
+            "convert_pull_request_to_draft",
+            &["github.pull_request.get"][..],
+        ),
+        (
             include_str!(concat!(
                 "../",
                 "fixtures/gh_shim_wire/requests/v1-issue-comment.request.json"
@@ -1108,8 +1118,12 @@ fn g3_shim_request_kinds_map_to_one_write_and_fixed_reads() {
         assert!(mapped.args.get("metadata").is_none());
         let mut retry = request.clone();
         retry["rung_as_of_unix_secs"] = json!(1);
-        retry["request_nonce"] = json!("new-nonce");
-        retry["approved_request_id"] = json!("approved");
+        // PR draft-state requests use the closed thread-state wire shape;
+        // nonce and approval belong to the bot_request envelope, not this body.
+        if request["verb"] != "pr ready" {
+            retry["request_nonce"] = json!("new-nonce");
+            retry["approved_request_id"] = json!("approved");
+        }
         assert_eq!(
             request_map::map(&retry, &resolved, "cortexkit/aft")
                 .unwrap()

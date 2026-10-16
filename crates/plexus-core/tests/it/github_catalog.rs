@@ -131,6 +131,8 @@ fn github_manifest_catalog_classifies_every_routed_action() {
         "remove_issue_label",
         "add_issue_assignees",
         "remove_issue_assignees",
+        "mark_pull_request_ready",
+        "convert_pull_request_to_draft",
     ];
     let reads = [
         "github.issue.get",
@@ -138,6 +140,7 @@ fn github_manifest_catalog_classifies_every_routed_action() {
         "github.issue_comments.list",
         "github.issue_timeline.list",
         "github.issue.search",
+        "github.pull_request.get",
     ];
     assert_eq!(ingested.manifest.resource_filters.write_enabling, ["repo"]);
     assert_eq!(

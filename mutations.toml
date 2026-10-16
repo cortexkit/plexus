@@ -1,6 +1,66 @@
 # These controls break authority, crash-safety and wire-contract guards to prove that named tests detect their loss. See docs/mutations.md.
 # Each edit is temporary; ckdev-mutate restores source and verifies Cargo.lock.
 [[control]]
+id = "github-graphql-repository-projection"
+guards = "Every reviewed POST /graphql omits repository governance keys, independently of the action name"
+file = "crates/plexus-core/src/rest_api.rs"
+old = 'if matches!(operation.method, HttpMethod::Post) && operation.path == "/graphql" {'
+new = 'if false && matches!(operation.method, HttpMethod::Post) && operation.path == "/graphql" { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/rest_api.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::tests::graphql_post_strips_repository_context_for_non_pr_actions"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-pr-ready-ownership"
+guards = "Only the bound bot login with GitHub account type Bot may change a PR draft state"
+file = "crates/plexus-core/src/github/facade/vendor_band.rs"
+old = 'if pr_state_kind(&mapped.request_kind) && !owned(&value, &login) {'
+new = 'if false && pr_state_kind(&mapped.request_kind) && !owned(&value, &login) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/pr_ready.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::pr_ready::pr_ready_not_own_refuses_before_mutation"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-pr-ready-graphql-errors"
+guards = "GraphQL errors at HTTP 200 refuse even when partial data includes a pull request"
+file = "crates/plexus-core/src/github/facade/vendor_band.rs"
+old = 'if value.get("errors").is_some() {'
+new = 'if false && value.get("errors").is_some() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/pr_ready.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::pr_ready::pr_ready_graphql_errors_at_http_200_are_sanitized_refusals"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-pr-ready-constant-query"
+guards = "A caller cannot supply the reviewed GraphQL query key, even if it matches the constant"
+file = "crates/plexus-core/src/rest_api.rs"
+old = 'if merged.contains_key(key) {'
+new = 'if false && merged.contains_key(key) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/rest_api.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::tests::pr_ready_caller_query_conflicts_with_reviewed_constant"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "frozen-preset-accepted"
 guards = "Served frozen presets reach catalog, role metadata and ordinary search authority checks"
 file = "crates/plexus-module/src/lib.rs"

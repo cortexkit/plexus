@@ -680,7 +680,7 @@ fn prepare_request(
         Some((path, query)) => (path, Some(query).filter(|query| !query.is_empty())),
         None => (base, None),
     };
-    let (path, remaining) = if let Some(constants) = &operation.request_constants {
+    let (path, mut remaining) = if let Some(constants) = &operation.request_constants {
         let mut merged = if args.is_null() {
             Map::new()
         } else {
@@ -700,6 +700,13 @@ fn prepare_request(
     };
     if has_dot_segment(&path) {
         return Err(RestError::DotSegment);
+    }
+    if matches!(operation.method, HttpMethod::Post) && operation.path == "/graphql" {
+        // Repository keys are governance context, not GraphQL body fields.
+        // Select by the reviewed operation so newly catalogued GraphQL actions
+        // get the same projection without a transport-side action inventory.
+        remaining.remove("owner");
+        remaining.remove("repo");
     }
     let mut url = format!("{}{}", base_path.trim_end_matches('/'), path);
     if let Some(query) = base_query {
@@ -1234,6 +1241,126 @@ mod tests {
 
     fn request_line(request: &str) -> &str {
         request.lines().next().unwrap_or("")
+    }
+
+    #[test]
+    fn pr_ready_caller_query_conflicts_with_reviewed_constant() {
+        let mut operation = http_op(HttpMethod::Post, "/graphql");
+        operation.request_constants = Some(std::collections::BTreeMap::from([(
+            "query".into(),
+            json!("reviewed query"),
+        )]));
+        for query in ["caller query", "reviewed query"] {
+            let prepared = prepare_request(
+                "https://api.github.com",
+                &operation,
+                &json!({"owner":"org","repo":"repo","variables":{"pullRequestId":"PR_7"},"query":query}),
+            );
+            assert!(matches!(prepared, Err(RestError::ConstantArgument(key)) if key == "query"));
+        }
+    }
+
+    #[test]
+    fn graphql_post_strips_repository_context_for_non_pr_actions() {
+        let (endpoint, task) = start_server(1, |_, received| {
+            assert_eq!(request_line(received), "POST /graphql HTTP/1.1");
+            let body: Value =
+                serde_json::from_str(received.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(
+                body,
+                json!({"query":"reviewed project mutation", "variables":{"projectId":"P_1"}})
+            );
+            http_response(200, r#"{"data":{"project":{"id":"P_1"}}}"#)
+        });
+        let mut operation = http_op(HttpMethod::Post, "/graphql");
+        operation.request_constants = Some(std::collections::BTreeMap::from([(
+            "query".into(),
+            json!("reviewed project mutation"),
+        )]));
+        let transport = RestTransport::new(config(endpoint, vec![("update_project", operation)]));
+        let result = transport.dispatch(
+            request(
+                "rest",
+                "update_project",
+                json!({"owner":"org","repo":"repo","variables":{"projectId":"P_1"}}),
+            ),
+            &ResolvedCredential::anonymous(),
+        );
+        assert_eq!(result.response.unwrap()["data"]["project"]["id"], "P_1");
+        task.join()
+            .expect("non-PR GraphQL operation reached the wire");
+
+        for (method, path) in [
+            (HttpMethod::Post, "/other"),
+            (HttpMethod::Patch, "/graphql"),
+        ] {
+            let args = json!({"owner":"org","repo":"repo"});
+            assert_eq!(
+                prepare_request("https://api.github.com", &http_op(method, path), &args)
+                    .unwrap()
+                    .body,
+                Some(args)
+            );
+        }
+        let get = prepare_request(
+            "https://api.github.com",
+            &http_op(HttpMethod::Get, "/graphql"),
+            &json!({"owner":"org","repo":"repo"}),
+        )
+        .unwrap();
+        assert_eq!(
+            get.url,
+            "https://api.github.com/graphql?owner=org&repo=repo"
+        );
+    }
+
+    #[test]
+    fn pr_ready_api_redirect_never_sends_bot_token_to_another_host() {
+        let (elsewhere, elsewhere_base) = unserved_listener();
+        let location = format!(
+            "{}/collect",
+            elsewhere_base.replace("127.0.0.1", "localhost")
+        );
+        let (endpoint, task) = start_server(1, move |_, received| {
+            assert!(received
+                .to_ascii_lowercase()
+                .contains("authorization: bearer bot-canary"));
+            raw_response(
+                "307 Temporary Redirect",
+                &format!("Location: {location}\r\n"),
+                "",
+            )
+        });
+        let mut operation = http_op(HttpMethod::Post, "/graphql");
+        operation.request_constants = Some(std::collections::BTreeMap::from([(
+            "query".into(),
+            json!("reviewed query"),
+        )]));
+        // The loopback server stands in for the catalog's fixed api.github.com
+        // endpoint. Redirect handling must not forward the credential to any
+        // other origin, even when the redirect preserves the POST method.
+        let transport = RestTransport::new(
+            config(endpoint, vec![("mark_pull_request_ready", operation)]).with_bindings(vec![
+                CredentialBinding {
+                    ref_role: "access_token".into(),
+                    placement: "header".into(),
+                    key: "Authorization".into(),
+                    prefix: "Bearer ".into(),
+                    required: true,
+                },
+            ]),
+        );
+        let result = transport.dispatch_github_facade(
+            request(
+                "rest",
+                "mark_pull_request_ready",
+                json!({"owner":"org","repo":"repo","variables":{"pullRequestId":"PR_7"}}),
+            ),
+            &ResolvedCredential::new(b"bot-canary".to_vec(), None, 1),
+        );
+        task.join().expect("API received one request");
+        assert_never_contacted(&elsewhere);
+        assert_eq!(result.error_code.as_deref(), Some("http_307"));
     }
 
     pub(super) fn http_op(method: HttpMethod, path: &str) -> HttpOperation {

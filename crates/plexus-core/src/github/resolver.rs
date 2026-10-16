@@ -151,6 +151,7 @@ pub enum RequestKind {
     CommentEdit,
     PrReview,
     PrCreate,
+    PrReady,
 }
 
 impl RequestKind {
@@ -164,6 +165,7 @@ impl RequestKind {
             // A review lives on the pull request's own path, which names it
             // pull_number, and without an event GitHub leaves it PENDING.
             Self::PrReview => &["pull_number", "body", "event"],
+            Self::PrReady => &["pull_number"],
             Self::IssueCreate => &["title", "body", "labels"],
             // Owner and repo come from the repository the bot is bound to (see
             // path_args), never from caller fields. GitHub's head_repo, maintainer_can_modify and issue are left out

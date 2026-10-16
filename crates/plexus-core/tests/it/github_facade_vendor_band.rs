@@ -12,6 +12,8 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+mod pr_ready;
+
 struct Token;
 impl HandleCredentialProvider for Token {
     fn prepare(&self, _: &str, _: i64, _: &str) -> Result<ResolvedCredential, &'static str> {
@@ -1833,6 +1835,26 @@ struct ReadBranchCase {
 fn read_branch_cases() -> Vec<ReadBranchCase> {
     vec![
         ReadBranchCase {
+            label: "pr-ready",
+            request: json!({"verb":"pr ready","repository":"org/repo","number":"7","undo":false}),
+            actions: vec![
+                ("github.pull_request.get", "read"),
+                ("mark_pull_request_ready", "write"),
+            ],
+            last_read: "github.pull_request.get",
+            write: "mark_pull_request_ready",
+        },
+        ReadBranchCase {
+            label: "pr-draft",
+            request: json!({"verb":"pr ready","repository":"org/repo","number":"7","undo":true}),
+            actions: vec![
+                ("github.pull_request.get", "read"),
+                ("convert_pull_request_to_draft", "write"),
+            ],
+            last_read: "github.pull_request.get",
+            write: "convert_pull_request_to_draft",
+        },
+        ReadBranchCase {
             label: "edit-last",
             request: json!({"action":"issue comment","edit_last":true,"repository":"org/repo","target":{"number":"42"},"body":{"body":"replacement"}}),
             actions: vec![
@@ -1997,6 +2019,11 @@ fn g9_after_last_read_matrix_blocks_each_branch_before_mutation() {
             );
             inner.set_response_for_method(
                 "github.issue.get",
+                "",
+                MockResponse::Success(json!({"user":{"login":"app-fixture[bot]","type":"Bot"}})),
+            );
+            inner.set_response_for_method(
+                "github.pull_request.get",
                 "",
                 MockResponse::Success(json!({"user":{"login":"app-fixture[bot]","type":"Bot"}})),
             );
@@ -3445,6 +3472,41 @@ mod scoped {
             "no second vendor call"
         );
         assert_eq!(fixture.reader.asked(), 1, "the replay did not ask again");
+    }
+
+    #[test]
+    fn pr_ready_and_undo_recheck_scope_after_the_ownership_read() {
+        for undo in [false, true] {
+            let action = if undo {
+                "convert_pull_request_to_draft"
+            } else {
+                "mark_pull_request_ready"
+            };
+            let fixture = scoped(
+                "pr-ready-ended-scope",
+                &[("github.pull_request.get", "read"), (action, "write")],
+            );
+            fixture.transport.set_response_for_method(
+                "github.pull_request.get",
+                "",
+                MockResponse::Success(json!({
+                    "user":{"login":"app-fixture[bot]","type":"Bot"}, "draft":!undo,
+                    "node_id":"PR_7", "html_url":"https://github.com/org/repo/pull/7", "number":7
+                })),
+            );
+            fixture.reader.then(ended());
+            let request =
+                json!({"verb":"pr ready","repository":"org/repo","number":"7","undo":undo});
+            let reply = fixture.send(
+                &stamp("agent-fixture", true),
+                &request,
+                "ready-ended",
+                now(),
+            );
+            assert_eq!(reply["result"]["refusal_code"], "scope_ended", "{reply}");
+            assert_eq!(fixture.actions(), ["github.pull_request.get"]);
+            assert_eq!(fixture.reader.asked(), 1);
+        }
     }
 
     #[test]
