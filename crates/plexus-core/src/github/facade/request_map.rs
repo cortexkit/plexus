@@ -80,6 +80,30 @@ pub fn map(
     }
     let action = object.get("action").and_then(Value::as_str);
     let verb = object.get("verb").and_then(Value::as_str);
+    if verb == Some("pr ready") {
+        for field in object.keys() {
+            if !matches!(
+                field.as_str(),
+                "operation"
+                    | "gh_route_schema"
+                    | "verb"
+                    | "repository"
+                    | "number"
+                    | "undo"
+                    | "manifest_version"
+                    | "rung_as_of_unix_secs"
+                    | "metadata"
+            ) {
+                return Err(format!("request_field_forbidden{{field: {field}}}"));
+            }
+        }
+        if object.get("undo").and_then(Value::as_bool).is_none() {
+            return Err("request_field_forbidden{field: undo}".into());
+        }
+        if object.get("number").is_none() {
+            return Err("request_field_forbidden{field: number}".into());
+        }
+    }
     let (kind, allowed_kind) = match (
         action,
         verb,
@@ -99,6 +123,13 @@ pub fn map(
         }
         (_, Some("issue close" | "pr close"), _) => ("close", RequestKind::Close),
         (_, Some("issue reopen" | "pr reopen"), _) => ("reopen", RequestKind::Reopen),
+        (_, Some("pr ready"), _) => {
+            if object["undo"] == true {
+                ("pr_draft", RequestKind::PrReady)
+            } else {
+                ("pr_ready", RequestKind::PrReady)
+            }
+        }
         _ => return Err("request_kind_unmapped".into()),
     };
     // The catalog action and pre-dispatch reads come from the effects table so
@@ -208,7 +239,7 @@ pub fn map(
             .or_else(|| number.as_str().and_then(|s| s.parse().ok()))
             .ok_or("request_kind_unmapped")?;
         // The review endpoint addresses the pull request as pull_number.
-        let field = if kind == "pr_review" {
+        let field = if matches!(kind, "pr_review" | "pr_ready" | "pr_draft") {
             "pull_number"
         } else {
             "issue_number"

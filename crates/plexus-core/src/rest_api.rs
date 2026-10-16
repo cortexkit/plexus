@@ -573,7 +573,12 @@ impl RestTransport {
                 credential,
             );
         }
-        let prepared = match prepare_request(&config.base_url, operation, &request.args) {
+        let prepared = match prepare_action_request(
+            &config.base_url,
+            operation,
+            &request.action,
+            &request.args,
+        ) {
             Ok(prepared) => prepared,
             Err(RestError::ConstantArgument(key)) => {
                 let mut response = local_not_sent();
@@ -658,6 +663,28 @@ struct PreparedRequest {
     url: String,
     path: String,
     body: Option<Value>,
+}
+
+fn prepare_action_request(
+    base_url: &str,
+    operation: &HttpOperation,
+    action: &str,
+    args: &Value,
+) -> Result<PreparedRequest, RestError> {
+    if matches!(
+        action,
+        "mark_pull_request_ready" | "convert_pull_request_to_draft"
+    ) {
+        // These facade-only GraphQL writes retain the bound repository for
+        // governance's resource filters, but GitHub accepts no repository keys
+        // alongside query and variables. The node id came from the owned PR read.
+        let mut args = args.as_object().ok_or(RestError::Configuration)?.clone();
+        args.remove("owner");
+        args.remove("repo");
+        prepare_request(base_url, operation, &Value::Object(args))
+    } else {
+        prepare_request(base_url, operation, args)
+    }
 }
 
 /// Render the action's path template against the invocation args and decide
@@ -1234,6 +1261,77 @@ mod tests {
 
     fn request_line(request: &str) -> &str {
         request.lines().next().unwrap_or("")
+    }
+
+    #[test]
+    fn pr_ready_caller_query_conflicts_with_reviewed_constant() {
+        let mut operation = http_op(HttpMethod::Post, "/graphql");
+        operation.request_constants = Some(std::collections::BTreeMap::from([(
+            "query".into(),
+            json!("reviewed query"),
+        )]));
+        for action in ["mark_pull_request_ready", "convert_pull_request_to_draft"] {
+            for query in ["caller query", "reviewed query"] {
+                let prepared = prepare_action_request(
+                    "https://api.github.com",
+                    &operation,
+                    action,
+                    &json!({"owner":"org","repo":"repo","variables":{"pullRequestId":"PR_7"},"query":query}),
+                );
+                assert!(
+                    matches!(prepared, Err(RestError::ConstantArgument(key)) if key == "query")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pr_ready_api_redirect_never_sends_bot_token_to_another_host() {
+        let (elsewhere, elsewhere_base) = unserved_listener();
+        let location = format!(
+            "{}/collect",
+            elsewhere_base.replace("127.0.0.1", "localhost")
+        );
+        let (endpoint, task) = start_server(1, move |_, received| {
+            assert!(received
+                .to_ascii_lowercase()
+                .contains("authorization: bearer bot-canary"));
+            raw_response(
+                "307 Temporary Redirect",
+                &format!("Location: {location}\r\n"),
+                "",
+            )
+        });
+        let mut operation = http_op(HttpMethod::Post, "/graphql");
+        operation.request_constants = Some(std::collections::BTreeMap::from([(
+            "query".into(),
+            json!("reviewed query"),
+        )]));
+        // The loopback server stands in for the catalog's fixed api.github.com
+        // endpoint. Redirect handling must not forward the credential to any
+        // other origin, even when the redirect preserves the POST method.
+        let transport = RestTransport::new(
+            config(endpoint, vec![("mark_pull_request_ready", operation)]).with_bindings(vec![
+                CredentialBinding {
+                    ref_role: "access_token".into(),
+                    placement: "header".into(),
+                    key: "Authorization".into(),
+                    prefix: "Bearer ".into(),
+                    required: true,
+                },
+            ]),
+        );
+        let result = transport.dispatch_github_facade(
+            request(
+                "rest",
+                "mark_pull_request_ready",
+                json!({"owner":"org","repo":"repo","variables":{"pullRequestId":"PR_7"}}),
+            ),
+            &ResolvedCredential::new(b"bot-canary".to_vec(), None, 1),
+        );
+        task.join().expect("API received one request");
+        assert_never_contacted(&elsewhere);
+        assert_eq!(result.error_code.as_deref(), Some("http_307"));
     }
 
     pub(super) fn http_op(method: HttpMethod, path: &str) -> HttpOperation {

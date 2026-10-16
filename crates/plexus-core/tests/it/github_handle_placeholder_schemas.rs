@@ -36,7 +36,7 @@ const PLACEHOLDER: &str = r#"{"additionalProperties":true,"type":"object"}"#;
 /// Every write an import accepts. The label and assignee writes an issue edit
 /// sends are implied by `edit_issue`, so the import grants them without being
 /// asked.
-const WRITES: [&str; 9] = [
+const WRITES: [&str; 11] = [
     "add_issue_comment",
     "update_issue_comment",
     "add_pr_review",
@@ -46,6 +46,8 @@ const WRITES: [&str; 9] = [
     "close_issue",
     "reopen_issue",
     "edit_issue",
+    "mark_pull_request_ready",
+    "convert_pull_request_to_draft",
 ];
 
 struct Token;
@@ -394,6 +396,16 @@ fn github_bodies(transport: &MockTransport) {
 fn every_request_kind() -> Vec<(&'static str, Value, Vec<&'static str>)> {
     vec![
         (
+            "pr-ready",
+            json!({"verb":"pr ready","number":"7","undo":false}),
+            vec!["mark_pull_request_ready"],
+        ),
+        (
+            "pr-draft",
+            json!({"verb":"pr ready","number":"7","undo":true}),
+            vec!["convert_pull_request_to_draft"],
+        ),
+        (
             "comment",
             json!({"action":"issue comment","target":{"number":"42"},"body":{"body":"hello"}}),
             vec!["add_issue_comment"],
@@ -506,6 +518,29 @@ fn placeholder_rows_take_the_reviewed_schema_and_every_bot_request_kind_still_di
     // because each leg sends only what its action declares.
     github_bodies(&f.transport);
     for (label, request, writes) in every_request_kind() {
+        if request["verb"] == "pr ready" {
+            let undo = request["undo"].as_bool().unwrap();
+            f.transport.set_response_for_method(
+                "github.pull_request.get",
+                "",
+                MockResponse::Success(json!({
+                    "user":{"login":"app-fixture[bot]","type":"Bot"},"draft":!undo,
+                    "node_id":"PR_7","html_url":"https://github.com/org/repo/pull/7","number":7
+                })),
+            );
+            let (action, mutation) = if undo {
+                ("convert_pull_request_to_draft", "convertPullRequestToDraft")
+            } else {
+                ("mark_pull_request_ready", "markPullRequestReadyForReview")
+            };
+            f.transport.set_response_for_method(
+                action,
+                "",
+                MockResponse::Success(json!({"data":{mutation:{"pullRequest":{
+                    "url":"https://github.com/org/repo/pull/7","number":7,"isDraft":undo
+                }}}})),
+            );
+        }
         let before = f.transport.requests().len();
         let reply = f.call(&request, label);
         assert_eq!(reply["result"]["status"], "completed", "{label}: {reply}");

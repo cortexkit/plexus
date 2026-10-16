@@ -47,6 +47,8 @@ pub const REQUEST_KINDS: &[&str] = &[
     "pr_create",
     "close",
     "reopen",
+    "pr_ready",
+    "pr_draft",
 ];
 
 /// The catalog action that names a request kind: the write an agent must be
@@ -62,6 +64,8 @@ pub fn primary_action(kind: &str) -> Option<&'static str> {
         "pr_create" => "create_pull_request",
         "close" => "close_issue",
         "reopen" => "reopen_issue",
+        "pr_ready" => "mark_pull_request_ready",
+        "pr_draft" => "convert_pull_request_to_draft",
         _ => return None,
     })
 }
@@ -73,6 +77,7 @@ pub fn reads_for_kind(kind: &str) -> Option<&'static [&'static str]> {
         "comment_edit_last" => &["github.issue_comments.list", "github.issue_comment.get"],
         "comment_edit" => &["github.issue_comment.get"],
         "close" | "reopen" | "issue_edit" => &["github.issue.get"],
+        "pr_ready" | "pr_draft" => &["github.pull_request.get"],
         "comment" | "pr_review" | "reaction" | "issue_create" | "pr_create" => &[],
         _ => return None,
     })
@@ -111,6 +116,8 @@ fn effects_for_kind(kind: &str) -> &'static [&'static str] {
         "pr_create" => &["create_pull_request"],
         "close" => &["add_issue_comment", "close_issue"],
         "reopen" => &["add_issue_comment", "reopen_issue"],
+        "pr_ready" => &["mark_pull_request_ready"],
+        "pr_draft" => &["convert_pull_request_to_draft"],
         "issue_edit" => &[
             "edit_issue",
             "add_issue_labels",

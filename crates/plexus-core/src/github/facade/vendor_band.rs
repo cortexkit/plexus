@@ -150,7 +150,7 @@ fn pick(body: &Value, fields: &[(&str, &str)]) -> Value {
         };
         let typed = match source {
             "id" | "number" => value.is_u64(),
-            "draft" => value.is_boolean(),
+            "draft" | "isDraft" => value.is_boolean(),
             // GitHub sends null for an issue closed or reopened without a reason.
             "state_reason" => value.is_string() || value.is_null(),
             _ => value.is_string(),
@@ -216,6 +216,20 @@ fn projection(kind: &str, legs: &[(&str, Value)], issue_read: Option<&Value>) ->
                 ("draft", "draft"),
             ],
         ),
+        "pr_ready" | "pr_draft" => match legs.last() {
+            Some((_, body)) => pick(
+                body,
+                &[("url", "url"), ("number", "number"), ("isDraft", "draft")],
+            ),
+            None => pick(
+                issue_read.unwrap_or(&Value::Null),
+                &[
+                    ("html_url", "url"),
+                    ("number", "number"),
+                    ("draft", "draft"),
+                ],
+            ),
+        },
         _ => pick(last, URL_AND_ID),
     }
 }
@@ -274,6 +288,36 @@ fn stop_for_scope(
 fn owned(value: &Value, login: &str) -> bool {
     value.pointer("/user/login").and_then(Value::as_str) == Some(login)
         && value.pointer("/user/type").and_then(Value::as_str) == Some("Bot")
+}
+
+fn pr_state_kind(kind: &str) -> bool {
+    matches!(kind, "pr_ready" | "pr_draft")
+}
+
+/// GraphQL reports application failures in successful HTTP responses. Reuse the
+/// REST validation refusal vocabulary, discarding messages and all unknown fields.
+fn pr_state_response(kind: &str, value: Value) -> Result<Value, String> {
+    let mutation = if kind == "pr_ready" {
+        "markPullRequestReadyForReview"
+    } else {
+        "convertPullRequestToDraft"
+    };
+    if value.get("errors").is_some() {
+        let errors = super::validation::errors(&value.to_string());
+        return Err(if errors.is_empty() {
+            "vendor_rejected{status: 422}".into()
+        } else {
+            format!(
+                "vendor_rejected{{status: 422, errors: {}}}",
+                serde_json::to_string(&errors).expect("validation errors are JSON")
+            )
+        });
+    }
+    let pr = &value["data"][mutation]["pullRequest"];
+    if !pr["isDraft"].is_boolean() || !pr["number"].is_u64() || !pr["url"].is_string() {
+        return Err("vendor_rejected{status: 422}".into());
+    }
+    Ok(pr.clone())
 }
 
 /// A claimed receipt is required to enter this code. Pre-dispatch reads lack
@@ -445,11 +489,14 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             Err(code) => return fail(reply, "G8", code),
         };
         completed.push(action);
-        if action == "github.issue.get" {
+        if action == "github.issue.get" || action == "github.pull_request.get" {
             issue_read = Some(value.clone());
         }
         if mapped.request_kind == "comment_edit_last" && value["id"] != args["comment_id"] {
             return fail(reply, "G8", "not_present".into());
+        }
+        if pr_state_kind(&mapped.request_kind) && !owned(&value, &login) {
+            return fail(reply, "G8", "pr_edit_not_own".into());
         }
         if matches!(
             mapped.request_kind.as_str(),
@@ -475,6 +522,41 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     }
     let proof = effects::OwnershipProof::new(&mapped.request_kind, completed, true);
     let mut legs = effects::plan(&mapped);
+    if pr_state_kind(&mapped.request_kind) {
+        let pr = issue_read.as_ref().unwrap_or(&Value::Null);
+        let (Some(draft), Some(node_id)) = (
+            pr["draft"].as_bool(),
+            pr["node_id"].as_str().filter(|id| !id.is_empty()),
+        ) else {
+            return fail(
+                reply,
+                "G9",
+                "pre_dispatch_read_incomplete{reason: invalid_response}".into(),
+            );
+        };
+        if !pr["number"].is_u64() || !pr["html_url"].is_string() {
+            return fail(
+                reply,
+                "G9",
+                "pre_dispatch_read_incomplete{reason: invalid_response}".into(),
+            );
+        }
+        if draft == (mapped.request_kind == "pr_draft")
+            && row
+                .effects
+                .iter()
+                .all(|effect| effect.dispatch_attempted_at.is_none())
+        {
+            legs.clear();
+        } else {
+            // Repository keys stay on the governed call for resource filtering;
+            // the REST transport sends only the GraphQL variables and fixed query.
+            legs = vec![(
+                mapped.action,
+                json!({"owner":args["owner"], "repo":args["repo"], "variables":{"pullRequestId":node_id}}),
+            )];
+        }
+    }
     if mapped.request_kind == "comment_edit_last" {
         for (_, leg) in &mut legs {
             leg["comment_id"] = args["comment_id"].clone();
@@ -533,6 +615,14 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         };
         match taxonomy::dispatch(engine.revalidate_and_dispatch(&reservation).outcome) {
             Ok(value) => {
+                let value = if pr_state_kind(&mapped.request_kind) {
+                    match pr_state_response(&mapped.request_kind, value) {
+                        Ok(value) => value,
+                        Err(code) => return fail(reply, "G10", code),
+                    }
+                } else {
+                    value
+                };
                 if store
                     .finish_github_effect(&agent, nonce, owner, index, &value, now)
                     .ok()
