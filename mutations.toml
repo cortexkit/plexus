@@ -1647,6 +1647,40 @@ timeout_s = 60
 build_timeout_s = 3600
 
 [[control]]
+id = "ci-watch-creation-floor"
+guards = "CI polling rejects attempts completed before watch creation without fetching jobs or publishing run markers, while retaining in-flight failures and recent reruns"
+file = "crates/plexus-core/src/poller/ci_runs.rs"
+old = "if completed < sub.created_at_ms {"
+new = "if false && completed < sub.created_at_ms { // NON-VACUITY BREAK"
+test_file = "crates/plexus-core/src/poller/ci_runs.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::ci_runs::tests::fresh_watch_rescan_drops_preexisting_attempts_without_events"]
+expect_message = "attempts completed before watch creation must not publish"
+only = false
+timeout_s = 60
+build_timeout_s = 3600
+
+[[control]]
+id = "ci-run-envelope-completion-time"
+guards = "New completed CI-run v2 envelopes use updated_at as completed_at on both transports without rewriting stored envelopes or legacy bodies"
+file = "crates/plexus-core/src/event_envelope.rs"
+old = "body[\"completed_at\"] = if item[\"status\"] == \"completed\" {"
+new = "body[\"completed_at\"] = if false && item[\"status\"] == \"completed\" { // NON-VACUITY BREAK"
+test_file = "crates/plexus-core/src/event_envelope.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["event_envelope::tests::completed_ci_run_uses_updated_at_for_both_sources"]
+expect_message = "completed CI runs must expose updated_at as completed_at"
+only = false
+timeout_s = 60
+build_timeout_s = 3600
+
+[[control]]
 id = "ci-committed-quota"
 guards = "Every CI page is dispatched only after an eight-unit ledger reservation has committed"
 file = "crates/plexus-core/src/poller/ci_runs.rs"

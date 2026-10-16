@@ -93,7 +93,7 @@ comments in its window, the newest comment supplies `comment_url` and
 
 ### CI job and CI run
 
-Each field is present in both kinds and nullable when the source lacks it:
+Each field is present in CI-job and CI-run envelopes and nullable when the source lacks it:
 
 | Field | Type (or null) |
 | --- | --- |
@@ -107,6 +107,12 @@ Each field is present in both kinds and nullable when the source lacks it:
 | `run_id` | integer |
 | `run_attempt` | integer |
 | `completed_at` | string |
+
+For CI jobs, `completed_at` comes from the job's `completed_at`. For CI runs,
+GitHub provides no `completed_at`, so both webhook and polling envelopes use the
+run's `updated_at` when `status` is `completed`; otherwise the field is `null`.
+This normalization applies only to newly inserted envelopes. Previously stored
+envelopes remain byte-identical, including any `completed_at: null` value.
 
 CI-job envelopes additionally always contain:
 

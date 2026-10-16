@@ -74,6 +74,13 @@ pub(crate) fn envelope(
     }
     if kind == "ci_run" {
         body["run_id"] = item["id"].clone();
+        // Workflow runs lack completed_at; updated_at is their completion time
+        // only once GitHub marks the run completed. Jobs use their own field.
+        body["completed_at"] = if item["status"] == "completed" {
+            item["updated_at"].clone()
+        } else {
+            Value::Null
+        };
     } else if kind == "ci_job" {
         body["workflow_name"] = item["workflow_name"]
             .as_str()
@@ -191,6 +198,62 @@ mod tests {
             let parsed: Value = serde_json::from_str(&body).unwrap();
             assert!(parsed["workflow_name"].is_null());
             assert!(body.contains(r#""workflow_name":null"#));
+        }
+    }
+
+    #[test]
+    fn completed_ci_run_uses_updated_at_for_both_sources() {
+        for source in [
+            EnvelopeSource::Poll,
+            EnvelopeSource::Webhook(Some("completed".into())),
+        ] {
+            let item = json!({"id":7,"status":"completed","updated_at":"2026-10-15T23:52:00Z"});
+            let original = item.clone();
+            let body = envelope(
+                KEY,
+                GITHUB_CI_RUN_COMPLETED,
+                "org/repo",
+                &item,
+                &ActorAttribution::NotEnriched,
+                &EnvelopeContext {
+                    source,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let parsed: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                parsed["completed_at"], "2026-10-15T23:52:00Z",
+                "completed CI runs must expose updated_at as completed_at"
+            );
+            assert_eq!(parsed["event_key"], KEY);
+            assert_eq!(item, original, "normalization must not alter the v1 source");
+        }
+    }
+
+    #[test]
+    fn in_progress_ci_run_has_null_completed_at_for_both_sources() {
+        for source in [
+            EnvelopeSource::Poll,
+            EnvelopeSource::Webhook(Some("in_progress".into())),
+        ] {
+            let item = json!({"id":7,"status":"in_progress","updated_at":"2026-10-15T23:52:00Z",
+                "completed_at":"not a run completion time"});
+            let body = envelope(
+                KEY,
+                GITHUB_CI_RUN_COMPLETED,
+                "org/repo",
+                &item,
+                &ActorAttribution::NotEnriched,
+                &EnvelopeContext {
+                    source,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let parsed: Value = serde_json::from_str(&body).unwrap();
+            assert!(parsed["completed_at"].is_null());
+            assert!(body.contains(r#""completed_at":null"#));
         }
     }
 
@@ -410,7 +473,7 @@ mod tests {
                 "id":38097281838_i64,"name":"Tests","conclusion":"success","status":"completed",
                 "head_branch":"train/check-persist-wait","head_sha":"3c8a2c3c7ca8e3407c60b7953c1267920b482a1b",
                 "url":"https://github.com/cortexkit/aft/actions/runs/38097281838","run_id":38097281838_i64,
-                "run_attempt":2,"completed_at":null
+                "run_attempt":2,"completed_at":"2026-10-11T00:41:42Z"
             }),
         );
     }
@@ -426,7 +489,7 @@ mod tests {
                 "id":38083743687_i64,"name":"Harness coverage advisory","conclusion":"success","status":"completed",
                 "head_branch":"fix/pi-model-discovery-readiness","head_sha":"f65b17d9d2bcd48126557b3afbe9df84691852e9",
                 "url":"https://github.com/cortexkit/magic-context/actions/runs/38083743687","run_id":38083743687_i64,
-                "run_attempt":1,"completed_at":null
+                "run_attempt":1,"completed_at":"2026-10-10T20:26:40Z"
             }),
         );
     }
