@@ -7,17 +7,21 @@ body is carried in the existing `github` tool's `bot_request` operation, with
 
 ## Live deployment — pending: run at deploy
 
-Workers do not access the live store. Deploy in this order:
+These steps change the running service's database and catalog, so an
+operator runs them, never an automated worker. Deploy in this order:
 
-1. Install the new binary first, so it understands the new actions and transport
-   projection before the catalog advertises them.
-2. Install `catalog/github_rest.jsonc` and ingest the reviewed catalog.
+1. Install the new binary first, so the actions the catalog adds are served by
+   code that maps `pr ready` to them and sends GraphQL requests without the
+   repository fields.
+2. Install `catalog/github_rest.jsonc` and restart so the reviewed catalog is
+   ingested.
 3. Run `handle-grant` for `mark_pull_request_ready`,
    `convert_pull_request_to_draft`, and the pre-read `github.pull_request.get` on
    every bot. Both writes require that pre-read; fresh imports imply it from
    either write grant.
 
-AFT can release its v19 signed manifest after plexus serves `pr ready` with
-both `undo: false` and `undo: true` through the governed bot facade.
+AFT's `gh` shim sends these requests only once its signed list of allowed `gh`
+commands (manifest version 19) includes `pr ready`. Release that manifest after
+plexus serves `pr ready` with both `undo: false` and `undo: true`.
 No GitHub App permission widening is intended: the mutations use the existing
 installation token and pull-requests write permission.
