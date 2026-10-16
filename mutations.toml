@@ -1,6 +1,21 @@
 # These controls break authority, crash-safety and wire-contract guards to prove that named tests detect their loss. See docs/mutations.md.
 # Each edit is temporary; ckdev-mutate restores source and verifies Cargo.lock.
 [[control]]
+id = "github-graphql-repository-projection"
+guards = "Every reviewed POST /graphql omits repository governance keys, independently of the action name"
+file = "crates/plexus-core/src/rest_api.rs"
+old = 'if matches!(operation.method, HttpMethod::Post) && operation.path == "/graphql" {'
+new = 'if false && matches!(operation.method, HttpMethod::Post) && operation.path == "/graphql" { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/rest_api.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::tests::graphql_post_strips_repository_context_for_non_pr_actions"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "github-pr-ready-ownership"
 guards = "Only the bound bot login with GitHub account type Bot may change a PR draft state"
 file = "crates/plexus-core/src/github/facade/vendor_band.rs"

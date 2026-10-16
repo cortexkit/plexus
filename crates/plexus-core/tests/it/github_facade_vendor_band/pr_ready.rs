@@ -1,10 +1,15 @@
 use super::*;
 use plexus_core::rest_api::{RestConfig, RestTransport};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 const READY_QUERY: &str = "mutation($pullRequestId: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $pullRequestId}) { pullRequest { url number isDraft } } }";
 const DRAFT_QUERY: &str = "mutation($pullRequestId: ID!) { convertPullRequestToDraft(input: {pullRequestId: $pullRequestId}) { pullRequest { url number isDraft } } }";
 const URL: &str = "https://github.com/org/repo/pull/7";
+// The default HTTP fixture stops accepting after two seconds, but these calls
+// prepare credentials and commit governance receipts before each HTTP leg.
+const ADMISSION_WAIT: Duration = Duration::from_secs(15);
 
 struct BotToken;
 impl HandleCredentialProvider for BotToken {
@@ -50,6 +55,14 @@ struct ReadyRun {
 
 impl ReadyRun {
     fn new(label: &str, responses: Vec<Value>) -> Self {
+        Self::with_token(label, responses, Arc::new(BotToken))
+    }
+
+    fn with_token(
+        label: &str,
+        responses: Vec<Value>,
+        token: Arc<dyn HandleCredentialProvider>,
+    ) -> Self {
         let (scratch, store, _, _, scope) = setup(
             label,
             &[
@@ -60,9 +73,10 @@ impl ReadyRun {
         );
         let sent = Arc::new(Mutex::new(Vec::new()));
         let captured = sent.clone();
-        let (endpoint, server) = validation_http::FixedRequestServer::start(
+        let (endpoint, server) = validation_http::FixedRequestServer::start_with_deadline(
             responses.len(),
             "PR ready",
+            ADMISSION_WAIT,
             move |index, raw| {
                 captured.lock().unwrap().push(raw.to_owned());
                 let body = responses[index].to_string();
@@ -91,7 +105,7 @@ impl ReadyRun {
         )
         .with_governance_seams(Arc::new(GithubGovernanceSeams {
             store: store.clone(),
-            credential_provider: Some(Arc::new(BotToken)),
+            credential_provider: Some(token),
         }))
         .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
         Self {
@@ -104,8 +118,8 @@ impl ReadyRun {
         }
     }
 
-    fn call(&self, request: &Value, nonce: &str) -> Value {
-        let reply = bot_request_scoped(
+    fn call_raw(&self, request: &Value, nonce: &str) -> Value {
+        bot_request_scoped(
             &self.store,
             &self.engine,
             plexus_core::github::AFT_PRINCIPAL,
@@ -115,7 +129,11 @@ impl ReadyRun {
             "pr-ready-id",
             "worker",
             plexus_core::storage::now_ms(),
-        );
+        )
+    }
+
+    fn call(&self, request: &Value, nonce: &str) -> Value {
+        let reply = self.call_raw(request, nonce);
         if reply["result"]["refusal_code"] == "transport_not_sent" {
             let db = Connection::open(self._scratch.path()).unwrap();
             let mut statement = db
@@ -135,6 +153,52 @@ impl ReadyRun {
         }
         reply
     }
+}
+
+#[test]
+fn pr_ready_fixture_waits_for_credential_preparation_before_each_http_leg() {
+    struct DelayedToken {
+        delayed_leg: usize,
+        calls: AtomicUsize,
+    }
+    impl HandleCredentialProvider for DelayedToken {
+        fn prepare(
+            &self,
+            handle: &str,
+            generation: i64,
+            reference: &str,
+        ) -> Result<ResolvedCredential, &'static str> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == self.delayed_leg {
+                // Model a slow vault reply without consuming CPU. It exceeds
+                // the server helper's default two-second accept deadline, so
+                // the fixture must keep listening during credential preparation.
+                std::thread::sleep(crate::bounded::WAIT + Duration::from_millis(500));
+            }
+            BotToken.prepare(handle, generation, reference)
+        }
+        fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
+    }
+    let mut failures = Vec::new();
+    for delayed_leg in [0, 1] {
+        let token = Arc::new(DelayedToken {
+            delayed_leg,
+            calls: AtomicUsize::new(0),
+        });
+        let run = ReadyRun::with_token(
+            "pr-ready-slow-credential",
+            vec![pull(true), mutation(false, false)],
+            token,
+        );
+        let reply = run.call_raw(&request(false), "slow-credential");
+        let received = run.sent.lock().unwrap().len();
+        let server = run.server.join();
+        if reply["result"]["status"] != "completed" || received != 2 || server.is_err() {
+            failures.push(format!(
+                "delayed leg {delayed_leg}: {reply}; received {received}; server: {server:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

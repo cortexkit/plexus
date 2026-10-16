@@ -573,12 +573,7 @@ impl RestTransport {
                 credential,
             );
         }
-        let prepared = match prepare_action_request(
-            &config.base_url,
-            operation,
-            &request.action,
-            &request.args,
-        ) {
+        let prepared = match prepare_request(&config.base_url, operation, &request.args) {
             Ok(prepared) => prepared,
             Err(RestError::ConstantArgument(key)) => {
                 let mut response = local_not_sent();
@@ -665,28 +660,6 @@ struct PreparedRequest {
     body: Option<Value>,
 }
 
-fn prepare_action_request(
-    base_url: &str,
-    operation: &HttpOperation,
-    action: &str,
-    args: &Value,
-) -> Result<PreparedRequest, RestError> {
-    if matches!(
-        action,
-        "mark_pull_request_ready" | "convert_pull_request_to_draft"
-    ) {
-        // These facade-only GraphQL writes retain the bound repository for
-        // governance's resource filters, but GitHub accepts no repository keys
-        // alongside query and variables. The node id came from the owned PR read.
-        let mut args = args.as_object().ok_or(RestError::Configuration)?.clone();
-        args.remove("owner");
-        args.remove("repo");
-        prepare_request(base_url, operation, &Value::Object(args))
-    } else {
-        prepare_request(base_url, operation, args)
-    }
-}
-
 /// Render the action's path template against the invocation args and decide
 /// where the remaining args travel: the query string for GET/DELETE, a JSON
 /// body for POST/PUT/PATCH.
@@ -707,7 +680,7 @@ fn prepare_request(
         Some((path, query)) => (path, Some(query).filter(|query| !query.is_empty())),
         None => (base, None),
     };
-    let (path, remaining) = if let Some(constants) = &operation.request_constants {
+    let (path, mut remaining) = if let Some(constants) = &operation.request_constants {
         let mut merged = if args.is_null() {
             Map::new()
         } else {
@@ -727,6 +700,13 @@ fn prepare_request(
     };
     if has_dot_segment(&path) {
         return Err(RestError::DotSegment);
+    }
+    if matches!(operation.method, HttpMethod::Post) && operation.path == "/graphql" {
+        // Repository keys are governance context, not GraphQL body fields.
+        // Select by the reviewed operation so newly catalogued GraphQL actions
+        // get the same projection without a transport-side action inventory.
+        remaining.remove("owner");
+        remaining.remove("repo");
     }
     let mut url = format!("{}{}", base_path.trim_end_matches('/'), path);
     if let Some(query) = base_query {
@@ -1270,19 +1250,68 @@ mod tests {
             "query".into(),
             json!("reviewed query"),
         )]));
-        for action in ["mark_pull_request_ready", "convert_pull_request_to_draft"] {
-            for query in ["caller query", "reviewed query"] {
-                let prepared = prepare_action_request(
-                    "https://api.github.com",
-                    &operation,
-                    action,
-                    &json!({"owner":"org","repo":"repo","variables":{"pullRequestId":"PR_7"},"query":query}),
-                );
-                assert!(
-                    matches!(prepared, Err(RestError::ConstantArgument(key)) if key == "query")
-                );
-            }
+        for query in ["caller query", "reviewed query"] {
+            let prepared = prepare_request(
+                "https://api.github.com",
+                &operation,
+                &json!({"owner":"org","repo":"repo","variables":{"pullRequestId":"PR_7"},"query":query}),
+            );
+            assert!(matches!(prepared, Err(RestError::ConstantArgument(key)) if key == "query"));
         }
+    }
+
+    #[test]
+    fn graphql_post_strips_repository_context_for_non_pr_actions() {
+        let (endpoint, task) = start_server(1, |_, received| {
+            assert_eq!(request_line(received), "POST /graphql HTTP/1.1");
+            let body: Value =
+                serde_json::from_str(received.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(
+                body,
+                json!({"query":"reviewed project mutation", "variables":{"projectId":"P_1"}})
+            );
+            http_response(200, r#"{"data":{"project":{"id":"P_1"}}}"#)
+        });
+        let mut operation = http_op(HttpMethod::Post, "/graphql");
+        operation.request_constants = Some(std::collections::BTreeMap::from([(
+            "query".into(),
+            json!("reviewed project mutation"),
+        )]));
+        let transport = RestTransport::new(config(endpoint, vec![("update_project", operation)]));
+        let result = transport.dispatch(
+            request(
+                "rest",
+                "update_project",
+                json!({"owner":"org","repo":"repo","variables":{"projectId":"P_1"}}),
+            ),
+            &ResolvedCredential::anonymous(),
+        );
+        assert_eq!(result.response.unwrap()["data"]["project"]["id"], "P_1");
+        task.join()
+            .expect("non-PR GraphQL operation reached the wire");
+
+        for (method, path) in [
+            (HttpMethod::Post, "/other"),
+            (HttpMethod::Patch, "/graphql"),
+        ] {
+            let args = json!({"owner":"org","repo":"repo"});
+            assert_eq!(
+                prepare_request("https://api.github.com", &http_op(method, path), &args)
+                    .unwrap()
+                    .body,
+                Some(args)
+            );
+        }
+        let get = prepare_request(
+            "https://api.github.com",
+            &http_op(HttpMethod::Get, "/graphql"),
+            &json!({"owner":"org","repo":"repo"}),
+        )
+        .unwrap();
+        assert_eq!(
+            get.url,
+            "https://api.github.com/graphql?owner=org&repo=repo"
+        );
     }
 
     #[test]
