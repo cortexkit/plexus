@@ -1648,17 +1648,17 @@ build_timeout_s = 3600
 
 [[control]]
 id = "ci-watch-creation-floor"
-guards = "CI polling rejects attempts started before watch creation without publishing jobs or run markers, while allowing recent reruns of older runs"
+guards = "CI polling rejects attempts completed before watch creation without fetching jobs or publishing run markers, while retaining in-flight failures and recent reruns"
 file = "crates/plexus-core/src/poller/ci_runs.rs"
-old = "if started < sub.created_at_ms {"
-new = "if false && started < sub.created_at_ms { // NON-VACUITY BREAK"
+old = "if completed < sub.created_at_ms {"
+new = "if false && completed < sub.created_at_ms { // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/poller/ci_runs.rs"
 runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
 expect_red = ["poller::ci_runs::tests::fresh_watch_rescan_drops_preexisting_attempts_without_events"]
-expect_message = "attempts started before watch creation must not publish"
+expect_message = "attempts completed before watch creation must not publish"
 only = false
 timeout_s = 60
 build_timeout_s = 3600

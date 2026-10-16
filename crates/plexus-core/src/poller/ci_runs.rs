@@ -455,7 +455,7 @@ where
             (checked_a, created_a, ak).cmp(&(checked_b, created_b, bk))
         });
         let mut events = Vec::new();
-        // Count completed runs/jobs, plus one run for each attempt started
+        // Count completed runs/jobs, plus one run for each attempt completed
         // before watch creation, whose jobs are never read. These attempts and
         // completed items older than retention use the ledger's existing
         // OlderThanWatermark reason for falling below a timestamp bound.
@@ -509,20 +509,22 @@ where
             }) {
                 return invalid();
             }
-            // Original creation time cannot distinguish an old attempt from a
-            // fresh rerun. Check the authoritative per-attempt start time even
-            // for attempts already persisted in the cursor by an earlier poll.
-            let Some(started) = timestamp(&run, "run_started_at") else {
-                return invalid();
-            };
-            if started < sub.created_at_ms {
-                examined += 1;
-                dropped.push((
-                    format!("run:{}:{}", attempt.run.run_id, attempt.run.run_attempt),
-                    DropReason::OlderThanWatermark,
-                ));
-                cursor.open.remove(&key);
-                continue;
+            // A replacement watch must keep following attempts still in flight
+            // when it was created. Only completed attempts can be historical;
+            // use the same updated_at completion time as the run envelope.
+            if run["status"] == "completed" {
+                let Some(completed) = timestamp(&run, "updated_at") else {
+                    return invalid();
+                };
+                if completed < sub.created_at_ms {
+                    examined += 1;
+                    dropped.push((
+                        format!("run:{}:{}", attempt.run.run_id, attempt.run.run_attempt),
+                        DropReason::OlderThanWatermark,
+                    ));
+                    cursor.open.remove(&key);
+                    continue;
+                }
             }
             args["page"] = json!(1);
             let first = match self.ci_read(
@@ -1777,7 +1779,7 @@ mod tests {
         assert_eq!(
             f.poll_checked(0),
             0,
-            "attempts started before watch creation must not publish"
+            "attempts completed before watch creation must not publish"
         );
         assert!(f.events().is_empty());
         assert!(f.markers().is_empty());
@@ -1793,8 +1795,8 @@ mod tests {
             let f = Fixture::new();
             f.set_created_at(f.now);
             let mut r = run(1, 1, f.now - 1_000, "completed", Some("failure"));
-            r["updated_at"] = json!(iso8601::format_millis(f.now + 60_000));
-            f.add(r.clone(), jobs(1, f.now + 60_000), discover);
+            r["updated_at"] = json!(iso8601::format_millis(f.now - 1));
+            f.add(r.clone(), jobs(1, f.now - 1), discover);
             if discover {
                 f.set_cursor(json!({"scanned_through_ms": f.now}));
             } else {
@@ -1809,20 +1811,71 @@ mod tests {
     }
 
     #[test]
-    fn fresh_watch_reports_reruns_started_at_or_after_creation() {
+    fn fresh_watch_reports_reruns_completed_at_or_after_creation() {
         for delay in [0, 1_000] {
             let f = Fixture::new();
             f.set_created_at(f.now);
             f.set_cursor(json!({"scanned_through_ms": f.now}));
             let mut r = run(1, 2, f.now - 86_400_000, "completed", Some("failure"));
-            r["run_started_at"] = json!(iso8601::format_millis(f.now + delay));
-            r["updated_at"] = json!(iso8601::format_millis(f.now + 60_000));
-            f.add(r, jobs(1, f.now + 60_000), true);
+            r["run_started_at"] = json!(iso8601::format_millis(f.now));
+            r["updated_at"] = json!(iso8601::format_millis(f.now + delay));
+            f.add(r, jobs(1, f.now + delay), true);
             assert_eq!(f.poll_checked(1), 2);
             assert_eq!(f.markers().len(), 2);
             assert_eq!(f.poll_checked(2), 0);
             assert_eq!(f.events().len(), 2);
         }
+    }
+
+    #[test]
+    fn fresh_watch_reports_preexisting_in_flight_failure() {
+        for discover in [true, false] {
+            for delay in [0, 1_000] {
+                let f = Fixture::new();
+                f.set_created_at(f.now);
+                f.set_cursor(json!({"scanned_through_ms": f.now}));
+                let mut r = run(1, 1, f.now - 86_400_000, "completed", Some("failure"));
+                r["updated_at"] = json!(iso8601::format_millis(f.now + delay));
+                f.add(r.clone(), jobs(1, f.now + delay), discover);
+                if !discover {
+                    f.open(&[r]);
+                }
+                assert_eq!(f.poll_checked(1), 2);
+                assert!(f.requests().iter().any(|r| r.action == JOBS_READ));
+                let markers = f.markers();
+                assert_eq!(markers.len(), 2);
+                assert!(markers.iter().any(|m| m.event_name == RUN_EVENT));
+                assert!(markers
+                    .iter()
+                    .any(|m| m.event_name == crate::event_key::GITHUB_CI_JOB_FAILED));
+                assert_eq!(f.events().len(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_watch_keeps_preexisting_in_progress_attempts() {
+        let f = Fixture::new();
+        f.set_created_at(f.now);
+        let mut r = run(1, 1, f.now - 86_400_000, "in_progress", None);
+        r["updated_at"] = Value::Null;
+        f.add(r.clone(), jobs(1, f.now + 60_000), true);
+        assert_eq!(f.poll_checked(1), 1);
+        assert_eq!(f.cursor()["open"].as_object().unwrap().len(), 1);
+        let markers = f.markers();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(
+            markers[0].event_name,
+            crate::event_key::GITHUB_CI_JOB_FAILED
+        );
+
+        r["status"] = json!("completed");
+        r["conclusion"] = json!("failure");
+        r["updated_at"] = json!(iso8601::format_millis(f.now + 120_000));
+        f.add(r, jobs(1, f.now + 60_000), false);
+        assert_eq!(f.poll_checked(2), 1);
+        assert!(f.cursor()["open"].as_object().unwrap().is_empty());
+        assert_eq!(f.events().len(), 2);
     }
 
     #[test]
@@ -1841,19 +1894,24 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_invalid_attempt_start_rejects_response_without_events() {
-        for started in [None, Some(Value::Null), Some(json!("invalid"))] {
-            let f = Fixture::new();
-            let mut r = run(1, 1, f.now, "completed", Some("failure"));
-            if let Some(started) = started {
-                r["run_started_at"] = started;
-            } else {
-                r.as_object_mut().unwrap().remove("run_started_at");
+    fn missing_or_invalid_completion_time_rejects_response_without_events() {
+        for completed in [None, Some(Value::Null), Some(json!("invalid"))] {
+            for conclusion in [Some("failure"), None] {
+                let f = Fixture::new();
+                let mut r = run(1, 1, f.now, "completed", conclusion);
+                if let Some(completed) = &completed {
+                    r["updated_at"] = completed.clone();
+                } else {
+                    r.as_object_mut().unwrap().remove("updated_at");
+                }
+                f.add(r, jobs(1, f.now), true);
+                assert!(
+                    matches!(f.poll(0), PollCycle::VendorFailed { code } if code == "response_shape_invalid")
+                );
+                assert!(f.events().is_empty());
+                assert!(f.markers().is_empty());
+                assert!(f.requests().iter().all(|r| r.action != JOBS_READ));
             }
-            f.add(r, jobs(1, f.now), true);
-            assert!(matches!(f.poll(0), PollCycle::VendorFailed { .. }));
-            assert!(f.events().is_empty());
-            assert!(f.markers().is_empty());
         }
     }
 
@@ -2448,6 +2506,7 @@ mod tests {
     #[test]
     fn age_floor_refuses_old_jobs_and_runs_but_not_distinct_recent_late_failures() {
         let f = Fixture::new();
+        f.set_created_at(f.now - AGE_FLOOR_MS - 2);
         let mut r = run(1, 1, f.now, "completed", Some("failure"));
         r["updated_at"] = json!(iso8601::format_millis(f.now - AGE_FLOOR_MS - 1));
         f.add(
@@ -2741,7 +2800,7 @@ mod tests {
     }
 
     /// Account for each rejected attempt or completed run/job as an inserted
-    /// event or a dropped item. One attempt started before watch creation; one
+    /// event or a dropped item. One attempt completed before watch creation; one
     /// run and one job predate retention; one job produces a new event.
     ///
     /// Run only this test in a child process because the counters accumulate
@@ -2768,12 +2827,7 @@ mod tests {
             return;
         }
         let f = Fixture::new();
-        f.set_created_at(f.now);
-        f.add(
-            run(2, 1, f.now - 1_000, "completed", Some("failure")),
-            jobs(1, f.now),
-            true,
-        );
+        f.set_created_at(f.now - AGE_FLOOR_MS - 2);
         let mut r = run(1, 1, f.now, "completed", Some("failure"));
         r["updated_at"] = json!(iso8601::format_millis(f.now - AGE_FLOOR_MS - 1));
         f.add(
@@ -2785,6 +2839,14 @@ mod tests {
             true,
         );
         assert_eq!(f.poll_checked(0), 1);
+        let fresh = Fixture::new();
+        fresh.set_created_at(fresh.now);
+        fresh.add(
+            run(2, 1, fresh.now - 61_000, "completed", Some("failure")),
+            jobs(1, fresh.now - 1_000),
+            true,
+        );
+        assert_eq!(fresh.poll_checked(0), 0);
         assert_eq!(
             crate::poller::poll_accounting_metrics(),
             json!({
