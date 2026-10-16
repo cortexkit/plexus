@@ -1153,9 +1153,9 @@ async fn start_live_daemon_with(
         format!("{unset_nonce}exec '{test_binary}' --exact vault_route_fixture --nocapture\n"),
     )
     .unwrap();
-    let engram_launcher = directory.join("engram-fixture.sh");
+    let entorhinal_launcher = directory.join("entorhinal-fixture.sh");
     fs::write(
-        &engram_launcher,
+        &entorhinal_launcher,
         format!("{unset_nonce}exec '{test_binary}' --exact vault_route_fixture --nocapture\n"),
     )
     .unwrap();
@@ -1192,10 +1192,10 @@ async fn start_live_daemon_with(
                     },
                     "reserved": true
                 },
-                "engram": {
+                "entorhinal": {
                     "program": "/bin/sh",
-                    "args": [engram_launcher],
-                    "env": {"TEST_VAULT_CONNECTION": connection_file_path, "TEST_CLAIM_SERVICE": "1"},
+                    "args": [entorhinal_launcher],
+                    "env": {"TEST_VAULT_CONNECTION": connection_file_path, "TEST_ROLE_SERVICE": "1"},
                     "reserved": true
                 },
                 "test-vault": {
@@ -1317,9 +1317,9 @@ async fn send_control_request_within(
 }
 
 /// The fixture modules every live daemon starts beside plexus, and that plexus
-/// calls: `engram` answers its connector-home claim reads and `test-vault` its
+/// calls: `entorhinal` answers its connector-home role reads and `test-vault` its
 /// credential reads.
-const FIXTURE_MODULE_IDS: [&str; 2] = ["engram", "test-vault"];
+const FIXTURE_MODULE_IDS: [&str; 2] = ["entorhinal", "test-vault"];
 
 /// Wait until plexus is registered AND serving, and the fixture modules it
 /// calls are registered. Returns plexus's `catalog.list` entry.
@@ -1523,8 +1523,8 @@ async fn open_management_route(stream: &mut TcpStream) -> (u16, u32) {
 /// an open management `route`.
 ///
 /// Plexus refuses every connector effect (a vendor call, a ticket, a consent
-/// card) as `connector_home_not_held` until a successful `claim.read` from
-/// engram says this machine holds the claim, and it starts every boot
+/// card) as `connector_home_not_held` until a successful `role.read` from
+/// entorhinal says this machine holds the role, and it starts every boot
 /// `unknown`. Its own first read runs on a background task at startup, so a
 /// test that issues an effect straight after plexus registers races that
 /// read: on a Linux CI runner a ticket was refused 7 ms before the read
@@ -1533,7 +1533,7 @@ async fn open_management_route(stream: &mut TcpStream) -> (u16, u32) {
 ///
 /// The status operation performs a fresh read each time it is asked, so this
 /// does not wait for plexus's 30 s background reader. A read that cannot reach
-/// engram leaves the state `unknown`, which is worth asking again; `not_held`
+/// entorhinal leaves the state `unknown`, which is worth asking again; `not_held`
 /// is a real answer the fixture never gives, so it fails at once. The bound is
 /// elapsed time, for the reasons given on `wait_for_module_catalog`.
 async fn wait_for_connector_home_held(stream: &mut TcpStream, route: (u16, u32)) {
@@ -1541,10 +1541,9 @@ async fn wait_for_connector_home_held(stream: &mut TcpStream, route: (u16, u32))
     let mut correlation = 17;
     loop {
         let now = std::time::Instant::now();
-        // Each read may take engram's 3 s call timeout plus a fresh route to
-        // it, so it gets the rest of the overall bound rather than the usual
-        // 5 s; giving up early would leave its late answer unread on this
-        // connection.
+        // The role reader reconnects to Entorhinal on each request, then has a
+        // 3 s call timeout. Allow the rest of the overall bound rather than
+        // 5 s so a late status reply cannot remain unread on this connection.
         let status = send_management_request_within(
             stream,
             route,
@@ -1555,8 +1554,8 @@ async fn wait_for_connector_home_held(stream: &mut TcpStream, route: (u16, u32))
         )
         .await;
         let value: Value = serde_json::from_slice(&status.body).expect("connector-home status");
-        // A failed read answers `{"error", "connectorHome"}` instead of
-        // `{"result": {"claim", "connectorHome"}}`.
+        // A failed read puts the local connectorHome gate beside the error;
+        // a successful read nests the gate and raw role reply inside result.
         let state = if value["result"].is_null() {
             &value["connectorHome"]["state"]
         } else {
@@ -2333,27 +2332,24 @@ async fn vault_route_fixture() {
     .await
     .expect("vault fixture connection file");
     let mut stream = connect_client(&connection).await;
-    let claims = std::env::var_os("TEST_CLAIM_SERVICE").is_some();
-    let mut module_manifest = manifest::build(if claims { "engram" } else { "test-vault" });
+    let roles = std::env::var_os("TEST_ROLE_SERVICE").is_some();
+    let mut module_manifest = manifest::build(if roles { "entorhinal" } else { "test-vault" });
     module_manifest
         .provides
         .retain(|role| matches!(role, ProviderRole::ManagementSurface { .. }));
     for role in &mut module_manifest.provides {
         if let ProviderRole::ManagementSurface { operations, .. } = role {
             *operations = vec![ManagementOperation {
-                name: "credential.get_scoped".into(),
+                name: if roles {
+                    "role.read"
+                } else {
+                    "credential.get_scoped"
+                }
+                .into(),
                 kind: ManagementOperationKind::Query,
                 description: None,
             }];
         }
-    }
-    if claims {
-        module_manifest.provides = vec![ProviderRole::InternalService {
-            service_id: "agent-sync".into(),
-            transport: subc_protocol::manifest::InternalTransport::Bulk,
-            agent_facing: false,
-            operations: vec!["claim.read".into(), "claim.force".into()],
-        }];
     }
     let hello = subc_protocol::ModuleHelloBody {
         manifest: module_manifest,
@@ -2402,11 +2398,8 @@ async fn vault_route_fixture() {
             serde_json::to_value(subc_protocol::session::ModuleControlResponse::RouteBindAck {})
                 .unwrap()
         } else {
-            assert!(if claims {
-                matches!(
-                    request["method"].as_str(),
-                    Some("claim.read" | "claim.force")
-                )
+            assert!(if roles {
+                request["method"] == "role.read"
             } else {
                 request["method"] == "credential.get_scoped"
             });
@@ -2415,18 +2408,9 @@ async fn vault_route_fixture() {
             };
             match bound.get(&(frame.header.channel, frame.header.epoch)) {
                 Some(Some(principal)) if *principal == plexus => {
-                    if claims {
-                        assert_eq!(request["params"]["subject"], "role:connector_home");
-                        if request["method"] == "claim.force" {
-                            assert_eq!(request["params"]["to_device"], "self");
-                            assert_eq!(request["params"]["cut"], "");
-                            assert_eq!(request["params"]["expected_epoch"], 1);
-                            assert_eq!(request["params"]["request_id"].as_str().unwrap().len(), 32);
-                            assert!(!request["params"]["reason"].as_str().unwrap().is_empty());
-                            json!({"result":{"epoch":2}})
-                        } else {
-                            json!({"result":{"epoch":1,"holder":"test-member","held_here":true,"source":"cloud"}})
-                        }
+                    if roles {
+                        assert_eq!(request["params"], json!({"role":"connector_home"}));
+                        json!({"result":{"role":"connector_home","epoch":1,"known":true,"stale":false,"holder":"test-member","holder_name":"Test Mac","held_here":true,"source":"cloud"}})
                     } else {
                         json!({"result": {"credential_id": request["params"]["credential_id"], "payload": b"test-vendor-token".to_vec(), "record_version": 1}})
                     }
@@ -2450,31 +2434,36 @@ async fn vault_route_fixture() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn connector_home_live_internal_route_attests_plexus_and_applies_self() {
+async fn connector_home_live_management_route_attests_plexus_and_reads_role() {
     let (mut daemon, connection) = start_live_daemon().await;
     let mut client = connect_client(&connection).await;
     wait_for_module_catalog(&mut client).await;
     let route = open_management_route(&mut client).await;
-    let preview = send_management_request(
+    let status = send_management_request(
         &mut client,
         route,
         101,
-        plexus_module::connector_home::CLAIM_OP,
-        json!({"reason":"bootstrap"}),
+        plexus_module::connector_home::STATUS_OP,
+        json!({}),
     )
     .await;
-    let preview: Value = serde_json::from_slice(&preview.body).unwrap();
-    assert_eq!(preview["result"]["preview"], true);
-    let applied = send_management_request(
+    let status: Value = serde_json::from_slice(&status.body).unwrap();
+    assert_eq!(status["result"]["role"]["role"], "connector_home");
+    assert_eq!(status["result"]["role"]["holder_name"], "Test Mac");
+    assert_eq!(status["result"]["connectorHome"]["state"], "held");
+    let removed = send_management_request(
         &mut client,
         route,
         102,
-        plexus_module::connector_home::CLAIM_OP,
-        json!({"reason":"bootstrap","apply":true,"request_id":"0123456789abcdef0123456789abcdef"}),
+        "plexus.admin.connector_home.claim",
+        json!({}),
     )
     .await;
-    let applied: Value = serde_json::from_slice(&applied.body).unwrap();
-    assert_eq!(applied["result"]["outcome"]["epoch"], 2, "{applied}");
-    assert_eq!(applied["result"]["connectorHome"]["state"], "held");
+    let removed: Value = serde_json::from_slice(&removed.body).unwrap();
+    assert_eq!(removed["error"]["code"], "unknown_method");
+    assert!(removed["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("connector_home.claim"));
     daemon.stop();
 }

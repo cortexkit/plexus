@@ -90,10 +90,7 @@ commands:
   recipients-remove narrow send authority (preview by default, --apply to write)
   recipients-list   read a connection and agent's allowlist
   connector-home status
-                 read the live engram claim and plexus gate
-  connector-home claim --reason <text> [--apply] [--request-id <32 hex>]
-                 preview by default; apply a reasoned takeover to this machine
-                 reuse --request-id only to retry the same apply
+                 read the live Entorhinal role and plexus gate
   import-store   offline cutover to a new store (no --subc required)
   issue-ticket   place a vault credential reference and issue a binding ticket
   rebind-credential replace a connection's credential reference (preview by default)
@@ -252,12 +249,17 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         Some(
             arguments
                 .get(1)
-                .ok_or_else(|| Failure::usage("connector-home requires status or claim"))?
+                .ok_or_else(|| Failure::usage("connector-home requires status"))?
                 .as_str(),
         )
     } else {
         None
     };
+    if connector_command == Some("claim") {
+        return Err(Failure::usage(
+            "connector-home claim was removed; use ck roles take connector_home",
+        ));
+    }
     let flags = Flags::parse(&arguments[if connector_command.is_some() { 2 } else { 1 }..])?;
     if flags.help {
         println!("{USAGE}");
@@ -360,39 +362,10 @@ fn recipients_request(command: &str, flags: &Flags) -> Result<(&'static str, Val
     Ok((method, params))
 }
 
-fn connector_home_request(command: &str, flags: &Flags) -> Result<(&'static str, Value), Failure> {
+fn connector_home_request(command: &str, _flags: &Flags) -> Result<(&'static str, Value), Failure> {
     match command {
         "status" => Ok((plexus_module::connector_home::STATUS_OP, json!({}))),
-        "claim" => {
-            let reason = flags.required("--reason")?;
-            if reason.trim().is_empty() {
-                return Err(Failure::usage("--reason must be non-empty"));
-            }
-            let apply = flags.has("--apply");
-            let mut params = json!({"reason":reason,"apply":apply});
-            if apply {
-                let id = match flags.value("--request-id") {
-                    Some(id) if plexus_module::connector_home::valid_request_id(id) => {
-                        id.to_owned()
-                    }
-                    Some(_) => return Err(Failure::usage("--request-id must be 32 lowercase hex")),
-                    None => {
-                        use std::io::Read;
-                        let mut bytes = [0u8; 16];
-                        std::fs::File::open("/dev/urandom")
-                            .and_then(|mut f| f.read_exact(&mut bytes))
-                            .map_err(|e| Failure::transport(format!("request id: {e}")))?;
-                        bytes.iter().map(|b| format!("{b:02x}")).collect()
-                    }
-                };
-                eprintln!(
-                    "connector-home apply request_id={id}; retain it for a retry of this apply"
-                );
-                params["request_id"] = json!(id);
-            }
-            Ok((plexus_module::connector_home::CLAIM_OP, params))
-        }
-        _ => Err(Failure::usage("connector-home requires status or claim")),
+        other => Err(Failure::usage(format!("unknown connector-home subcommand '{other}'; use ck roles take connector_home to take the role"))),
     }
 }
 
@@ -412,7 +385,6 @@ fn accepted_flags(
     connector_command: Option<&str>,
 ) -> Option<&'static [&'static str]> {
     Some(match (command, connector_command) {
-        ("connector-home", Some("claim")) => &["--reason", "--apply", "--request-id"],
         ("connector-home", _) => &[],
         // `--handle-file` is accepted only so the removed flag gets its own
         // refusal pointing at `--credential-id`.
@@ -1713,13 +1685,13 @@ mod tests {
 
         let refused = run(&args(&[
             "connector-home",
-            "claim",
+            "status",
             "--subc",
             "x",
             "--reson",
             "r",
         ]))
-        .expect_err("connector-home claim must refuse an unknown flag");
+        .expect_err("connector-home status must refuse an unknown flag");
         assert!(refused.message.contains("--reson"), "{}", refused.message);
     }
 
@@ -2517,17 +2489,23 @@ mod tests {
 mod connector_home_cli_tests {
     use super::*;
     #[test]
-    fn connector_home_claim_requires_nonempty_reason() {
-        for args in [vec![], vec!["--reason".into(), " ".into()]] {
-            assert!(connector_home_request("claim", &Flags::parse(&args).unwrap()).is_err());
+    fn connector_home_claim_is_refused_by_name() {
+        for args in [
+            vec!["connector-home".into(), "claim".into()],
+            vec!["connector-home".into(), "claim".into(), "--apply".into()],
+        ] {
+            let error = run(&args).unwrap_err();
+            assert_eq!(error.code, EXIT_USAGE);
+            assert!(error.message.contains("connector-home claim"));
+            assert!(error.message.contains("ck roles take connector_home"));
         }
     }
     #[test]
-    fn connector_home_claim_previews_by_default() {
-        let flags = Flags::parse(&["--reason".into(), "bootstrap".into()]).unwrap();
-        let (method, params) = connector_home_request("claim", &flags).unwrap();
-        assert_eq!(method, plexus_module::connector_home::CLAIM_OP);
-        assert_eq!(params, json!({"reason":"bootstrap","apply":false}));
+    fn connector_home_status_reads_the_live_role() {
+        let (method, params) =
+            connector_home_request("status", &Flags::parse(&[]).unwrap()).unwrap();
+        assert_eq!(method, plexus_module::connector_home::STATUS_OP);
+        assert_eq!(params, json!({}));
     }
 }
 
