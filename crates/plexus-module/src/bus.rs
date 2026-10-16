@@ -1371,9 +1371,11 @@ pub mod tests {
     }
 
     struct Claim(std::sync::atomic::AtomicBool);
-    impl crate::connector_home::ClaimPeer for Claim {
+    impl crate::connector_home::RolePeer for Claim {
         fn call(&self, _: &str, _: Value) -> Result<Value, subc_protocol::ErrorBody> {
-            Ok(json!({"epoch":1, "held_here":self.0.load(std::sync::atomic::Ordering::SeqCst)}))
+            Ok(
+                json!({"role":"connector_home","epoch":1,"known":true,"stale":false,"holder":null,"holder_name":null,"source":"cloud", "held_here":self.0.load(std::sync::atomic::Ordering::SeqCst)}),
+            )
         }
     }
 

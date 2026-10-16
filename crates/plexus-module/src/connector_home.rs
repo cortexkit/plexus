@@ -1,66 +1,121 @@
-//! Admit connector effects only when engram's claim names this machine as the connector home.
+//! Fence outside effects to the user's connector-home machine, as confirmed by Entorhinal's role registry.
 use plexus_core::SubcPrefrontalRoutePeer;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use subc_protocol::ErrorBody;
 
-pub const SUBJECT: &str = "role:connector_home";
+pub const ROLE: &str = "connector_home";
 pub const STATUS_OP: &str = "plexus.admin.connector_home.status";
-pub const CLAIM_OP: &str = "plexus.admin.connector_home.claim";
 
-pub trait ClaimPeer: Send + Sync {
+pub trait RolePeer: Send + Sync {
     fn call(&self, method: &str, params: Value) -> Result<Value, ErrorBody>;
 }
 
-pub(crate) fn claim_reply(value: Value) -> Result<Value, ErrorBody> {
+pub(crate) fn role_reply(value: Value) -> Result<Value, ErrorBody> {
     if let Some(error) = value.get("error") {
         return Err(
             serde_json::from_value(error.clone()).unwrap_or_else(|_| ErrorBody {
                 code: "peer_protocol_error".into(),
-                message: "engram returned a malformed error".into(),
+                message: "entorhinal returned a malformed error".into(),
                 detail: None,
             }),
         );
     }
-    Ok(value.get("result").cloned().unwrap_or(value))
+    value.get("result").cloned().ok_or_else(|| ErrorBody {
+        code: "peer_protocol_error".into(),
+        message: "entorhinal reply omitted result".into(),
+        detail: None,
+    })
 }
-impl ClaimPeer for SubcPrefrontalRoutePeer {
+impl RolePeer for SubcPrefrontalRoutePeer {
     fn call(&self, method: &str, params: Value) -> Result<Value, ErrorBody> {
-        self.call_service(method, params).and_then(claim_reply)
+        self.call_service(method, params).and_then(role_reply)
     }
 }
-struct EngramPeer {
+struct EntorhinalPeer {
     path: std::path::PathBuf,
 }
-impl ClaimPeer for EngramPeer {
+impl RolePeer for EntorhinalPeer {
     fn call(&self, method: &str, params: Value) -> Result<Value, ErrorBody> {
         // Reconnect on each read so a daemon unavailable at startup can later confirm ownership.
-        let target = serde_json::from_value(
-            json!({"kind":"internal_service", "module_id":"engram", "service_id":"agent-sync"}),
-        )
-        .expect("internal service target");
-        let peer = SubcPrefrontalRoutePeer::connect_target(
+        let peer = SubcPrefrontalRoutePeer::connect(
             &self.path,
-            target,
+            "entorhinal",
             subc_protocol::BindIdentity::new("connector-home", "plexus", "module"),
         )
         .map_err(|_| ErrorBody {
             code: "unavailable".into(),
-            message: "engram route unavailable".into(),
+            message: "entorhinal route unavailable".into(),
             detail: None,
         })?
         .with_call_timeout(std::time::Duration::from_secs(3));
-        ClaimPeer::call(&peer, method, params)
+        RolePeer::call(&peer, method, params)
     }
 }
 struct Unavailable;
-impl ClaimPeer for Unavailable {
+impl RolePeer for Unavailable {
     fn call(&self, _: &str, _: Value) -> Result<Value, ErrorBody> {
         Err(ErrorBody {
             code: "unavailable".into(),
-            message: "engram route unavailable".into(),
+            message: "entorhinal route unavailable".into(),
             detail: None,
         })
+    }
+}
+
+struct RoleAnswer {
+    epoch: u64,
+    known: bool,
+    held_here: bool,
+    stale: bool,
+    holder_name: Option<String>,
+    source: Option<String>,
+}
+
+impl RoleAnswer {
+    fn parse(value: &Value) -> Result<Self, ErrorBody> {
+        let malformed = || ErrorBody {
+            code: "peer_protocol_error".into(),
+            message: "entorhinal returned a malformed role.read reply".into(),
+            detail: None,
+        };
+        let text = |key: &str| -> Result<Option<String>, ErrorBody> {
+            match value.get(key) {
+                Some(Value::Null) => Ok(None),
+                Some(Value::String(s)) => Ok(Some(s.clone())),
+                _ => Err(malformed()),
+            }
+        };
+        if value.get("role").and_then(Value::as_str) != Some(ROLE) {
+            return Err(malformed());
+        }
+        // Even nullable fields must be present: a partial answer cannot establish ownership.
+        text("holder")?;
+        Ok(Self {
+            epoch: value
+                .get("epoch")
+                .and_then(Value::as_u64)
+                .ok_or_else(malformed)?,
+            known: value
+                .get("known")
+                .and_then(Value::as_bool)
+                .ok_or_else(malformed)?,
+            held_here: value
+                .get("held_here")
+                .and_then(Value::as_bool)
+                .ok_or_else(malformed)?,
+            stale: value
+                .get("stale")
+                .and_then(Value::as_bool)
+                .ok_or_else(malformed)?,
+            holder_name: text("holder_name")?,
+            source: text("source")?,
+        })
+    }
+
+    fn confirmed_in_process(&self) -> bool {
+        // Entorhinal marks cached roles stale at its own startup until it verifies a backing-store read.
+        !self.stale
     }
 }
 
@@ -68,7 +123,8 @@ impl ClaimPeer for Unavailable {
 struct Snapshot {
     state: &'static str,
     epoch: Option<u64>,
-    holder: Option<String>,
+    holder_name: Option<String>,
+    code: Option<String>,
     source: Option<String>,
     checked_at: Option<i64>,
 }
@@ -77,7 +133,8 @@ impl Default for Snapshot {
         Self {
             state: "unknown",
             epoch: None,
-            holder: None,
+            holder_name: None,
+            code: None,
             source: None,
             checked_at: None,
         }
@@ -86,66 +143,79 @@ impl Default for Snapshot {
 pub struct ConnectorHome {
     snapshot: Mutex<Snapshot>,
     read_lane: Mutex<()>,
-    peer: Arc<dyn ClaimPeer>,
-    /// The first `claim.force` request built for each apply `request_id`.
-    /// A retry with the same id resends exactly that request, so engram (the
-    /// service that owns the claim) can recognise it as the same apply rather
-    /// than a new one. Bounded: the oldest ids are forgotten past
-    /// [`MAX_REMEMBERED_APPLIES`], since a retry belongs right after its apply.
-    applies: Mutex<std::collections::VecDeque<(String, Value)>>,
+    peer: Arc<dyn RolePeer>,
 }
 
-/// How many apply request ids the module remembers for retries.
-pub const MAX_REMEMBERED_APPLIES: usize = 64;
 impl ConnectorHome {
-    pub fn new(peer: Arc<dyn ClaimPeer>) -> Self {
+    pub fn new(peer: Arc<dyn RolePeer>) -> Self {
         Self {
             snapshot: Mutex::new(Snapshot::default()),
             read_lane: Mutex::new(()),
             peer,
-            applies: Mutex::new(Default::default()),
         }
     }
     pub fn unavailable() -> Self {
         Self::new(Arc::new(Unavailable))
     }
     pub fn production(path: &std::path::Path) -> Self {
-        Self::new(Arc::new(EngramPeer {
+        Self::new(Arc::new(EntorhinalPeer {
             path: path.to_owned(),
         }))
     }
-    /// Starts unknown on each boot: only a successful claim.read with held_here=true
-    /// admits connector effects. Engram computes held_here; plexus never compares device ids.
-    /// A failed read preserves unknown, held or not_held, including on route errors,
-    /// timeouts, key_unavailable and unavailable: ownership does not expire, and engram
-    /// can answer from its local confirmed record while its cloud is unreachable.
-    /// The exception is verify_failed, which sets not_held because ownership evidence
-    /// failed integrity checks rather than merely being temporarily unavailable.
-    /// Plexus never persists this decision, so a restart requires a new successful read.
+    /// Only fresh, well-formed answers replace the last decision. Route failures and
+    /// stale answers preserve it; integrity failures revoke admission immediately.
+    /// Plexus never persists admission, so a restart needs a new confirmed read.
     pub fn refresh(&self) -> Result<Value, ErrorBody> {
-        // Hold this lock across the request and update so concurrent refreshes cannot apply answers out of order.
+        // Serialize requests and updates so concurrent readers cannot apply answers out of order.
         let _read = self.read_lane.lock().unwrap();
-        let reply = self.peer.call("claim.read", json!({"subject":SUBJECT}));
+        let reply = self
+            .peer
+            .call("role.read", json!({"role":ROLE}))
+            .and_then(|value| {
+                RoleAnswer::parse(&value)?;
+                Ok(value)
+            });
         let mut next = self.snapshot.lock().unwrap();
         let before = next.clone();
         match &reply {
             Ok(value) => {
-                let epoch = value["epoch"].as_u64();
-                let held = epoch.is_some_and(|epoch| epoch > 0) && value["held_here"] == true;
-                next.state = if held { "held" } else { "not_held" };
-                next.epoch = epoch;
-                next.holder = value["holder"].as_str().map(str::to_owned);
-                next.source = value["source"].as_str().map(str::to_owned);
-                next.checked_at = Some(plexus_core::storage::now_ms());
+                let answer = RoleAnswer::parse(value).expect("validated role answer");
+                if answer.confirmed_in_process() {
+                    next.state = if !answer.known {
+                        "unknown"
+                    } else if answer.held_here {
+                        "held"
+                    } else {
+                        "not_held"
+                    };
+                    next.epoch = Some(answer.epoch);
+                    next.holder_name = answer.holder_name;
+                    next.source = answer.source;
+                    next.code = None;
+                    next.checked_at = Some(plexus_core::storage::now_ms());
+                }
             }
-            Err(error) if error.code == "verify_failed" => {
-                next.state = "not_held";
+            Err(error) if error.code == "claim_integrity_failed" => {
+                next.state = "integrity_failed";
+                next.code = Some(error.code.clone());
                 next.checked_at = Some(plexus_core::storage::now_ms());
             }
             Err(_) => {}
         }
-        if (before.state, before.epoch, &before.holder) != (next.state, next.epoch, &next.holder) {
-            eprintln!(info wire: "connector home: {} -> {} epoch={:?} holder={:?}", before.state, next.state, next.epoch, next.holder);
+        if (
+            before.state,
+            before.epoch,
+            &before.holder_name,
+            &before.source,
+            &before.code,
+        ) != (
+            next.state,
+            next.epoch,
+            &next.holder_name,
+            &next.source,
+            &next.code,
+        ) {
+            eprintln!(info wire: "connector home: {} -> {} epoch={:?} holder_name={:?}", before.state, next.state, next.epoch, next.holder_name);
         }
         reply
     }
@@ -154,7 +224,7 @@ impl ConnectorHome {
     }
     pub fn status(&self) -> Value {
         let s = self.snapshot.lock().unwrap();
-        json!({"state":s.state, "epoch":s.epoch, "holder":s.holder, "source":s.source, "checkedAt":s.checked_at})
+        json!({"state":s.state, "epoch":s.epoch, "holder_name":s.holder_name, "code":s.code, "source":s.source, "checkedAt":s.checked_at})
     }
     pub fn refusal(&self) -> Option<Value> {
         if self.held() {
@@ -168,63 +238,8 @@ impl ConnectorHome {
     pub fn live_status(&self) -> Value {
         let live = self.refresh();
         match live {
-            Ok(claim) => json!({"result":{"claim":claim, "connectorHome":self.status()}}),
+            Ok(role) => json!({"result":{"role":role, "connectorHome":self.status()}}),
             Err(error) => json!({"error":error,"connectorHome":self.status()}),
-        }
-    }
-    pub fn claim(&self, params: &Value) -> Value {
-        let Some(reason) = params["reason"].as_str().filter(|r| !r.trim().is_empty()) else {
-            return json!({"error":{"code":"invalid_request","message":"a non-empty reason is required"}});
-        };
-        let latest = match self.refresh() {
-            Ok(v) => v,
-            Err(e) => return json!({"error":e}),
-        };
-        let Some(epoch) = latest["epoch"].as_u64() else {
-            return json!({"error":{"code":"peer_protocol_error","message":"claim.read omitted epoch"}});
-        };
-        if params["apply"] != true {
-            return json!({"result":{"preview":true,"subject":SUBJECT,"expected_epoch":epoch,"to_device":"self","reason":reason,"connectorHome":self.status()}});
-        }
-        let Some(id) = params["request_id"]
-            .as_str()
-            .filter(|id| valid_request_id(id))
-        else {
-            return json!({"error":{"code":"invalid_request","message":"apply requires a stable 32 lowercase hex request_id"}});
-        };
-        let request = {
-            let mut applies = self.applies.lock().unwrap();
-            let request = match applies.iter().find(|(known, _)| known == id) {
-                Some((_, request)) => request.clone(),
-                None => {
-                    let request = force_request("self", epoch, id, reason);
-                    if applies.len() >= MAX_REMEMBERED_APPLIES {
-                        applies.pop_front();
-                    }
-                    applies.push_back((id.to_owned(), request.clone()));
-                    request
-                }
-            };
-            if request["reason"] != reason {
-                return json!({"error":{"code":"id_reused","message":"request_id reused with a different reason"}});
-            }
-            request
-        };
-        match self.peer.call("claim.force", request) {
-            Ok(outcome) => {
-                let refreshed = self.refresh();
-                json!({"result":{"outcome":outcome,"connectorHome":self.status(),"readError":refreshed.err()}})
-            }
-            Err(mut error) => {
-                if matches!(error.code.as_str(), "epoch_moved" | "not_holder") {
-                    let detail = error.detail.as_ref().cloned().unwrap_or(Value::Null);
-                    error.message = format!(
-                        "{}: holder={} epoch={}",
-                        error.code, detail["holder"], detail["epoch"]
-                    );
-                }
-                json!({"error":error})
-            }
         }
     }
     /// Development and test helper that admits connector effects; production never calls it.
@@ -238,15 +253,6 @@ impl ConnectorHome {
         };
         home
     }
-}
-pub fn valid_request_id(id: &str) -> bool {
-    id.len() == 32
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-pub fn force_request(target: &str, epoch: u64, id: &str, reason: &str) -> Value {
-    json!({"subject":SUBJECT,"request_id":id,"to_device":target,"expected_epoch":epoch,"cut":"","reason":reason})
 }
 /// Whether calls to one tool have an effect outside this store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,9 +270,9 @@ pub enum ToolEffect {
 /// or withdrawn through prefrontal, or an approved request executed; those
 /// run only while this machine holds the connector home.
 ///
-/// A tool missing from this table is treated as having no effect, so a test
-/// checks that every advertised tool has an entry: adding a tool forces a
-/// decision here instead of silently skipping the gate.
+/// A tool missing from this table requires the gate as a safe fallback. A test
+/// also requires every advertised tool to have an entry so adding a tool forces
+/// an explicit effect decision.
 pub const TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     ("invoke", ToolEffect::Always),
     ("web_search", ToolEffect::Always),

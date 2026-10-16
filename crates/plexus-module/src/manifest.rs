@@ -359,17 +359,12 @@ pub fn build_with_launch_nonce_source(
                 ManagementOperation {
                     name: crate::connector_home::STATUS_OP.to_string(),
                     kind: ManagementOperationKind::Query,
-                    description: Some("Read the live connector home claim and the local gate".into()),
+                    description: Some("Read the live connector home role and the local gate".into()),
                 },
                 ManagementOperation {
                     name: crate::relay::STATUS_OP.to_string(),
                     kind: ManagementOperationKind::Query,
                     description: Some("Read GitHub webhook relay connection status".into()),
-                },
-                ManagementOperation {
-                    name: crate::connector_home::CLAIM_OP.to_string(),
-                    kind: ManagementOperationKind::Mutate,
-                    description: Some("Preview or apply a reasoned connector home takeover".into()),
                 },
             ],
             config_schema: json!({ "type": "object" }),
@@ -1227,7 +1222,6 @@ mod tests {
                 ADMIN_SET_WEB_SEARCH_LIMIT_OP,
                 crate::connector_home::STATUS_OP,
                 crate::relay::STATUS_OP,
-                crate::connector_home::CLAIM_OP,
             ]
         );
     }

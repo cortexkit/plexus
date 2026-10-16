@@ -5563,24 +5563,6 @@ build_timeout_s = 3600
 timeout_s = 60
 
 [[control]]
-id = "claim-outcome-audit-failure-still-answers"
-guards = "An applied connector-home claim whose outcome audit row fails still returns the claim's outcome, with an audit_append_failed warning"
-file = "crates/plexus-module/src/lib.rs"
-old = '''            if let Err(error) = state.store().append_audit(&audit) {
-                warn_audit_failed(&mut response, "connector_home.claim", &error);
-            }'''
-new = '''            state.store().append_audit(&audit).map_err(|e| ModuleError::Message(format!("audit connector home outcome: {e}")))?; /* NON-VACUITY BREAK */'''
-test_file = "crates/plexus-module/src/connector_home_tests.rs"
-runner = "cargo"
-package = "plexus-module"
-target = "--lib"
-select = "expected"
-expect_red = ["connector_home_tests::an_applied_claim_answers_even_when_its_outcome_audit_fails"]
-expect_message = "an applied claim must be answered even when its outcome audit fails"
-build_timeout_s = 3600
-timeout_s = 60
-
-[[control]]
 id = "events-schema-advertises-set-deliver-to"
 guards = "The closed events tool schema advertises every op its handler serves, so schema-validating callers can reach set_deliver_to"
 file = "crates/plexus-module/src/manifest.rs"
@@ -5910,22 +5892,6 @@ target = "--lib"
 select = "expected"
 expect_red = ["relay::tests::a_regained_connector_home_redials_within_the_claim_refresh_interval"]
 expect_message = "longer than the claim refresh interval"
-build_timeout_s = 3600
-timeout_s = 60
-
-[[control]]
-id = "connector-home-applies-bounded"
-guards = "The remembered connector-home apply requests are capped, evicting the oldest"
-file = "crates/plexus-module/src/connector_home.rs"
-old = "applies.pop_front();"
-new = "/* NON-VACUITY BREAK */"
-test_file = "crates/plexus-module/src/connector_home_tests.rs"
-runner = "cargo"
-package = "plexus-module"
-target = "--lib"
-select = "expected"
-expect_red = ["connector_home_tests::remembered_apply_requests_are_bounded"]
-expect_message = "the oldest apply id must be forgotten past the cap"
 build_timeout_s = 3600
 timeout_s = 60
 
@@ -9062,8 +9028,8 @@ expect_message = "unknown tools must fail closed"
 build_timeout_s = 3600
 
 [[control]]
-id = "module-claim-body-error"
-guards = "A claim peer's error envelope is not decoded as a successful claim"
+id = "module-role-body-error"
+guards = "A role peer's error envelope retains its integrity refusal code"
 file = "crates/plexus-module/src/connector_home.rs"
 old = 'if let Some(error) = value.get("error") {'
 new = 'if let Some(error) = value.get("ignored_error") { /* NON-VACUITY BREAK */'
@@ -9072,8 +9038,8 @@ runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["wire_safety_tests::body_error_from_claim_peer_is_not_a_success"]
-expect_message = "unwrap_err"
+expect_red = ["wire_safety_tests::body_error_from_role_peer_is_not_a_success"]
+expect_message = "role body errors must retain their refusal code"
 build_timeout_s = 3600
 
 [[control]]
@@ -9259,21 +9225,6 @@ expect_message = "missing reason value must be refused"
 build_timeout_s = 3600
 
 [[control]]
-id = "connector-home-preview-records"
-guards = "Preview-only claim calls do not append outcome audit rows"
-file = "crates/plexus-module/src/lib.rs"
-old = 'if params["apply"] != true {'
-new = 'if false { /* NON-VACUITY BREAK */'
-test_file = "crates/plexus-module/src/connector_home_tests.rs"
-runner = "cargo"
-package = "plexus-module"
-target = "--lib"
-select = "expected"
-expect_red = ["connector_home_tests::preview_claim_does_not_write_outcome_audit_rows"]
-expect_message = "preview claims must not append outcome audit rows"
-build_timeout_s = 3600
-
-[[control]]
 id = "module-policy-filter-type"
 guards = "Malformed connection filters cannot widen policy reads"
 file = "crates/plexus-module/src/ceremony.rs"
@@ -9301,21 +9252,6 @@ target = "--lib"
 select = "expected"
 expect_red = ["relay::tests::credential_transport_faults_are_not_missing_credentials"]
 expect_message = "NoCredential"
-build_timeout_s = 3600
-
-[[control]]
-id = "module-claim-peer-protocol"
-guards = "A missing claim epoch names a peer protocol fault, not invalid operator input"
-file = "crates/plexus-module/src/connector_home.rs"
-old = '"code":"peer_protocol_error","message":"claim.read omitted epoch"'
-new = '"code":"invalid_request","message":"claim.read omitted epoch" /* NON-VACUITY BREAK */'
-test_file = "crates/plexus-module/src/connector_home_tests.rs"
-runner = "cargo"
-package = "plexus-module"
-target = "--lib"
-select = "expected"
-expect_red = ["connector_home_tests::missing_claim_epoch_is_a_peer_protocol_fault"]
-expect_message = "missing claim epoch is the peer's fault"
 build_timeout_s = 3600
 
 [[control]]
@@ -11635,3 +11571,70 @@ select = "expected"
 expect_red = ["scheduler::tests::cadence_inputs_skip_connections_in_normal_mode_and_reads_for_held_watches"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "connector-home-role-held-here"
+guards = "Serving requires Entorhinal to confirm held_here as well as known"
+file = "crates/plexus-module/src/connector_home.rs"
+old = "} else if answer.held_here {"
+new = "} else if true { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/connector_home_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["connector_home_tests::reader_requires_held_here_and_known"]
+expect_message = "not_held"
+build_timeout_s = 3600
+
+[[control]]
+id = "connector-home-role-integrity"
+guards = "An integrity refusal stops serving immediately, including after a confirmed hold"
+file = "crates/plexus-module/src/connector_home.rs"
+old = 'Err(error) if error.code == "claim_integrity_failed" => {'
+new = 'Err(error) if error.code == "claim_integrity_failed" && false => { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/connector_home_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["connector_home_tests::reader_integrity_stops_serving_until_verified_read"]
+expect_message = "integrity failure must revoke admission"
+build_timeout_s = 3600
+
+[[control]]
+id = "connector-home-role-malformed"
+guards = "Missing required role fields are malformed and cannot establish a new hold"
+file = "crates/plexus-module/src/connector_home.rs"
+old = '''known: value
+                .get("known")
+                .and_then(Value::as_bool)
+                .ok_or_else(malformed)?,'''
+new = '''known: value
+                .get("known")
+                .and_then(Value::as_bool)
+                .unwrap_or(true), /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-module/src/connector_home_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["connector_home_tests::reader_malformed_is_never_a_new_hold"]
+expect_message = "malformed reply admitted"
+build_timeout_s = 3600
+
+[[control]]
+id = "connector-home-no-removed-operations"
+guards = "Shipped sources cannot reintroduce the removed Engram claim operations"
+file = "crates/plexus-module/src/connector_home.rs"
+old = 'let _read = self.read_lane.lock().unwrap();'
+new = '''let _read = self.read_lane.lock().unwrap();
+        if false { let _ = self.peer.call("claim.read", json!({})); } /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-module/tests/connector_home_cutover.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--test connector_home_cutover"
+select = "expected"
+expect_red = ["shipped_sources_never_call_removed_claim_operations"]
+expect_message = "removed claim operation in shipped source"
+build_timeout_s = 3600

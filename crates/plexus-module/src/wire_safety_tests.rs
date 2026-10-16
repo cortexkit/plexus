@@ -188,17 +188,17 @@ fn unknown_tools_require_connector_home() {
 }
 
 #[test]
-fn body_error_from_claim_peer_is_not_a_success() {
-    let error = connector_home::claim_reply(
-        json!({"error":{"code":"verify_failed","message":"invalid evidence"}}),
+fn body_error_from_role_peer_is_not_a_success() {
+    let error = connector_home::role_reply(
+        json!({"error":{"code":"claim_integrity_failed","message":"invalid evidence"}}),
     )
     .unwrap_err();
     assert_eq!(
-        error.code, "verify_failed",
-        "claim body errors must retain their refusal code"
+        error.code, "claim_integrity_failed",
+        "role body errors must retain their refusal code"
     );
     assert_eq!(
-        connector_home::claim_reply(json!({"result":{"epoch":9}})).unwrap(),
+        connector_home::role_reply(json!({"result":{"epoch":9}})).unwrap(),
         json!({"epoch":9})
     );
 }

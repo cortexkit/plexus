@@ -1565,7 +1565,6 @@ async fn handle_management_request(
             | manifest::GITHUB_BIND_OP
             | manifest::GITHUB_UNBIND_OP
             | connector_home::STATUS_OP
-            | connector_home::CLAIM_OP
             | relay::STATUS_OP
     ) {
         // THE LAST SILENT GATE, and the one that actually bit: a consumer sent
@@ -1659,48 +1658,6 @@ async fn handle_management_request(
         | manifest::ADMIN_RECIPIENTS_LIST_OP => ceremony::recipients(state, params, method),
         connector_home::STATUS_OP => {
             blocking_section(|| state.runtime.connector_home.live_status())
-        }
-        connector_home::CLAIM_OP => {
-            let request_id = params["request_id"].as_str().unwrap_or("claim-preview");
-            let mut audit = AuditRecord::ceremony(
-                &principal_key,
-                None,
-                None,
-                "connector_home.claim.apply",
-                "write",
-                None,
-            );
-            audit.gate = Some("connector_home".into());
-            audit.request_id = Some(request_id.into());
-            audit.outcome = Some("pending".into());
-            if params["apply"] == true {
-                state.store().append_audit(&audit).map_err(|e| {
-                    ModuleError::Message(format!("audit connector home apply: {e}"))
-                })?;
-            }
-            let mut response = blocking_section(|| state.runtime.connector_home.claim(params));
-            audit.action = Some("connector_home.claim.outcome".into());
-            audit.outcome = Some(
-                response
-                    .pointer("/error/code")
-                    .and_then(Value::as_str)
-                    .unwrap_or("applied")
-                    .into(),
-            );
-            if let Some(code) = response.pointer("/error/code").and_then(Value::as_str) {
-                audit.decision = "deny".into();
-                audit.reason_code = code.into();
-            }
-            // The claim has already been forced (or refused) by engram, so a
-            // failed outcome row must not replace the answer with an error.
-            if params["apply"] != true {
-                return send_tool_response(writer, version, channel, epoch, correlation, response)
-                    .await;
-            }
-            if let Err(error) = state.store().append_audit(&audit) {
-                warn_audit_failed(&mut response, "connector_home.claim", &error);
-            }
-            response
         }
         manifest::GITHUB_IMPORT_OP => {
             let inventory = serde_json::from_value::<plexus_core::github::control::Inventory>(
