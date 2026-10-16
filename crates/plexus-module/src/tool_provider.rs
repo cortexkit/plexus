@@ -964,6 +964,29 @@ mod tests {
         assert_eq!(names(&answer), ["web_search", "code_search"]);
     }
 
+    /// Prefrontal registers a head's plexus tools with exactly these bytes: its head
+    /// tag list intersected with the tags plexus declares, sorted, with no preset.
+    /// Heads must receive the two search tools and nothing that writes.
+    #[tokio::test]
+    async fn tool_catalog_route_serves_core_head_registration_request() {
+        use subc_protocol::{FrameType, Principal};
+        let frame = send_metadata(
+            Principal::Reserved {
+                module_id: "prefrontal-core".to_owned(),
+            },
+            ops::TOOL_CATALOG,
+            json!({"params":{"capabilities":["code.search.public/v1","web.search/v1"]}}),
+        )
+        .await;
+        assert_eq!(frame.header.ty, FrameType::Response);
+        let answer: CatalogAnswer = serde_json::from_slice(&frame.body).unwrap();
+        assert_eq!(
+            names(&answer),
+            ["web_search", "code_search"],
+            "a head registration must receive exactly the two search tools"
+        );
+    }
+
     #[tokio::test]
     async fn tool_catalog_route_refuses_unknown_or_unsupported_fields() {
         for (arguments, field) in [
