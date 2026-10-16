@@ -29,8 +29,9 @@ integrity `code`, and `checkedAt`. State transitions are logged.
 
 ## Rollout — pending: run at deploy
 
-Deploy Plexus with this cutover and Entorhinal 0.1.25 or later. Then **Ufuk runs
-`ck roles take connector_home` within the minute**. Plexus refuses outside
+Deploy Plexus with this cutover and Entorhinal 0.1.25 or later. Then **the
+operator runs `ck roles take connector_home` within the minute**, on the machine
+that should be the connector home; the command asks for Touch ID. Plexus refuses outside
 effects until a confirmed read lands. Plexus no longer reads or takes claims
 through Engram; only Entorhinal serves its connector-home reads.
 
@@ -39,8 +40,8 @@ ck-plexus-admin connector-home status --subc <connection-file>
 ck roles take connector_home
 ```
 
-Status requires a direct operator route, not another module's principal. It
-reads `role.read` and prints both the reply and the current gate. `ck-plexus-admin connector-home claim` is
+Status is answered only to the operator's own local connection (`direct`), not
+to a call carried by another module. It reads `role.read` and prints both the reply and the current gate. `ck-plexus-admin connector-home claim` is
 removed and refuses by name, directing the operator to `ck roles take
 connector_home`. Plexus never takes the role: Entorhinal's `role.take` is
 Direct-only with Touch ID and refuses `reserved:plexus`.
@@ -50,8 +51,9 @@ Moving connector state still requires carrying `store.db` and
 
 ## Effect-path census
 
-The gate returns `connector_home_not_held`, state/epoch/holder_name where known, and
-`transmission: not_sent` before the following entry points do work:
+While this machine is not confirmed as the connector home, each entry point below
+refuses before doing any work. The refusal is `connector_home_not_held`, with the
+state, epoch and holder name where known, and `transmission: not_sent`:
 
 | Entry point | Effects behind the gate |
 | --- | --- |
@@ -84,6 +86,8 @@ harness supplies an Entorhinal management-surface double over real subc
 RouteBind and route calls. It admits only daemon-attested `reserved:plexus`,
 checks the exact `role.read` wire body, and exercises status and refusal of the
 removed claim operation. A source scan fences removed claim operations with
-planted controls. Real-handler ENTO vectors are pending in
-`crates/plexus-module/tests/fixtures/entorhinal-roles/`; the marked loader skips
-with a message only while no JSON files exist.
+planted controls. Entorhinal will publish `role.read` replies produced by its
+own handler; they go, byte for byte, in
+`crates/plexus-module/tests/fixtures/entorhinal-roles/` so plexus's decoding is
+checked against real output. Until that file exists, the loader test skips with
+a message.

@@ -1,4 +1,7 @@
-//! Fence outside effects to the user's connector-home machine, as confirmed by Entorhinal's role registry.
+//! Fence outside effects to the user's connector-home machine. Entorhinal, the
+//! CortexKit module that records which machine holds each single-holder role,
+//! answers `role.read` for `connector_home`; plexus serves only while it
+//! confirms this machine holds it.
 use plexus_core::SubcPrefrontalRoutePeer;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -114,7 +117,10 @@ impl RoleAnswer {
     }
 
     fn confirmed_in_process(&self) -> bool {
-        // Entorhinal marks cached roles stale at its own startup until it verifies a backing-store read.
+        // Entorhinal marks its cached answers stale whenever it restarts, and clears
+        // the mark only after re-reading the role from its synced store. A stale
+        // answer may predate another machine taking the role, so it never counts
+        // as confirmation.
         !self.stale
     }
 }
