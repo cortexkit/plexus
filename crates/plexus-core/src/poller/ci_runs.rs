@@ -455,12 +455,12 @@ where
             (checked_a, created_a, ak).cmp(&(checked_b, created_b, bk))
         });
         let mut events = Vec::new();
-        // Count completed runs/jobs, plus one run for each attempt completed
-        // before watch creation, whose jobs are never read. These attempts and
-        // completed items older than retention use the ledger's existing
-        // OlderThanWatermark reason for falling below a timestamp bound.
-        // Discovery rows and eligible unfinished objects only track later work;
-        // do not count them as delivery items.
+        // Count completed runs/jobs, plus one run for each attempt that finished
+        // before this watch was created; such attempts' jobs are never read.
+        // Those attempts, and completed items older than event retention, are
+        // dropped as `OlderThanWatermark`: the drop-ledger reason for an item
+        // below the oldest time this watch may report. Discovery rows and
+        // unfinished objects only track later work; they are not delivery items.
         let mut examined = 0usize;
         let mut dropped: Vec<(String, DropReason)> = Vec::new();
         let (mut vanished, mut expired) = (0, 0);

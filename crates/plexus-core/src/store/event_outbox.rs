@@ -2444,8 +2444,10 @@ mod tests {
         assert_eq!(new_envelope["completed_at"], "2026-10-15T23:52:00Z");
         assert_eq!(inserted.body, serde_json::to_string(&item).unwrap());
 
-        // Model a run stored before completion-time normalization. Its v1
-        // source has updated_at, so rebuilding on read would change the bytes.
+        // A ci_run envelope stored before plexus filled `completed_at` from a
+        // finished run's `updated_at`. Its v1 body carries `updated_at`, so
+        // rebuilding the envelope on read would now fill the field and change
+        // the bytes; fetching must return the stored bytes instead.
         let old_envelope = String::from_utf8(
             crate::jcs::canonicalize_exact_integers(&json!({
                 "event_key":KEY,"kind":"ci_run","repo":"owner/repo","action":"updated",
