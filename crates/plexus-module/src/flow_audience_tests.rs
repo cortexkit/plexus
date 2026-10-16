@@ -514,10 +514,6 @@ async fn workspace_filter_covers_every_repository_operation_class() {
     for (name, args) in [
         ("github_read", read_args("o/x")),
         (
-            "github",
-            json!({"op":"read","action":"github.issue.get","repository":"o/x","args":{"issue_number":42}}),
-        ),
-        (
             "github_read",
             json!({"action":"github.actions.job_log","repository":"o/x","args":{"job_id":1}}),
         ),
@@ -1072,31 +1068,26 @@ async fn github_read_search_free_text_is_unresolved() {
     );
     assert_eq!(transport.requests().len(), 1);
     assert_eq!(transport.requests()[0].args["q"], "repo:o/x");
-    for name in ["github_read", "github"] {
-        for (field, value) in [
-            ("terms", json!("fix")),
-            ("terms", json!("repo:other/secret")),
-            ("terms", json!("\"repo:other/secret\"")),
-            ("q", json!("repo:other/secret")),
-            ("query", json!("repo:other/secret")),
-            ("terms", Value::Null),
-        ] {
-            let mut request = safe.clone();
-            if name == "github" {
-                request["op"] = json!("read");
-            }
-            request["args"][field] = value;
-            let reply = quiet_refusal(
-                &state,
-                &transport,
-                &scratch,
-                name,
-                request,
-                "flow_audience_excludes_repository",
-            );
-            assert_eq!(reply["error"]["repository"], "<unresolved>");
-            assert_eq!(reply["error"]["transmission"], "not_sent");
-        }
+    for (field, value) in [
+        ("terms", json!("fix")),
+        ("terms", json!("repo:other/secret")),
+        ("terms", json!("\"repo:other/secret\"")),
+        ("q", json!("repo:other/secret")),
+        ("query", json!("repo:other/secret")),
+        ("terms", Value::Null),
+    ] {
+        let mut request = safe.clone();
+        request["args"][field] = value;
+        let reply = quiet_refusal(
+            &state,
+            &transport,
+            &scratch,
+            "github_read",
+            request,
+            "flow_audience_excludes_repository",
+        );
+        assert_eq!(reply["error"]["repository"], "<unresolved>");
+        assert_eq!(reply["error"]["transmission"], "not_sent");
     }
 }
 

@@ -207,9 +207,7 @@ pub(crate) fn check_call(
     if !matches!(audience, Audience::Workspace { .. }) {
         return Ok(());
     }
-    let github_search_read = (name == manifest::GITHUB_READ_TOOL
-        || (name == manifest::GITHUB_TOOL
-            && args.get("op").and_then(Value::as_str) == Some("read")))
+    let github_search_read = name == manifest::GITHUB_READ_TOOL
         && args.get("action").and_then(Value::as_str) == Some("github.issue.search");
     if github_search_read && args.get("args").is_some_and(has_github_query_field) {
         return Err(excludes("<unresolved>"));
@@ -217,7 +215,6 @@ pub(crate) fn check_call(
     let repository = match name {
         manifest::GITHUB_READ_TOOL => Some(args.get("repository").cloned().unwrap_or(Value::Null)),
         manifest::GITHUB_TOOL => match args.get("op").and_then(Value::as_str) {
-            Some("read") => Some(args.get("repository").cloned().unwrap_or(Value::Null)),
             Some("bot_request") => Some(
                 args.get("request")
                     .and_then(|request| request.get("repository"))

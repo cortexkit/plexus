@@ -2342,6 +2342,16 @@ fn facade_tool_reply_inner(
     if let Some(refusal) = tool_provider::mode_refusal(name, &mode) {
         return Ok(json!({"error": refusal}));
     }
+    if name == manifest::GITHUB_TOOL {
+        let operation = arguments.get("op").and_then(Value::as_str);
+        if !matches!(operation, Some("bot_request" | "bindings.read")) {
+            return Ok(json!({"error": {
+                "code": "invalid_operation",
+                "op": operation,
+                "message": "unsupported github operation"
+            }}));
+        }
+    }
     if (mode == CallMode::Flow
         || route_scope
             .as_ref()
@@ -2506,7 +2516,7 @@ fn facade_tool_reply_inner(
             }
             response
         }
-        (manifest::GITHUB_TOOL, Some("read")) | (manifest::GITHUB_READ_TOOL, _) => {
+        (manifest::GITHUB_READ_TOOL, _) => {
             let action = arguments
                 .get("action")
                 .and_then(Value::as_str)
@@ -13008,11 +13018,11 @@ mod github_read_frame_tests {
         )
     }
 
-    async fn send_read_frame(runtime: Arc<ModuleState>, action: &str) -> Value {
+    async fn send_github_read_frame(runtime: Arc<ModuleState>, action: &str) -> Value {
         send_facade_frame(
             runtime,
-            manifest::GITHUB_TOOL,
-            json!({"op":"read", "repository":["o/x"], "action":action, "args":{"terms":"bug"}}),
+            manifest::GITHUB_READ_TOOL,
+            json!({"repository":["o/x"], "action":action, "args":{"terms":"bug"}}),
             "prefrontal-core",
             None,
         )
@@ -13069,7 +13079,7 @@ mod github_read_frame_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn github_read_matches_legacy_read_envelopes_for_all_three_actions() {
+    async fn github_read_returns_the_governed_envelope_for_all_three_actions() {
         for (action, repository, args, vendor_reply, expected) in [
             (
                 "github.issue.get",
@@ -13115,32 +13125,56 @@ mod github_read_frame_tests {
             } else {
                 assert!(reply.get("structuredContent").is_none());
             }
-            let mut legacy = arguments;
-            legacy["op"] = json!("read");
-            let legacy_reply = send_facade_frame(
-                runtime,
-                manifest::GITHUB_TOOL,
-                legacy,
-                "prefrontal-core",
-                None,
-            )
-            .await;
-            assert_eq!(
-                reply, legacy_reply,
-                "{action}: both entry points return the same envelope"
-            );
             let requests = transport.requests();
             assert_eq!(
                 requests.len(),
-                2,
-                "{action}: both entry points must dispatch"
+                1,
+                "{action}: github_read must dispatch exactly once"
             );
-            for request in &requests {
-                assert_eq!(request.action, action);
-                assert_eq!(request.connection_id, "github-handle-app-x");
-            }
-            assert_eq!(requests[0].args, requests[1].args);
+            assert_eq!(requests[0].action, action);
+            assert_eq!(requests[0].connection_id, "github-handle-app-x");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_facade_refuses_removed_read_op_by_name_and_keeps_bindings_read() {
+        let (runtime, store, transport, _scratch) = imported_runtime();
+        let refused = send_facade_frame(
+            runtime.clone(),
+            manifest::GITHUB_TOOL,
+            json!({"op":"read","action":"github.issue.get","repository":"o/x","args":{"issue_number":42}}),
+            "prefrontal-core",
+            None,
+        )
+        .await;
+        assert_eq!(refused["error"]["code"], "invalid_operation", "{refused}");
+        assert_eq!(refused["error"]["op"], "read", "{refused}");
+        assert!(transport.requests().is_empty());
+
+        store
+            .insert_grant(&plexus_core::GrantInput {
+                grant_id: "prefrontal-bindings-read".into(),
+                principal: "direct".into(),
+                connection_id: "github-handle-app-x".into(),
+                grantee_principal: "reserved:prefrontal-core".into(),
+                risk_ceiling: "read".into(),
+                action_selectors: vec![],
+                authority_kind: "invoke".into(),
+                expires_at: None,
+            })
+            .unwrap();
+        let bindings = send_facade_frame(
+            runtime,
+            manifest::GITHUB_TOOL,
+            json!({"op":"bindings.read","connection_id":"github-handle-app-x"}),
+            "prefrontal-core",
+            None,
+        )
+        .await;
+        assert_eq!(bindings["isError"], false, "{bindings}");
+        assert_eq!(bindings["result"]["bindings"][0]["repository"], "o/x");
+        assert_eq!(bindings["result"]["bindings"][0]["app_handle_id"], "app-x");
+        assert!(transport.requests().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -13405,7 +13439,7 @@ mod github_read_frame_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prefrontal_read_frame_returns_only_bound_search_hits() {
         let (runtime, store, transport, _scratch) = imported_runtime();
-        let reply = send_read_frame(runtime, "github.issue.search").await;
+        let reply = send_github_read_frame(runtime, "github.issue.search").await;
         assert_eq!(
             reply["result"]["items"],
             json!([{"repository":{"full_name":"o/x"}}]),
@@ -13423,7 +13457,7 @@ mod github_read_frame_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prefrontal_read_frame_refuses_unsupported_action_by_name() {
         let (runtime, store, transport, _scratch) = imported_runtime();
-        let reply = send_read_frame(runtime, "add_issue_comment").await;
+        let reply = send_github_read_frame(runtime, "add_issue_comment").await;
         assert_eq!(reply["error"]["code"], "read_action_unsupported", "{reply}");
         assert!(transport.requests().is_empty());
         assert!(store.list_audit("direct").unwrap().is_empty());
