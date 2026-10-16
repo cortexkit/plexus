@@ -145,14 +145,12 @@ actually fetched plus the ZIP redirect. Credentialless storage requests do not
 consume the personal token's quota. The existing ledger constraint admits these
 one-unit reservations, so no store migration is required.
 
-The connection ceiling and poll grant set up later in this guide cover only the
-four reads CI polling uses, and this section doesn't change them. To enable
-CI flow reads, explicitly extend the connection ceiling and grant Basal invoke
-authority for their catalog legs: `get_job`, `github.actions.job_log`,
-`list_workflow_run_artifacts`, `github.actions.artifact_file`,
-`get_workflow_run_metadata`, and `list_workflow_runs_for_workflow`. The last two
-are separate from the poller's attempt-specific `get_workflow_run` and
-repository-wide `list_workflow_runs`; do not replace those polling actions.
+The connection ceiling and poll grant set up later in this guide initially cover
+only the four reads CI polling uses. After connecting, follow **Enabling CI flow
+reads** below to add Basal's invoke authority. The flow reads
+`get_workflow_run_metadata` and `list_workflow_runs_for_workflow` are separate
+from the poller's attempt-specific `get_workflow_run` and repository-wide
+`list_workflow_runs`; do not replace those polling actions.
 After restart, verify the advertised action list, refreshed catalog and grants
 before enabling flows. Exhaustion interrupts the read with
 `github_actions_quota_exhausted` and an exact `detail.retry_after_ms`.
@@ -221,6 +219,48 @@ wildcard-grantee grant to make a failing body fetch pass. Record returned grant
 IDs for rollback; on retry, list existing grants rather than blindly minting
 another one. The admin list is text, not a JSON CLI; the read-only SQL provides
 a complete machine-readable cross-check.
+
+### Enabling CI flow reads (pending: run at deploy)
+
+Run these operator commands only after the connection exists and the refreshed
+reviewed catalog is loaded. Workers must not touch the live store.
+
+1. **Widen the ceiling (pending: run at deploy).** Preview the six explicitly
+   reviewed reads, then apply the same request. This adds no grant and never
+   raises the connection's risk ceiling.
+
+   ```sh
+   CI_FLOW_ACTIONS=get_job,github.actions.job_log,list_workflow_run_artifacts,github.actions.artifact_file,get_workflow_run_metadata,list_workflow_runs_for_workflow
+   "$LIVE_BIN/ck-plexus-admin" widen-ceiling --subc "$SUBC" \
+     --connection conn-github-actions --actions "$CI_FLOW_ACTIONS" \
+     > "$EVIDENCE/ci-flow-ceiling-preview.txt"
+   "$LIVE_BIN/ck-plexus-admin" widen-ceiling --subc "$SUBC" \
+     --connection conn-github-actions --actions "$CI_FLOW_ACTIONS" --apply \
+     > "$EVIDENCE/ci-flow-ceiling-applied.txt"
+   ```
+
+   **Pass:** the resulting ceiling includes all six reads and all four existing
+   polling reads, at the unchanged `read` risk. The preview writes nothing; apply
+   reports the added actions (or unchanged actions on an idempotent retry).
+
+2. **Grant Basal invoke authority (pending: run at deploy).** Check existing
+   grants first; if a live `invoke` grant on `conn-github-actions` addressed to
+   `reserved:basal` already covers exactly `$CI_FLOW_ACTIONS`, record its ID rather
+   than minting a duplicate.
+
+   ```sh
+   "$LIVE_BIN/ck-plexus-admin" list-grants --subc "$SUBC" \
+     --connection conn-github-actions --all
+   "$LIVE_BIN/ck-plexus-admin" grant --subc "$SUBC" \
+     --connection conn-github-actions --grantee reserved:basal --kind invoke \
+     --actions "$CI_FLOW_ACTIONS" > "$EVIDENCE/basal-ci-flow-grant.txt"
+   "$LIVE_BIN/ck-plexus-admin" list-grants --subc "$SUBC" \
+     --connection conn-github-actions --all > "$EVIDENCE/ci-flow-grants.txt"
+   ```
+
+   **Pass:** `list-grants` shows the live `invoke` grant for `reserved:basal`
+   covering exactly the six actions named in `$CI_FLOW_ACTIONS`, with the polling and consume grants still
+   present. Record its grant ID for rollback.
 
 ## 4. Observe the first hour (pending: run at deploy)
 

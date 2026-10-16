@@ -11440,3 +11440,35 @@ select = "expected"
 expect_red = ["github_read_frame_tests::ci_read_tests::ci_reads_later_request_quota_refusal_keeps_spent_units"]
 expect_message = "the refusal must describe an interrupted read"
 build_timeout_s = 3600
+
+[[control]]
+id = "widen-ceiling-risk-bounded"
+guards = "Explicit operator ceiling widening never admits a reviewed action above the connection's existing risk ceiling"
+file = "crates/plexus-core/src/store/ceiling.rs"
+old = "if !risk.within(ceiling.risk) {"
+new = "if false { /* NON-VACUITY BREAK: bypass action risk ceiling */"
+test_file = "crates/plexus-core/src/store/ceiling.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::ceiling_store::tests::widen_ceiling_never_raises_risk"]
+expect_message = "widening must enforce the existing risk ceiling"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "widen-ceiling-reviewed-action-required"
+guards = "Explicit operator ceiling widening requires an active reviewed catalog row, not a quarantined or disabled action"
+file = "crates/plexus-core/src/store/ceiling.rs"
+old = "AND name=?3 AND status='active' AND quarantine_reason IS NULL"
+new = "AND name=?3 /* NON-VACUITY BREAK: admit inactive catalog rows */"
+test_file = "crates/plexus-core/src/store/ceiling.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::ceiling_store::tests::widen_ceiling_requires_active_reviewed_actions"]
+expect_message = "widening requires an active reviewed action"
+build_timeout_s = 3600
+timeout_s = 60

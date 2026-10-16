@@ -1544,6 +1544,7 @@ async fn handle_management_request(
         method,
         manifest::ADMIN_ISSUE_TICKET_OP
             | manifest::ADMIN_GRANT_OP
+            | manifest::ADMIN_WIDEN_CEILING_OP
             | manifest::ADMIN_REVOKE_GRANT_OP
             | manifest::ADMIN_LIST_GRANTS_OP
             | manifest::ADMIN_SET_POLICY_OP
@@ -1768,6 +1769,7 @@ async fn handle_management_request(
             ceremony::rebind_credential(state, &principal_key, params)
         }
         manifest::ADMIN_GRANT_OP => ceremony::grant(state, &principal_key, params),
+        manifest::ADMIN_WIDEN_CEILING_OP => ceremony::widen_ceiling(state, &principal_key, params),
         manifest::ADMIN_LIST_GRANTS_OP => ceremony::list_grants(state, &principal_key, params),
         manifest::ADMIN_SET_POLICY_OP => ceremony::set_policy(state, &principal_key, params),
         manifest::ADMIN_LIST_POLICIES_OP => ceremony::list_policies(state, &principal_key, params),
@@ -6870,6 +6872,99 @@ mod tests {
         )
         .await;
         let refused: Value = serde_json::from_slice(&refused.body).expect("facade response JSON");
+        assert_eq!(refused["error"]["code"], "unknown_method");
+    }
+
+    #[tokio::test]
+    async fn widen_ceiling_is_management_only_and_requires_a_direct_principal() {
+        let (writer, mut responses) = mpsc::channel(4);
+        let store = Arc::new(
+            PlexusStore::open(&StorageDescriptor {
+                module_id: DEFAULT_MODULE_ID.into(),
+                storage_namespace: "widen-ceiling-gate".into(),
+                isolation: cortexkit_store_types::Isolation::Module,
+                backend: cortexkit_store_types::StorageBackend::Sqlite {
+                    path: ":memory:".into(),
+                },
+            })
+            .unwrap(),
+        );
+        let state = Arc::new(ModuleState {
+            health: Arc::new(health::HealthState::new()),
+            runtime: runtime_for_test(store),
+        });
+        let bindings = Arc::new(RouteBindings::new());
+        let route = RouteFrameContext {
+            version: PROTOCOL_VERSION,
+            channel: 4,
+            epoch: 2,
+            correlation: 71,
+        };
+        let params = json!({"connection_id":"ci","actions":["get_job"],"dry_run":false});
+        for (principal, expected) in [
+            (
+                Principal::Reserved {
+                    module_id: "basal".into(),
+                },
+                "operator_authority_required",
+            ),
+            (Principal::Direct, "connection_not_found"),
+        ] {
+            bindings
+                .insert(route.channel, route.epoch, principal)
+                .unwrap();
+            handle_management_request(
+                route,
+                manifest::ADMIN_WIDEN_CEILING_OP,
+                &params,
+                &writer,
+                &state,
+                &bindings,
+            )
+            .await
+            .unwrap();
+            let response = recv_within(
+                responses.recv(),
+                std::time::Duration::from_secs(5),
+                "widen ceiling response",
+            )
+            .await;
+            let response: Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(response["error"]["code"], expected);
+        }
+        for params in [
+            json!({"connection_id":"ci","actions":["get_job"],"dry_run":"false"}),
+            json!({"connection_id":"ci","actions":"get_job"}),
+            json!({"connection_id":"ci","actions":[1]}),
+            json!({"connection_id":"ci","actions":["get_job"],"risk":"write"}),
+        ] {
+            assert_eq!(
+                ceremony::widen_ceiling(&state, "direct", &params)["error"]["code"],
+                "invalid_request"
+            );
+        }
+        let facade = Frame::build(
+            FrameType::Request,
+            Flags::new(false, Priority::Interactive, false),
+            route.channel,
+            route.epoch,
+            72,
+            serde_json::to_vec(
+                &json!({"name":manifest::ADMIN_WIDEN_CEILING_OP,"arguments":params}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        handle_tool_request(facade, &writer, &state, &bindings)
+            .await
+            .unwrap();
+        let refused = recv_within(
+            responses.recv(),
+            std::time::Duration::from_secs(5),
+            "facade refusal",
+        )
+        .await;
+        let refused: Value = serde_json::from_slice(&refused.body).unwrap();
         assert_eq!(refused["error"]["code"], "unknown_method");
     }
 

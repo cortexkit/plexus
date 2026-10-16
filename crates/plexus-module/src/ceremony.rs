@@ -19,7 +19,8 @@
 //!    a ticket may authorize;
 //! 2. the ticket carries a credential reference, whose vault read is proven
 //!    before the ticket is issued, and the limits it was issued with;
-//!    redeeming it makes those limits the connection's permanent ceiling;
+//!    redeeming it sets the connection's initial ceiling; only an explicit
+//!    operator widening ceremony may later add reviewed actions;
 //! 3. the connection's ceiling limits every grant minted against it;
 //! 4. the grant limits every invoke, which the governance engine's grant
 //!    check enforces.
@@ -180,11 +181,12 @@ pub(crate) fn refusal_response(refusal: &CeremonyRefusal) -> Value {
         CeremonyRefusal::ConnectionNotFound => "connection_not_found",
         CeremonyRefusal::CeilingAbsent => "ceiling_absent",
         CeremonyRefusal::UndeclaredAction(_) => "action_outside_ceiling",
-        // Its own code, because the remedies differ: an undeclared action means
-        // editing a manifest, while a connection-ceiling breach cannot be
-        // repaired on that connection at all -- the ceiling is permanent from
-        // ticket issuance, so the only route is a new ticket. A shared code
-        // would send an operator to fix the wrong thing.
+        CeremonyRefusal::UnreviewedAction(_) => "action_not_reviewed",
+        CeremonyRefusal::ExplicitActionsRequired => "explicit_actions_required",
+        CeremonyRefusal::HandleCeilingRequiresHandleGrant => "handle_grant_required",
+        // An undeclared action needs manifest review; an action outside the
+        // connection ceiling needs explicit operator widening before a grant.
+        // Separate codes keep those remedies distinguishable.
         CeremonyRefusal::OutsideConnectionCeiling { .. } => "outside_connection_ceiling",
         CeremonyRefusal::RiskAboveCeiling { .. } => "risk_above_ceiling",
         CeremonyRefusal::InvalidRisk(_) => "invalid_risk",
@@ -351,6 +353,40 @@ pub(crate) fn issue_ticket(state: &Arc<ModuleState>, principal_key: &str, params
             "binding ticket could not be issued",
             &error,
         ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WidenCeilingRequest {
+    connection_id: String,
+    actions: Vec<String>,
+    #[serde(default = "preview_by_default")]
+    dry_run: bool,
+}
+
+fn preview_by_default() -> bool {
+    true
+}
+
+pub(crate) fn widen_ceiling(state: &Arc<ModuleState>, principal: &str, params: &Value) -> Value {
+    let request = match serde_json::from_value::<WidenCeilingRequest>(params.clone()) {
+        Ok(request) if !request.connection_id.trim().is_empty() => request,
+        _ => {
+            return json!({"error":{"code":"invalid_request","message":"widen-ceiling requires connection_id, an actions array and an optional boolean dry_run"}})
+        }
+    };
+    match state.store().widen_connection_ceiling(
+        principal,
+        &request.connection_id,
+        &request.actions,
+        request.dry_run,
+    ) {
+        Ok(Ok(plan)) => json!({"result":plan}),
+        Ok(Err(refusal)) => refusal_response(&refusal),
+        Err(error) => {
+            crate::wire::store_failure("ceiling widened", "ceiling could not be widened", &error)
+        }
     }
 }
 

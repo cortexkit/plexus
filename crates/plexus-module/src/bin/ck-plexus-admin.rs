@@ -98,6 +98,7 @@ commands:
   issue-ticket   place a vault credential reference and issue a binding ticket
   rebind-credential replace a connection's credential reference (preview by default)
   grant          mint authority for a connection, bounded by its ceiling
+  widen-ceiling  add reviewed actions to a connection ceiling (preview by default)
   revoke-grant   remove a grant (idempotent)
   list-grants    show every grant held, with its vendor and state
   set-policy     create or update a policy for matching actions
@@ -134,9 +135,15 @@ issue-ticket --app <key> --actions a,b,c|'*' [--credential-id <id>]
              [--risk read|write|destructive] [--connection <id>]
   Supply a vault credential id. Supply neither when the
   reviewed manifest declares auth.mode=none. A reference must be readable by reserved:plexus.
-  --risk and --actions set the connection's PERMANENT authority ceiling;
+  --risk and --actions set the connection's initial authority ceiling;
   every later grant must fit inside it. --actions is required; pass '*' to
   request every action the vendor declares, stored as a concrete list.
+
+widen-ceiling --connection <id> --actions a,b,c [--apply]
+    Adds only named, active reviewed actions within the existing risk ceiling.
+    Without --apply, prints the current, added, unchanged and resulting actions
+    and writes nothing. Grants are issued separately with grant. GitHub bot
+    handle connections must use handle-grant instead.
 
 grant --connection <id> --actions a,b,c|'*' [--grantee <principal>]
       [--kind invoke|connection_admin|poll|events_consume] [--risk ...]
@@ -309,6 +316,7 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
     let (method, params) = match command.as_str() {
         "connector-home" => connector_home_request(connector_command.unwrap(), &flags)?,
         "grant" => grant_request(&flags)?,
+        "widen-ceiling" => widen_ceiling_request(&flags)?,
         "revoke-grant" => revoke_grant_request(&flags)?,
         "list-grants" => list_grants_request(&flags)?,
         "set-policy" => set_policy_request(&flags)?,
@@ -425,6 +433,7 @@ fn accepted_flags(
             "--expires-ms",
         ],
         ("revoke-grant", _) => &["--grant"],
+        ("widen-ceiling", _) => &["--connection", "--actions", "--apply"],
         ("list-grants", _) => &["--connection", "--all"],
         ("set-policy", _) => &["--connection", "--action", "--effect", "--expires-ms"],
         ("list-policies", _) => &["--connection"],
@@ -559,6 +568,37 @@ impl Flags {
         }
         Ok(actions)
     }
+}
+
+fn widen_ceiling_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
+    let actions = flags.action_selectors()?;
+    if actions.iter().any(|action| action.contains('*')) {
+        return Err(Failure::usage(
+            "--actions must name explicit actions, not '*'",
+        ));
+    }
+    Ok((
+        plexus_module::manifest::ADMIN_WIDEN_CEILING_OP,
+        json!({
+            "connection_id": flags.required("--connection")?,
+            "actions": actions,
+            "dry_run": !flags.has("--apply"),
+        }),
+    ))
+}
+
+fn widen_ceiling_lines(result: &Value) -> Vec<String> {
+    vec![
+        format!("connection: {}", text(&result["connection_id"])),
+        format!("dry_run:    {}", result["dry_run"]),
+        format!("applied:    {}", result["applied"]),
+        format!("risk:       {} (unchanged)", text(&result["ceiling_risk"])),
+        format!("current:    {}", list(&result["current_ceiling"])),
+        format!("add:        {}", list(&result["added_actions"])),
+        format!("unchanged:  {}", list(&result["unchanged_actions"])),
+        format!("resulting:  {}", list(&result["resulting_ceiling"])),
+        "Grants are separate; use grant to issue authority within this ceiling.".into(),
+    ]
 }
 
 fn rebind_credential_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
@@ -1140,6 +1180,11 @@ fn report(command: &str, response: &Value, flags: &Flags) -> Result<(), Failure>
         }
         "handle-grant" => {
             for line in handle_grant_lines(result) {
+                println!("{line}");
+            }
+        }
+        "widen-ceiling" => {
+            for line in widen_ceiling_lines(result) {
                 println!("{line}");
             }
         }
@@ -2120,6 +2165,56 @@ mod tests {
             handle_grant_request(&flags(&bad)).unwrap_err().code,
             EXIT_USAGE
         );
+    }
+
+    #[test]
+    fn widen_ceiling_previews_by_default_and_requires_explicit_actions() {
+        let preview = flags(&[
+            "--connection",
+            "conn-github-actions",
+            "--actions",
+            "get_job, get_run",
+        ]);
+        preview
+            .refuse_unknown(accepted_flags("widen-ceiling", None).unwrap())
+            .unwrap();
+        let (method, params) = widen_ceiling_request(&preview).unwrap();
+        assert_eq!(method, "plexus.admin.widen_ceiling");
+        assert_eq!(
+            params,
+            json!({"connection_id": "conn-github-actions", "actions": ["get_job", "get_run"], "dry_run": true})
+        );
+        let apply = flags(&[
+            "--connection",
+            "conn-github-actions",
+            "--actions",
+            "get_job",
+            "--apply",
+        ]);
+        assert_eq!(widen_ceiling_request(&apply).unwrap().1["dry_run"], false);
+        for actions in ["*", "get_job,*", "", " , "] {
+            assert!(
+                widen_ceiling_request(&flags(&["--connection", "c", "--actions", actions]))
+                    .is_err()
+            );
+        }
+        assert!(widen_ceiling_request(&flags(&["--connection", "c"])).is_err());
+        assert!(USAGE.contains("widen-ceiling --connection <id> --actions a,b,c [--apply]"));
+        let lines = widen_ceiling_lines(&json!({
+            "connection_id": "c", "dry_run": true, "applied": false, "ceiling_risk": "read",
+            "current_ceiling": ["poll"], "added_actions": ["get_job"],
+            "unchanged_actions": ["poll"], "resulting_ceiling": ["get_job", "poll"]
+        }))
+        .join("\n");
+        for expected in [
+            "current:    poll",
+            "add:        get_job",
+            "unchanged:  poll",
+            "resulting:  get_job,poll",
+            "Grants are separate",
+        ] {
+            assert!(lines.contains(expected), "{lines}");
+        }
     }
 
     /// `handle-grant --kind poll` sends the poll form: no carrier or effect,
