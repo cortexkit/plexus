@@ -3797,6 +3797,7 @@ fn effective_ci_cadence_from_store(
 ) -> (i64, Option<i64>) {
     let mut r_count = 0i64;
     let mut stored_cadence: Option<i64> = None;
+    let mut cadences = plexus_core::scheduler::PollingCadences::new(store, relay_slow);
     for principal in principals {
         match store.list_subscriptions(principal, None, None) {
             Ok(subs) => {
@@ -3805,8 +3806,7 @@ fn effective_ci_cadence_from_store(
                         r_count += 1;
                         // The CI cadence reported is the shortest among active
                         // CI-run watches, since that watch is due soonest.
-                        let cadence =
-                            plexus_core::scheduler::effective_cadence_s(store, &sub, relay_slow);
+                        let cadence = cadences.effective_cadence_s(&sub);
                         stored_cadence = Some(stored_cadence.map_or(cadence, |s| s.min(cadence)));
                     }
                 }

@@ -11515,3 +11515,63 @@ select = "expected"
 expect_red = ["relay::tests::relay_polling_disconnect_catches_up_once_and_reconnects_fresh"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "relay-polling-ci-snapshot"
+guards = "A scheduler pass reads the shared CI quota cadence only once"
+file = "crates/plexus-core/src/scheduler.rs"
+old = 'let ci_floor = if subscription.cursor_kind == "ci_runs" {'
+new = 'self.ci_quota_cadence_s = None; /* NON-VACUITY BREAK */ let ci_floor = if subscription.cursor_kind == "ci_runs" {'
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_ci_spacing_keeps_the_shared_quota_floor"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-polling-connections-snapshot"
+guards = "Connection app membership is shared by every watch in a pass and refreshed next pass"
+file = "crates/plexus-core/src/scheduler.rs"
+old = "if !self\n                .github_connections\n                .contains_key(&subscription.principal)\n            {"
+new = 'if true { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_batches_connections_and_refreshes_them_next_pass"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-polling-normal-no-connections"
+guards = "Normal mode never loads connection membership for the relay cadence floor"
+file = "crates/plexus-core/src/scheduler.rs"
+old = 'let github_slow = if self.relay_slow {'
+new = 'let github_slow = if true { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/scheduler.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["scheduler::tests::cadence_inputs_skip_connections_in_normal_mode_and_reads_for_held_watches"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-polling-held-watch-no-reads"
+guards = "Watches already held by backoff do not trigger extra cadence database reads"
+file = "crates/plexus-core/src/scheduler.rs"
+old = 'if decision != DueDecision::Poll {'
+new = 'if decision == DueDecision::BreakerTripped { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/scheduler.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["scheduler::tests::cadence_inputs_skip_connections_in_normal_mode_and_reads_for_held_watches"]
+build_timeout_s = 3600
+timeout_s = 120

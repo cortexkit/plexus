@@ -2192,17 +2192,51 @@ fn relay_polling_ci_spacing_keeps_the_shared_quota_floor() {
         "100 watches share 62 whole eight-request cycles after repository lookups"
     );
     for slow in [false, true] {
-        assert_eq!(
-            plexus_core::scheduler::effective_cadence_s(&store, &sub, slow),
-            5807
-        );
+        let mut cadences = plexus_core::scheduler::PollingCadences::new(&store, slow);
+        assert_eq!(cadences.effective_cadence_s(&sub), 5807);
         let mut longer = sub.clone();
         longer.cadence_s = 10_000;
+        assert_eq!(cadences.effective_cadence_s(&longer), 10_000);
+        sql(&scratch, &format!("UPDATE trigger_subscriptions SET status='retired' WHERE cursor_kind='ci_runs' AND subscription_id!='{ci}'"));
         assert_eq!(
-            plexus_core::scheduler::effective_cadence_s(&store, &longer, slow),
-            10_000
+            cadences.effective_cadence_s(&sub),
+            5807,
+            "quota inputs must be read once for the whole pass"
+        );
+        let mut next_pass = plexus_core::scheduler::PollingCadences::new(&store, slow);
+        assert_eq!(
+            next_pass.effective_cadence_s(&sub),
+            if slow { 1800 } else { 300 }
+        );
+        sql(
+            &scratch,
+            "UPDATE trigger_subscriptions SET status='active' WHERE cursor_kind='ci_runs'",
         );
     }
+}
+
+#[test]
+fn relay_polling_batches_connections_and_refreshes_them_next_pass() {
+    let (scratch, store, issue) = fixture("relay-connection-snapshot");
+    let issue = store.subscription("direct", &issue).unwrap().unwrap();
+    let pr = store.subscription("direct", "pr-watch").unwrap().unwrap();
+    let mut cadences = plexus_core::scheduler::PollingCadences::new(&store, true);
+    assert_eq!(cadences.effective_cadence_s(&issue), 1800);
+    sql(
+        &scratch,
+        "UPDATE connections SET app_key='another_provider' WHERE connection_id='conn-1'",
+    );
+    assert_eq!(
+        cadences.effective_cadence_s(&pr),
+        1800,
+        "one connection snapshot must serve all watches in a pass"
+    );
+    let mut next_pass = plexus_core::scheduler::PollingCadences::new(&store, true);
+    assert_eq!(
+        next_pass.effective_cadence_s(&pr),
+        300,
+        "the next pass must observe connection changes"
+    );
 }
 
 #[tokio::test]
