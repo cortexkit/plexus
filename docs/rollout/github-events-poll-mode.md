@@ -225,9 +225,10 @@ a complete machine-readable cross-check.
 Run these operator commands only after the connection exists and the refreshed
 reviewed catalog is loaded. Workers must not touch the live store.
 
-1. **Widen the ceiling (pending: run at deploy).** Preview the six explicitly
-   reviewed reads, then apply the same request. This adds no grant and never
-   raises the connection's risk ceiling.
+1. **Widen the ceiling (pending: run at deploy).** Preview adding the six flow
+   reads named in `CI_FLOW_ACTIONS` below (job, job log, run artifacts, artifact
+   file, run metadata and a workflow's runs), then apply the same request. This
+   adds no grant and never raises the connection's risk ceiling.
 
    ```sh
    CI_FLOW_ACTIONS=get_job,github.actions.job_log,list_workflow_run_artifacts,github.actions.artifact_file,get_workflow_run_metadata,list_workflow_runs_for_workflow
