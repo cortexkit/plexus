@@ -2841,6 +2841,9 @@ pub struct PlexusStore {
     inner: SqliteStore,
     grant_journal: Option<PathBuf>,
     outbox_ready: tokio::sync::Notify,
+    /// Run values from recent `workflow_run` webhooks, for later job webhooks.
+    /// In memory only; empty after a restart.
+    ci_runs: relay::CiRunCache,
 }
 
 impl PlexusStore {
@@ -2908,6 +2911,7 @@ impl PlexusStore {
             inner: store,
             grant_journal,
             outbox_ready: tokio::sync::Notify::new(),
+            ci_runs: Default::default(),
         })
     }
 
@@ -10598,6 +10602,7 @@ mod tests {
             inner,
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
+            ci_runs: Default::default(),
         };
         let live = store
             .matching_grant(
@@ -10911,6 +10916,7 @@ mod tests {
             inner,
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
+            ci_runs: Default::default(),
         };
         let served = store
             .list_events("direct", None, None)
@@ -10991,6 +10997,7 @@ mod tests {
             inner,
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
+            ci_runs: Default::default(),
         };
         let record = AuditRecord::ceremony("direct", None, None, "test", "read", None);
         store.append_audit(&record).unwrap();
@@ -11104,6 +11111,7 @@ mod tests {
             inner,
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
+            ci_runs: Default::default(),
         };
         let scope = CallScope {
             owner: "reserved:prefrontal-core".into(),

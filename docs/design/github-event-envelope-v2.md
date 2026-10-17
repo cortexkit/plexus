@@ -44,7 +44,9 @@ Each field listed for a kind is always present. Unknown values are JSON `null`,
 not omitted. Fields belonging only to another kind are not included. There are
 no labels in the envelope, and normalization adds no GitHub requests. CI-job
 envelopes stored before `workflow_name` was added do not contain that field; their
-stored bytes and digests remain unchanged.
+stored bytes and digests remain unchanged. Likewise, CI-job and CI-run envelopes
+stored before `actor`, `triggering_actor`, `event` and `head_repo_is_fork` were
+added do not contain those fields, and keep their stored bytes and digests.
 
 ## Fields
 
@@ -119,6 +121,50 @@ CI-job envelopes additionally always contain:
 | Field | Type (or null) | Source |
 | --- | --- | --- |
 | `workflow_name` | string | Webhooks: `workflow_job.workflow_name`; polling: `workflow_name` on the job object. Missing, empty, or non-string values are `null`. |
+
+#### Run actor, event and fork status
+
+CI-job and CI-run envelopes both always contain these four fields, describing
+the workflow run (for a job, the run attempt the job belongs to). Other kinds
+never contain them. They let a consumer tell runs started by its own accounts
+from runs on outside contributors' branches.
+
+| Field | Type (or null) | Value |
+| --- | --- | --- |
+| `actor` | string | The run's `actor.login`: the account whose push or pull request started the workflow. |
+| `triggering_actor` | string | The run's `triggering_actor.login`: the account that started this run attempt. A re-run changes this field and leaves `actor` alone. |
+| `event` | string | The run's `event`, for example `push`, `pull_request`, `pull_request_target`, `merge_group`, `schedule` or `workflow_dispatch`. |
+| `head_repo_is_fork` | boolean | `true` when the run's `head_repository.full_name` differs from its `repository.full_name`, compared ASCII case-insensitively; `false` when they are equal. |
+
+Null rules: a missing, `null`, empty or non-string source value is `null`.
+`actor` and `triggering_actor` are read independently; neither ever falls back
+to the other. `head_repo_is_fork` is `null` when either repository name is
+missing or empty.
+
+Sources:
+
+- **CI run, webhook and polling.** The stored item is GitHub's full workflow-run
+  object (`workflow_run` in the webhook, the `get_workflow_run` response when
+  polling), so the values are read from it directly.
+- **CI job, polling.** The poller reads each run attempt (`get_workflow_run`)
+  before listing its jobs, and passes that run's values to the job envelopes.
+  No request is added. The values are not stored in the job's v1 body or in the
+  CI cursor: both hold the run metadata object, which older binaries read with
+  unknown fields refused, so it is unchanged.
+- **CI job, webhook.** A `workflow_job` delivery does not carry these values.
+  The relay remembers them, in memory, from every `workflow_run` webhook
+  (`requested`, `in_progress` and `completed`), keyed by lowercase repository
+  full name, run id and run attempt. A later job webhook for that run attempt
+  takes its values from there. A job whose run attempt was not remembered gets
+  `null` for all four. The cache holds at most 10,000 run attempts, evicting the
+  oldest first, and forgets an attempt 24 hours (by relay receipt time) after
+  its latest `workflow_run` webhook. It is empty after a restart. Remembering a
+  run does not admit it: `workflow_run` webhooks that are not `completed` still
+  publish nothing.
+
+The first stored copy of an event owns its envelope, so a job first seen by
+webhook without a remembered run keeps `null` values even if a later poll could
+have supplied them.
 
 ### Release
 

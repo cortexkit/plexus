@@ -9,6 +9,53 @@ use serde_json::{json, Value};
 pub struct EnvelopeContext {
     pub source: EnvelopeSource,
     pub comment: Option<Value>,
+    /// Who started the workflow run a CI job belongs to, and from where. A
+    /// stored job object does not carry these values, so the inserter passes
+    /// them from the job's run: the poller from the run it read just before the
+    /// jobs, the relay from its in-memory cache of `workflow_run` webhooks.
+    /// `None` puts nulls in the job envelope. CI-run envelopes ignore this and
+    /// read the run object they are built from.
+    pub ci_run: Option<CiRunAttribution>,
+}
+
+/// The four run-level values every `ci_run` and `ci_job` v2 envelope carries.
+/// `None` becomes JSON `null`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CiRunAttribution {
+    /// `actor.login`: who pushed the commit or opened the change.
+    pub actor: Option<String>,
+    /// `triggering_actor.login`: who started this run attempt. Kept separate
+    /// from `actor`; a re-run changes this one only.
+    pub triggering_actor: Option<String>,
+    /// The run's `event`, such as `push` or `pull_request`.
+    pub event: Option<String>,
+    /// Whether the run's head repository differs from its base repository,
+    /// compared ASCII case-insensitively. `None` when either name is missing.
+    pub head_repo_is_fork: Option<bool>,
+}
+
+impl CiRunAttribution {
+    /// Read the values from a GitHub workflow-run object, as returned by the
+    /// REST API and carried in `workflow_run` webhooks. Missing, empty or
+    /// non-string values become `None`; there is no fallback between fields.
+    pub fn from_run(run: &Value) -> Self {
+        let text = |pointer: &str| {
+            run.pointer(pointer)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        let head = text("/head_repository/full_name");
+        let base = text("/repository/full_name");
+        Self {
+            actor: text("/actor/login"),
+            triggering_actor: text("/triggering_actor/login"),
+            event: text("/event"),
+            head_repo_is_fork: head
+                .zip(base)
+                .map(|(head, base)| !head.eq_ignore_ascii_case(&base)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,7 +128,19 @@ pub(crate) fn envelope(
         } else {
             Value::Null
         };
-    } else if kind == "ci_job" {
+    }
+    if matches!(kind, "ci_run" | "ci_job") {
+        let ci = if kind == "ci_run" {
+            CiRunAttribution::from_run(item)
+        } else {
+            context.ci_run.clone().unwrap_or_default()
+        };
+        body["actor"] = json!(ci.actor);
+        body["triggering_actor"] = json!(ci.triggering_actor);
+        body["event"] = json!(ci.event);
+        body["head_repo_is_fork"] = json!(ci.head_repo_is_fork);
+    }
+    if kind == "ci_job" {
         body["workflow_name"] = item["workflow_name"]
             .as_str()
             .filter(|name| !name.is_empty())
@@ -318,7 +377,19 @@ mod tests {
         serde_json::from_str(bytes).unwrap()
     }
 
-    fn golden(name: &str, event: &str, kind: &str, repo: &str, action: &str, mut expected: Value) {
+    fn golden(name: &str, event: &str, kind: &str, repo: &str, action: &str, expected: Value) {
+        golden_with_run(name, event, kind, repo, action, None, expected)
+    }
+
+    fn golden_with_run(
+        name: &str,
+        event: &str,
+        kind: &str,
+        repo: &str,
+        action: &str,
+        ci_run: Option<CiRunAttribution>,
+        mut expected: Value,
+    ) {
         let item = capture(name);
         let is_webhook = name.starts_with("webhook_");
         // Only the item is captured. The wrapper reconstructs documented relay
@@ -333,6 +404,7 @@ mod tests {
                 EnvelopeSource::Poll
             },
             comment: None,
+            ci_run,
         };
         let actor = ActorAttribution::Known(vec!["fixture-actor".into()]);
         let actual = envelope(
@@ -440,7 +512,10 @@ mod tests {
                 "head_branch":"train/callgraph-dirty-restart","head_sha":"e56c0d525fa9f387dc8fa00354851e90cf52ed0e",
                 "url":"https://github.com/cortexkit/aft/actions/runs/38098639025/job/114349743680",
                 "run_id":38098639025_i64,"run_attempt":1,"completed_at":"2026-10-11T00:45:44Z",
-                "workflow_name":"Tests"
+                "workflow_name":"Tests",
+                // No run context was supplied: a job whose run the relay has
+                // not cached keeps all four run fields, as nulls.
+                "actor":null,"triggering_actor":null,"event":null,"head_repo_is_fork":null
             }),
         );
     }
@@ -457,7 +532,8 @@ mod tests {
                 "head_branch":"fix/pi-model-discovery-readiness","head_sha":"f65b17d9d2bcd48126557b3afbe9df84691852e9",
                 "url":"https://github.com/cortexkit/magic-context/actions/runs/38083735257/job/114305774943",
                 "run_id":38083735257_i64,"run_attempt":1,"completed_at":"2026-10-10T20:26:10Z",
-                "workflow_name":"Design gate"
+                "workflow_name":"Design gate",
+                "actor":null,"triggering_actor":null,"event":null,"head_repo_is_fork":null
             }),
         );
     }
@@ -473,7 +549,10 @@ mod tests {
                 "id":38097281838_i64,"name":"Tests","conclusion":"success","status":"completed",
                 "head_branch":"train/check-persist-wait","head_sha":"3c8a2c3c7ca8e3407c60b7953c1267920b482a1b",
                 "url":"https://github.com/cortexkit/aft/actions/runs/38097281838","run_id":38097281838_i64,
-                "run_attempt":2,"completed_at":"2026-10-11T00:41:42Z"
+                "run_attempt":2,"completed_at":"2026-10-11T00:41:42Z",
+                // A push run inside the repository.
+                "actor":"octo-lantern","triggering_actor":"octo-lantern","event":"push",
+                "head_repo_is_fork":false
             }),
         );
     }
@@ -489,10 +568,170 @@ mod tests {
                 "id":38083743687_i64,"name":"Harness coverage advisory","conclusion":"success","status":"completed",
                 "head_branch":"fix/pi-model-discovery-readiness","head_sha":"f65b17d9d2bcd48126557b3afbe9df84691852e9",
                 "url":"https://github.com/cortexkit/magic-context/actions/runs/38083743687","run_id":38083743687_i64,
-                "run_attempt":1,"completed_at":"2026-10-10T20:26:40Z"
+                "run_attempt":1,"completed_at":"2026-10-10T20:26:40Z",
+                // A pull request from the octo-quartz fork.
+                "actor":"octo-checks[bot]","triggering_actor":"octo-checks[bot]",
+                "event":"pull_request_target","head_repo_is_fork":true
             }),
         );
     }
+    /// The polled job's own run: the captured fork pull-request run, which is
+    /// a sibling of the job's run on the same pull request, given the job's run
+    /// id. The poller passes the values read from this object.
+    fn poll_job_run() -> Value {
+        let mut run = capture("poll_ci_run");
+        run["id"] = json!(38083735257_i64);
+        run
+    }
+
+    #[test]
+    fn captured_poll_job_golden_carries_its_fork_run_attribution() {
+        golden_with_run(
+            "poll_ci_job",
+            GITHUB_CI_JOB_COMPLETED,
+            "ci_job",
+            "cortexkit/magic-context",
+            "updated",
+            Some(CiRunAttribution::from_run(&poll_job_run())),
+            json!({
+                "id":114305774943_i64,"name":"design-gate / design-approved-sync","conclusion":"skipped","status":"completed",
+                "head_branch":"fix/pi-model-discovery-readiness","head_sha":"f65b17d9d2bcd48126557b3afbe9df84691852e9",
+                "url":"https://github.com/cortexkit/magic-context/actions/runs/38083735257/job/114305774943",
+                "run_id":38083735257_i64,"run_attempt":1,"completed_at":"2026-10-10T20:26:10Z",
+                "workflow_name":"Design gate",
+                "actor":"octo-checks[bot]","triggering_actor":"octo-checks[bot]",
+                "event":"pull_request_target","head_repo_is_fork":true
+            }),
+        );
+    }
+
+    #[test]
+    fn captured_webhook_job_golden_carries_its_cached_push_run_attribution() {
+        let mut run = capture("webhook_ci_run");
+        run["id"] = json!(38098639025_i64);
+        run["run_attempt"] = json!(1);
+        golden_with_run(
+            "webhook_ci_job",
+            GITHUB_CI_JOB_COMPLETED,
+            "ci_job",
+            "cortexkit/aft",
+            "completed",
+            Some(CiRunAttribution::from_run(&run)),
+            json!({
+                "id":114349743680_i64,"name":"Search quality binary (Linux x64)","conclusion":"success","status":"completed",
+                "head_branch":"train/callgraph-dirty-restart","head_sha":"e56c0d525fa9f387dc8fa00354851e90cf52ed0e",
+                "url":"https://github.com/cortexkit/aft/actions/runs/38098639025/job/114349743680",
+                "run_id":38098639025_i64,"run_attempt":1,"completed_at":"2026-10-11T00:45:44Z",
+                "workflow_name":"Tests",
+                "actor":"octo-lantern","triggering_actor":"octo-lantern","event":"push",
+                "head_repo_is_fork":false
+            }),
+        );
+    }
+
+    /// When the operator re-runs a contributor's run, GitHub keeps the
+    /// contributor as `actor` and names the operator as `triggering_actor`.
+    /// Both envelopes report each login from its own field.
+    #[test]
+    fn rerun_reports_actor_and_triggering_actor_separately() {
+        let mut run = capture("webhook_ci_run");
+        run["run_attempt"] = json!(3);
+        run["triggering_actor"]["login"] = json!("ualtinok");
+        let attribution = CiRunAttribution::from_run(&run);
+        assert_eq!(
+            attribution,
+            CiRunAttribution {
+                actor: Some("octo-lantern".into()),
+                triggering_actor: Some("ualtinok".into()),
+                event: Some("push".into()),
+                head_repo_is_fork: Some(false),
+            },
+            "a re-run must keep the pusher as actor and name the re-runner as triggering_actor"
+        );
+        let run_body: Value = serde_json::from_str(
+            &envelope(
+                KEY,
+                GITHUB_CI_RUN_COMPLETED,
+                "cortexkit/aft",
+                &run,
+                &ActorAttribution::NotEnriched,
+                &EnvelopeContext::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let job_body: Value = serde_json::from_str(
+            &envelope(
+                KEY,
+                GITHUB_CI_JOB_FAILED,
+                "cortexkit/aft",
+                &capture("webhook_ci_job"),
+                &ActorAttribution::NotEnriched,
+                &EnvelopeContext {
+                    ci_run: Some(attribution),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for body in [run_body, job_body] {
+            assert_eq!(
+                (&body["actor"], &body["triggering_actor"]),
+                (&json!("octo-lantern"), &json!("ualtinok")),
+                "a re-run must keep the pusher as actor: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn fork_detection_ignores_ascii_case_and_is_null_when_a_name_is_missing() {
+        let fork = |run: Value| CiRunAttribution::from_run(&run).head_repo_is_fork;
+        let named = |head: &str, base: &str| json!({"head_repository":{"full_name":head},"repository":{"full_name":base}});
+        const SAME_OR_FORK: &str =
+            "fork detection must compare head and base repository names case-insensitively";
+        assert_eq!(
+            fork(named("CortexKit/AFT", "cortexkit/aft")),
+            Some(false),
+            "{SAME_OR_FORK}"
+        );
+        assert_eq!(
+            fork(named("octo-quartz/aft", "cortexkit/aft")),
+            Some(true),
+            "{SAME_OR_FORK}"
+        );
+        assert_eq!(
+            fork(json!({"repository":{"full_name":"cortexkit/aft"}})),
+            None
+        );
+        assert_eq!(
+            fork(json!({"head_repository":null,"repository":{"full_name":"cortexkit/aft"}})),
+            None
+        );
+        assert_eq!(
+            fork(json!({"head_repository":{"full_name":"cortexkit/aft"}})),
+            None
+        );
+        assert_eq!(fork(named("", "cortexkit/aft")), None);
+        // A run with none of the source fields keeps every value null, and the
+        // envelope still carries all four keys.
+        let body = envelope(
+            KEY,
+            GITHUB_CI_RUN_COMPLETED,
+            "org/repo",
+            &json!({"id":7,"actor":{"login":""},"triggering_actor":null,"event":7}),
+            &ActorAttribution::NotEnriched,
+            &EnvelopeContext::default(),
+        )
+        .unwrap();
+        for field in ["actor", "triggering_actor", "event", "head_repo_is_fork"] {
+            assert!(
+                body.contains(&format!(r#""{field}":null"#)),
+                "{field} must be present and null: {body}"
+            );
+        }
+    }
+
     #[test]
     fn captured_poll_release_golden() {
         golden(
@@ -557,6 +796,7 @@ mod tests {
         let context = EnvelopeContext {
             source: EnvelopeSource::Webhook(None),
             comment: None,
+            ci_run: None,
         };
         let body: Value = serde_json::from_str(
             &envelope(
