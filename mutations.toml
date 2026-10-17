@@ -10214,7 +10214,7 @@ timeout_s = 120
 [[control]]
 id = "github-job-log-flow-visibility"
 guards = "An agent-stamped Basal flow reads only repositories bound to that agent's enabled bot"
-file = "crates/plexus-core/src/github/reads/ci.rs"
+file = "crates/plexus-core/src/github/reads/mod.rs"
 old = "if !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == \"enabled\")"
 new = "if false && !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == \"enabled\") /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/job_log_read_tests.rs"
@@ -10387,7 +10387,7 @@ timeout_s = 120
 [[control]]
 id = '''github-artifact-flow-visibility'''
 guards = '''Flows require their agents enabled repository binding'''
-file = '''crates/plexus-core/src/github/reads/ci.rs'''
+file = '''crates/plexus-core/src/github/reads/mod.rs'''
 old = '''if !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == "enabled")'''
 new = '''if false && !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == "enabled") /* NON-VACUITY BREAK */'''
 test_file = '''crates/plexus-module/src/artifact_file_read_tests.rs'''
@@ -11269,9 +11269,9 @@ build_timeout_s = 3600
 [[control]]
 id = "ci-superseded-bot-repository-visibility"
 guards = "An agent-stamped Basal flow cannot read CI metadata outside its enabled bot bindings"
-file = "crates/plexus-core/src/github/reads/ci.rs"
-old = '''            if !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == "enabled")'''
-new = '''            if false && !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == "enabled") /* NON-VACUITY BREAK */'''
+file = "crates/plexus-core/src/github/reads/mod.rs"
+old = '''if !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == "enabled")'''
+new = '''if false && !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == "enabled") /* NON-VACUITY BREAK */'''
 test_file = "crates/plexus-module/src/ci_read_tests.rs"
 runner = "cargo"
 package = "plexus-module"
