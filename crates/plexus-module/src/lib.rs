@@ -2115,6 +2115,7 @@ async fn handle_tool_request(
 }
 
 pub mod flow_audience;
+mod github_react;
 mod grants_would_ask;
 mod permissions;
 
@@ -2301,6 +2302,7 @@ fn facade_tool_reply_inner(
             | manifest::INVOKE_TOOL
             | manifest::GITHUB_TOOL
             | manifest::GITHUB_READ_TOOL
+            | manifest::GITHUB_REACT_TOOL
             | manifest::EVENTS_GET_TOOL
             | manifest::REQUESTS_TOOL
             | manifest::EVENTS_TOOL
@@ -2435,6 +2437,18 @@ fn facade_tool_reply_inner(
             return Ok(tool_error("invalid_request", "github_read requires only action, repository (string or string array), and args (object)"));
         }
     }
+    // github_react's arguments are checked here, after the same mode, flow
+    // and audience checks as every tool, and become the request a github
+    // bot_request call would carry. Dispatch below sends that request down the
+    // bot_request path itself.
+    let reaction_request = if name == manifest::GITHUB_REACT_TOOL {
+        match github_react::reaction_request(arguments) {
+            Ok(built) => Some(built),
+            Err(refusal) => return Ok(refusal),
+        }
+    } else {
+        None
+    };
     if name == manifest::EVENTS_GET_TOOL
         && arguments
             .keys()
@@ -2572,12 +2586,17 @@ fn facade_tool_reply_inner(
                 }
             })
         }
-        (manifest::GITHUB_TOOL, Some("bot_request")) => {
-            let request = arguments.get("request").cloned().unwrap_or(Value::Null);
-            let nonce = arguments
-                .get("request_nonce")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+        (manifest::GITHUB_TOOL, Some("bot_request")) | (manifest::GITHUB_REACT_TOOL, _) => {
+            let (request, nonce) = match &reaction_request {
+                Some(built) => (built.request.clone(), built.request_nonce.as_str()),
+                None => (
+                    arguments.get("request").cloned().unwrap_or(Value::Null),
+                    arguments
+                        .get("request_nonce")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                ),
+            };
             let request_id = format!("gh-{correlation}");
             let owner = format!("{channel}-{correlation}");
             let now = plexus_core::now_ms();
@@ -4799,6 +4818,9 @@ mod rest_pool_tests;
 
 #[cfg(test)]
 mod withdraw_tests;
+
+#[cfg(test)]
+mod github_react_tests;
 
 #[cfg(test)]
 mod recipient_tests;

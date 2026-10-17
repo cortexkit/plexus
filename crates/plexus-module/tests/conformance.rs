@@ -56,7 +56,7 @@ async fn live_daemon_proves_hello_empty_connections_health_and_deny() {
     let ProviderRole::ToolProvider { tools, .. } = role else {
         panic!("plexus must register a ToolProvider role");
     };
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 11);
     assert_eq!(
         tools
             .iter()
@@ -69,6 +69,7 @@ async fn live_daemon_proves_hello_empty_connections_health_and_deny() {
             "requests",
             "github",
             "github_read",
+            "github_react",
             "events_get",
             "events",
             "web_search",

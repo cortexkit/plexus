@@ -32,6 +32,7 @@ const TOOL_CAPABILITIES: &[(&str, &[&str])] = &[
     ("requests", &["plexus:approval.requests/v1"]),
     ("github", &["plexus:github.facade/v1"]),
     ("github_read", &["github.read/v1", "plexus:github.read/v1"]),
+    ("github_react", &["plexus:github.react/v1"]),
     ("events_get", &["plexus:events.get/v1"]),
     ("events", &["plexus:events/v1"]),
     (WEB_SEARCH_TOOL, &["plexus:web.search/v1", "web.search/v1"]),
@@ -53,7 +54,9 @@ fn modes_for(name: &str) -> Vec<CallMode> {
         | ops::TOOL_WITHDRAW => {
             vec![CallMode::Classic, CallMode::Codemode, CallMode::Flow]
         }
-        "github" | "invoke" => vec![CallMode::Classic, CallMode::Flow],
+        // github_react acts as the stamped agent's bot, which a codemode run
+        // can never do, so it is served like github and invoke.
+        "github" | "github_react" | "invoke" => vec![CallMode::Classic, CallMode::Flow],
         _ => vec![CallMode::Classic],
     }
 }
@@ -360,7 +363,7 @@ mod tests {
             reply(ops::TOOL_CATALOG, arguments.as_object().unwrap()).unwrap(),
         )
         .unwrap();
-        assert_eq!(answer.tools.len(), 10);
+        assert_eq!(answer.tools.len(), 11);
         assert_eq!(answer.tools.len(), advertised.len());
         for (tool, definition) in answer.tools.iter().zip(advertised) {
             assert_eq!(tool.name, definition.name);
@@ -443,6 +446,7 @@ mod tests {
             ("requests", &["plexus:approval.requests/v1"]),
             ("github", &["plexus:github.facade/v1"]),
             ("github_read", &["github.read/v1", "plexus:github.read/v1"]),
+            ("github_react", &["plexus:github.react/v1"]),
             ("events_get", &["plexus:events.get/v1"]),
             ("events", &["plexus:events/v1"]),
             ("web_search", &["plexus:web.search/v1", "web.search/v1"]),
@@ -551,6 +555,7 @@ mod tests {
             ("github.read/v1", "github_read"),
             ("plexus:github.read/v1", "github_read"),
             ("plexus:github.facade/v1", "github"),
+            ("plexus:github.react/v1", "github_react"),
         ] {
             let answer = fetch(
                 json!({"capabilities": [tag]}),
@@ -561,6 +566,8 @@ mod tests {
             assert_eq!(names(&answer), [name]);
             let expected = if name == "github_read" {
                 vec!["github.read/v1", "plexus:github.read/v1"]
+            } else if name == "github_react" {
+                vec!["plexus:github.react/v1"]
             } else {
                 vec!["plexus:github.facade/v1"]
             };

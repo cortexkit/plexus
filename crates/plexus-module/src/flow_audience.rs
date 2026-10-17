@@ -214,6 +214,7 @@ pub(crate) fn check_call(
     }
     let repository = match name {
         manifest::GITHUB_READ_TOOL => Some(args.get("repository").cloned().unwrap_or(Value::Null)),
+        manifest::GITHUB_REACT_TOOL => Some(args.get("repository").cloned().unwrap_or(Value::Null)),
         manifest::GITHUB_TOOL => match args.get("op").and_then(Value::as_str) {
             Some("bot_request") => Some(
                 args.get("request")

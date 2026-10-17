@@ -70,6 +70,8 @@ fn fixture(home: Arc<ConnectorHome>) -> (Scratch, Arc<ModuleState>) {
 fn call_tool(state: &Arc<ModuleState>, name: &str, op: &str) -> Value {
     let arguments = if name == "github_read" {
         json!({"action":"github.issue.get","repository":"o/x","args":{"issue_number":42}})
+    } else if name == "github_react" {
+        json!({"repository":"o/x","kind":"issue","target":{"number":42},"reaction":"eyes","request_nonce":"home"})
     } else {
         json!({"op":op})
     };
@@ -95,6 +97,7 @@ fn unknown_refuses_every_facade_effect_before_dispatch() {
         ("invoke", "call"),
         ("github", "bot_request"),
         ("github_read", ""),
+        ("github_react", ""),
         ("web_search", "search"),
         ("code_search", ""),
         ("requests", "approve"),

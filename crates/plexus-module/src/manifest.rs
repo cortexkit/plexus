@@ -29,6 +29,10 @@ pub const CATALOG_TOOL: &str = "catalog";
 pub const INVOKE_TOOL: &str = "invoke";
 pub const GITHUB_TOOL: &str = "github";
 pub const GITHUB_READ_TOOL: &str = "github_read";
+/// Adds one reaction to an issue or pull request as the acting agent's own
+/// bot, and nothing else. It is the `github` tool's `bot_request` narrowed to
+/// reactions, so a flow can be given it without every other bot write.
+pub const GITHUB_REACT_TOOL: &str = "github_react";
 pub const EVENTS_GET_TOOL: &str = "events_get";
 pub const REQUESTS_TOOL: &str = "requests";
 pub const EVENTS_TOOL: &str = "events";
@@ -137,7 +141,7 @@ fn published_event_declarations() -> Vec<EventDeclaration> {
         .collect()
 }
 
-/// Build the stable facade of ten public tools. Connector actions are not
+/// Build the stable facade of eleven public tools. Connector actions are not
 /// exposed as separate tools; the facade returns the current connector catalog instead.
 ///
 /// This manifest does not say how the module received its launch code. The
@@ -249,6 +253,7 @@ pub fn build_with_launch_nonce_source(
                     &["bot_request", "bindings.read"],
                 ),
                 github_read_tool(),
+                github_react_tool(),
                 events_get_tool(),
                 events_tool(),
                 web_search_tool(),
@@ -405,6 +410,36 @@ fn github_read_tool() -> Tool {
                 }}
             },
             "required": ["action", "repository", "args"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn github_react_tool() -> Tool {
+    Tool {
+        name: GITHUB_REACT_TOOL.to_string(),
+        description: Some(
+            "Add one reaction to a GitHub issue or pull request, posted as your own bot. kind is issue or pr and target.number is its number. Reusing a request_nonce with the same request returns the first reply instead of reacting again.".to_string(),
+        ),
+        // Each call posts a reaction on GitHub. A lost reply is retried with
+        // the same request_nonce, which the bot request receipts turn into a
+        // replay, so the tool is not Pure.
+        execution_mode: ExecutionMode::Mutating,
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "minLength": 1, "description": "owner/name"},
+                "kind": {"type": "string", "enum": ["issue", "pr"]},
+                "target": {
+                    "type": "object",
+                    "properties": {"number": {"type": "integer", "minimum": 1}},
+                    "required": ["number"],
+                    "additionalProperties": false
+                },
+                "reaction": {"type": "string", "enum": plexus_core::github::facade::request_map::REACTIONS},
+                "request_nonce": {"type": "string", "minLength": 1}
+            },
+            "required": ["repository", "kind", "target", "reaction", "request_nonce"],
             "additionalProperties": false
         }),
     }
@@ -781,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_advertises_ten_tools_including_read_facades_and_search() {
+    fn manifest_advertises_eleven_tools_including_read_facades_and_search() {
         let manifest = build("plexus");
         let ProviderRole::ToolProvider { tools, .. } = &manifest.provides[0] else {
             panic!("plexus must expose a ToolProvider role");
@@ -798,6 +833,7 @@ mod tests {
                 REQUESTS_TOOL,
                 GITHUB_TOOL,
                 GITHUB_READ_TOOL,
+                GITHUB_REACT_TOOL,
                 EVENTS_GET_TOOL,
                 EVENTS_TOOL,
                 WEB_SEARCH_TOOL,
@@ -811,13 +847,13 @@ mod tests {
             json!(["bot_request", "bindings.read"]),
             "the github facade only advertises bot requests and binding reads"
         );
-        assert_eq!(tools[8].execution_mode, ExecutionMode::Pure);
+        assert_eq!(tools[9].execution_mode, ExecutionMode::Pure);
         assert_eq!(
-            tools[8].schema["required"],
+            tools[9].schema["required"],
             json!(["query"]),
             "web_search takes flat arguments with only the query required"
         );
-        let events_schema = &tools[7].schema;
+        let events_schema = &tools[8].schema;
         assert!(
             events_schema["properties"]["op"]["enum"]
                 .as_array()
@@ -1179,6 +1215,53 @@ mod tests {
                     }}
                 },
                 "required": ["action", "repository", "args"],
+                "additionalProperties": false
+            })
+        );
+    }
+
+    /// github_react posts on GitHub, so it must never be advertised as Pure: a
+    /// Pure tool may be retried freely, and only the request_nonce receipt
+    /// makes a repeated reaction safe. Its schema is closed at every level.
+    #[test]
+    fn github_react_manifest_is_mutating_with_a_closed_schema() {
+        let manifest = build("plexus");
+        let ProviderRole::ToolProvider { tools, .. } = &manifest.provides[0] else {
+            panic!("plexus must expose a ToolProvider role");
+        };
+        let react = tools
+            .iter()
+            .find(|tool| tool.name == "github_react")
+            .unwrap();
+        let wire = serde_json::to_value(react).unwrap();
+        assert_eq!(
+            wire["execution_mode"], "mutating",
+            "github_react must advertise the Mutating execution mode"
+        );
+        assert_eq!(react.execution_mode, ExecutionMode::Mutating);
+        assert!(react
+            .description
+            .as_deref()
+            .is_some_and(|text| text.contains("own bot")));
+        assert_eq!(
+            react.schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    "repository": {"type": "string", "minLength": 1, "description": "owner/name"},
+                    "kind": {"type": "string", "enum": ["issue", "pr"]},
+                    "target": {
+                        "type": "object",
+                        "properties": {"number": {"type": "integer", "minimum": 1}},
+                        "required": ["number"],
+                        "additionalProperties": false
+                    },
+                    "reaction": {"type": "string", "enum": [
+                        "+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"
+                    ]},
+                    "request_nonce": {"type": "string", "minLength": 1}
+                },
+                "required": ["repository", "kind", "target", "reaction", "request_nonce"],
                 "additionalProperties": false
             })
         );
