@@ -37,6 +37,23 @@ pub enum ReadError {
     QuotaExhausted { retry_after_ms: i64 },
 }
 
+fn check_repository_visibility(
+    store: &PlexusStore,
+    principal: &str,
+    repository: &str,
+    scope: Option<&crate::scope::CallScope>,
+) -> Result<(), ReadError> {
+    if let Some(agent) = crate::scope::basal_flow_read_agent(principal, scope) {
+        let handle = store
+            .github_handle_for_repo(&crate::github::canonical_repository(repository))
+            .map_err(|_| ReadError::Denied(Denial::StoreFailure))?;
+        if !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == "enabled") {
+            return Err(ReadError::Refused("repository_not_visible"));
+        }
+    }
+    Ok(())
+}
+
 fn walk_error(error: pagination::WalkError) -> ReadError {
     match error {
         pagination::WalkError::Incomplete => ReadError::PageBound,
@@ -248,6 +265,21 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     if action == "github.actions.run.superseded" {
         return run_superseded::read(engine, principal, repository, args, scope, attributed_agent);
     }
+    let visible = || -> Result<(), ReadError> {
+        if BOT_ACTIONS.contains(&action) {
+            let repositories: Vec<&str> = match repository {
+                Value::String(name) => vec![name],
+                Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+                _ => vec![],
+            };
+            for repository in repositories {
+                check_repository_visibility(engine.store(), principal, repository, scope)?;
+            }
+        }
+        Ok(())
+    };
+    // Reject the entire selection before resolving connections or checking grants.
+    visible()?;
     let (resolved, handle) =
         match resolve_read_with_handle(engine.store(), action, repository, args) {
             Ok(resolved) => resolved,
@@ -261,6 +293,7 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     // each read's arguments.
     let connection_principal = handle.connection_principal;
     let invoke = |page: Option<usize>| -> Result<Value, ReadError> {
+        visible()?;
         let mut mapped = if action == "github.issue.search" {
             let terms = args.get("terms").and_then(Value::as_str).unwrap_or("");
             Map::from_iter([
@@ -317,6 +350,9 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             request = request.with_resolved_repository(resolved.repositories[0].clone());
         }
         let reservation = engine.authorize(request).map_err(ReadError::Denied)?;
+        // Repository ownership or bot status can change during authorization;
+        // recheck the agent's current bindings before sending this page.
+        visible()?;
         match engine.revalidate_and_dispatch(&reservation).outcome {
             TransportOutcome::Completed {
                 response: Some(result),

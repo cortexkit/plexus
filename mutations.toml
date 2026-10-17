@@ -11654,3 +11654,41 @@ expect_red = ["github_read_frame_tests::github_facade_refuses_removed_read_op_by
 expect_message = "unknown_method"
 build_timeout_s = 3600
 timeout_s = 90
+
+[[control]]
+id = "github-issue-flow-own-bot-visibility"
+guards = "Agent-stamped Basal issue reads refuse another bot's repository before authority or dispatch"
+file = "crates/plexus-core/src/github/reads/mod.rs"
+old = 'if BOT_ACTIONS.contains(&action) {'
+new = 'if false && BOT_ACTIONS.contains(&action) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/issue_flow_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::issue_flow_tests::agent_flow_issue_reads_refuse_foreign_repository_before_authority"]
+build_timeout_s = 3600
+timeout_s = 90
+
+[[control]]
+id = "github-issue-flow-search-all-repositories"
+guards = "Agent-stamped Basal issue search checks every selected repository, not just the first"
+file = "crates/plexus-core/src/github/reads/mod.rs"
+old = '''let repositories: Vec<&str> = match repository {
+                Value::String(name) => vec![name],
+                Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+                _ => vec![],
+            };'''
+new = '''let repositories: Vec<&str> = match repository { // NON-VACUITY BREAK
+                Value::String(name) => vec![name],
+                Value::Array(items) => items.iter().take(1).filter_map(Value::as_str).collect(),
+                _ => vec![],
+            };'''
+test_file = "crates/plexus-module/src/issue_flow_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::issue_flow_tests::agent_flow_issue_search_checks_every_repository"]
+build_timeout_s = 3600
+timeout_s = 90

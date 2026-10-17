@@ -46,19 +46,7 @@ pub(super) fn invoke<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     scope: Option<&crate::scope::CallScope>,
     attributed_agent: Option<&str>,
 ) -> Result<Value, ReadError> {
-    let visible = || -> Result<(), ReadError> {
-        if let Some(agent) = crate::scope::basal_flow_read_agent(principal, scope) {
-            let handle = engine
-                .store()
-                .github_handle_for_repo(repository)
-                .map_err(|_| ReadError::Denied(Denial::StoreFailure))?;
-            if !handle.is_some_and(|handle| handle.agent_id == agent && handle.status == "enabled")
-            {
-                return Err(ReadError::Refused("repository_not_visible"));
-            }
-        }
-        Ok(())
-    };
+    let visible = || check_repository_visibility(engine.store(), principal, repository, scope);
     visible()?;
     let mut request = AuthorizationRequest::new(
         principal,

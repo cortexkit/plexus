@@ -1,4 +1,25 @@
-# Agentless flow audience
+# Flow repository visibility
+
+## Agent-owned flows
+
+For `reserved:basal` routes with both `flow_id` and `agent_id`, `github_read`
+issue reads (`github.issue.get`, `github.issue_comments.list`, and
+`github.issue.search`) use the same enabled-bot repository visibility rule as CI
+reads. `scope::basal_flow_read_agent` selects these routes, as it does for
+`events_get`. Every named repository must currently belong to that agent's bot;
+search cannot combine an owned repository with another bot's repository.
+The shared read check runs before connection resolution, grants or reservations
+and rechecks each page before authorization and dispatch. A repository outside
+those bindings refuses `repository_not_visible` with `transmission: not_sent`.
+Visibility does not confer authority: allowed repositories still pass every
+existing grant and policy check, with scope used for attribution only.
+
+This fence does not apply to non-flow callers or routes carried by other
+modules, even when they have an agent stamp. Agentless global flows continue to
+use Basal's grants on any bound repository. Agentless workspace flows retain
+the audience rules below, including the free-text search refusal.
+
+## Agentless flow audience
 
 Only `reserved:basal` routes stamped with `flow_id` and no `agent_id` consult
 `prefrontal-core`'s `flow.audience`. The lookup uses Plexus's own unscoped
