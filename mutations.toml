@@ -3263,8 +3263,8 @@ timeout_s = 60
 id = "call-mode-codemode-github"
 guards = "bot writes and invoke never advertise codemode before run delegation is decided"
 file = "crates/plexus-module/src/tool_provider.rs"
-old = '"github" | "invoke" => vec![CallMode::Classic, CallMode::Flow],'
-new = '"github" => vec![CallMode::Classic, CallMode::Codemode, CallMode::Flow], "invoke" => vec![CallMode::Classic, CallMode::Flow], // NON-VACUITY BREAK'
+old = '"github" | "github_react" | "invoke" => vec![CallMode::Classic, CallMode::Flow],'
+new = '"github" => vec![CallMode::Classic, CallMode::Codemode, CallMode::Flow], "github_react" | "invoke" => vec![CallMode::Classic, CallMode::Flow], // NON-VACUITY BREAK'
 test_file = "crates/plexus-module/src/tool_provider.rs"
 runner = "cargo"
 package = "plexus-module"
