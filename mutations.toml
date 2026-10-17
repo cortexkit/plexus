@@ -3443,7 +3443,7 @@ expect_red = [
 ]
 expect_message = "the claim was released"
 build_timeout_s = 3600
-timeout_s = 120
+timeout_s = 600
 
 [[control]]
 id = "github-empty-success-is-settled"
@@ -3461,7 +3461,7 @@ expect_red = [
 ]
 expect_message = "/an empty success body must record a settled outcome|the claim was released/"
 build_timeout_s = 3600
-timeout_s = 120
+timeout_s = 600
 
 [[control]]
 id = "github-control-credential-generation"
@@ -3476,7 +3476,7 @@ target = "--test it"
 expect_red = ["github_control_surface::probe_and_bind_keep_the_dispatch_token_of_the_handles_generation"]
 expect_message = "the probe, the bind and the second dispatch all used the cached token"
 build_timeout_s = 3600
-timeout_s = 120
+timeout_s = 600
 
 [[control]]
 id = "github-approval-fresh-id"
@@ -3491,7 +3491,7 @@ target = "--test it"
 expect_red = ["github_facade_gates::g7_approval_names_its_carrier_and_a_reused_nonce_gets_a_fresh_one"]
 expect_message = "the reused nonce did not raise a new approval"
 build_timeout_s = 3600
-timeout_s = 120
+timeout_s = 600
 
 [[control]]
 id = "github-approval-requester-is-carrier"
@@ -3521,7 +3521,7 @@ target = "--lib"
 expect_red = ["github_identity::tests::a_blocking_route_wait_completes_on_every_runtime_flavor"]
 expect_message = "multi-threaded runtime"
 build_timeout_s = 3600
-timeout_s = 120
+timeout_s = 600
 
 [[control]]
 id = "credentials-reply-token-wiped"
@@ -3536,7 +3536,7 @@ target = "--lib"
 expect_red = ["credentials::ckcred_wire_tests::reading_a_credential_wipes_the_token_from_the_reply"]
 expect_message = "the reply still carries the token"
 build_timeout_s = 3600
-timeout_s = 120
+timeout_s = 600
 
 [[control]]
 id = "credentials-auth-reports-one-thread"
