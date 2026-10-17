@@ -25,8 +25,10 @@ impl HandleCredentialProvider for Token {
     fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
 }
 
-/// Answers the vendor band's pre-send scope recheck with the stamp the route
-/// was bound with, as the daemon does for a live scope.
+/// Stands in for the daemon's session-scope lookup. Just before a bot write is
+/// sent, plexus asks the daemon whether the caller's session scope is still
+/// live and delegating; this answers with the scope the route was opened
+/// under, as the daemon does while that session is running.
 struct Live(CallScope);
 impl plexus_core::scope::ScopeReader for Live {
     fn describe(
@@ -390,9 +392,10 @@ async fn github_react_refuses_every_undeclared_field_by_name() {
     assert_eq!(receipts(&scratch), 0, "a refused shape claimed a receipt");
 }
 
-/// The tool's only reachable effect is a reaction: no value of `kind` names
-/// another bot write, even though the agent and its carrier both hold a grant
-/// for `add_issue_comment`.
+/// `github_react` can only add a reaction. The test grants both the agent and
+/// the module that carries its call permission to post comments
+/// (`add_issue_comment`), then tries every `kind`: none reaches anything but
+/// `add_reaction`, so holding a broader grant never widens this tool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn github_react_reaches_no_action_but_add_reaction() {
     let (state, transport, scratch) = runtime("kinds", "aft");
@@ -506,7 +509,9 @@ async fn github_react_stops_while_this_machine_does_not_hold_the_connector_home(
 /// request path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn github_react_replies_byte_for_byte_like_the_equivalent_bot_request() {
-    // A sent reaction, each tool on its own identical runtime.
+    // A reaction that is sent: each tool runs on its own freshly built test
+    // runtime with the same grants, bot and fake GitHub, so the replies can be
+    // compared byte for byte.
     let (react_state, react_transport, _a) = runtime("same-react", "aft");
     let (bot_state, bot_transport, _b) = runtime("same-bot", "aft");
     let reacted = send(

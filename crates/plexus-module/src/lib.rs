@@ -2438,9 +2438,11 @@ fn facade_tool_reply_inner(
         }
     }
     // github_react's arguments are checked here, after the same mode, flow
-    // and audience checks as every tool, and become the request a github
-    // bot_request call would carry. Dispatch below sends that request down the
-    // bot_request path itself.
+    // and audience checks as every tool. They are turned into the same
+    // `request` object a `github` tool `bot_request` reaction would carry
+    // (action, repository, target number and reaction), and dispatch below
+    // sends it through the bot_request path, so both tools share one
+    // implementation.
     let reaction_request = if name == manifest::GITHUB_REACT_TOOL {
         match github_react::reaction_request(arguments) {
             Ok(built) => Some(built),

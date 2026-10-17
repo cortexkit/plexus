@@ -54,8 +54,10 @@ fn modes_for(name: &str) -> Vec<CallMode> {
         | ops::TOOL_WITHDRAW => {
             vec![CallMode::Classic, CallMode::Codemode, CallMode::Flow]
         }
-        // github_react acts as the stamped agent's bot, which a codemode run
-        // can never do, so it is served like github and invoke.
+        // github_react posts as the bot of the agent named in the caller's
+        // session scope. A codemode run's scope only attributes the call to an
+        // agent and never lets it act as that agent, so like github and
+        // invoke it is not served in codemode.
         "github" | "github_react" | "invoke" => vec![CallMode::Classic, CallMode::Flow],
         _ => vec![CallMode::Classic],
     }
