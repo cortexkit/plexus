@@ -2556,6 +2556,11 @@ fn facade_tool_reply_inner(
                     Err(plexus_core::github::reads::ReadError::LeaseExpired) => {
                         json!({"error":{"code":"pre_dispatch_read_incomplete","reason":"lease_expired"}})
                     }
+                    Err(plexus_core::github::reads::ReadError::Refused(
+                        "repository_not_visible",
+                    )) => {
+                        json!({"error":{"code":"repository_not_visible","message":"repository_not_visible","transmission":"not_sent"}})
+                    }
                     Err(plexus_core::github::reads::ReadError::Refused(code)) => {
                         tool_error(code, code)
                     }
@@ -12916,6 +12921,9 @@ mod stamp_invoke_tests {
 
 #[cfg(test)]
 mod github_read_frame_tests {
+    mod issue_flow_tests {
+        include!("issue_flow_read_tests.rs");
+    }
     mod ci_read_tests {
         include!("ci_read_tests.rs");
     }

@@ -38,7 +38,7 @@ The following code paths can be reached by a flow-stamped tool call and can refu
 4. GitHub bot G6 agent presence and request-selector exclusion; the latter is unified only for flow calls, preserving non-flow `agent_grant_excludes_request`.
 5. GitHub bot G8 ownership/pre-dispatch reads and G10 writes: both propagate typed governance refusals, retaining their action-specific detail in durable receipt outcomes.
 6. `github.bindings.read`: module grant existence/expiry on the handle connection (selectors intentionally do not govern binding-table visibility).
-7. `github_read`: each page's ordinary governance call, with flow scope attached for diagnostics only, preserving module-only authority.
+7. `github_read`: each page's ordinary governance call, with flow scope attached for diagnostics only, preserving module-only authority. Agent-stamped Basal flows additionally require every issue or CI repository to be bound to that agent's enabled bot before grants or reservations; agentless workspace flows apply their audience fence instead. These visibility checks never replace grants and are checked on the real call, not by this prediction.
 8. Web-search candidate selection: no eligible module grant, including expiry, selector or risk-ceiling failure.
 9. Web-search cache-miss governance recheck, when authority changes after candidate selection. Cache-hit policy refusal is a policy refusal, not a grant absence.
 
