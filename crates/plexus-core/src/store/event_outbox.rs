@@ -2556,7 +2556,8 @@ mod tests {
                 older["actor"], "octo-lantern",
                 "a new {item_kind} envelope carries the run values"
             );
-            // The same envelope as a binary without the run values stored it.
+            // Rebuild the envelope an older binary, without the run values,
+            // would have stored for this change: the same fields minus the four.
             for field in ["actor", "triggering_actor", "event", "head_repo_is_fork"] {
                 older.as_object_mut().unwrap().remove(field);
             }
