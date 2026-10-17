@@ -150,8 +150,54 @@ fn catalog_tools(definitions: &[Tool]) -> Vec<CatalogTool> {
 fn generation(tools: &[CatalogTool]) -> String {
     // Hash full definitions, not structural schema digests: descriptions and
     // capability promises are catalog content even when call pins stay valid.
-    let definitions = serde_json::to_value(tools).expect("catalog tools serialize");
+    let definitions = wire_tools(tools);
     plexus_core::jcs_sha256(&definitions).expect("facade definitions are JCS-compatible")
+}
+
+/// The `emits_events` member of a tool's catalog entry, when it has one.
+///
+/// `false` promises that no call to the tool, whatever its arguments, makes
+/// plexus emit a bus event, either directly or by relaying an upstream
+/// notification the call caused. Absent means plexus makes no promise either
+/// way. Role crate 0.9.1 adds this member as `CatalogTool.emits_events`; the
+/// crate version plexus pins predates it, so [`wire_tools`] adds it to the
+/// served entries until plexus can move to that crate.
+fn emits_events(name: &str) -> Option<bool> {
+    match name {
+        // github_react only adds a reaction, through the bot request path,
+        // which writes receipts and audit rows but no event. The two ways a
+        // reaction could come back as a plexus event are both closed:
+        // - polling: adding a reaction does not change an issue's
+        //   `updated_at` (measured on six issues), and the issue and pull
+        //   request event keys include `updated_at`, so no poll sees a new
+        //   change;
+        // - the webhook relay admits no reaction webhook types.
+        // If either stops holding, this promise must be withdrawn.
+        manifest::GITHUB_REACT_TOOL => Some(false),
+        _ => None,
+    }
+}
+
+/// Catalog tools as plexus serves them: the pinned role crate's encoding,
+/// plus `emits_events` on the tools that declare it (see [`emits_events`]).
+/// Generation, catalog digest and the reply all use this encoding, so the
+/// digests cover exactly what is served.
+fn wire_tools(tools: &[CatalogTool]) -> Value {
+    let mut wire = serde_json::to_value(tools).expect("catalog tools serialize");
+    for tool in wire
+        .as_array_mut()
+        .expect("catalog tools serialize as a list")
+    {
+        let fields = tool.as_object_mut().expect("a catalog tool is an object");
+        let name = fields
+            .get("name")
+            .and_then(Value::as_str)
+            .expect("a catalog tool has a name");
+        if let Some(emits) = emits_events(name) {
+            fields.insert("emits_events".to_owned(), Value::Bool(emits));
+        }
+    }
+    wire
 }
 
 pub(crate) fn serves_preset(preset: &str) -> bool {
@@ -259,6 +305,7 @@ fn catalog_answer(
     // A digest cannot include itself. Hash the full answer before shortening a
     // digest-only reply, so both fetch modes report exactly the same digest.
     let mut content = serde_json::to_value(&answer).expect("catalog answer serializes");
+    content["tools"] = wire_tools(&answer.tools);
     content.as_object_mut().unwrap().remove("catalog_digest");
     answer.catalog_digest =
         plexus_core::jcs_sha256(&content).expect("catalog content is JCS-compatible");
@@ -317,7 +364,9 @@ pub(crate) fn reply(name: &str, arguments: &Map<String, Value>) -> Result<Value,
         ));
     }
     let answer = cached_catalog(&request)?;
+    let tools = wire_tools(&answer.tools);
     let mut wire = serde_json::to_value(answer).expect("catalog answer serializes");
+    wire["tools"] = tools;
     if request.digest_only == Some(true) {
         // CatalogAnswer decodes omitted tools but serializes an empty list;
         // the role's digest-only wire shape contains only these two members.
@@ -417,6 +466,50 @@ mod tests {
             );
             assert!(!serves_call_mode(tool, &CallMode::Unknown("future".into())));
         }
+    }
+
+    /// The served catalog marks github_react, and no other tool, with
+    /// `emits_events: false`, and the served digest covers that member.
+    #[test]
+    fn catalog_emits_events_is_false_on_github_react_only() {
+        let mut capabilities: Vec<_> = TOOL_CAPABILITIES
+            .iter()
+            .flat_map(|(_, tags)| tags.iter().copied())
+            .collect();
+        capabilities.sort_unstable();
+        capabilities.dedup();
+        let wire = reply(
+            ops::TOOL_CATALOG,
+            json!({"params": {"capabilities": capabilities}})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        let tools = wire["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 11);
+        for tool in tools {
+            if tool["name"] == "github_react" {
+                assert_eq!(
+                    tool.get("emits_events"),
+                    Some(&json!(false)),
+                    "github_react must promise emits_events: false"
+                );
+            } else {
+                assert_eq!(
+                    tool.get("emits_events"),
+                    None,
+                    "only github_react carries emits_events: {}",
+                    tool["name"]
+                );
+            }
+        }
+        let mut content = wire.clone();
+        content.as_object_mut().unwrap().remove("catalog_digest");
+        assert_eq!(
+            wire["catalog_digest"],
+            plexus_core::jcs_sha256(&content).unwrap(),
+            "the catalog digest must cover the served emits_events member"
+        );
     }
 
     #[test]
