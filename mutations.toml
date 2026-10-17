@@ -3562,8 +3562,10 @@ expect_red = [
   "github_resolver::repository_names_match_in_any_case",
 ]
 expect_message = "/binding_owner_mismatch|full_name/"
+hub_targets = ["plexus_core"]
+hub = "One lowercase repository name is shared by binding lookup, the artifact read's repository match and the store's repository join, so their unit tests also fail when it is removed."
 build_timeout_s = 3600
-timeout_s = 120
+timeout_s = 600
 
 [[control]]
 id = "manifest-loopback-parsed-host"
@@ -4810,6 +4812,8 @@ package = "plexus-core"
 target = "--lib"
 expect_red = ["scope::tests::a_scope_acts_as_its_agent_only_when_it_delegates_under_an_authorized_owner", "scope::tests::a_non_delegating_stamp_attributes_its_agent_without_acting_as_it", "scope::tests::the_approval_reader_rule_separates_every_case", "scope::tests::a_running_call_recheck_refuses_every_undecidable_answer"]
 expect_message = "assertion `left == right` failed"
+hub_targets = ["it"]
+hub = "The same acts-as-agent rule gates GitHub bot writes and approval execution, so the facade gate and approval tests also fail when delegation is no longer required."
 build_timeout_s = 3600
 
 [[control]]
