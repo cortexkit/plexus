@@ -3124,7 +3124,7 @@ build_timeout_s = 3600
 id = "tool-catalog-generation-descriptions"
 guards = "tool.catalog generation changes when descriptions change, not just structural call pins"
 file = "crates/plexus-module/src/tool_provider.rs"
-old = "let definitions = serde_json::to_value(tools).expect(\"catalog tools serialize\");"
+old = "let definitions = wire_tools(tools);"
 new = "let definitions = serde_json::to_value(tools.iter().map(|tool| (&tool.name, &tool.schema_digest, tool.semantics, &tool.capabilities)).collect::<Vec<_>>()).expect(\"catalog tools serialize\"); // NON-VACUITY BREAK"
 test_file = "crates/plexus-module/src/tool_provider.rs"
 runner = "cargo"
@@ -3263,8 +3263,8 @@ timeout_s = 60
 id = "call-mode-codemode-github"
 guards = "bot writes and invoke never advertise codemode before run delegation is decided"
 file = "crates/plexus-module/src/tool_provider.rs"
-old = '"github" | "invoke" => vec![CallMode::Classic, CallMode::Flow],'
-new = '"github" => vec![CallMode::Classic, CallMode::Codemode, CallMode::Flow], "invoke" => vec![CallMode::Classic, CallMode::Flow], // NON-VACUITY BREAK'
+old = '"github" | "github_react" | "invoke" => vec![CallMode::Classic, CallMode::Flow],'
+new = '"github" => vec![CallMode::Classic, CallMode::Codemode, CallMode::Flow], "github_react" | "invoke" => vec![CallMode::Classic, CallMode::Flow], // NON-VACUITY BREAK'
 test_file = "crates/plexus-module/src/tool_provider.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -11754,5 +11754,87 @@ target = "--lib"
 select = "expected"
 expect_red = ["storage::relay::tests::a_job_webhook_takes_run_values_from_earlier_run_webhooks_that_publish_nothing"]
 expect_message = "a job webhook must carry its cached run's values"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "github-react-closed-arguments"
+guards = "github_react refuses every top-level argument outside repository, kind, target, reaction and request_nonce by name, before any receipt or GitHub contact"
+file = "crates/plexus-module/src/github_react.rs"
+old = '.find(|field| !FIELDS.contains(&field.as_str()))'
+new = '.find(|field| false && !FIELDS.contains(&field.as_str())) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/github_react_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_react_tests::github_react_refuses_every_undeclared_field_by_name"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-react-mutating-manifest"
+guards = "github_react advertises the Mutating execution mode, never Pure, because each call posts a reaction on GitHub"
+file = "crates/plexus-module/src/manifest.rs"
+old = "// replay, so the tool is not Pure.\n        execution_mode: ExecutionMode::Mutating,"
+new = "// replay, so the tool is not Pure.\n        execution_mode: ExecutionMode::Pure, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/manifest.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::github_react_manifest_is_mutating_with_a_closed_schema"]
+expect_message = "github_react must advertise the Mutating execution mode"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "github-react-connector-home-decided"
+guards = "github_react has an explicit connector-home decision, so it stops while this machine does not hold the role"
+file = "crates/plexus-module/src/connector_home.rs"
+old = '''    // Every call posts a reaction on GitHub as the agent's bot.
+    ("github_react", ToolEffect::Always),'''
+new = '''    /* NON-VACUITY BREAK: github_react has no decision */'''
+test_file = "crates/plexus-module/src/connector_home_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["connector_home_tests::every_advertised_tool_has_a_connector_home_decision"]
+expect_message = "tool github_react has no connector-home decision in TOOL_EFFECTS"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "github-react-reaction-only"
+guards = "github_react can only build an issue or pr reaction request, so no kind value reaches a bot write other than add_reaction"
+file = "crates/plexus-module/src/github_react.rs"
+old = '''        Some("pr") => "pr reaction",
+        _ => return Err(refuse("kind", "kind must be issue or pr".into())),'''
+new = '''        Some("pr") => "pr reaction",
+        Some(other) => other, /* NON-VACUITY BREAK */
+        _ => return Err(refuse("kind", "kind must be issue or pr".into())),'''
+test_file = "crates/plexus-module/src/github_react_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_react_tests::github_react_reaches_no_action_but_add_reaction"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-react-emits-no-events"
+guards = "tool.catalog marks github_react, and only github_react, with emits_events: false (a full lib run also reddens catalog_core_wire_vectors_match_reply, whose committed generation covers the member)"
+file = "crates/plexus-module/src/tool_provider.rs"
+old = 'manifest::GITHUB_REACT_TOOL => Some(false),'
+new = 'manifest::GITHUB_REACT_TOOL => None, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/tool_provider.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tool_provider::tests::catalog_emits_events_is_false_on_github_react_only"]
+expect_message = "github_react must promise emits_events: false"
 build_timeout_s = 3600
 timeout_s = 60

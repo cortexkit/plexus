@@ -286,6 +286,8 @@ pub const TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     ("code_search", ToolEffect::Always),
     ("github", ToolEffect::Ops(&["bot_request"])),
     ("github_read", ToolEffect::Always),
+    // Every call posts a reaction on GitHub as the agent's bot.
+    ("github_react", ToolEffect::Always),
     ("connections", ToolEffect::Ops(&["connect"])),
     ("requests", ToolEffect::Ops(&["approve", "deny"])),
     ("tool.withdraw", ToolEffect::Always),

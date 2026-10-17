@@ -541,6 +541,10 @@ async fn workspace_filter_covers_every_repository_operation_class() {
             "github",
             json!({"op":"bot_request","request_nonce":"n","request":{"repository":"o/x","action":"issue create","body":{"title":"x"}}}),
         ),
+        (
+            "github_react",
+            json!({"repository":"o/x","kind":"issue","target":{"number":42},"reaction":"eyes","request_nonce":"n"}),
+        ),
     ] {
         let reply = quiet_refusal(
             &state,
