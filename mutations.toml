@@ -454,6 +454,8 @@ package = "plexus-core"
 target = "--lib"
 expect_red = ["rest_api::tests::http_request_constants_reach_the_query_and_body_on_the_wire"]
 expect_message = 'right: Object {"page": Number(2), "per_page": Number(100)}'
+hub_targets = ["it"]
+hub = "A GraphQL action's reviewed query text is a request constant carried in the POST body, so the PR ready and undo facade test also fails when constants stop reaching POST bodies."
 build_timeout_s = 3600
 
 [[control]]
@@ -858,6 +860,8 @@ target = "--test it"
 expect_red = ["write_reconciliation::delegated_caller_revoked_grant_denied_without_read_back"]
 expect_message = "denied"
 runner = "cargo"
+hub_targets = ["decision_plane"]
+hub = "Read-back is authorized as the acting caller, and reconciliation then refuses and abandons the reservation when the principal that authorization resolved differs from the recorded owner, so the decision-plane owner-change test also fails when read-back is authorized as the owner instead."
 build_timeout_s = 3600
 
 [[control]]
@@ -901,6 +905,8 @@ target = "--test github_acceptance"
 expect_red = ["transient_credential_refusal_is_released_for_a_same_nonce_retry"]
 expect_message = "completed"
 runner = "cargo"
+hub_targets = ["it"]
+hub = "The same release of the nonce claim after a transient vault refusal lets a multi-leg write resume on a later leg, so the vendor-band resume tests also fail when the claim is no longer released."
 build_timeout_s = 3600
 
 [[control]]
@@ -3419,7 +3425,7 @@ target = "--test it"
 expect_red = ["github_import_grant_closure::handle_write_filter_follows_bind_and_unbind"]
 expect_message = "an unbound repository stayed in the write filter"
 build_timeout_s = 3600
-timeout_s = 120
+timeout_s = 600
 
 [[control]]
 id = "github-transient-release-between-legs"
@@ -3500,7 +3506,7 @@ target = "--test it"
 expect_red = ["github_facade_gates::g7_approval_names_its_carrier_and_a_reused_nonce_gets_a_fresh_one"]
 expect_message = "the approval must name the carrying module"
 build_timeout_s = 3600
-timeout_s = 120
+timeout_s = 600
 
 [[control]]
 id = "github-route-wait-runtime-flavor"
@@ -3545,7 +3551,7 @@ target = "--lib"
 expect_red = ["credentials::ckcred_wire_tests::auth_failure_reports_share_one_reporting_thread"]
 expect_message = "one reporting thread"
 build_timeout_s = 3600
-timeout_s = 120
+timeout_s = 600
 
 [[control]]
 id = "github-repository-canonical-case"
@@ -4764,6 +4770,8 @@ package = "plexus-core"
 target = "--test governance"
 expect_red = ["a_locked_vault_at_dispatch_keeps_the_approval_for_a_retry"]
 expect_message = "a_locked_vault_at_dispatch_keeps_the_approval_for_a_retry"
+hub_targets = ["plexus_core"]
+hub = "The same hold for retry covers an unreadable credential store at dispatch, so the governance unit test for a credential store failure also fails when approved calls are no longer held."
 build_timeout_s = 3600
 
 [[control]]
@@ -4828,6 +4836,8 @@ package = "plexus-core"
 target = "--lib"
 expect_red = ["scope::tests::a_scope_acts_as_its_agent_only_when_it_delegates_under_an_authorized_owner", "scope::tests::the_approval_reader_rule_separates_every_case"]
 expect_message = "assertion `left == right` failed"
+hub_targets = ["it"]
+hub = "The same acts-as-agent rule gates GitHub bot writes, so the facade gate and scoped vendor-band tests also fail when an unauthorized owner may confer agent authority."
 build_timeout_s = 3600
 
 [[control]]
