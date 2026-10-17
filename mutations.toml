@@ -1831,7 +1831,7 @@ old = """if !oversized && pages - 1 > (REQUEST_CAP - used) as u64 {
                 cursor"""
 new = """if !oversized && pages - 1 > (REQUEST_CAP - used) as u64 {
                 if let Some(job) = jobs.first().cloned() {
-                    if let Ok(CiItem::Event(event)) = ci_event(job, &attempt.run, false, floor, &repo_name, sub.project_id.clone()) { examined += 1; events.push(*event); }
+                    if let Ok(CiItem::Event(event)) = ci_event(job, &attempt.run, None, false, floor, &repo_name, sub.project_id.clone()) { examined += 1; events.push(*event); }
                 } // NON-VACUITY BREAK
                 cursor"""
 test_file = "crates/plexus-core/src/poller/ci_runs.rs"
