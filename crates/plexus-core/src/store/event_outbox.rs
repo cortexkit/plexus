@@ -2556,9 +2556,16 @@ mod tests {
                 older["actor"], "octo-lantern",
                 "a new {item_kind} envelope carries the run values"
             );
-            // Rebuild the envelope an older binary, without the run values,
-            // would have stored for this change: the same fields minus the four.
-            for field in ["actor", "triggering_actor", "event", "head_repo_is_fork"] {
+            // Rebuild the envelope an older binary, before run attribution and
+            // job execution fields were added, would have stored for this change.
+            for field in [
+                "actor",
+                "triggering_actor",
+                "event",
+                "head_repo_is_fork",
+                "runner_name",
+                "steps_run",
+            ] {
                 older.as_object_mut().unwrap().remove(field);
             }
             let older = String::from_utf8(crate::jcs::canonicalize_exact_integers(&older).unwrap())
@@ -2573,8 +2580,8 @@ mod tests {
                     )
                 })
                 .unwrap();
-            // A second copy of the same change arrives with run values; the
-            // stored envelope is not rewritten.
+            // A second copy arrives with run values and job execution fields;
+            // the stored envelope is not rewritten.
             commit(&store, subscription_id, &[make()]);
             grant(
                 &store,

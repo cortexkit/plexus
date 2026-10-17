@@ -11838,3 +11838,36 @@ expect_red = ["tool_provider::tests::catalog_emits_events_is_false_on_github_rea
 expect_message = "github_react must promise emits_events: false"
 build_timeout_s = 3600
 timeout_s = 60
+
+[[control]]
+id = "ci-job-steps-run-counts-concluded-steps"
+guards = "A CI-job envelope counts only steps with a non-null string conclusion"
+file = "crates/plexus-core/src/event_envelope.rs"
+old = '''.iter()
+                .filter(|step| step["conclusion"].as_str().is_some())
+                .count()'''
+new = '''.iter()
+                .count() /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/event_envelope.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["event_envelope::tests::ci_job_steps_run_counts_only_steps_with_a_conclusion"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "ci-job-runner-name-null-not-empty"
+guards = "A missing or empty CI-job runner name is represented as JSON null"
+file = "crates/plexus-core/src/event_envelope.rs"
+old = ".unwrap_or(Value::Null);\n        body[\"steps_run\"]"
+new = ".unwrap_or_else(|| json!(\"\")); /* NON-VACUITY BREAK */\n        body[\"steps_run\"]"
+test_file = "crates/plexus-core/src/event_envelope.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["event_envelope::tests::ci_job_runner_name_is_null_when_missing_or_empty"]
+build_timeout_s = 3600
+timeout_s = 120

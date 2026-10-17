@@ -47,6 +47,9 @@ envelopes stored before `workflow_name` was added do not contain that field; the
 stored bytes and digests remain unchanged. Likewise, CI-job and CI-run envelopes
 stored before `actor`, `triggering_actor`, `event` and `head_repo_is_fork` were
 added do not contain those fields, and keep their stored bytes and digests.
+Previously stored CI-job envelopes likewise do not acquire the subsequently
+added `runner_name` or `steps_run` fields; their stored bytes and digests remain
+unchanged.
 
 ## Fields
 
@@ -121,6 +124,11 @@ CI-job envelopes additionally always contain:
 | Field | Type (or null) | Source |
 | --- | --- | --- |
 | `workflow_name` | string | Webhooks: `workflow_job.workflow_name`; polling: `workflow_name` on the job object. Missing, empty, or non-string values are `null`. |
+| `runner_name` | string or null | The job object's `runner_name`. Missing, empty, or non-string values are `null`. |
+| `steps_run` | integer | Number of entries in the job object's `steps` array whose `conclusion` is a non-null string. Missing, empty, or non-array `steps` produce `0`. |
+
+Both webhook and polling job objects carry `runner_name` and `steps`; these
+fields are normalized from the stored job without additional GitHub requests.
 
 #### Run actor, event and fork status
 

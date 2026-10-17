@@ -146,6 +146,18 @@ pub(crate) fn envelope(
             .filter(|name| !name.is_empty())
             .map(|name| json!(name))
             .unwrap_or(Value::Null);
+        body["runner_name"] = item["runner_name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .map(|name| json!(name))
+            .unwrap_or(Value::Null);
+        body["steps_run"] = json!(item["steps"]
+            .as_array()
+            .map(|steps| steps
+                .iter()
+                .filter(|step| step["conclusion"].as_str().is_some())
+                .count())
+            .unwrap_or_default());
         for field in ["run_id", "run_attempt", "head_branch"] {
             if body[field].is_null() {
                 body[field] = item["run"][field].clone();
@@ -258,6 +270,143 @@ mod tests {
             assert!(parsed["workflow_name"].is_null());
             assert!(body.contains(r#""workflow_name":null"#));
         }
+    }
+
+    #[test]
+    fn ci_job_runner_name_is_null_when_missing_or_empty() {
+        for item in [
+            json!({}),
+            json!({"runner_name": null}),
+            json!({"runner_name": ""}),
+            json!({"runner_name": 7}),
+        ] {
+            let body = envelope(
+                KEY,
+                GITHUB_CI_JOB_COMPLETED,
+                "org/repo",
+                &item,
+                &ActorAttribution::NotEnriched,
+                &EnvelopeContext::default(),
+            )
+            .unwrap();
+            let parsed: Value = serde_json::from_str(&body).unwrap();
+            assert!(parsed["runner_name"].is_null());
+            assert!(body.contains(r#""runner_name":null"#));
+        }
+    }
+
+    #[test]
+    fn ci_job_steps_run_counts_only_steps_with_a_conclusion() {
+        let item = json!({"steps":[
+            {"conclusion":"success"},
+            {"conclusion":"failure"},
+            {"conclusion":""},
+            {"conclusion":null},
+            {},
+            {"conclusion":7}
+        ]});
+        let body = envelope(
+            KEY,
+            GITHUB_CI_JOB_COMPLETED,
+            "org/repo",
+            &item,
+            &ActorAttribution::NotEnriched,
+            &EnvelopeContext::default(),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["steps_run"], 3);
+
+        for item in [
+            json!({}),
+            json!({"steps": []}),
+            json!({"steps": {"step": 1}}),
+        ] {
+            let body = envelope(
+                KEY,
+                GITHUB_CI_JOB_COMPLETED,
+                "org/repo",
+                &item,
+                &ActorAttribution::NotEnriched,
+                &EnvelopeContext::default(),
+            )
+            .unwrap();
+            let parsed: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(parsed["steps_run"], 0);
+        }
+    }
+
+    #[test]
+    fn ci_job_never_started_failure_has_no_runner_or_steps() {
+        let item = json!({
+            "conclusion":"failure",
+            "status":"completed",
+            "runner_name":null,
+            "steps":[],
+            "started_at":"2026-10-11T00:30:15Z",
+            "completed_at":"2026-10-11T00:30:15Z"
+        });
+        assert_eq!(item["started_at"], item["completed_at"]);
+        let body = envelope(
+            KEY,
+            GITHUB_CI_JOB_COMPLETED,
+            "org/repo",
+            &item,
+            &ActorAttribution::NotEnriched,
+            &EnvelopeContext::default(),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert!(parsed["runner_name"].is_null());
+        assert_eq!(parsed["steps_run"], 0);
+    }
+
+    #[test]
+    fn ci_job_setup_failure_has_runner_and_no_steps() {
+        let item = json!({
+            "conclusion":"failure",
+            "status":"completed",
+            "runner_name":"GitHub Actions 1000008996",
+            "steps":[]
+        });
+        let body = envelope(
+            KEY,
+            GITHUB_CI_JOB_COMPLETED,
+            "org/repo",
+            &item,
+            &ActorAttribution::NotEnriched,
+            &EnvelopeContext::default(),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["runner_name"], "GitHub Actions 1000008996");
+        assert_eq!(parsed["steps_run"], 0);
+    }
+
+    #[test]
+    fn ci_job_normal_failure_has_runner_and_concluded_steps() {
+        let item = json!({
+            "conclusion":"failure",
+            "status":"completed",
+            "runner_name":"GitHub Actions 1000008996",
+            "steps":[
+                {"conclusion":"success"},
+                {"conclusion":"failure"},
+                {"conclusion":null}
+            ]
+        });
+        let body = envelope(
+            KEY,
+            GITHUB_CI_JOB_COMPLETED,
+            "org/repo",
+            &item,
+            &ActorAttribution::NotEnriched,
+            &EnvelopeContext::default(),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["runner_name"], "GitHub Actions 1000008996");
+        assert_eq!(parsed["steps_run"], 2);
     }
 
     #[test]
@@ -512,7 +661,7 @@ mod tests {
                 "head_branch":"train/callgraph-dirty-restart","head_sha":"e56c0d525fa9f387dc8fa00354851e90cf52ed0e",
                 "url":"https://github.com/cortexkit/aft/actions/runs/38098639025/job/114349743680",
                 "run_id":38098639025_i64,"run_attempt":1,"completed_at":"2026-10-11T00:45:44Z",
-                "workflow_name":"Tests",
+                "workflow_name":"Tests","runner_name":"GitHub Actions 1000008996","steps_run":11,
                 // No run context was supplied: a job whose run the relay has
                 // not cached keeps all four run fields, as nulls.
                 "actor":null,"triggering_actor":null,"event":null,"head_repo_is_fork":null
@@ -532,7 +681,7 @@ mod tests {
                 "head_branch":"fix/pi-model-discovery-readiness","head_sha":"f65b17d9d2bcd48126557b3afbe9df84691852e9",
                 "url":"https://github.com/cortexkit/magic-context/actions/runs/38083735257/job/114305774943",
                 "run_id":38083735257_i64,"run_attempt":1,"completed_at":"2026-10-10T20:26:10Z",
-                "workflow_name":"Design gate",
+                "workflow_name":"Design gate","runner_name":null,"steps_run":0,
                 "actor":null,"triggering_actor":null,"event":null,"head_repo_is_fork":null
             }),
         );
@@ -598,7 +747,7 @@ mod tests {
                 "head_branch":"fix/pi-model-discovery-readiness","head_sha":"f65b17d9d2bcd48126557b3afbe9df84691852e9",
                 "url":"https://github.com/cortexkit/magic-context/actions/runs/38083735257/job/114305774943",
                 "run_id":38083735257_i64,"run_attempt":1,"completed_at":"2026-10-10T20:26:10Z",
-                "workflow_name":"Design gate",
+                "workflow_name":"Design gate","runner_name":null,"steps_run":0,
                 "actor":"octo-checks[bot]","triggering_actor":"octo-checks[bot]",
                 "event":"pull_request_target","head_repo_is_fork":true
             }),
@@ -622,7 +771,7 @@ mod tests {
                 "head_branch":"train/callgraph-dirty-restart","head_sha":"e56c0d525fa9f387dc8fa00354851e90cf52ed0e",
                 "url":"https://github.com/cortexkit/aft/actions/runs/38098639025/job/114349743680",
                 "run_id":38098639025_i64,"run_attempt":1,"completed_at":"2026-10-11T00:45:44Z",
-                "workflow_name":"Tests",
+                "workflow_name":"Tests","runner_name":"GitHub Actions 1000008996","steps_run":11,
                 "actor":"octo-lantern","triggering_actor":"octo-lantern","event":"push",
                 "head_repo_is_fork":false
             }),
