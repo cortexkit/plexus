@@ -90,6 +90,18 @@ fn advertised_tools() -> Vec<Tool> {
         .collect()
 }
 
+/// Every capability tag any plexus tool carries, sorted bytewise with no
+/// repeats: the `tool_capabilities` list `role.describe` reports.
+fn tool_capability_union() -> Vec<String> {
+    let mut tags: Vec<String> = TOOL_CAPABILITIES
+        .iter()
+        .flat_map(|(_, tags)| tags.iter().map(|tag| (*tag).to_owned()))
+        .collect();
+    tags.sort_unstable();
+    tags.dedup();
+    tags
+}
+
 fn catalog_tools(definitions: &[Tool]) -> Vec<CatalogTool> {
     definitions
         .iter()
@@ -255,7 +267,7 @@ pub(crate) fn reply(name: &str, arguments: &Map<String, Value>) -> Result<Value,
         if let Some(field) = arguments.keys().next() {
             return Err(invalid_request(field, "role.describe takes no arguments"));
         }
-        return Ok(serde_json::to_value(RoleDescribe {
+        let mut describe = serde_json::to_value(RoleDescribe {
             majors: vec![Major {
                 version: PROVIDES.to_owned(),
                 ops: vec![
@@ -268,7 +280,20 @@ pub(crate) fn reply(name: &str, arguments: &Map<String, Value>) -> Result<Value,
             implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
             capabilities: vec![CAPABILITY_FILTER.to_owned()],
         })
-        .expect("role description serializes"));
+        .expect("role description serializes");
+        // tool-provider/v1 (from role crate 0.9.0) requires a provider that
+        // advertises the capability filter to list every tag its catalog tools
+        // carry, so a consumer can pick the tags to ask for before fetching the
+        // catalog. The crate version plexus pins predates the field, so it is
+        // added to the wire reply here.
+        describe
+            .as_object_mut()
+            .expect("role description is an object")
+            .insert(
+                "tool_capabilities".to_owned(),
+                serde_json::json!(tool_capability_union()),
+            );
+        return Ok(describe);
     }
     // The wire type permits additive members; this provider refuses axes it
     // cannot implement rather than silently returning the default catalog.
@@ -962,6 +987,40 @@ mod tests {
         assert_eq!(frame.header.ty, FrameType::Response);
         let answer: CatalogAnswer = serde_json::from_slice(&frame.body).unwrap();
         assert_eq!(names(&answer), ["web_search", "code_search"]);
+    }
+
+    /// A provider that advertises the capability filter must list, in
+    /// `role.describe`, exactly the union of tags its catalog tools carry, sorted
+    /// bytewise with no repeats. Consumers on role crate 0.9.0 refuse a
+    /// description that advertises the filter without that list.
+    #[test]
+    fn role_describe_lists_every_catalog_tool_tag() {
+        let describe = reply(ops::ROLE_DESCRIBE, &Map::new()).unwrap();
+        assert!(describe["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == CAPABILITY_FILTER));
+        let listed: Vec<String> =
+            serde_json::from_value(describe["tool_capabilities"].clone()).unwrap();
+        assert!(
+            listed
+                .windows(2)
+                .all(|pair| pair[0].as_bytes() < pair[1].as_bytes()),
+            "tool_capabilities must be sorted bytewise with no repeats: {listed:?}"
+        );
+        let answer = catalog(&all_capabilities_request(), &advertised_tools()).unwrap();
+        let mut served: Vec<String> = answer
+            .tools
+            .iter()
+            .flat_map(|tool| tool.capabilities.clone())
+            .collect();
+        served.sort_unstable();
+        served.dedup();
+        assert_eq!(
+            listed, served,
+            "tool_capabilities must equal the union of catalog tool tags"
+        );
     }
 
     /// Prefrontal registers a head's plexus tools with exactly these bytes: its head
