@@ -2145,6 +2145,7 @@ mod tests {
             inner,
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
+            ci_runs: Default::default(),
         };
         let start = std::time::Instant::now();
         for _ in 0..100 {
@@ -2340,6 +2341,7 @@ mod tests {
                         comment: Some(
                             json!({"html_url":"https://github.com/cortexkit/basal/pull/13#issuecomment-1","user":{"login":"basal-alfonso[bot]"}}),
                         ),
+                        ci_run: None,
                     };
                 }
                 keyed
@@ -2409,6 +2411,7 @@ mod tests {
             keyed.envelope_context = crate::event_envelope::EnvelopeContext {
                 source,
                 comment: None,
+                ci_run: None,
             };
             commit(&store, subscription_id, &[keyed]);
 
@@ -2496,6 +2499,114 @@ mod tests {
         assert_eq!(served.body, inserted.body);
         assert_eq!(served.digest, inserted.digest);
         assert_eq!(served.event_key, inserted.event_key);
+    }
+
+    #[test]
+    fn ci_envelopes_stored_before_run_attribution_are_served_byte_identical() {
+        let cases = [
+            (
+                "webhook_run",
+                "ci_runs",
+                "ci_run",
+                "github_ci_run_completed",
+                serde_json::from_str::<Value>(include_str!(
+                    "../../tests/fixtures/event-envelope-v2/webhook_ci_run.json"
+                ))
+                .unwrap(),
+            ),
+            (
+                "webhook_job",
+                "ci_runs",
+                "ci_job",
+                "github_ci_job_completed",
+                serde_json::from_str::<Value>(include_str!(
+                    "../../tests/fixtures/event-envelope-v2/webhook_ci_job.json"
+                ))
+                .unwrap(),
+            ),
+        ];
+        for (subscription_id, cursor_kind, item_kind, event_name, item) in cases {
+            let store = store();
+            subscription(&store, subscription_id, cursor_kind);
+            let event_headers = headers("project-ci");
+            let make = || {
+                let mut keyed = input(&item, KEY, &event_headers);
+                keyed.event.item_kind = Some(item_kind);
+                let identity = keyed.identity.as_mut().unwrap();
+                identity.event_name = event_name;
+                keyed.envelope_context = crate::event_envelope::EnvelopeContext {
+                    source: crate::event_envelope::EnvelopeSource::Webhook(Some(
+                        "completed".into(),
+                    )),
+                    comment: None,
+                    ci_run: Some(crate::event_envelope::CiRunAttribution {
+                        actor: Some("octo-lantern".into()),
+                        triggering_actor: Some("ualtinok".into()),
+                        event: Some("push".into()),
+                        head_repo_is_fork: Some(false),
+                    }),
+                };
+                keyed
+            };
+            commit(&store, subscription_id, &[make()]);
+            let inserted = store.canonical_event_by_key(KEY).unwrap().unwrap();
+            let mut older: Value =
+                serde_json::from_str(inserted.envelope_v2.as_ref().unwrap()).unwrap();
+            assert_eq!(
+                older["actor"], "octo-lantern",
+                "a new {item_kind} envelope carries the run values"
+            );
+            // Rebuild the envelope an older binary, without the run values,
+            // would have stored for this change: the same fields minus the four.
+            for field in ["actor", "triggering_actor", "event", "head_repo_is_fork"] {
+                older.as_object_mut().unwrap().remove(field);
+            }
+            let older = String::from_utf8(crate::jcs::canonicalize_exact_integers(&older).unwrap())
+                .unwrap();
+            let older_digest = hex::encode(sha2::Sha256::digest(older.as_bytes()));
+            store
+                .inner
+                .with_conn_fenced(|conn| {
+                    conn.execute(
+                        "UPDATE event_outbox SET envelope_v2=?1,digest_v2=?2 WHERE event_key=?3",
+                        (&older, &older_digest, KEY),
+                    )
+                })
+                .unwrap();
+            // A second copy of the same change arrives with run values; the
+            // stored envelope is not rewritten.
+            commit(&store, subscription_id, &[make()]);
+            grant(
+                &store,
+                &format!("consume-{subscription_id}"),
+                "consumer",
+                subscription_id,
+                "direct",
+                "[\"list_issues\"]",
+                None,
+            );
+            let EventLookupOutcome::Found(served) = store
+                .event_by_key_version(
+                    KEY,
+                    EventReader::Consumer {
+                        principal: "consumer",
+                    },
+                    now_ms(),
+                    2,
+                )
+                .unwrap()
+            else {
+                panic!("stored {item_kind} must remain visible");
+            };
+            assert_eq!(
+                served.envelope_v2.as_deref(),
+                Some(older.as_str()),
+                "an older {item_kind} envelope must be served byte-identical"
+            );
+            assert_eq!(served.digest_v2.as_deref(), Some(older_digest.as_str()));
+            assert_eq!(served.body, inserted.body);
+            assert_eq!(served.digest, inserted.digest);
+        }
     }
 
     #[test]

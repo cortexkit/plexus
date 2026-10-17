@@ -70,6 +70,11 @@ struct CiEvent {
     key: String,
     repo_id: i64,
     headers: EventHeaders,
+    /// For jobs, the run values their v2 envelope carries. The values come
+    /// from the run read in the same cycle and are deliberately not stored in
+    /// `RunMetadata`: that struct is persisted in the cursor and in each job's
+    /// v1 body, and older binaries reject unknown fields in it.
+    ci_run: Option<crate::event_envelope::CiRunAttribution>,
 }
 
 // A 404 is local to one open attempt, unlike every other read failure.
@@ -509,6 +514,9 @@ where
             }) {
                 return invalid();
             }
+            // Jobs carry the run's actor, event and fork status in their v2
+            // envelope. Take them from this run read; no extra request.
+            let run_attribution = crate::event_envelope::CiRunAttribution::from_run(&run);
             // A replacement watch must keep following attempts still in flight
             // when it was created. Only completed attempts can be historical;
             // use the same updated_at completion time as the run envelope.
@@ -601,6 +609,7 @@ where
                     match ci_event(
                         job,
                         &attempt.run,
+                        Some(&run_attribution),
                         false,
                         floor,
                         &repo_name,
@@ -629,6 +638,7 @@ where
                 match ci_event(
                     run,
                     &attempt.run,
+                    None,
                     true,
                     floor,
                     &repo_name,
@@ -670,7 +680,10 @@ where
                     headers: &event.headers,
                 }),
                 delivery_id: None,
-                envelope_context: Default::default(),
+                envelope_context: crate::event_envelope::EnvelopeContext {
+                    ci_run: event.ci_run.clone(),
+                    ..Default::default()
+                },
             })
             .collect::<Vec<_>>();
         match store.commit_keyed_poll_success(
@@ -722,6 +735,7 @@ enum CiItem {
 fn ci_event(
     mut body: Value,
     meta: &RunMetadata,
+    run_attribution: Option<&crate::event_envelope::CiRunAttribution>,
     is_run: bool,
     floor: i64,
     repo: &str,
@@ -773,6 +787,7 @@ fn ci_event(
         event_name,
         key,
         repo_id: meta.repository_id,
+        ci_run: run_attribution.cloned(),
         headers: EventHeaders {
             repo: repo.into(),
             project,
@@ -1754,6 +1769,141 @@ mod tests {
         (1..=count)
             .map(|id| job(id as i64, completed, Some("failure")))
             .collect()
+    }
+
+    /// The captured fork pull-request run, re-run by the operator: GitHub
+    /// keeps the fork owner as `actor` and names the operator as
+    /// `triggering_actor`. Ids, status and times are the fixture's own.
+    fn fork_rerun(
+        id: i64,
+        attempt: i64,
+        created: i64,
+        status: &str,
+        conclusion: Option<&str>,
+    ) -> Value {
+        let mut captured: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/event-envelope-v2/poll_ci_run.json"
+        ))
+        .unwrap();
+        let served = run(id, attempt, created, status, conclusion);
+        for field in [
+            "id",
+            "run_attempt",
+            "created_at",
+            "run_started_at",
+            "updated_at",
+            "status",
+            "conclusion",
+        ] {
+            captured[field] = served[field].clone();
+        }
+        captured["repository"]["id"] = json!(101);
+        captured["actor"]["login"] = json!("octo-quartz");
+        captured["triggering_actor"]["login"] = json!("ualtinok");
+        captured
+    }
+
+    #[test]
+    fn polled_jobs_take_run_attribution_from_the_run_read_without_extra_requests() {
+        let f = Fixture::new();
+        f.add(
+            fork_rerun(1, 2, f.now, "completed", Some("failure")),
+            vec![
+                job(5, f.now, Some("failure")),
+                job(6, f.now, Some("success")),
+            ],
+            true,
+        );
+        assert_eq!(f.poll_checked(0), 3);
+        assert_eq!(
+            f.requests()
+                .iter()
+                .map(|request| request.action.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "list_workflow_runs",
+                "list_workflow_runs",
+                RUN_READ,
+                JOBS_READ
+            ],
+            "run attribution must come from reads the poll already makes"
+        );
+        let markers = f.markers();
+        assert_eq!(markers.len(), 3);
+        for marker in &markers {
+            let envelope: Value =
+                serde_json::from_str(marker.envelope_v2.as_deref().unwrap()).unwrap();
+            for (field, expected) in [
+                ("actor", json!("octo-quartz")),
+                ("triggering_actor", json!("ualtinok")),
+                ("event", json!("pull_request_target")),
+                ("head_repo_is_fork", json!(true)),
+            ] {
+                assert_eq!(
+                    envelope[field], expected,
+                    "{} envelope must carry the run's {field}",
+                    envelope["kind"]
+                );
+            }
+            // The v1 body of a job is unchanged: no attribution was added.
+            let body: Value = serde_json::from_str(&marker.body).unwrap();
+            if envelope["kind"] == "ci_job" {
+                for field in ["actor", "triggering_actor", "event", "head_repo_is_fork"] {
+                    assert!(body.get(field).is_none(), "v1 job body gained {field}");
+                }
+            }
+        }
+    }
+
+    /// An older plexus binary deserializes the CI cursor and its run metadata
+    /// with `deny_unknown_fields`. After a newer binary polls, both the cursor's
+    /// open attempt and the `run` object stored in each job's v1 body must
+    /// still read under that older shape, frozen here.
+    #[test]
+    fn an_older_binary_reads_the_cursor_and_job_run_written_by_this_one() {
+        #[allow(dead_code)]
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct OlderRunMetadata {
+            run_id: i64,
+            run_attempt: i64,
+            head_branch: Option<String>,
+            pull_requests: Vec<Value>,
+            event: String,
+            repository_id: i64,
+        }
+        #[allow(dead_code)]
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct OlderOpenAttempt {
+            created_at: String,
+            last_checked_ms: i64,
+            run: OlderRunMetadata,
+        }
+        let f = Fixture::new();
+        // In progress, so the attempt stays open in the persisted cursor.
+        f.add(
+            fork_rerun(1, 2, f.now, "in_progress", None),
+            vec![job(5, f.now, Some("failure"))],
+            true,
+        );
+        assert_eq!(f.poll_checked(0), 1);
+        let cursor = f.cursor();
+        serde_json::from_value::<OlderOpenAttempt>(cursor["open"]["1:2"].clone())
+            .expect("an older binary must read the open attempt this binary wrote");
+        serde_json::from_value::<CiCursor>(cursor)
+            .expect("the cursor must keep its deny_unknown_fields shape");
+        let (_, job_body, _) = f
+            .events()
+            .into_iter()
+            .find(|(kind, _, _)| kind == "ci_job")
+            .unwrap();
+        serde_json::from_value::<OlderRunMetadata>(job_body["run"].clone())
+            .expect("an older binary must read the stored job's run object");
+        let envelope: Value =
+            serde_json::from_str(f.markers()[0].envelope_v2.as_deref().unwrap()).unwrap();
+        assert_eq!(envelope["actor"], "octo-quartz");
+        assert_eq!(envelope["triggering_actor"], "ualtinok");
     }
 
     #[test]

@@ -7,6 +7,116 @@ use serde_json::json;
 
 pub const MAX_SEQ: u64 = 9_007_199_254_740_991;
 
+/// Most run attempts remembered from `workflow_run` webhooks. A job webhook
+/// normally follows its run's `requested` webhook within minutes, so this
+/// holds far more than the attempts in flight at once.
+pub const CI_RUN_CACHE_CAPACITY: usize = 10_000;
+/// Oldest remembered run attempt, by relay receipt time: 24 hours.
+pub const CI_RUN_CACHE_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// (lowercase repository full name, run id, run attempt)
+type CiRunKey = (String, i64, i64);
+
+/// The actor, triggering actor, event and fork status of recent workflow run
+/// attempts, taken from `workflow_run` webhooks. A `workflow_job` webhook
+/// carries none of these values, so its v2 envelope takes them from here.
+/// A job whose run attempt is not remembered gets nulls. The cache lives in
+/// memory only and is bounded by count and by receipt age; the oldest entry
+/// is evicted first.
+#[derive(Default)]
+pub struct CiRunCache {
+    inner: std::sync::Mutex<CiRunCacheEntries>,
+}
+
+#[derive(Default)]
+struct CiRunCacheEntries {
+    /// Values, the receipt time they were stored at, and their insertion number.
+    entries:
+        std::collections::HashMap<CiRunKey, (crate::event_envelope::CiRunAttribution, i64, u64)>,
+    /// Keys by insertion number, oldest first.
+    order: std::collections::BTreeMap<u64, CiRunKey>,
+    next: u64,
+}
+
+fn ci_run_key(repo: &str, run_id: Option<&Value>, attempt: Option<&Value>) -> Option<CiRunKey> {
+    Some((
+        repo.to_ascii_lowercase(),
+        run_id?.as_i64().filter(|id| *id > 0)?,
+        attempt?.as_i64().filter(|attempt| *attempt > 0)?,
+    ))
+}
+
+impl CiRunCache {
+    /// Remember the run values of any `workflow_run` webhook, whatever its
+    /// action. Storing does not admit the webhook as an event.
+    fn remember(&self, event: &Event, received: i64) {
+        let Some((repo, _)) = repository(&event.body) else {
+            return;
+        };
+        let run = &event.body["workflow_run"];
+        let Some(key) = ci_run_key(&repo, run.get("id"), run.get("run_attempt")) else {
+            return;
+        };
+        let attribution = crate::event_envelope::CiRunAttribution::from_run(run);
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let cache = &mut *guard;
+        if let Some((_, _, old)) = cache.entries.remove(&key) {
+            cache.order.remove(&old);
+        }
+        let number = cache.next;
+        cache.next += 1;
+        cache
+            .entries
+            .insert(key.clone(), (attribution, received, number));
+        cache.order.insert(number, key);
+        let oldest_allowed = received.saturating_sub(CI_RUN_CACHE_MAX_AGE_MS);
+        while let Some((&number, key)) = cache.order.first_key_value() {
+            let expired = cache
+                .entries
+                .get(key)
+                .is_none_or(|(_, stored, _)| *stored < oldest_allowed);
+            if cache.entries.len() <= CI_RUN_CACHE_CAPACITY && !expired {
+                break;
+            }
+            let key = key.clone();
+            cache.order.remove(&number);
+            cache.entries.remove(&key);
+        }
+    }
+
+    /// The remembered values for a `workflow_job` object's run attempt, or
+    /// `None` when that attempt was not seen or was seen too long ago.
+    fn for_job(
+        &self,
+        repo: &str,
+        job: &Value,
+        received: i64,
+    ) -> Option<crate::event_envelope::CiRunAttribution> {
+        let key = ci_run_key(repo, job.get("run_id"), job.get("run_attempt"))?;
+        let cache = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        cache
+            .entries
+            .get(&key)
+            .filter(|(_, stored, _)| *stored >= received.saturating_sub(CI_RUN_CACHE_MAX_AGE_MS))
+            .map(|(attribution, _, _)| attribution.clone())
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entries
+            .len()
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Hello {
     pub v: u64,
@@ -252,7 +362,10 @@ impl PlexusStore {
                     }
                 }
                 None => {
-                    if let Err(reason) = admit(conn, event, received)? {
+                    if event.event == "workflow_run" {
+                        self.ci_runs.remember(event, received);
+                    }
+                    if let Err(reason) = admit(conn, event, received, &self.ci_runs)? {
                         conn.execute("INSERT INTO event_outbox_counters(name,value) VALUES (?1,1)
                             ON CONFLICT(name) DO UPDATE SET value=value+1", [reason.counter()])?;
                         diag!(info relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action);
@@ -311,6 +424,7 @@ fn admit(
     conn: &rusqlite::Connection,
     event: &Event,
     received: i64,
+    ci_runs: &CiRunCache,
 ) -> rusqlite::Result<Result<(), DropReason>> {
     let Some((repo, repo_id)) = repository(&event.body) else {
         return Ok(Err(DropReason::InvalidPayload));
@@ -542,6 +656,9 @@ fn admit(
             envelope_context: crate::event_envelope::EnvelopeContext {
                 source: crate::event_envelope::EnvelopeSource::Webhook(event.action.clone()),
                 comment: event.body.get("comment").cloned(),
+                ci_run: (item_kind == "ci_job")
+                    .then(|| ci_runs.for_job(&repo, payload, received))
+                    .flatten(),
             },
         },
     )?;
@@ -710,6 +827,268 @@ mod tests {
             .is_err(),
             "relay replay must not wake an idle drain"
         );
+    }
+
+    fn capture(name: &str) -> Value {
+        serde_json::from_str(match name {
+            "webhook_ci_run" => {
+                include_str!("../../tests/fixtures/event-envelope-v2/webhook_ci_run.json")
+            }
+            "webhook_ci_job" => {
+                include_str!("../../tests/fixtures/event-envelope-v2/webhook_ci_job.json")
+            }
+            "poll_ci_run" => {
+                include_str!("../../tests/fixtures/event-envelope-v2/poll_ci_run.json")
+            }
+            "poll_ci_job" => {
+                include_str!("../../tests/fixtures/event-envelope-v2/poll_ci_job.json")
+            }
+            _ => panic!("unknown capture {name}"),
+        })
+        .unwrap()
+    }
+
+    /// A relay delivery wrapping a captured run or job object, with the
+    /// repository wrapper GitHub sends alongside it.
+    fn ci_webhook(seq: u64, action: &str, field: &str, item: Value, received_at: &str) -> Event {
+        let repo = if field == "workflow_run" {
+            item["repository"]["full_name"].clone()
+        } else {
+            json!("cortexkit/aft")
+        };
+        let mut body = json!({"repository":{"id":101,"full_name":repo},
+            "sender":{"login":"octo-lantern","type":"User"}});
+        body[field] = item;
+        Event {
+            seq,
+            delivery_id: format!("ci-{seq}"),
+            event: field.into(),
+            action: Some(action.into()),
+            installation_id: 42,
+            received_at: received_at.into(),
+            stub: None,
+            body,
+        }
+    }
+
+    fn ci_relay_store() -> PlexusStore {
+        let store = PlexusStore::open(&StorageDescriptor {
+            module_id: "plexus".into(),
+            storage_namespace: new_id("relay-ci-run-cache"),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: cortexkit_store_types::StorageBackend::Sqlite {
+                path: ":memory:".into(),
+            },
+        })
+        .unwrap();
+        store
+            .insert_connection("direct", "conn-1", "github_actions", "active", &json!({}))
+            .unwrap();
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                for repo in ["aft", "magic-context"] {
+                    conn.execute(
+                        "INSERT INTO trigger_subscriptions (subscription_id, principal, connection_id,
+                            action, cadence_s, cursor_kind, schema_hash, status, created_at_ms, fixed_args)
+                         VALUES (?1, 'direct', 'conn-1', 'list_workflow_runs', 300, 'ci_runs',
+                            'hash', 'active', 1, ?2)",
+                        (
+                            format!("ci-{repo}"),
+                            json!({"owner":"cortexkit","repo":repo}).to_string(),
+                        ),
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        store
+            .relay_hello("github", &hello("stream", 1, 1, 0))
+            .unwrap();
+        store
+    }
+
+    fn stored_count(store: &PlexusStore, table: &str) -> i64 {
+        store
+            .inner
+            .with_read(|conn| {
+                conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap()
+    }
+
+    fn envelope_for(store: &PlexusStore, delivery_id: &str) -> Value {
+        let stored: String = store
+            .inner
+            .with_read(|conn| {
+                conn.query_row(
+                    "SELECT o.envelope_v2 FROM event_outbox o
+                     JOIN trigger_events e ON e.event_id = o.event_id WHERE e.delivery_id = ?1",
+                    [delivery_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        serde_json::from_str(&stored).unwrap()
+    }
+
+    fn run_fields(envelope: &Value) -> Value {
+        json!([
+            envelope["actor"],
+            envelope["triggering_actor"],
+            envelope["event"],
+            envelope["head_repo_is_fork"]
+        ])
+    }
+
+    /// `workflow_run` webhooks that are not completed publish nothing, but the
+    /// relay remembers their run values. A later job webhook for the same run
+    /// attempt carries them in its v2 envelope; a job for an unseen run gets
+    /// nulls. Covers a push run, a re-run by someone other than the pusher,
+    /// and a pull request from a fork.
+    #[test]
+    fn a_job_webhook_takes_run_values_from_earlier_run_webhooks_that_publish_nothing() {
+        let store = ci_relay_store();
+        let time = "2030-10-08T09:00:00.000Z";
+        let mut push_run = capture("webhook_ci_run");
+        push_run["id"] = json!(38098639025_i64);
+        push_run["run_attempt"] = json!(1);
+        push_run["status"] = json!("queued");
+        push_run["conclusion"] = Value::Null;
+        let mut rerun = push_run.clone();
+        rerun["run_attempt"] = json!(2);
+        rerun["triggering_actor"]["login"] = json!("ualtinok");
+        let mut in_progress = push_run.clone();
+        in_progress["status"] = json!("in_progress");
+        // The fork pull-request run that the captured polled job belongs to.
+        let mut fork_run = capture("poll_ci_run");
+        fork_run["id"] = json!(38083735257_i64);
+        fork_run["status"] = json!("queued");
+        fork_run["conclusion"] = Value::Null;
+        let runs = [
+            ("requested", push_run),
+            ("in_progress", in_progress),
+            ("requested", rerun),
+            ("requested", fork_run),
+        ];
+        for (seq, (action, run)) in (1..).zip(runs) {
+            store
+                .commit_relay_event(
+                    "github",
+                    "stream",
+                    &ci_webhook(seq, action, "workflow_run", run, time),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            (
+                stored_count(&store, "trigger_events"),
+                stored_count(&store, "event_outbox")
+            ),
+            (0, 0),
+            "run webhooks that are not completed must publish nothing"
+        );
+        assert_eq!(store.ci_runs.len(), 3, "one entry per run attempt");
+
+        let job = capture("webhook_ci_job");
+        let mut rerun_job = job.clone();
+        rerun_job["id"] = json!(114349743681_i64);
+        rerun_job["run_attempt"] = json!(2);
+        let mut fork_job = capture("poll_ci_job");
+        fork_job.as_object_mut().unwrap().remove("run");
+        let mut uncached_job = job.clone();
+        uncached_job["id"] = json!(114349743682_i64);
+        uncached_job["run_id"] = json!(38098639026_i64);
+        let mut fork_job_event = ci_webhook(8, "completed", "workflow_job", fork_job, time);
+        fork_job_event.body["repository"]["full_name"] = json!("CortexKit/Magic-Context");
+        for event in [
+            ci_webhook(5, "completed", "workflow_job", job, time),
+            ci_webhook(6, "completed", "workflow_job", rerun_job, time),
+            ci_webhook(7, "completed", "workflow_job", uncached_job, time),
+            fork_job_event,
+        ] {
+            store
+                .commit_relay_event("github", "stream", &event)
+                .unwrap();
+        }
+        const CACHED: &str = "a job webhook must carry its cached run's values";
+        assert_eq!(
+            run_fields(&envelope_for(&store, "ci-5")),
+            json!(["octo-lantern", "octo-lantern", "push", false]),
+            "{CACHED}"
+        );
+        assert_eq!(
+            run_fields(&envelope_for(&store, "ci-6")),
+            json!(["octo-lantern", "ualtinok", "push", false]),
+            "{CACHED}: a re-run keeps the pusher as actor"
+        );
+        assert_eq!(
+            run_fields(&envelope_for(&store, "ci-8")),
+            json!([
+                "octo-checks[bot]",
+                "octo-checks[bot]",
+                "pull_request_target",
+                true
+            ]),
+            "{CACHED}: the repository name matches whatever its case"
+        );
+        let uncached = envelope_for(&store, "ci-7");
+        assert_eq!(
+            run_fields(&uncached),
+            json!([null, null, null, null]),
+            "a job whose run was not seen carries nulls"
+        );
+        for field in ["actor", "triggering_actor", "event", "head_repo_is_fork"] {
+            assert!(uncached.get(field).is_some(), "{field} must be present");
+        }
+    }
+
+    #[test]
+    fn the_run_cache_is_bounded_by_count_and_by_a_day_of_receipt_age() {
+        let run = |id: i64| Event {
+            seq: 1,
+            delivery_id: "run".into(),
+            event: "workflow_run".into(),
+            action: Some("requested".into()),
+            installation_id: 42,
+            received_at: "2030-10-08T09:00:00.000Z".into(),
+            stub: None,
+            body: json!({"repository":{"id":101,"full_name":"CortexKit/AFT"},
+                "workflow_run":{"id":id,"run_attempt":1,"actor":{"login":"octo-lantern"}}}),
+        };
+        let job = |id: i64| json!({"run_id":id,"run_attempt":1});
+        let start = 1_000_000_000;
+        let cache = CiRunCache::default();
+        for id in 1..=CI_RUN_CACHE_CAPACITY as i64 + 1 {
+            cache.remember(&run(id), start);
+        }
+        assert_eq!(cache.len(), CI_RUN_CACHE_CAPACITY);
+        assert_eq!(
+            cache.for_job("cortexkit/aft", &job(1), start),
+            None,
+            "the oldest entry is evicted first"
+        );
+        assert_eq!(
+            cache
+                .for_job("cortexkit/aft", &job(2), start)
+                .and_then(|run| run.actor),
+            Some("octo-lantern".into()),
+            "the repository key ignores ASCII case"
+        );
+
+        let cache = CiRunCache::default();
+        cache.remember(&run(1), start);
+        let last_valid = start + CI_RUN_CACHE_MAX_AGE_MS;
+        assert!(cache
+            .for_job("cortexkit/aft", &job(1), last_valid)
+            .is_some());
+        assert!(cache
+            .for_job("cortexkit/aft", &job(1), last_valid + 1)
+            .is_none());
+        cache.remember(&run(2), last_valid + 1);
+        assert_eq!(cache.len(), 1, "storing prunes entries older than a day");
     }
 
     #[test]

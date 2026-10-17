@@ -11696,3 +11696,53 @@ select = "expected"
 expect_red = ["github_read_frame_tests::issue_flow_tests::agent_flow_issue_search_checks_every_repository"]
 build_timeout_s = 3600
 timeout_s = 90
+
+[[control]]
+id = "github-v2-ci-fork-detection"
+guards = "ci_run and ci_job envelopes report head_repo_is_fork true only when the head repository differs from the base repository"
+file = "crates/plexus-core/src/event_envelope.rs"
+old = '.map(|(head, base)| !head.eq_ignore_ascii_case(&base)),'
+new = '.map(|(head, base)| head.eq_ignore_ascii_case(&base)), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/event_envelope.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["event_envelope::tests::fork_detection_ignores_ascii_case_and_is_null_when_a_name_is_missing"]
+expect_message = "fork detection must compare head and base repository names case-insensitively"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "github-v2-ci-actor-not-triggering-actor"
+guards = "ci_run and ci_job envelopes take actor from actor.login, never from triggering_actor, so a re-run keeps the pusher as actor"
+file = "crates/plexus-core/src/event_envelope.rs"
+old = 'actor: text("/actor/login"),'
+new = 'actor: text("/triggering_actor/login"), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/event_envelope.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["event_envelope::tests::rerun_reports_actor_and_triggering_actor_separately"]
+expect_message = "a re-run must keep the pusher as actor"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "github-v2-ci-webhook-job-run-cache"
+guards = "A workflow_job webhook's v2 envelope takes actor, triggering_actor, event and fork status from the cached workflow_run webhooks of its run attempt"
+file = "crates/plexus-core/src/store/relay.rs"
+old = '''ci_run: (item_kind == "ci_job")
+                    .then(|| ci_runs.for_job(&repo, payload, received))
+                    .flatten(),'''
+new = '''ci_run: None, /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/store/relay.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::relay::tests::a_job_webhook_takes_run_values_from_earlier_run_webhooks_that_publish_nothing"]
+expect_message = "a job webhook must carry its cached run's values"
+build_timeout_s = 3600
+timeout_s = 60
