@@ -3124,7 +3124,7 @@ build_timeout_s = 3600
 id = "tool-catalog-generation-descriptions"
 guards = "tool.catalog generation changes when descriptions change, not just structural call pins"
 file = "crates/plexus-module/src/tool_provider.rs"
-old = "let definitions = serde_json::to_value(tools).expect(\"catalog tools serialize\");"
+old = "let definitions = wire_tools(tools);"
 new = "let definitions = serde_json::to_value(tools.iter().map(|tool| (&tool.name, &tool.schema_digest, tool.semantics, &tool.capabilities)).collect::<Vec<_>>()).expect(\"catalog tools serialize\"); // NON-VACUITY BREAK"
 test_file = "crates/plexus-module/src/tool_provider.rs"
 runner = "cargo"
@@ -11825,7 +11825,7 @@ timeout_s = 120
 
 [[control]]
 id = "github-react-emits-no-events"
-guards = "tool.catalog marks github_react, and only github_react, with emits_events: false; the committed wire vectors' generation also covers the member"
+guards = "tool.catalog marks github_react, and only github_react, with emits_events: false (a full lib run also reddens catalog_core_wire_vectors_match_reply, whose committed generation covers the member)"
 file = "crates/plexus-module/src/tool_provider.rs"
 old = 'manifest::GITHUB_REACT_TOOL => Some(false),'
 new = 'manifest::GITHUB_REACT_TOOL => None, /* NON-VACUITY BREAK */'
@@ -11834,7 +11834,7 @@ runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["tool_provider::tests::catalog_emits_events_is_false_on_github_react_only", "tool_provider::tests::catalog_core_wire_vectors_match_reply"]
+expect_red = ["tool_provider::tests::catalog_emits_events_is_false_on_github_react_only"]
 expect_message = "github_react must promise emits_events: false"
 build_timeout_s = 3600
 timeout_s = 60
