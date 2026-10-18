@@ -1,4 +1,5 @@
 use super::*;
+use crate::poller::GITHUB_ACTIONS_CONNECTION;
 use crate::repository_ownership::RepositoryWatch;
 use std::collections::BTreeMap;
 
@@ -24,13 +25,15 @@ fn ci_schedule(conn: &rusqlite::Connection) -> rusqlite::Result<(i64, i64)> {
     // trailing-hour ceiling quota admission enforces, so scheduled polls fit it.
     let cycles_per_hour = effective_ci_ceiling(conn)? / CI_CYCLE_REQUESTS;
     let cadence = if cycles_per_hour == 0 {
-        i64::MAX
+        // Quota admission still defers these polls. A finite cadence keeps
+        // scheduler stall detection meaningful when capacity is exhausted.
+        86_400
     } else {
         (count
             .saturating_mul(3600)
             .saturating_add(cycles_per_hour - 1)
             / cycles_per_hour)
-            .max(300)
+            .clamp(300, 86_400)
     };
     Ok((count, cadence))
 }
@@ -63,8 +66,7 @@ impl PlexusStore {
                 WHERE c.app_key IN ('github','github_actions','github_rest')
                 AND s.status <> 'retired'
                 AND s.project_source = 'entorhinal' AND s.project_id IS NOT NULL
-                AND lower(json_extract(s.fixed_args,'$.owner'))=lower(?1)
-                AND lower(json_extract(s.fixed_args,'$.repo'))=lower(?2)",
+                AND lower(json_extract(s.fixed_args,'$.owner') || '/' || json_extract(s.fixed_args,'$.repo'))=lower(?1 || '/' || ?2)",
             )?;
             let projects = statement
                 .query_map([owner, repo], |row| row.get::<_, String>(0))?
@@ -91,22 +93,22 @@ impl PlexusStore {
                         WHERE s.principal='direct' AND c.status='active' AND (
                             (s.connection_id='conn-github' AND c.app_key='github' AND s.action='list_issues') OR
                             (s.connection_id='conn-github-prs' AND c.app_key='github' AND s.action='list_pull_requests') OR
-                            (s.connection_id='conn-github-actions' AND c.app_key='github_actions' AND s.action='list_workflow_runs'))
+                            (s.connection_id=?1 AND c.app_key='github_actions' AND s.action='list_workflow_runs'))
                     ), replaced AS (
                         SELECT repo_name FROM eligible WHERE status='active'
                         GROUP BY repo_name HAVING count(DISTINCT action)=3
                     )
                     SELECT subscription_id FROM eligible WHERE status='suspended'
-                    AND suspended_reason='repository_identity_changed'
+                    AND suspended_reason IN ('repository_identity_changed','catalog_schema_mismatch')
                     AND repo_name IN (SELECT repo_name FROM replaced)",
                 )?;
-                let ids = statement.query_map([], |row| row.get::<_, String>(0))?
+                let ids = statement.query_map([GITHUB_ACTIONS_CONNECTION], |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 for id in &ids {
                     conn.execute("UPDATE trigger_subscriptions SET status='retired', generation=generation+1
                         WHERE principal='direct' AND subscription_id=?1", [id])?;
                     ownership_audit(conn, "direct", id, "retire",
-                        &serde_json::json!({"reason":"repository_identity_changed","replacement":"active_trio"}).to_string())?;
+                        &serde_json::json!({"reason":"obsolete_watch","replacement":"active_trio"}).to_string())?;
                 }
                 Ok(ids.len())
             })
@@ -135,11 +137,10 @@ impl PlexusStore {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?))
             })?.collect::<Result<Vec<_>, _>>()?;
-            Ok(rows.into_iter().filter_map(|(principal, id, args, project_id, source, action)| {
-                let args: Value = serde_json::from_str(&args).ok()?;
-                Some(RepositoryWatch { principal, id, action, owner: args.get("owner")?.as_str()?.into(),
-                    repo: args.get("repo")?.as_str()?.into(), project_id, source })
-            }).collect())
+            rows.into_iter().map(|(principal, id, args, project_id, source, action)| {
+                let (owner, repo) = repository_arguments(&id, &args)?;
+                Ok(RepositoryWatch { principal, id, action, owner, repo, project_id, source })
+            }).collect()
         })
     }
 
@@ -163,21 +164,20 @@ impl PlexusStore {
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows
-                .into_iter()
-                .filter_map(|(principal, id, args, project_id, source)| {
-                    let args: Value = serde_json::from_str(&args).ok()?;
-                    Some(RepositoryWatch {
+            rows.into_iter()
+                .map(|(principal, id, args, project_id, source)| {
+                    let (owner, repo) = repository_arguments(&id, &args)?;
+                    Ok(RepositoryWatch {
                         principal,
                         id,
                         action: "list_workflow_runs".into(),
-                        owner: args.get("owner")?.as_str()?.into(),
-                        repo: args.get("repo")?.as_str()?.into(),
+                        owner,
+                        repo,
                         project_id,
                         source,
                     })
                 })
-                .collect())
+                .collect()
         })
     }
 
@@ -190,7 +190,7 @@ impl PlexusStore {
         let args = serde_json::json!({"owner":issue.owner,"repo":issue.repo});
         let plan = self.prepare_subscription(
             "direct",
-            "conn-github-actions",
+            GITHUB_ACTIONS_CONNECTION,
             "list_workflow_runs",
             300,
             &serde_json::json!({}),
@@ -378,8 +378,7 @@ impl PlexusStore {
                             "SELECT EXISTS(SELECT 1 FROM trigger_subscriptions s JOIN connections c
                      ON c.principal=s.principal AND c.connection_id=s.connection_id
                      WHERE {WATCH_EXISTS_SQL} AND c.app_key='github' AND s.action=?1
-                     AND lower(json_extract(s.fixed_args,'$.owner'))=lower(?2)
-                     AND lower(json_extract(s.fixed_args,'$.repo'))=lower(?3))"
+                      AND lower(json_extract(s.fixed_args,'$.owner') || '/' || json_extract(s.fixed_args,'$.repo'))=lower(?2 || '/' || ?3))"
                         ),
                         rusqlite::params![plan.action, owner, repo],
                         |r| r.get(0),
@@ -436,8 +435,7 @@ fn insert_ci_repository_watch(
             "SELECT EXISTS(SELECT 1 FROM trigger_subscriptions s JOIN connections c
          ON c.principal=s.principal AND c.connection_id=s.connection_id
          WHERE {WATCH_EXISTS_SQL} AND c.app_key='github_actions' AND s.action='list_workflow_runs'
-         AND lower(json_extract(s.fixed_args,'$.owner'))=lower(?1)
-         AND lower(json_extract(s.fixed_args,'$.repo'))=lower(?2))"
+          AND lower(json_extract(s.fixed_args,'$.owner') || '/' || json_extract(s.fixed_args,'$.repo'))=lower(?1 || '/' || ?2))"
         ),
         rusqlite::params![issue.owner, issue.repo],
         |row| row.get(0),
@@ -454,8 +452,7 @@ fn insert_ci_repository_watch(
          AND EXISTS(SELECT 1 FROM trigger_subscriptions p JOIN connections pc
          ON pc.principal=p.principal AND pc.connection_id=p.connection_id
          WHERE p.status='active' AND pc.app_key='github' AND p.action='list_pull_requests'
-         AND lower(json_extract(p.fixed_args,'$.owner'))=lower(?3)
-         AND lower(json_extract(p.fixed_args,'$.repo'))=lower(?4))",
+          AND lower(json_extract(p.fixed_args,'$.owner') || '/' || json_extract(p.fixed_args,'$.repo'))=lower(?3 || '/' || ?4))",
             rusqlite::params![issue.principal, issue.id, issue.owner, issue.repo],
             |row| {
                 Ok((
@@ -483,13 +480,13 @@ fn insert_ci_repository_watch(
         "INSERT INTO trigger_subscriptions
          (subscription_id, principal, connection_id, action, cadence_s, cursor_kind,
           cursor_state, fixed_args, schema_hash, status, generation, created_at_ms, project_id, project_source)
-         VALUES (?1,'direct','conn-github-actions','list_workflow_runs',300,'ci_runs',?2,?3,?4,'active',0,?5,?6,?7)",
+          VALUES (?1,'direct',?8,'list_workflow_runs',300,'ci_runs',?2,?3,?4,'active',0,?5,?6,?7)",
         rusqlite::params![plan.subscription_id, seed.to_string(), plan.fixed_args.to_string(),
-            plan.schema_hash, now, project, source],
+            plan.schema_hash, now, project, source, GITHUB_ACTIONS_CONNECTION],
     )?;
     ownership_audit(conn, "direct", &plan.subscription_id, "subscribe",
         &serde_json::json!({"owner":issue.owner,"repo":issue.repo,"project":project,"source":source,
-            "connection":"conn-github-actions","action":"list_workflow_runs"}).to_string())?;
+            "connection":GITHUB_ACTIONS_CONNECTION,"action":"list_workflow_runs"}).to_string())?;
     Ok(Some(1))
 }
 
@@ -502,8 +499,8 @@ fn ci_action_hashes(
 ) -> rusqlite::Result<Option<BTreeMap<String, String>>> {
     let active: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM connections WHERE principal='direct'
-         AND connection_id='conn-github-actions' AND app_key='github_actions' AND status='active')",
-        [],
+          AND connection_id=?1 AND app_key='github_actions' AND status='active')",
+        [GITHUB_ACTIONS_CONNECTION],
         |row| row.get(0),
     )?;
     if !active {
@@ -512,13 +509,14 @@ fn ci_action_hashes(
     let mut statement = conn.prepare(
         "SELECT grant_id, principal, connection_id, grantee_principal, risk_ceiling,
          action_selectors, authority_kind, expires_at, generation FROM grants
-         WHERE principal='direct' AND connection_id='conn-github-actions'
+          WHERE principal='direct' AND connection_id=?2
          AND authority_kind=?1 AND grantee_principal='direct'",
     )?;
     let grants = statement
-        .query_map([crate::governance::AUTHORITY_POLL], |row| {
-            map_grant_row(row, now)
-        })?
+        .query_map(
+            [crate::governance::AUTHORITY_POLL, GITHUB_ACTIONS_CONNECTION],
+            |row| map_grant_row(row, now),
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut hashes = BTreeMap::new();
     for action in [
@@ -530,34 +528,31 @@ fn ci_action_hashes(
         if !grant_candidate(&grants, action, now, None).is_some_and(|g| g.authorizes(action, now)) {
             return Ok(None);
         }
-        let hash = conn.query_row(
-            "SELECT schema_hash FROM catalog_actions WHERE principal='direct'
-             AND connection_id='conn-github-actions' AND name=?1 AND status='active' AND risk='read'",
-            [action], |row| row.get::<_, String>(0),
-        ).optional()?;
+        let hash = conn
+            .query_row(
+                "SELECT schema_hash FROM catalog_actions WHERE principal='direct'
+              AND connection_id=?2 AND name=?1 AND status='active' AND risk='read'",
+                [action, GITHUB_ACTIONS_CONNECTION],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
         let Some(hash) = hash else { return Ok(None) };
         hashes.insert(action.into(), hash);
     }
     Ok(Some(hashes))
 }
 
-// Keep the metadata write and its audit inseparable, including a pair of new
-// watches. A savepoint also works inside an existing transaction.
+// Every caller must supply the fenced outer transaction, which rolls back both
+// metadata and audit on failure. A nested savepoint cannot add atomicity here.
 fn atomic<T>(
     conn: &rusqlite::Connection,
     f: impl FnOnce() -> rusqlite::Result<T>,
 ) -> rusqlite::Result<T> {
-    conn.execute_batch("SAVEPOINT repository_ownership")?;
-    match f() {
-        Ok(value) => {
-            conn.execute_batch("RELEASE repository_ownership")?;
-            Ok(value)
-        }
-        Err(error) => {
-            conn.execute_batch("ROLLBACK TO repository_ownership; RELEASE repository_ownership")?;
-            Err(error)
-        }
-    }
+    assert!(
+        !conn.is_autocommit(),
+        "ownership writes require an enclosing transaction"
+    );
+    f()
 }
 
 fn ownership_audit(
@@ -580,14 +575,65 @@ fn bot_bound_on_conn(
     repo: &str,
 ) -> rusqlite::Result<bool> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM github_repo_binding WHERE lower(repository) = lower(?1))",
+        super::event_outbox::BINDING_EXISTS_SQL,
         [format!("{owner}/{repo}")],
         |row| row.get(0),
     )
 }
 
+fn repository_arguments(id: &str, args: &str) -> rusqlite::Result<(String, String)> {
+    let value = serde_json::from_str::<Value>(args).ok();
+    let pair = value
+        .as_ref()
+        .and_then(|value| Some((value.get("owner")?.as_str()?, value.get("repo")?.as_str()?)));
+    match pair {
+        Some((owner, repo)) if !owner.is_empty() && !repo.is_empty() => {
+            Ok((owner.into(), repo.into()))
+        }
+        _ => {
+            diag!(warn governance: "repository watch {id} has malformed fixed arguments");
+            Err(rusqlite::Error::InvalidParameterName(
+                "malformed repository watch arguments".into(),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ci_cadence_stays_finite_when_no_cycle_fits() {
+        let store = fixture(true);
+        store.inner.with_conn_fenced(|conn| {
+            for n in 0..600 {
+                conn.execute("INSERT INTO trigger_subscriptions (subscription_id,principal,connection_id,action,cadence_s,cursor_kind,schema_hash,status,created_at_ms,fixed_args)
+                    VALUES (?1,'direct','conn-github-actions','list_workflow_runs',300,'ci_runs','hash','active',0,?2)",
+                    rusqlite::params![format!("capacity-{n}"),format!(r#"{{"owner":"o","repo":"r{n}"}}"#)])?;
+            }
+            Ok(())
+        }).unwrap();
+        store.reconcile_ci_cadence().unwrap();
+        assert_eq!(store.ci_quota_cadence_s().unwrap(), 86_400);
+    }
+
+    #[test]
+    fn malformed_repository_watch_arguments_are_reported() {
+        let store = fixture(true);
+        let watch = watch(&store, CI, "list_workflow_runs", "owner", "repo", 300);
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE trigger_subscriptions SET fixed_args='{}' WHERE subscription_id=?1",
+                    [&watch.subscription_id],
+                )
+            })
+            .unwrap();
+        assert!(
+            store.ci_repository_watches().is_err(),
+            "malformed watches must not silently disappear"
+        );
+    }
     use super::*;
     use crate::repository_ownership::{reconcile, RemoteResolution, RepositoryRegistry};
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
@@ -1517,7 +1563,7 @@ mod tests {
             .subscription("direct", &old.subscription_id)
             .unwrap()
             .unwrap();
-        assert_eq!(retained.status, "suspended");
+        assert_eq!(retained.status, "retired");
         assert_eq!(retained.cursor_state, old.cursor_state);
         assert_eq!(reconcile(&store, &registry, 3000).unwrap().created, 0);
     }

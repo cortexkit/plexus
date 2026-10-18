@@ -338,11 +338,13 @@ impl PlexusStore {
             return Err(StoreError::Backend("invalid relay event".into()));
         }
         let mut inserted = false;
+        let mut committed_new = false;
         self.inner.with_conn_fenced(|conn| {
             let current = cursor(conn, source)?.ok_or_else(protocol_error)?;
             if current.stream_id != stream { return Err(protocol_error()); }
             if event.seq <= current.committed_seq { return Ok(()); }
             if event.seq != current.committed_seq + 1 { return Err(protocol_error()); }
+            committed_new = true;
             match event.stub {
                 Some(Stub::Oversized) => reread(conn, event)?,
                 Some(Stub::RateLimited) => reread(conn, event)?,
@@ -362,12 +364,8 @@ impl PlexusStore {
                     }
                 }
                 None => {
-                    if event.event == "workflow_run" {
-                        self.ci_runs.remember(event, received);
-                    }
                     if let Err(reason) = admit(conn, event, received, &self.ci_runs)? {
-                        conn.execute("INSERT INTO event_outbox_counters(name,value) VALUES (?1,1)
-                            ON CONFLICT(name) DO UPDATE SET value=value+1", [reason.counter()])?;
+                        event_outbox::increment(conn, reason.counter(), 1)?;
                         diag!(info relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action);
                     } else {
                         inserted = true;
@@ -377,6 +375,9 @@ impl PlexusStore {
             conn.execute("UPDATE relay_cursor SET committed_seq=?1 WHERE source=?2 AND stream_id=?3", (event.seq, source, stream))?;
             Ok(())
         })?;
+        if committed_new && event.stub.is_none() && event.event == "workflow_run" {
+            self.ci_runs.remember(event, received);
+        }
         if inserted {
             self.outbox_ready.notify_one();
         }
@@ -420,6 +421,126 @@ fn watch(conn: &rusqlite::Connection, repo: &str, action: &str) -> rusqlite::Res
             principal:r.get(0)?, connection:r.get(1)?, subscription:r.get(2)?, project:r.get(3)? })).optional()
 }
 
+fn paired_watches(conn: &Connection, repo: &str, action: &str) -> rusqlite::Result<Vec<Watch>> {
+    let counterpart = if action == "list_issues" {
+        "list_pull_requests"
+    } else {
+        "list_issues"
+    };
+    conn.prepare("SELECT s.principal,s.connection_id,s.subscription_id,s.project_id
+        FROM trigger_subscriptions s JOIN connections c ON c.principal=s.principal AND c.connection_id=s.connection_id
+        WHERE s.status='active' AND c.status='active' AND c.app_key='github' AND s.action=?2
+        AND lower(json_extract(s.fixed_args,'$.owner') || '/' || json_extract(s.fixed_args,'$.repo'))=lower(?1)
+        AND EXISTS (SELECT 1 FROM trigger_subscriptions p JOIN connections pc
+            ON pc.principal=p.principal AND pc.connection_id=p.connection_id
+            WHERE p.principal=s.principal AND p.project_id IS s.project_id AND p.status='active'
+            AND pc.status='active' AND pc.app_key='github' AND p.action=?3
+            AND lower(json_extract(p.fixed_args,'$.owner') || '/' || json_extract(p.fixed_args,'$.repo'))=lower(?1))
+        ORDER BY s.subscription_id")?
+        .query_map((repo, action, counterpart), |r| Ok(Watch {
+            principal:r.get(0)?, connection:r.get(1)?, subscription:r.get(2)?, project:r.get(3)? }))?.collect()
+}
+
+type EventShape = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
+
+fn event_shape(event: &Event) -> Result<EventShape, DropReason> {
+    use crate::event_key::*;
+    Ok(match event.event.as_str() {
+        "issues" | "issue_comment" => (
+            GITHUB_ISSUE_CHANGED,
+            "issue",
+            "issue",
+            "list_issues",
+            "updated_at",
+        ),
+        "pull_request" | "pull_request_review" | "pull_request_review_comment" => (
+            GITHUB_PR_CHANGED,
+            "pull_request",
+            "pull_request",
+            "list_pull_requests",
+            "updated_at",
+        ),
+        "release" if event.action.as_deref() == Some("published") => (
+            GITHUB_RELEASE_PUBLISHED,
+            "release",
+            "release",
+            "get_latest_release",
+            "published_at",
+        ),
+        "workflow_job"
+            if event
+                .body
+                .pointer("/workflow_job/status")
+                .and_then(Value::as_str)
+                == Some("completed") =>
+        {
+            let failed = matches!(
+                event
+                    .body
+                    .pointer("/workflow_job/conclusion")
+                    .and_then(Value::as_str),
+                Some("failure" | "timed_out")
+            );
+            (
+                if failed {
+                    GITHUB_CI_JOB_FAILED
+                } else {
+                    GITHUB_CI_JOB_COMPLETED
+                },
+                "ci_job",
+                "workflow_job",
+                "list_workflow_runs",
+                "completed_at",
+            )
+        }
+        "workflow_run"
+            if event
+                .body
+                .pointer("/workflow_run/status")
+                .and_then(Value::as_str)
+                == Some("completed") =>
+        {
+            (
+                GITHUB_CI_RUN_COMPLETED,
+                "ci_run",
+                "workflow_run",
+                "list_workflow_runs",
+                "updated_at",
+            )
+        }
+        _ => return Err(DropReason::UnsupportedEvent),
+    })
+}
+
+fn relay_headers(repo: &str, project: Option<String>, kind: &str, payload: &Value) -> EventHeaders {
+    let prs = payload.get("pull_requests").and_then(Value::as_array);
+    EventHeaders {
+        repo: repo.into(),
+        project,
+        pr: if kind == crate::event_key::GITHUB_PR_CHANGED {
+            payload.get("number").map(Value::to_string)
+        } else {
+            prs.filter(|prs| prs.len() == 1)
+                .and_then(|prs| prs[0].get("number"))
+                .map(Value::to_string)
+        },
+        branch: payload
+            .get("head_branch")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        conclusion: payload
+            .get("conclusion")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    }
+}
+
 fn admit(
     conn: &rusqlite::Connection,
     event: &Event,
@@ -429,6 +550,14 @@ fn admit(
     let Some((repo, repo_id)) = repository(&event.body) else {
         return Ok(Err(DropReason::InvalidPayload));
     };
+    let watched: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM trigger_subscriptions s
+        JOIN connections c ON c.principal=s.principal AND c.connection_id=s.connection_id
+        WHERE s.status <> 'retired' AND c.status='active' AND c.app_key IN ('github','github_actions')
+        AND lower(json_extract(s.fixed_args,'$.owner') || '/' || json_extract(s.fixed_args,'$.repo'))=lower(?1))",
+        [&repo], |row| row.get(0))?;
+    if !watched {
+        return Ok(Err(DropReason::UnwatchedRepository));
+    }
     let recorded: Option<i64> = conn
         .query_row(
             "SELECT repo_id FROM github_repo_id_cache WHERE repo=lower(?1)",
@@ -457,91 +586,9 @@ fn admit(
             DropReason::UnwatchedRepository
         }));
     }
-    // An issue or pull request event belongs to the repository's issue and
-    // pull request watch pair. A release or CI event needs only the watch for
-    // its own action, so a repository watched for releases or CI alone still
-    // receives its webhooks.
-    let pair = if matches!(
-        event.event.as_str(),
-        "release" | "workflow_job" | "workflow_run"
-    ) {
-        None
-    } else {
-        let (Some(issue), Some(pr)) = (
-            watch(conn, &repo, "list_issues")?,
-            watch(conn, &repo, "list_pull_requests")?,
-        ) else {
-            return Ok(Err(DropReason::UnwatchedRepository));
-        };
-        if issue.project != pr.project {
-            return Ok(Err(DropReason::UnwatchedRepository));
-        }
-        Some((issue, pr))
-    };
-    let (kind, item_kind, item_field, action, timestamp_field) = match event.event.as_str() {
-        "issues" | "issue_comment" => (
-            crate::event_key::GITHUB_ISSUE_CHANGED,
-            "issue",
-            "issue",
-            "list_issues",
-            "updated_at",
-        ),
-        "pull_request" | "pull_request_review" | "pull_request_review_comment" => (
-            crate::event_key::GITHUB_PR_CHANGED,
-            "pull_request",
-            "pull_request",
-            "list_pull_requests",
-            "updated_at",
-        ),
-        "release" if event.action.as_deref() == Some("published") => (
-            crate::event_key::GITHUB_RELEASE_PUBLISHED,
-            "release",
-            "release",
-            "get_latest_release",
-            "published_at",
-        ),
-        "workflow_job"
-            if event
-                .body
-                .pointer("/workflow_job/status")
-                .and_then(Value::as_str)
-                == Some("completed") =>
-        {
-            let failed = matches!(
-                event
-                    .body
-                    .pointer("/workflow_job/conclusion")
-                    .and_then(Value::as_str),
-                Some("failure" | "timed_out")
-            );
-            (
-                if failed {
-                    crate::event_key::GITHUB_CI_JOB_FAILED
-                } else {
-                    crate::event_key::GITHUB_CI_JOB_COMPLETED
-                },
-                "ci_job",
-                "workflow_job",
-                "list_workflow_runs",
-                "completed_at",
-            )
-        }
-        "workflow_run"
-            if event
-                .body
-                .pointer("/workflow_run/status")
-                .and_then(Value::as_str)
-                == Some("completed") =>
-        {
-            (
-                crate::event_key::GITHUB_CI_RUN_COMPLETED,
-                "ci_run",
-                "workflow_run",
-                "list_workflow_runs",
-                "updated_at",
-            )
-        }
-        _ => return Ok(Err(DropReason::UnsupportedEvent)),
+    let (kind, item_kind, item_field, action, timestamp_field) = match event_shape(event) {
+        Ok(shape) => shape,
+        Err(reason) => return Ok(Err(reason)),
     };
     let Some(payload) = event.body.get(item_field).filter(|v| v.is_object()) else {
         return Ok(Err(DropReason::InvalidPayload));
@@ -559,23 +606,16 @@ fn admit(
     let Ok(key) = crate::event_key::derive_event_key(kind, &fields) else {
         return Ok(Err(DropReason::InvalidPayload));
     };
-    // The repository's project comes from its issue watch when it has one,
-    // which is where the operator or repository ownership stamps it; a
-    // repository watched for releases or CI alone takes the project of the
-    // watch the event lands on.
-    let issue_project = match &pair {
-        Some((issue, _)) => Some(issue.project.clone()),
-        None => watch(conn, &repo, "list_issues")?.map(|issue| issue.project),
+    // Pair within one principal and project; independent first-row lookups can
+    // combine unrelated owners. Fanout creates visibility rows, not extra notices.
+    let targets = if matches!(action, "list_issues" | "list_pull_requests") {
+        paired_watches(conn, &repo, action)?
+    } else {
+        watch(conn, &repo, action)?.into_iter().collect()
     };
-    let target = match (action, pair) {
-        ("list_issues", Some((issue, _))) => issue,
-        ("list_pull_requests", Some((_, pr))) => pr,
-        _ => match watch(conn, &repo, action)? {
-            Some(target) => target,
-            None => return Ok(Err(DropReason::UnwatchedRepository)),
-        },
-    };
-    let project = issue_project.unwrap_or_else(|| target.project.clone());
+    if targets.is_empty() {
+        return Ok(Err(DropReason::UnwatchedRepository));
+    }
     let change = (kind == crate::event_key::GITHUB_ISSUE_CHANGED).then(|| {
         if payload.get("created_at") == payload.get("updated_at") {
             "opened"
@@ -583,26 +623,7 @@ fn admit(
             "updated"
         }
     });
-    let prs = payload.get("pull_requests").and_then(Value::as_array);
-    let headers = EventHeaders {
-        repo: repo.clone(),
-        project,
-        pr: if kind == crate::event_key::GITHUB_PR_CHANGED {
-            payload.get("number").map(Value::to_string)
-        } else {
-            prs.filter(|prs| prs.len() == 1)
-                .and_then(|prs| prs[0].get("number"))
-                .map(Value::to_string)
-        },
-        branch: payload
-            .get("head_branch")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        conclusion: payload
-            .get("conclusion")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-    };
+    let headers = relay_headers(&repo, targets[0].project.clone(), kind, payload);
     let identity = KeyedEventIdentity {
         event_key: &key,
         event_name: kind,
@@ -637,49 +658,192 @@ fn admit(
     // the same second share a key: the second is treated as a duplicate and its
     // sender is lost. Polling behaves the same way, because a duplicate insert
     // never rewrites a stored row.
-    let inserted = insert_keyed_event_row(
-        conn,
-        &target.principal,
-        &target.connection,
-        &target.subscription,
-        &KeyedPollEventInput {
-            event: PollEventInput {
-                vendor_event_id: &event.delivery_id,
-                payload,
-                observed_at_ms: received,
-                item_kind: Some(item_kind),
-                activity_at_ms: Some(activity),
-                actor: &actor,
+    let mut inserted_any = false;
+    let mut delivery_id = Some(event.delivery_id.as_str());
+    for target in targets {
+        let headers = EventHeaders {
+            project: target.project.clone(),
+            ..headers.clone()
+        };
+        let identity = KeyedEventIdentity {
+            headers: &headers,
+            ..identity
+        };
+        let inserted = insert_keyed_event_row(
+            conn,
+            &target.principal,
+            &target.connection,
+            &target.subscription,
+            &KeyedPollEventInput {
+                event: PollEventInput {
+                    vendor_event_id: &event.delivery_id,
+                    payload,
+                    observed_at_ms: received,
+                    item_kind: Some(item_kind),
+                    activity_at_ms: Some(activity),
+                    actor: &actor,
+                },
+                identity: Some(identity),
+                delivery_id: delivery_id.take(),
+                envelope_context: crate::event_envelope::EnvelopeContext {
+                    source: crate::event_envelope::EnvelopeSource::Webhook(event.action.clone()),
+                    comment: event.body.get("comment").cloned(),
+                    ci_run: (item_kind == "ci_job")
+                        .then(|| ci_runs.for_job(&repo, payload, received))
+                        .flatten(),
+                },
             },
-            identity: Some(identity),
-            delivery_id: Some(&event.delivery_id),
-            envelope_context: crate::event_envelope::EnvelopeContext {
-                source: crate::event_envelope::EnvelopeSource::Webhook(event.action.clone()),
-                comment: event.body.get("comment").cloned(),
-                ci_run: (item_kind == "ci_job")
-                    .then(|| ci_runs.for_job(&repo, payload, received))
-                    .flatten(),
-            },
-        },
-    )?;
+        )?;
+        inserted_any |= !matches!(inserted, TriggerEventInsertOutcome::Duplicate { .. });
+    }
     // Failed poll resolutions leave a cache row with a null id. Seed that row too,
     // so a polled copy can derive the same key; never overwrite a known identity.
     conn.execute("INSERT INTO github_repo_id_cache(repo,repo_id,last_attempt_at_ms,resolved_at_ms) VALUES (lower(?1),?2,?3,?3)
         ON CONFLICT(repo) DO UPDATE SET repo_id=excluded.repo_id,
             last_attempt_at_ms=excluded.last_attempt_at_ms,resolved_at_ms=excluded.resolved_at_ms
         WHERE github_repo_id_cache.repo_id IS NULL", (&repo, repo_id, received))?;
-    Ok(
-        if matches!(inserted, TriggerEventInsertOutcome::Duplicate { .. }) {
-            Err(DropReason::AlreadyDelivered)
-        } else {
-            Ok(())
-        },
-    )
+    Ok(if !inserted_any {
+        Err(DropReason::AlreadyDelivered)
+    } else {
+        Ok(())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn paired_relay_fanout_keeps_one_canonical_notice_and_wake() {
+        let store = ci_relay_store();
+        for principal in ["alpha", "beta", "lonely"] {
+            store
+                .insert_connection(principal, "github", "github", "active", &json!({}))
+                .unwrap();
+        }
+        store.inner.with_conn_fenced(|conn| {
+            for (id,principal,action,project) in [
+                ("a-issue","alpha","list_issues","a"),
+                ("a-issue-extra","alpha","list_issues","a"),
+                ("z-pr","alpha","list_pull_requests","a"),
+                ("z-issue","beta","list_issues","b"),
+                ("a-pr","beta","list_pull_requests","b"),
+                ("unpaired","lonely","list_issues","a"),
+            ] {
+                conn.execute("INSERT INTO trigger_subscriptions(subscription_id,principal,connection_id,action,cadence_s,cursor_kind,schema_hash,status,created_at_ms,fixed_args,project_id,project_source)
+                    VALUES (?1,?2,'github',?3,300,'ordered_timestamp','hash','active',0,'{\"owner\":\"org\",\"repo\":\"repo\"}',?4,'hand')",
+                    (id,principal,action,project))?;
+            }
+            Ok(())
+        }).unwrap();
+        let mut event: Event = serde_json::from_value(json!({
+            "seq":1,"delivery_id":"issue-1","event":"issues","action":"edited","installation_id":42,
+            "received_at":"2030-10-08T09:00:00.000Z","stub":null,
+            "body":{"repository":{"id":101,"full_name":"org/repo"},"sender":{"login":"octocat"},
+                "issue":{"number":7,"created_at":"2030-10-07T09:00:00Z","updated_at":"2030-10-08T09:00:00Z"}}
+        })).unwrap();
+        store
+            .commit_relay_event("github", "stream", &event)
+            .unwrap();
+        assert_eq!(
+            stored_count(&store, "trigger_events"),
+            3,
+            "every valid target gets visibility, never a mixed-principal pair"
+        );
+        assert_eq!(
+            stored_count(&store, "event_outbox"),
+            1,
+            "fanout must not duplicate the notice that wakes an agent"
+        );
+        let canonical = store.drain_event_outbox(10).unwrap();
+        assert_eq!(canonical.len(), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(1), store.outbox_committed())
+            .await
+            .unwrap();
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            store.outbox_committed()
+        )
+        .await
+        .is_err());
+        event.seq = 2;
+        event.delivery_id = "issue-replay".into();
+        store
+            .commit_relay_event("github", "stream", &event)
+            .unwrap();
+        assert_eq!(
+            store.drain_event_outbox(10).unwrap(),
+            canonical,
+            "fanout/replay must not rewrite first-writer bytes"
+        );
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            store.outbox_committed()
+        )
+        .await
+        .is_err());
+    }
+
+    #[test]
+    fn unwatched_relay_repositories_do_not_change_cached_identity() {
+        let store = ci_relay_store();
+        store
+            .record_repo_id_resolution("org/away", Some(10), 1)
+            .unwrap();
+        let event: Event = serde_json::from_value(json!({
+            "seq":1,"delivery_id":"away","event":"issues","action":"edited","installation_id":42,
+            "received_at":"2030-10-08T09:00:00.000Z","stub":null,
+            "body":{"repository":{"id":20,"full_name":"org/away"}}
+        }))
+        .unwrap();
+        store
+            .commit_relay_event("github", "stream", &event)
+            .unwrap();
+        let health = store.event_outbox_health().unwrap();
+        assert_eq!(
+            health.relay_drops.get("relay_drop_unwatched_repository"),
+            Some(&1)
+        );
+        assert_eq!(health.repository_identity_changed, 0);
+        assert_eq!(
+            store.repo_id_cache("org/away").unwrap().unwrap().repo_id,
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn failed_relay_commit_does_not_seed_run_cache() {
+        let store = ci_relay_store();
+        let event = ci_webhook(
+            1,
+            "completed",
+            "workflow_run",
+            capture("webhook_ci_run"),
+            "2030-10-08T09:00:00.000Z",
+        );
+        store.inner.with_conn_fenced(|conn| conn.execute_batch(
+            "CREATE TRIGGER reject_cursor BEFORE UPDATE ON relay_cursor BEGIN SELECT RAISE(ABORT,'no commit'); END;")).unwrap();
+        assert!(store
+            .commit_relay_event("github", "stream", &event)
+            .is_err());
+        assert_eq!(
+            store.ci_runs.len(),
+            0,
+            "cache must reflect successful commits only"
+        );
+        assert_eq!(
+            store.relay_cursor("github").unwrap().unwrap().committed_seq,
+            0
+        );
+        store
+            .inner
+            .with_conn_fenced(|conn| conn.execute_batch("DROP TRIGGER reject_cursor"))
+            .unwrap();
+        store
+            .commit_relay_event("github", "stream", &event)
+            .unwrap();
+        assert_eq!(store.ci_runs.len(), 1);
+    }
 
     fn hello(stream: &str, next_seq: u64, oldest_seq: u64, last_acked_seq: u64) -> Hello {
         Hello {

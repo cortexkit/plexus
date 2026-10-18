@@ -159,7 +159,9 @@ pub enum QuotaRequest {
 pub enum QuotaAdmission {
     Inactive,
     Reserved {
+        /// Identifies the persisted debit for diagnostics, not a refundable token.
         reservation_id: String,
+        /// Records the cost admitted by the quota decision.
         requests: i64,
     },
     Deferred {
@@ -170,6 +172,7 @@ pub enum QuotaAdmission {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoResolutionAdmission {
     Reserved {
+        /// The same reservation id persisted in the shared quota ledger.
         reservation_id: String,
         cached_repo_id: Option<i64>,
     },
@@ -181,6 +184,7 @@ pub enum RepoResolutionAdmission {
 pub enum RepoIdUpdate {
     Resolved,
     Failed,
+    /// Describes the identity transition already logged and applied to watches.
     IdentityChanged {
         old_repo_id: i64,
         new_repo_id: i64,
@@ -346,6 +350,14 @@ const LOOKUP_METADATA: &str = "SELECT o.repo, e.principal, e.connection_id, e.su
     FROM event_outbox o JOIN trigger_events e ON e.event_id = o.event_id
     WHERE o.event_key = ?1";
 
+pub(super) const BINDING_EXISTS_SQL: &str =
+    "SELECT EXISTS(SELECT 1 FROM github_repo_binding WHERE lower(repository) = lower(?1))";
+
+const AGENT_EVENT_VISIBILITY_SQL: &str = "SELECT EXISTS(
+    SELECT 1 FROM github_repo_binding b INDEXED BY idx_github_binding_lower_repo
+    JOIN github_app_handle h ON h.app_handle_id = b.app_handle_id
+    WHERE lower(b.repository) = lower(?1) AND h.agent_id = ?2 AND h.status = 'enabled')";
+
 fn canonical_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalEvent> {
     let body: String = row.get::<_, Option<String>>(11)?.unwrap_or_default();
     let digest = if body.is_empty() {
@@ -428,9 +440,7 @@ impl PlexusStore {
             // revealing which events exist through response time.
             let (repo, owner, connection, subscription) = metadata.clone().unwrap_or_default();
             let visible = match reader {
-                EventReader::Agent { agent_id } => conn.query_row("SELECT EXISTS(
-                    SELECT 1 FROM github_repo_binding b JOIN github_app_handle h ON h.app_handle_id = b.app_handle_id
-                    WHERE lower(b.repository) = lower(?1) AND h.agent_id = ?2 AND h.status = 'enabled')",
+                EventReader::Agent { agent_id } => conn.query_row(AGENT_EVENT_VISIBILITY_SQL,
                     (&repo, agent_id), |r| r.get::<_, bool>(0))?,
                 EventReader::Consumer { principal } => {
                     let mut query = conn.prepare("SELECT g.action_selectors, s.action FROM grants g
@@ -1106,6 +1116,30 @@ mod tests {
                         []
                     )
                     .is_err());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn case_insensitive_binding_lookups_use_the_expression_index() {
+        let store = store();
+        store
+            .inner
+            .with_read(|conn| {
+                for sql in [BINDING_EXISTS_SQL, AGENT_EVENT_VISIBILITY_SQL] {
+                    let mut query = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let mut rows = query.raw_query();
+                    let mut plan = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        plan.push(row.get::<_, String>(3)?);
+                    }
+                    assert!(
+                        plan.iter().any(|row| row.contains("SEARCH")
+                            && row.contains("idx_github_binding_lower_repo")),
+                        "case-insensitive binding lookup must search its index: {plan:?}"
+                    );
+                }
                 Ok(())
             })
             .unwrap();

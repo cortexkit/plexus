@@ -1055,6 +1055,7 @@ CREATE TABLE event_outbox_failures (
     failure_reason TEXT NOT NULL,
     PRIMARY KEY(event_key,version)
 );
+CREATE INDEX idx_github_binding_lower_repo ON github_repo_binding(lower(repository));
 "#,
     },
 ];
