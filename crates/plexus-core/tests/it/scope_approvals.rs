@@ -186,6 +186,15 @@ fn fixture(label: &str) -> Fixture {
 }
 
 impl Fixture {
+    fn make_retries_due(&self) {
+        rusqlite::Connection::open(&self.path as &std::path::Path)
+            .unwrap()
+            .execute(
+                "UPDATE action_requests SET scope_checked_at_ms=0 WHERE status='approved'",
+                [],
+            )
+            .unwrap();
+    }
     /// Make the ask-first call on a route bound under `scope` (or none) and
     /// return the request it parked.
     fn park(&self, scope: Option<CallScope>) -> String {
@@ -348,6 +357,12 @@ fn a_not_yet_resynced_scope_leaves_the_approval_pending_until_it_is_confirmed() 
 
     // The owner re-synced the same session: the approval runs once.
     fixture.reader.answer(Ok(live(scope(true))));
+    assert_eq!(
+        fixture.engine.retry_waiting_approvals(16),
+        0,
+        "the retry interval still applies after a scope change"
+    );
+    fixture.make_retries_due();
     assert_eq!(fixture.engine.retry_waiting_approvals(16), 1);
     assert_eq!(fixture.sent(), 1);
     let sent = fixture.request(&request_id);
@@ -537,6 +552,7 @@ fn a_passing_failure_keeps_a_held_approval_waiting_until_it_clears() {
         .engine
         .credential_source()
         .set_success(handle, b"vendor-token".to_vec(), None, 1);
+    fixture.make_retries_due();
     assert_eq!(fixture.engine.retry_waiting_approvals(16), 1);
     assert_eq!(
         fixture.sent(),
@@ -593,6 +609,7 @@ fn a_passing_refusal_at_reauthorization_keeps_a_held_approval_waiting() {
     );
     assert_eq!(fixture.sent(), 0);
 
+    fixture.make_retries_due();
     assert_eq!(fixture.engine.retry_waiting_approvals(16), 1);
     assert_eq!(fixture.sent(), 1);
     assert_eq!(fixture.request(&request_id).status, "consumed");

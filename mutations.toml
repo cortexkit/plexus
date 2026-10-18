@@ -478,8 +478,8 @@ build_timeout_s = 3600
 id = "approval-status"
 guards = "A pending approval cannot authorize dispatch"
 file = "crates/plexus-core/src/governance.rs"
-old = "if approved.status == \"approved\"\n                        && same_call(approved)"
-new = "if (approved.status == \"approved\" || approved.status == \"pending\")\n                        && same_call(approved) /* NON-VACUITY BREAK */"
+old = "if RequestStatus::of(&approved.status) == RequestStatus::Approved\n                        && same_call(approved)"
+new = "if matches!(RequestStatus::of(&approved.status), RequestStatus::Approved | RequestStatus::Pending)\n                        && same_call(approved) /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/tests/governance.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -672,8 +672,12 @@ build_timeout_s = 3600
 id = "approval-already-decided"
 guards = "Approving an already approved or denied request names approval_already_decided"
 file = "crates/plexus-core/src/governance.rs"
-old = "\"approved\" | \"denied\" => PolicyDenial::ApprovalAlreadyDecided,"
-new = "\"approved\" | \"denied\" => PolicyDenial::ApprovalExpired, /* NON-VACUITY BREAK */"
+old = '''RequestStatus::Approved | RequestStatus::Denied => {
+                    PolicyDenial::ApprovalAlreadyDecided
+                }'''
+new = '''RequestStatus::Approved | RequestStatus::Denied => {
+                    PolicyDenial::ApprovalExpired /* NON-VACUITY BREAK */
+                }'''
 test_file = "crates/plexus-core/tests/governance.rs"
 package = "plexus-core"
 target = "--test governance"
@@ -984,8 +988,8 @@ build_timeout_s = 3600
 id = "revocation-journal-malformed-refuses"
 guards = "A malformed revocation journal refuses restored storage instead of silently resurrecting authority"
 file = "crates/plexus-core/src/grant_journal.rs"
-old = "        .collect::<Result<Vec<_>, _>>()?;\n    if let Some(tail) = torn_tail {"
-new = "        .filter_map(Result::ok)\n        .collect::<Vec<_>>(); /* NON-VACUITY BREAK */\n    if let Some(tail) = torn_tail {"
+old = 'Err(error) if complete =>'
+new = 'Err(error) if false && complete => /* NON-VACUITY BREAK */'
 test_file = "crates/plexus-core/src/import_store/tests.rs"
 package = "plexus-core"
 target = "--lib"
@@ -4762,8 +4766,8 @@ build_timeout_s = 3600
 id = "governance-vault-failure-holds-approval"
 guards = "An approved call refused at dispatch for a passing reason, before the claim consumed its approval, is held for the scheduler's retry"
 file = "crates/plexus-core/src/governance.rs"
-old = "        if outcome.retryability == Retryability::AutoRetryable\n            && matches!"
-new = "        if false && outcome.retryability == Retryability::AutoRetryable /* NON-VACUITY BREAK */\n            && matches!"
+old = "        if matches!(&outcome.outcome, TransportOutcome::NotSent { code, .. }"
+new = "        if false && matches!(&outcome.outcome, TransportOutcome::NotSent { code, .. } /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/tests/governance.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -5452,7 +5456,7 @@ timeout_s = 120
 id = "ensure-action-request-single-transaction"
 guards = "Create-or-reuse of an unkeyed approval request looks up and inserts in one transaction, so an identical write landing in between is reused rather than duplicated"
 edits = [
-  { file = "crates/plexus-core/src/storage.rs", old = '''race_point("action_request_insert");''', new = '''if let Some(existing) = self.inner.with_conn(|conn| find_action_request_by_shape_on_conn(conn, principal, connection_id, action, args, schema_hash, now_ms(), scope))? { return Ok(existing.request_id); } /* NON-VACUITY BREAK: lookup outside the insert transaction */
+  { file = "crates/plexus-core/src/storage.rs", old = '''race_point("action_request_insert");''', new = '''if let Some(existing) = self.inner.with_conn(|conn| find_action_request_by_shape_on_conn(conn, principal, connection_id, action, args, schema_hash, now_ms(), scope, requester))? { return Ok(existing.request_id); } /* NON-VACUITY BREAK: lookup outside the insert transaction */
         race_point("action_request_insert");''' },
   { file = "crates/plexus-core/src/storage.rs", old = '''            )? {
                 return Ok(existing.request_id);
@@ -6446,8 +6450,8 @@ timeout_s = 120
 id = "consent-held-detach-deadline-reserve"
 guards = "Reserve time to commit detach before the held call budget ends"
 file = "crates/plexus-core/src/consent_card.rs"
-old = ".saturating_sub(CONTROL_RPC_TIMEOUT)"
-new = ".saturating_sub(Duration::ZERO) /* NON-VACUITY BREAK */"
+old = "let wait = remaining\n                .saturating_sub(CONTROL_RPC_TIMEOUT)"
+new = "let wait = remaining\n                .saturating_sub(Duration::ZERO) /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/consent_card.rs"
 package = "plexus-core"
 target = "--lib"
@@ -7523,7 +7527,7 @@ guards = "Incomplete ownership reads leave an auditable authorization refusal"
 file = "crates/plexus-core/src/governance.rs"
 old = '''.is_some_and(|seams| seams.ownership_reads_complete(&request))
         {
-            let denial = Denial::StoreFailure;
+            let denial = Denial::OwnershipProofMissing;
             self.audit_denial(
                 &request,
                 &args_hash,
@@ -7535,7 +7539,7 @@ old = '''.is_some_and(|seams| seams.ownership_reads_complete(&request))
             return Err(denial);'''
 new = '''.is_some_and(|seams| seams.ownership_reads_complete(&request))
         {
-            return Err(Denial::StoreFailure); // NON-VACUITY BREAK'''
+            return Err(Denial::OwnershipProofMissing); // NON-VACUITY BREAK'''
 test_file = "crates/plexus-core/src/governance.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -7743,9 +7747,11 @@ id = "allow-verdict-persistence-fails-closed"
 guards = "A failed decision-plane Allow status/ID write refuses before a reservation or vendor dispatch"
 file = "crates/plexus-core/src/governance.rs"
 old = '''eprintln!(error governance: "could not record decision {decision_id} on request {intent_id}: {error}");
+                    self.report_unsent_plane_allow(request, connection, action, args_snapshot_hash, &decision_id, &Denial::StoreFailure);
                     Denial::StoreFailure
                 })?;'''
 new = '''eprintln!(error governance: "could not record decision {decision_id} on request {intent_id}: {error}");
+                    self.report_unsent_plane_allow(request, connection, action, args_snapshot_hash, &decision_id, &Denial::StoreFailure);
                     Denial::StoreFailure
                 }).or::<Denial>(Ok(true))?; // NON-VACUITY BREAK'''
 test_file = "crates/plexus-core/tests/decision_plane.rs"
@@ -11869,5 +11875,525 @@ package = "plexus-core"
 target = "--lib"
 select = "expected"
 expect_red = ["event_envelope::tests::ci_job_runner_name_is_null_when_missing_or_empty"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-policy-row-pin"
+guards = "Claim pins governing policy identity as well as its generation"
+file = "crates/plexus-core/src/storage.rs"
+old = '&& policy.as_ref().map(|value| &value.policy_id) == reservation.snapshot.policy_id.as_ref()'
+new = '&& true /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::claim_pins_policy_identity_not_only_generation"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-module-grant-layer"
+guards = "Module matching excludes agent-keyed grant rows"
+file = "crates/plexus-core/src/storage.rs"
+old = 'AND agent_id IS NULL'
+new = '/* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::module_matching_never_uses_an_agent_row"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-claim-module-expiry"
+guards = "Claim rechecks the authorizing module grant expiry"
+file = "crates/plexus-core/src/storage.rs"
+old = 'WHERE principal = ?1 AND (expires_at IS NULL OR expires_at > ?5) AND grant_id = ('
+new = 'WHERE principal = ?1 AND (?5 IS NOT NULL) AND grant_id = ( /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::claim_rechecks_module_and_agent_expiry"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-claim-agent-expiry"
+guards = "Claim rechecks the pinned agent grant expiry independently"
+file = "crates/plexus-core/src/storage.rs"
+old = 'WHERE principal = ?1 AND (expires_at IS NULL OR expires_at > ?5) AND grant_id = reservations.agent_grant_id)'
+new = 'WHERE principal = ?1 AND grant_id = reservations.agent_grant_id) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::claim_rechecks_module_and_agent_expiry"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-severity-before-consent"
+guards = "Unavailable severe execution refuses before asking for consent"
+file = "crates/plexus-core/src/governance.rs"
+old = 'if matches!(severity, Severity::S3 | Severity::S4) && self.decision_plane.is_none() {'
+new = 'if false && matches!(severity, Severity::S3 | Severity::S4) && self.decision_plane.is_none() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::severe_ask_first_refuses_before_creating_consent"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-object-arguments"
+guards = "Non-object non-null arguments cannot escape schema review"
+file = "crates/plexus-core/src/governance.rs"
+old = 'if !args.is_object() && !args.is_null() {'
+new = 'if false && !args.is_object() && !args.is_null() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::non_object_arguments_are_not_reviewable"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-unspent-approval-retry"
+guards = "Terminal preclaim refusals cannot strand unspent approval"
+file = "crates/plexus-core/src/governance.rs"
+old = 'if matches!(&outcome.outcome, TransportOutcome::NotSent { code, .. }'
+new = 'if false && matches!(&outcome.outcome, TransportOutcome::NotSent { code, .. } /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::terminal_preclaim_refusal_keeps_approval_retryable"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-denial-audit"
+guards = "Operator refusal survives approval-row retention in the audit journal"
+file = "crates/plexus-core/src/governance.rs"
+old = 'self.audit_approval_resolution(&request, decider, "approval_denied");'
+new = '/* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::operator_denial_is_in_append_only_audit"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-poll-not-interactive"
+guards = "Poll authority cannot create an approval later dispatched as invoke"
+file = "crates/plexus-core/src/governance.rs"
+old = 'request.supports_per_call_approval && request.authority_kind == AUTHORITY_INVOKE,'
+new = 'request.supports_per_call_approval, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::poll_authority_cannot_create_interactive_approval"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-waiting-backoff"
+guards = "Repeated scheduler passes do not immediately retry waiting approvals"
+file = "crates/plexus-core/src/storage.rs"
+old = 'AND (expires_at <= ?3 OR scope_checked_at_ms <= ?4)'
+new = 'AND (?3 IS NOT NULL AND ?4 IS NOT NULL) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::waiting_approval_batches_back_off_between_attempts"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-routing-shape-pin"
+guards = "Approval cannot be replayed against different crate-internal routing"
+file = "crates/plexus-core/src/governance.rs"
+old = '&& routing_matches'
+new = '&& (routing_matches || true) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::approved_routing_is_persistent_and_immutable"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-effective-audit-severity"
+guards = "Decision audit severity is effective severity rather than vendor tier"
+file = "crates/plexus-core/src/governance.rs"
+old = '.map(|severity| severity.as_str().to_string()),'
+new = '.map(|_severity| "S1".to_string()), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::decision_and_dispatch_audit_use_effective_severity"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-unclaimable-abandoned"
+guards = "Stale arguments invalidate rather than leave a reserved row claimable"
+file = "crates/plexus-core/src/governance.rs"
+old = 'if !claimable {'
+new = 'if false && !claimable { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::stale_arguments_and_grant_hash_abandon_reservations"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-resource-before-plane"
+guards = "Local resource refusals do not create an approved decision-plane verdict"
+file = "crates/plexus-core/src/governance.rs"
+old = 'resource_denial(connection, action, args)'
+new = 'None /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/tests/decision_plane.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test decision_plane"
+select = "expected"
+expect_red = ["local_resource_refusal_precedes_the_decision_plane"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-agent-revocation-snapshot"
+guards = "Immutable revocation snapshots identify the revoked agent"
+file = "crates/plexus-core/src/grant_journal.rs"
+old = 'created_at_ms, ?4, ?5, agent_id'
+new = 'created_at_ms, ?4, ?5, NULL /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::revoked_agent_identity_is_preserved_in_immutable_snapshot"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-journal-complete-records"
+guards = "Malformed complete revocation lines refuse replay instead of restoring authority"
+file = "crates/plexus-core/src/grant_journal.rs"
+old = 'Err(error) if complete =>'
+new = 'Err(error) if false && complete => /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/grant_journal.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["grant_journal::tests::a_malformed_line_that_ends_in_a_newline_refuses_the_journal"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-ownership-refusal-type"
+guards = "Missing facade ownership proof is a typed terminal refusal, not store failure"
+file = "crates/plexus-core/src/governance.rs"
+old = 'let denial = Denial::OwnershipProofMissing;'
+new = 'let denial = Denial::StoreFailure; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::facade_write_reservation_waits_for_ownership_reads"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-admin-action-ceiling"
+guards = "Approving and denying require admin authority for the request action and risk"
+file = "crates/plexus-core/src/governance.rs"
+old = 'Ok(scoped_grant_refusal(grant.as_ref(), &request.action, &action.risk, now).is_none())'
+new = 'Ok(true) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::admin_approval_and_denial_honor_selector_and_risk"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-requester-shape-key"
+guards = "Different carriers never share a shape-reused approval request"
+file = "crates/plexus-core/src/storage.rs"
+old = 'AND requester = ?10'
+new = 'AND (?10 IS NOT NULL) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::shape_reuse_never_crosses_requesters"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-secret-argument-boundary"
+guards = "Internal callers cannot forward recursive credential-named arguments"
+file = "crates/plexus-core/src/governance.rs"
+old = 'if crate::secret_input::contains_secret_input(&request.args) {'
+new = 'if false && crate::secret_input::contains_secret_input(&request.args) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::internal_calls_refuse_recursive_credential_material"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-read-filter-required"
+guards = "Missing allowlisted read paths refuse rather than accepting vendor defaults"
+file = "crates/plexus-core/src/governance.rs"
+old = 'return Some(ResourceDenial::MissingRequiredFilter(key.clone()));'
+new = 'return None; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::missing_allowlisted_read_path_is_refused_and_nested_paths_resolve"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-consent-pending-backoff"
+guards = "An immediate pending consent reply cannot spin a held call's RPC loop"
+file = "crates/plexus-core/src/consent_card.rs"
+old = 'std::thread::sleep(pause);'
+new = 'std::thread::sleep(Duration::ZERO); /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/consent_card.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["consent_card::tests::immediate_pending_replies_are_paced"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-poll-regrant-issuance"
+guards = "Regranting poll authority mints an id that old journal records cannot revoke"
+file = "crates/plexus-core/src/store/github/mod.rs"
+old = 'crate::storage::new_id(&format!("github-grant:{}:poll", grant.app_handle_id))'
+new = 'format!("github-grant:{}:poll", grant.app_handle_id) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/tests/it/github_import_grant_closure.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_import_grant_closure::poll_regrant_survives_restart_while_restored_issuance_stays_revoked"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-approved-routing-restored"
+guards = "Approved dispatch restores routing outside vendor arguments"
+file = "crates/plexus-core/src/governance.rs"
+old = 'authorization.resolved_repository = routing["repository"].as_str().map(str::to_owned);'
+new = 'authorization.resolved_repository = None; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::approved_dispatch_restores_internal_repository"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-reservation-failure-report"
+guards = "Reservation failures after plane approval report an unsent refusal"
+file = "crates/plexus-core/src/governance.rs"
+old = '.any(|_| plane.report_outcome(&report).is_ok())'
+new = '.any(|_| true) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/tests/decision_plane.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test decision_plane"
+select = "expected"
+expect_red = ["reservation_failure_reports_refusal_after_plane_approval"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-report-failure-not-denial"
+guards = "A reporting failure does not rewrite execution as an authority denial"
+file = "crates/plexus-core/src/governance.rs"
+old = 'decision: if matches!(report.terminal,'
+new = 'decision: if false && matches!(report.terminal, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/tests/decision_plane.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test decision_plane"
+select = "expected"
+expect_red = ["a_failing_outcome_report_is_retried_then_audited"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-unknown-policy-effect"
+guards = "Unknown policy effects cannot widen authority through fallback ranking"
+file = "crates/plexus-core/src/governance.rs"
+old = '_ => Self::Block,'
+new = '_ => Self::Allow, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::unknown_effects_and_statuses_fail_closed"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-missing-row-stale"
+guards = "Deleted connection rows invalidate the claim without becoming a store error"
+file = "crates/plexus-core/src/storage.rs"
+old = '''COALESCE((SELECT generation FROM connections
+                             WHERE principal = ?1 AND connection_id = ?2), -1),'''
+new = '''(SELECT generation FROM connections
+                             WHERE principal = ?1 AND connection_id = ?2), /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::missing_connection_or_action_invalidates_claim_without_store_error"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-search-every-repository"
+guards = "A trusted multi-repository search selection must fit the connection allowlist in full"
+file = "crates/plexus-core/src/governance.rs"
+old = 'for repository in repositories {'
+new = 'for repository in repositories.iter().take(1) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::checked_search_selection_requires_every_repository_to_be_allowed"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-grant-hash-abandoned"
+guards = "A dispatch grant-hash mismatch invalidates its unsent reservation"
+file = "crates/plexus-core/src/governance.rs"
+old = '''_ => {
+                    self.abandon_unsent_reservation(reservation);
+                    self.audit_dispatch_denial(reservation, "grant_hash_mismatch");'''
+new = '''_ => {
+                    /* NON-VACUITY BREAK */
+                    self.audit_dispatch_denial(reservation, "grant_hash_mismatch");'''
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::stale_arguments_and_grant_hash_abandon_reservations"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-scope-precheck-before-work"
+guards = "Waiting on an unconfirmed scope does not create reservations or authorization audit noise"
+file = "crates/plexus-core/src/governance.rs"
+old = 'if let Some(bound) = approval_scope_of(&request) {'
+new = 'if let Some(bound) = approval_scope_of(&request).filter(|_| false) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::waiting_scope_precheck_does_not_reserve_or_audit_again"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-consent-resolution-audit"
+guards = "Consent denial, expiry and withdrawal remain in append-only audit after request retention"
+file = "crates/plexus-core/src/governance.rs"
+old = '''self.audit_approval_resolution(
+                    &request,
+                    &format!("{CONSENT_CARD_DECIDER_PREFIX}{id}"),
+                    code,
+                );'''
+new = '/* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::consent_denial_expiry_and_withdrawal_are_audited"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-plane-intent-routing"
+guards = "Decision-plane-created intents retain routing separately from vendor arguments"
+file = "crates/plexus-core/src/governance.rs"
+old = "        };\n\n        if request.origin != RequestOrigin::Facade"
+new = "        };\n\n        if false && request.origin != RequestOrigin::Facade /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/decision_plane.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test decision_plane"
+select = "expected"
+expect_red = ["intent_id_stable_across_transient_reattempt_and_fresh_for_new_write"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "governance-verdict-persistence-refusal-report"
+guards = "A valid plane allow that cannot be persisted is reported refused before returning"
+file = "crates/plexus-core/src/governance.rs"
+old = 'self.report_unsent_plane_allow(request, connection, action, args_snapshot_hash, &decision_id, &Denial::StoreFailure);'
+new = '/* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/tests/decision_plane.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test decision_plane"
+select = "expected"
+expect_red = ["a_failed_allow_verdict_write_refuses_before_reservation_or_dispatch"]
 build_timeout_s = 3600
 timeout_s = 120

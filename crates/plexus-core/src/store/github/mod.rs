@@ -2132,8 +2132,11 @@ impl PlexusStore {
                 })
                 .cloned()
                 .collect();
-            let poll_grant_id = format!("github-grant:{}:poll", grant.app_handle_id);
-            let existing = rows.iter().find(|(id, _)| id == &poll_grant_id);
+            let existing = rows.first();
+            // Reuse live authority by its key, never by a deterministic mint id.
+            // A revoked issuance remains journaled across database restores.
+            let poll_grant_id = existing.map(|(id, _)| id.clone())
+                .unwrap_or_else(|| crate::storage::new_id(&format!("github-grant:{}:poll", grant.app_handle_id)));
             let op = match (added.is_empty(), existing.is_some()) {
                 (true, _) => "unchanged",
                 (false, true) => "extend",
@@ -2595,6 +2598,7 @@ mod facade_seam_tests {
             risk: Risk::Write,
             severity: Severity::S1,
             snapshot: SnapshotGenerations {
+                policy_id: None,
                 connection: 0,
                 catalog_action: 0,
                 grant: 0,

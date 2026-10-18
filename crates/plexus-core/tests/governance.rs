@@ -2030,10 +2030,9 @@ fn read_with_non_allowlisted_resource_value_denies_value_not_allowed() {
     let _ = fs::remove_file(path);
 }
 
-/// Intentional stale-open-read: omitting a filter key on a read does not deny.
-/// A future change to require keys on reads must update this test deliberately.
+/// An omitted allowlisted key must not select an unreviewed vendor default.
 #[test]
-fn read_omitting_filter_key_passes_resource_gate_intentional_stale_open_read() {
+fn read_omitting_allowlisted_filter_key_is_refused() {
     let (engine, path) = seed("read-omit-filter-key");
     engine
         .store()
@@ -2050,9 +2049,12 @@ fn read_omitting_filter_key_passes_resource_gate_intentional_stale_open_read() {
         .expect("set filters");
     add_action_with_policy(&engine, "list_events", "read", "allow", "read");
     let request = AuthorizationRequest::new("direct", "conn-1", "list_events", json!({}));
-    engine
-        .authorize(request)
-        .expect("read omitting filter key is intentional stale-open-read (passes gate)");
+    assert_eq!(
+        engine.authorize(request),
+        Err(Denial::ResourceFilter(
+            ResourceDenial::MissingRequiredFilter("calendar_allowlist".into())
+        ))
+    );
     let _ = fs::remove_file(path);
 }
 

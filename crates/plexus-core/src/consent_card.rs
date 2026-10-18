@@ -77,13 +77,6 @@ impl ElicitationCallError {
             Self::Transport => "consent_route_unreadable",
         }
     }
-
-    /// True when Cingulate answered with a refusal: asking again with
-    /// the same input gets the same refusal. Anything else (the request was
-    /// lost or the reply unreadable) may succeed on a later attempt.
-    pub fn is_refusal(&self) -> bool {
-        matches!(self, Self::Refused { .. })
-    }
 }
 
 /// Calls Cingulate under the held call's daemon scope selector. The timeout
@@ -332,6 +325,7 @@ impl ConsentCards {
                     CONTROL_RPC_TIMEOUT.min(remaining),
                 );
             }
+            let started = Instant::now();
             let record = match self.route.call_scoped(
                 scope,
                 CONSENT_AWAIT,
@@ -353,6 +347,16 @@ impl ConsentCards {
             if record.get("state").and_then(Value::as_str) != Some("pending") {
                 return Ok(record);
             }
+            // A peer may answer pending without honoring its long-poll timeout.
+            // Pace those replies without spending the time reserved for detach.
+            let pause = Duration::from_millis(250)
+                .saturating_sub(started.elapsed())
+                .min(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .saturating_sub(CONTROL_RPC_TIMEOUT),
+                );
+            std::thread::sleep(pause);
         }
     }
 
@@ -508,6 +512,33 @@ mod tests {
             delegates: true,
             owner_authorized: true,
         }
+    }
+
+    #[test]
+    fn immediate_pending_replies_are_paced() {
+        struct Immediate(std::sync::Mutex<Vec<Instant>>);
+        impl ElicitationRoute for Immediate {
+            fn call_scoped(
+                &self,
+                _: &CallScope,
+                operation: &str,
+                _: Value,
+                _: Duration,
+            ) -> Result<Value, ElicitationCallError> {
+                assert_eq!(operation, CONSENT_AWAIT);
+                let mut calls = self.0.lock().unwrap();
+                calls.push(Instant::now());
+                Ok(json!({"state": if calls.len()==1 { "pending" } else { "answered" }}))
+            }
+        }
+        let route = Arc::new(Immediate(std::sync::Mutex::new(Vec::new())));
+        let reply = ConsentCards::new(route.clone())
+            .wait_until(&scope(), "card", Instant::now() + Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(reply["state"], "answered");
+        let calls = route.0.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[1].duration_since(calls[0]) >= Duration::from_millis(240));
     }
 
     #[test]
