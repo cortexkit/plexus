@@ -27,6 +27,7 @@ serde_path_to_error = { workspace = true }
 ryu-js = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+getrandom = "0.3"
 zeroize = { workspace = true }
 rusqlite = { workspace = true }
 rustix = { version = "1", features = ["process"] }

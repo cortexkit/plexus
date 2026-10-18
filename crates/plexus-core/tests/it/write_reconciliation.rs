@@ -133,7 +133,8 @@ fn status(f: &Fixture) -> (String, Option<String>) {
         .engine
         .store()
         .list_write_reconciliations("direct")
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(rows.len(), 1);
     (rows[0].status.clone(), rows[0].reason.clone())
 }
@@ -187,6 +188,7 @@ fn completed_write_has_no_pending_record() {
         .store()
         .list_write_reconciliations("direct")
         .unwrap()
+        .0
         .is_empty());
 }
 
@@ -268,7 +270,8 @@ fn delegated_caller_revoked_grant_denied_without_read_back() {
         f.engine
             .store()
             .list_write_reconciliations("delegate")
-            .unwrap()[0]
+            .unwrap()
+            .0[0]
             .status,
         "denied"
     );
@@ -277,6 +280,7 @@ fn delegated_caller_revoked_grant_denied_without_read_back() {
         .store()
         .list_write_reconciliations("stranger")
         .unwrap()
+        .0
         .is_empty());
 }
 
