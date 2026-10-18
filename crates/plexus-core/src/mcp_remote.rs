@@ -2762,7 +2762,7 @@ mod transport_integration_tests {
             "transport": {"kind": "mcp_remote", "url": "https://unused.invalid/mcp"},
             "auth": {"mode": "api_key"},
             "credential_bindings": [{
-                "ref_role": "credential", "placement": "header", "key": "Authorization",
+                "ref_role": "primary", "placement": "header", "key": "Authorization",
                 "prefix": "Bearer ", "required": true
             }],
             "resource_filters": {"required": [], "optional": [], "write_enabling": []},
