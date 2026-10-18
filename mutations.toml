@@ -12137,3 +12137,129 @@ select = "expected"
 expect_red = ["web_search_tests::admin::clear_rejects_names_counts_missing_provider_and_nonboolean_intent"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-chain-capability-first"
+guards = "Capability is the first recorded failure even when connection resolution also fails"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = 'let attempt = (|| {'
+new = '''let attempt = (|| {
+                if let Err(refusal) = &resolved { return Err(SkipReason::for_refusal(refusal)); } /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::capability_precedes_grant_but_every_check_two_counts"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-policy-before-status"
+guards = "Policy refusal precedes action quarantine and later checks"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = 'let effect = self'
+new = '''if action.status == "quarantined" { return Err(SkipReason::Quarantined); } /* NON-VACUITY BREAK */
+        let effect = self'''
+test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::policy_status_connection_cooldown_then_rate_is_the_failure_order"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-grant-before-charge"
+guards = "An ungranted caller cannot spend any provider's shared rate bucket"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = 'all_not_granted &= not_granted;'
+new = '''if not_granted {
+                let limits = engine.store().web_search_limits(name).unwrap().unwrap_or_else(default_limits);
+                let _ = self.limiter.try_acquire(name, &caller_key, limits, now_ms);
+            } /* NON-VACUITY BREAK */
+            all_not_granted &= not_granted;'''
+test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::grant_before_charge_preserves_every_provider_bucket"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-check-two-on-capability-skip"
+guards = "The all-not-granted terminal uses check two even for a capability-skipped provider"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = 'all_not_granted &= not_granted;'
+new = 'all_not_granted &= not_granted && !matches!(prepared, Some(Err(_))); /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::all_ungranted_flow_uses_first_provider_and_its_own_cause"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-first-grant-cause"
+guards = "The terminal flow refusal carries the first provider's target and cause, not a later provider's"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = 'if position == 0 && not_granted {'
+new = 'if (position == 0 || position > 0) && not_granted { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::all_ungranted_flow_uses_first_provider_and_its_own_cause"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-ambiguous-terminal"
+guards = "Ambiguity alone or mixed with a missing grant is unavailable, never all-not-granted"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = 'all_not_granted &= not_granted;'
+new = 'all_not_granted &= not_granted || matches!(resolved, Err(WebSearchRefusal::BackendAmbiguous)); /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::ambiguous_alone_and_mixed_with_not_granted_are_unavailable"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-minimum-rate-retry"
+guards = "All-rate-limited returns the smallest provider retry delay"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = 'old.min(retry)'
+new = 'old.max(retry) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::all_rate_limited_returns_smallest_retry"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-cooldown-before-rate"
+guards = "Cooldown precedes rate refusal on a usable granted connection"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = '.is_some_and(|until| *until > now_ms)'
+new = '.is_some_and(|until| *until > now_ms && false) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::policy_status_connection_cooldown_then_rate_is_the_failure_order"]
+build_timeout_s = 3600
+timeout_s = 120
