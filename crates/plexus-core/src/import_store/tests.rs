@@ -99,6 +99,51 @@ fn recipient_allowlist_is_carried_on_current_store_cutover() {
     assert_eq!(scalar::<i64>(&new,"SELECT COUNT(*) FROM recipient_allowlist WHERE principal='direct' AND connection_id='c' AND agent_id='agent' AND recipient='bob@example.com'"),1);
 }
 
+#[test]
+fn outbox_failures_follow_only_retained_publication_markers_on_import() {
+    assert_eq!(
+        identity(
+            "event_outbox_failures",
+            &Record::from([
+                ("event_key".into(), Value::Text("retained".into())),
+                ("version".into(), Value::Integer(2))
+            ])
+        ),
+        "event_outbox_failures [retained, 2]"
+    );
+    let f = Fixture::new();
+    let source = open_sqlite(&descriptor(&f.from).unwrap()).unwrap();
+    source.migrate("plexus", MIGRATIONS).unwrap();
+    source.with_conn(|conn| conn.execute_batch("INSERT INTO event_outbox(event_key,event_id,event_name,repo_id,repo,created_at_ms)
+        VALUES ('retained','unacked','github_issue_changed',1,'org/repo',1),('orphan','missing','github_issue_changed',1,'org/repo',1);
+        INSERT INTO event_outbox_failures(event_key,version,failed_at_ms,failure_reason)
+        VALUES ('retained',1,11,'invalid_headers'),('retained',2,12,'invalid_body'),('orphan',1,13,'invalid_body');")).unwrap();
+    drop(source);
+    f.import();
+    let new = f.destination();
+    let failures: Vec<(String,i64,i64,String)> = new.prepare("SELECT event_key,version,failed_at_ms,failure_reason FROM event_outbox_failures ORDER BY version").unwrap()
+        .query_map([],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(
+        failures,
+        vec![
+            ("retained".into(), 1, 11, "invalid_headers".into()),
+            ("retained".into(), 2, 12, "invalid_body".into())
+        ],
+        "cutover must retain terminal publication status only for surviving markers"
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT COUNT(*) FROM event_outbox WHERE event_key='orphan'"
+        ),
+        0
+    );
+    assert_eq!(
+        scalar::<i64>(&new, "SELECT COUNT(*) FROM pragma_foreign_key_check"),
+        0
+    );
+}
+
 /// Durable GitHub handle authority, bot-request receipts, the relay cursor,
 /// publishing markers of carried events and writes still being reconciled
 /// all survive the cutover; the marker of an acked (dropped) event does not.
@@ -365,6 +410,7 @@ fn production_v23_round_trip_dispositions_and_routing() {
             "recipient_allowlist" => (0, 0, 0),
             // Tables added after generation 23 are absent from this fixture.
             "event_outbox"
+            | "event_outbox_failures"
             | "consent_call_keys"
             | "relay_cursor"
             | "github_app_handle"
