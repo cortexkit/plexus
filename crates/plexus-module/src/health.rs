@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use serde_json::{json, Value};
 use subc_protocol::session::{HealthStatus, ModuleControlResponse};
@@ -221,6 +221,7 @@ pub struct HealthState {
     /// not degrade another test's health report. `None` reads as no
     /// connection needing repair.
     credential_repair_source: Option<CredentialRepairSource>,
+    poller_credential_repair: bool,
 }
 
 impl HealthState {
@@ -271,6 +272,7 @@ impl HealthState {
             last_panic_recovery_awake_ms: AtomicU64::new(0),
             panic_recovery_observed: AtomicBool::new(false),
             credential_repair_source: None,
+            poller_credential_repair: false,
         }
     }
 
@@ -281,6 +283,7 @@ impl HealthState {
         source: impl Fn() -> BTreeMap<String, String> + Send + Sync + 'static,
     ) -> Self {
         self.credential_repair_source = Some(Box::new(source));
+        self.poller_credential_repair = false;
         self
     }
 
@@ -289,10 +292,9 @@ impl HealthState {
     /// when a poll on it fails because its credential is missing, permanently
     /// unusable, or needs the user to sign in again, and removes it after the next
     /// successful poll on that connection.
-    pub fn with_poller_credential_repair(self) -> Self {
-        self.with_credential_repair_source(|| {
-            credential_repair_from_poll_accounting(&plexus_core::poller::poll_accounting_metrics())
-        })
+    pub fn with_poller_credential_repair(mut self) -> Self {
+        self.poller_credential_repair = true;
+        self
     }
 
     pub fn stamp_heartbeat(&self) {
@@ -645,50 +647,55 @@ impl HealthState {
 
         let outbox_drain_stopped = self.outbox_drain_stopped.load(Ordering::Relaxed);
         let outbox_unpublishable = self.outbox_unpublishable.load(Ordering::Relaxed);
-        let credential_repair = self
-            .credential_repair_source
-            .as_ref()
-            .map(|source| source())
-            .unwrap_or_default();
+        let poll_accounting = plexus_core::poller::poll_accounting_metrics();
+        let credential_repair = if self.poller_credential_repair {
+            credential_repair_from_poll_accounting(&poll_accounting)
+        } else {
+            self.credential_repair_source
+                .as_ref()
+                .map(|source| source())
+                .unwrap_or_default()
+        };
         let panic_recovery_age_ms = self.note_panic_recoveries(recoveries, awake_now_ms);
         let seen_panic_recoveries = self.transport_panic_recoveries_seen.load(Ordering::Acquire);
-        // Task liveness and useful progress are independent facts. A live
-        // scheduler may keep ticking while every due poll fails.
-        let (status, detail) = if let Some(message) = self.relay.degraded_message() {
-            (HealthStatus::Degraded, Some(message.into()))
-        } else if !scheduler_alive {
-            (
-                HealthStatus::Degraded,
-                Some(
-                    "trigger scheduler task is not running; subscriptions are not being polled"
-                        .to_string(),
-                ),
-            )
-        } else if scheduler_stalled {
-            (
-                HealthStatus::Degraded,
-                Some(format!(
-                    "trigger scheduler has active work but no poll has completed for \
+        // Independent dispatch, task-liveness, and useful-progress facts can
+        // each degrade the module. A live scheduler is not necessarily a useful
+        // one: it may keep ticking while every due poll fails.
+        let mut failures = Vec::new();
+        if heartbeat_awake_age_ms > HEARTBEAT_STALE_MS {
+            failures.push(format!(
+                "dispatch heartbeat stale for {heartbeat_awake_age_ms}ms \
+                     (threshold {HEARTBEAT_STALE_MS}ms awake time)"
+            ));
+        }
+        if !scheduler_alive {
+            failures.push(
+                "trigger scheduler task is not running; subscriptions are not being polled"
+                    .to_string(),
+            );
+        }
+        if scheduler_stalled {
+            failures.push(format!(
+                "trigger scheduler has active work but no poll has completed for \
                      {scheduler_stall_age_ms}ms (threshold {scheduler_stall_threshold_ms}ms)"
-                )),
-            )
-        } else if outbox_drain_stopped {
-            (
-                HealthStatus::Degraded,
-                Some(
-                    "outbox drain task is not running; event notices are not being published"
-                        .to_string(),
-                ),
-            )
-        } else if outbox_unpublishable > 0 {
-            (
-                HealthStatus::Degraded,
-                Some(format!(
-                    "{outbox_unpublishable} outbox event(s) cannot be published and are skipped; \
+            ));
+        }
+        if outbox_drain_stopped {
+            failures.push(
+                "outbox drain task is not running; event notices are not being published"
+                    .to_string(),
+            );
+        }
+        if self.last_publish_error().is_some() {
+            failures.push("event notice publishing is failing; see lastPublishError".into());
+        }
+        if outbox_unpublishable > 0 {
+            failures.push(format!(
+                "{outbox_unpublishable} outbox event(s) cannot be published and are skipped; \
                      the bus log names each one"
-                )),
-            )
-        } else if !credential_repair.is_empty() {
+            ));
+        }
+        if !credential_repair.is_empty() {
             // A watch on a connection whose credential needs repair delivers
             // nothing and is retried at most hourly until a person signs in
             // again or replaces the credential, so the module is failing at
@@ -698,26 +705,27 @@ impl HealthState {
                 .map(|(connection, code)| format!("{connection} ({code})"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            (
-                HealthStatus::Degraded,
-                Some(format!(
-                    "credential needs repair by a person for {} connection(s): {connections}",
-                    credential_repair.len()
-                )),
-            )
-        } else if let Some(age_ms) =
+            failures.push(format!(
+                "credential needs repair by a person for {} connection(s): {connections}",
+                credential_repair.len()
+            ));
+        }
+        if let Some(age_ms) =
             panic_recovery_age_ms.filter(|age_ms| *age_ms <= PANIC_RECOVERY_DEGRADED_MS)
         {
-            (
-                HealthStatus::Degraded,
-                Some(format!(
-                    "a vendor transport healed a connection after a panic poisoned its lock \
+            failures.push(format!(
+                "a vendor transport healed a connection after a panic poisoned its lock \
                      {age_ms}ms ago ({seen_panic_recoveries} recovery(ies) since boot); \
                      the transport log names each one at ERROR"
-                )),
-            )
-        } else {
+            ));
+        }
+        if let Some(message) = self.relay.degraded_message() {
+            failures.push(message.into());
+        }
+        let (status, detail) = if failures.is_empty() {
             (HealthStatus::Ok, None)
+        } else {
+            (HealthStatus::Degraded, Some(failures.join("; ")))
         };
         // Null only when no pass has polled anything. A pass whose polls all
         // fail fast finishes in under a millisecond and legitimately measures
@@ -791,7 +799,7 @@ impl HealthState {
                 "schedulerPollsCompleted": scheduler_polls_completed,
                 // Process-lifetime poll accounting, including manual polls. Only
                 // the per-poll violation counter is authoritative during updates.
-                "schedulerPollAccounting": plexus_core::poller::poll_accounting_metrics(),
+                "schedulerPollAccounting": poll_accounting,
                 "repositoryIdentity": plexus_core::poller::repo_identity_metrics(),
                 // Process-lifetime CI watch counters (deferred polls, vanished
                 // and expired runs), which operators watch during a CI rollout.
@@ -899,10 +907,9 @@ pub(crate) const fn scheduler_stall_threshold_ms_for_test(cadence_s: u64) -> u64
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
-        .unwrap_or(0)
+    plexus_core::storage::now_ms()
+        .try_into()
+        .expect("nonnegative epoch milliseconds")
 }
 
 /// The connections in the poller's `credentialNeedsRepairByConnection` metric,
@@ -930,6 +937,26 @@ fn credential_repair_from_poll_accounting(metrics: &Value) -> BTreeMap<String, S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn regression_publish_failure_degrades_until_recovery() {
+        let health = super::HealthState::new();
+        health.record_publish_error("nats_publish_failed");
+        let subc_protocol::session::ModuleControlResponse::HealthCheck { status, detail, .. } =
+            health.report()
+        else {
+            panic!("health reply")
+        };
+        assert_eq!(status, subc_protocol::session::HealthStatus::Degraded);
+        assert!(detail.unwrap().contains("publishing"));
+        health.clear_publish_error();
+        let subc_protocol::session::ModuleControlResponse::HealthCheck { status, .. } =
+            health.report()
+        else {
+            panic!("health reply")
+        };
+        assert_eq!(status, subc_protocol::session::HealthStatus::Ok);
+    }
+
     use super::*;
 
     fn status_of(response: &ModuleControlResponse) -> HealthStatus {

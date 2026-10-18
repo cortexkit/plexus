@@ -132,13 +132,36 @@ fn held_admits_facade_dispatch_boundary() {
     assert_eq!(reply["error"]["code"], "invalid_request");
 }
 #[test]
-fn not_held_refusal_names_holder_and_epoch() {
+fn not_held_refusal_hides_topology_but_operator_status_keeps_it() {
     let home = ConnectorHome::new(Double::new(vec![Ok(role_answer(true, false, false))]));
     home.refresh().unwrap();
     let reply = home.refusal().unwrap();
-    assert_eq!(reply["error"]["connectorHome"]["holder_name"], "Other Mac");
-    assert_eq!(reply["error"]["connectorHome"]["epoch"], 7);
+    assert_eq!(reply["error"]["connectorHome"], json!({"state":"not_held"}));
+    assert!(!reply.to_string().contains("Other Mac"));
+    assert!(!reply.to_string().contains("cloud"));
+    assert_eq!(home.status()["holder_name"], "Other Mac");
+    assert_eq!(home.status()["epoch"], 7);
     assert_eq!(reply["error"]["connectorHome"]["state"], "not_held");
+}
+
+#[test]
+fn claim_notifications_follow_confirmed_gain_and_loss_only() {
+    let home = ConnectorHome::new(Double::new(vec![
+        held(),
+        Err(error("unavailable")),
+        Ok(role_answer(true, false, false)),
+    ]));
+    let mut decisions = home.decisions();
+    assert!(!*decisions.borrow_and_update());
+    home.refresh().unwrap();
+    assert!(decisions.has_changed().unwrap());
+    assert!(*decisions.borrow_and_update());
+    assert!(home.refresh().is_err());
+    assert!(!decisions.has_changed().unwrap());
+    assert!(*decisions.borrow_and_update());
+    home.refresh().unwrap();
+    assert!(decisions.has_changed().unwrap());
+    assert!(!*decisions.borrow_and_update());
 }
 #[test]
 fn unavailable_after_held_preserves_admission() {

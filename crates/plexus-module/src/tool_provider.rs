@@ -818,6 +818,16 @@ mod tests {
                 }
             };
             let actual_bytes = serde_json::to_vec(&actual).unwrap();
+            if std::env::var("PLEXUS_REGENERATE_CATALOG_FIXTURES").as_deref() == Ok("1") {
+                if actual_bytes.as_slice() != *reply_bytes {
+                    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/tool-catalog")
+                        .join(format!("{name}.reply.json"));
+                    std::fs::write(&path, &actual_bytes).unwrap();
+                    println!("updated {}", path.display());
+                }
+                continue;
+            }
             assert_eq!(
                 actual_bytes.as_slice(),
                 *reply_bytes,

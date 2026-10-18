@@ -1540,12 +1540,13 @@ build_timeout_s = 3600
 id = "bus-adapter-stamp-before-ack"
 guards = "The pending outbox marker cannot be stamped before the real JetStream ack"
 file = "crates/plexus-module/src/bus.rs"
-old = "        let receipt = publisher\n            .publish(&subject, &notice_id, digest, headers)"
-new = "        store.mark_event_version_published(&event.event_key, version, now_ms()).map_err(|e| e.to_string())?; /* NON-VACUITY BREAK */\n        let receipt = publisher\n            .publish(&subject, &notice_id, digest, headers)"
+old = "let receipt = match publisher"
+new = "store.mark_event_version_published(&event.event_key, version, now_ms()).map_err(|e| e.to_string())?; /* NON-VACUITY BREAK */ let receipt = match publisher"
 test_file = "crates/plexus-module/src/bus.rs"
 runner = "cargo"
 package = "plexus-module"
 target = "--lib"
+select = "expected"
 expect_red = ["bus::tests::real_nats_adapter_polls_publish_and_waits_for_ack_before_stamp"]
 build_timeout_s = 3600
 
@@ -2167,8 +2168,8 @@ timeout_s = 60
 id = "drain-after-ack"
 guards = "A failed JetStream publish leaves its canonical marker pending for retry"
 file = "crates/plexus-module/src/bus.rs"
-old = "let receipt = publisher\n            .publish(&subject, &notice_id, digest, headers)\n            .await?;"
-new = "store.mark_event_version_published(&event.event_key, version, now_ms()).unwrap(); // NON-VACUITY BREAK\n        let receipt = publisher\n            .publish(&subject, &notice_id, digest, headers)\n            .await?;"
+old = "let receipt = match publisher"
+new = "store.mark_event_version_published(&event.event_key, version, now_ms()).unwrap(); /* NON-VACUITY BREAK */ let receipt = match publisher"
 test_file = "crates/plexus-module/src/bus.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -13118,5 +13119,305 @@ package = "plexus-module"
 target = "--lib"
 select = "expected"
 expect_red = ["consent_capacity_tests::expired_consent_request_keeps_approval_without_dispatching"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-project-controls"
+guards = "Project bindings refuse control characters before persisting them"
+file = "crates/plexus-module/src/lib.rs"
+old = "Some(Value::String(project_id)) if project_id.chars().any(char::is_control) => {"
+new = "Some(Value::String(project_id)) if false && project_id.chars().any(char::is_control) => { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["subscription_lifecycle_tests::subscription_bindings_persist_through_the_tool_surface"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-header-controls"
+guards = "Notice headers refuse all control characters before entering the NATS codec"
+file = "crates/plexus-module/src/bus.rs"
+old = "if value.chars().any(char::is_control) {"
+new = "if false && value.chars().any(char::is_control) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bus.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["bus::tests::regression_notice_headers_refuse_all_control_characters"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-dead-letter-durable"
+guards = "An invalid header is durably quarantined across store reopen and degrades health"
+file = "crates/plexus-module/src/bus.rs"
+old = "    reason: &'static str,\n) -> Result<(), String> {\n    let db = store.clone();"
+new = "    reason: &'static str,\n) -> Result<(), String> {\n    if std::hint::black_box(true) { return Ok(()); } /* NON-VACUITY BREAK */\n    let db = store.clone();"
+test_file = "crates/plexus-module/src/bus.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["bus::tests::regression_invalid_header_does_not_block_later_notices"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-systemic-refusal-not-poison"
+guards = "Whole-account publish refusals never dead-letter otherwise valid rows"
+file = "crates/plexus-module/src/bus.rs"
+old = "isolated_refusals(version, &refused, published > 0)"
+new = "isolated_refusals(version, &refused, true) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bus.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["bus::tests::isolated_refusals_need_three_successful_peer_passes_but_systemic_refusals_never_quarantine"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-isolated-refusal-threshold"
+guards = "A row-specific publish refusal needs three consecutive successful peer passes"
+file = "crates/plexus-module/src/bus.rs"
+old = "(*count >= 3).then(|| key.clone())"
+new = "(*count >= 2).then(|| key.clone()) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bus.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["bus::tests::isolated_refusals_need_three_successful_peer_passes_but_systemic_refusals_never_quarantine"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-publish-health"
+guards = "An alive drain with publish failures reports degraded until recovery"
+file = "crates/plexus-module/src/health.rs"
+old = "if self.last_publish_error().is_some() {"
+new = "if false && self.last_publish_error().is_some() { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/health.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["health::tests::regression_publish_failure_degrades_until_recovery"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-relay-receive-deadline"
+guards = "A silent half-open relay cannot remain connected indefinitely"
+file = "crates/plexus-module/src/relay.rs"
+old = "const RECEIVE_DEADLINE: Duration = Duration::from_secs(60);"
+new = "const RECEIVE_DEADLINE: Duration = Duration::from_secs(3600); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::regression_silent_websocket_has_a_receive_deadline"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-relay-supersede-detail"
+guards = "Relay supersede health identifies the competing connector home"
+file = "crates/plexus-module/src/relay.rs"
+old = "if snapshot.superseded {"
+new = "if false && snapshot.superseded { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::regression_supersede_names_the_other_connector_home"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-github-schema-handler-fields"
+guards = "The closed GitHub schema admits the existing AFT bot-write and reaction envelopes"
+file = "crates/plexus-module/src/manifest.rs"
+old = "properties.insert(\"request\".into(), json!({\"type\":\"object\"}));"
+new = "/* NON-VACUITY BREAK: omit request from the closed schema */"
+test_file = "crates/plexus-module/src/manifest.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::regression_github_and_connection_schemas_admit_handler_fields"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-future-expiry"
+guards = "Grant and policy expiry reject past and seconds-unit timestamps"
+file = "crates/plexus-module/src/ceremony.rs"
+old = "if expiry <= plexus_core::storage::now_ms() {"
+new = "if false && expiry <= plexus_core::storage::now_ms() { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ceremony.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["ceremony::tests::regression_past_and_seconds_unit_expiries_are_refused"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-preview-boolean"
+guards = "Malformed preview flags are named refusals, not silently treated as previews"
+file = "crates/plexus-module/src/ceremony.rs"
+old = "fn boolean_flag(params: &Value, name: &str, default: bool) -> Result<bool, Value> {"
+new = "fn boolean_flag(params: &Value, name: &str, default: bool) -> Result<bool, Value> { if std::hint::black_box(true) { return Ok(default); } /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ceremony.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["ceremony::tests::regression_malformed_preview_flags_are_named_refusals"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-role-route-reuse"
+guards = "Role reads reuse a live route but reconnect after transport failure"
+file = "crates/plexus-module/src/connector_home.rs"
+old = "if connection.is_none() {"
+new = "if true || connection.is_none() { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/connector_home.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["connector_home::peer_tests::role_route_is_reused_until_a_transport_failure"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-role-decision-notification"
+guards = "Confirmed role gain and loss notify watchers without revoking offline admission"
+file = "crates/plexus-module/src/connector_home.rs"
+old = "let changed = *held != admitted;"
+new = "let changed = false; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/connector_home_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["connector_home_tests::claim_notifications_follow_confirmed_gain_and_loss_only"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-claim-gain-wakeup"
+guards = "Claim gain wakes an idle drain without a new insert"
+file = "crates/plexus-module/src/bus.rs"
+old = "_ = claim.changed() => {},"
+new = "_ = std::future::pending::<()>() => {}, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bus.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["bus::tests::claim_gain_wakes_an_idle_drain_with_an_existing_backlog"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-agent-refusal-topology"
+guards = "Agent connector-home refusals reveal only state, not fleet topology"
+file = "crates/plexus-module/src/connector_home.rs"
+old = "let state = json!({\"state\":self.snapshot.lock().unwrap().state});"
+new = "let state = self.status(); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/connector_home_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["connector_home_tests::not_held_refusal_hides_topology_but_operator_status_keeps_it"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-build-index-readonly"
+guards = "Build provenance status cannot refresh the watched Git index"
+file = "crates/plexus-module/build_support.rs"
+old = ".env(\"GIT_OPTIONAL_LOCKS\", \"0\")"
+new = ".env(\"GIT_OPTIONAL_LOCKS\", \"1\") /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/manifest.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::regression_dirty_command_cannot_refresh_the_watched_index"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-nonce-retry-budget"
+guards = "The NATS connection budget covers slow nonce signing retries"
+file = "crates/plexus-module/src/bus.rs"
+old = ".connection_timeout(Duration::from_secs(10));"
+new = ".connection_timeout(Duration::from_secs(2)); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bus.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["bus::tests::auth_callback_budget_includes_slow_nonce_retries"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-health-all-failures"
+guards = "Relay configuration failure cannot hide a dead scheduler in health detail"
+file = "crates/plexus-module/src/health.rs"
+old = "let mut failures = Vec::new();"
+new = "if let Some(message) = self.relay.degraded_message() { return ModuleControlResponse::HealthCheck { status: HealthStatus::Degraded, detail: Some(message.into()), metrics: None }; } /* NON-VACUITY BREAK */ let mut failures = Vec::new();"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::regression_task_death_is_not_hidden_by_relay_failure"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-build-input-scope"
+guards = "Unwatched operator notes do not change compiled-input provenance"
+file = "crates/plexus-module/build_support.rs"
+old = "\"crates\","
+new = "\".\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/manifest.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::regression_dirty_marker_checks_only_watched_compiled_inputs"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb-idle-no-bus-session"
+guards = "An empty outbox does not open a bus session; pending work fails visibly and recovers"
+file = "crates/plexus-module/src/bus.rs"
+old = "if !outbox_has_pending(state.store()).await? {"
+new = "if false && !outbox_has_pending(state.store()).await? { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bus.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["bus::tests::idle_without_a_bus_is_healthy_pending_failure_degrades_and_publish_recovers"]
 build_timeout_s = 3600
 timeout_s = 120

@@ -3865,6 +3865,12 @@ fn facade_events_set_project(call: &FacadeArguments<'_>) -> Result<Value, Module
                 }}));
             }
             Some(Value::Null) => None,
+            Some(Value::String(project_id)) if project_id.chars().any(char::is_control) => {
+                return Ok(json!({"error": {
+                    "code": "invalid_request",
+                    "message": "project_id must not contain control characters",
+                }}));
+            }
             Some(Value::String(project_id)) => Some(project_id.as_str()),
             Some(_) => {
                 return Ok(json!({"error": {
@@ -9563,6 +9569,25 @@ mod subscription_lifecycle_tests {
             Some("proj_plexus".to_string()),
             "the handler did not persist the project: {body}"
         );
+
+        for project_id in ["a\nb", "a\rb", "a\tb", "a\0b", "a\u{85}b"] {
+            call(
+                json!({"op":"set_project", "subscription_id":subscription.subscription_id, "project_id":project_id}),
+                writer.clone(), Arc::clone(&state), Arc::clone(&bindings),
+            ).await;
+            let body: Value = serde_json::from_slice(
+                &recv_within(
+                    responses.recv(),
+                    std::time::Duration::from_secs(5),
+                    "invalid project response",
+                )
+                .await
+                .body,
+            )
+            .unwrap();
+            assert_eq!(body["error"]["code"], "invalid_request", "{body}");
+            assert_eq!(stored(&store).as_deref(), Some("proj_plexus"));
+        }
 
         // Omitting the key is refused and leaves the binding alone: read as a
         // clear, a misspelled field name would wipe it.

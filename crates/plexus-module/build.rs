@@ -21,6 +21,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod build_support;
+
 fn main() {
     let workspace_lock = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../Cargo.lock")
@@ -103,27 +105,14 @@ fn main() {
         }
     }
 
-    // A dirty working tree gets a `-dirty` suffix, because the bare commit
-    // would otherwise attest a tree the binary does not match.
+    // The binary embeds a Git commit for source identity and a separate
+    // Cargo.lock digest for dependency identity. An uncommitted source edit
+    // changes neither value, so add `-dirty` to the commit to avoid claiming
+    // that the binary matches the committed source.
     //
-    // MEASURED: building with an uncommitted source edit embedded the plain
-    // HEAD hash, so a third party comparing the marker against the repository
-    // at that commit would confirm provenance for source that was never
-    // committed. The digest half has the same shape and no fix -- a source
-    // edit does not touch Cargo.lock, so the dependency claim stays true while
-    // the source claim quietly is not. Naming the dirty tree is what keeps the
-    // marker's two claims from being read as one.
-    //
-    // `git status --porcelain` rather than `diff --quiet`: the latter ignores
-    // untracked files, and a new module compiled into the build is exactly the
-    // divergence worth catching.
-    let dirty = Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| !out.stdout.is_empty())
-        .unwrap_or(false);
+    // Include untracked source files, but not unrelated docs or operator notes:
+    // the dirty check must cover exactly the compiled inputs watched above.
+    let dirty = compiled_inputs_dirty(&workspace);
     // Full 40-hex rather than an abbreviated form: the wire provenance
     // contract (subc-protocol `build_provenance`) validates canonical 40-hex,
     // and every downstream reader here resolves the value through git (which
@@ -146,6 +135,15 @@ fn main() {
         })
         .unwrap_or_else(|| "unavailable".to_string());
     println!("cargo:rustc-env=PLEXUS_BUILD_COMMIT={commit}");
+}
+
+pub(crate) fn compiled_inputs_dirty(workspace: &std::path::Path) -> bool {
+    build_support::dirty_command(workspace)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| !out.stdout.is_empty())
+        .unwrap_or(false)
 }
 
 fn git_output(args: &[&str]) -> Option<String> {
