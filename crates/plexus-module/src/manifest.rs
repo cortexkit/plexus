@@ -244,7 +244,7 @@ pub fn build_with_launch_nonce_source(
                 ),
                 tool(
                     REQUESTS_TOOL,
-                    "Inspect pending ask-first connector requests.",
+                    "Inspect, approve or deny pending ask-first connector requests; approval and denial may contact external services.",
                     ExecutionMode::Mutating,
                     &["list", "inspect", "approve", "deny"],
                 ),
@@ -494,6 +494,10 @@ fn events_tool() -> Tool {
                 "subscription_id": {"type": "string"},
                 "subscription": {"type": "string"},
                 "event_ids": {"type": "array", "items": {"type": "string"}},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                "after": {"type": "object", "properties": {
+                    "created_at_ms": {"type": "integer"}, "event_id": {"type": "string", "minLength": 1}
+                }, "required": ["created_at_ms", "event_id"], "additionalProperties": false},
                 "event_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                 "event_name": {"type": "string"},
                 "version": {"type": "integer", "enum": [1, 2]},
@@ -597,7 +601,7 @@ fn web_search_tool() -> Tool {
 }
 
 fn tool(name: &str, description: &str, execution_mode: ExecutionMode, operations: &[&str]) -> Tool {
-    Tool {
+    let mut tool = Tool {
         name: name.to_string(),
         description: Some(description.to_string()),
         execution_mode,
@@ -615,11 +619,145 @@ fn tool(name: &str, description: &str, execution_mode: ExecutionMode, operations
             "required": ["op"],
             "additionalProperties": false
         }),
+    };
+    let properties = tool.schema["properties"]
+        .as_object_mut()
+        .expect("object properties");
+    match name {
+        GITHUB_TOOL => {
+            properties.insert("connection_id".into(), json!({"type":"string"}));
+            properties.insert("request".into(), json!({"type":"object"}));
+            properties.insert("request_nonce".into(), json!({"type":"string"}));
+        }
+        CONNECTIONS_TOOL => {
+            properties.insert("resource_filters".into(), json!({}));
+        }
+        _ => {}
     }
+    tool
 }
 
 #[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;
+
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn regression_dirty_marker_checks_only_watched_compiled_inputs() {
+        let scratch = plexus_core::test_scratch::Scratch::directory("build-dirty-inputs");
+        let git = |args: &[&str]| {
+            let mut command = std::process::Command::new("git");
+            command.current_dir(scratch.path()).args(args);
+            let output = crate::bounded::child_output(
+                &mut command,
+                std::time::Duration::from_secs(10),
+                "fixture git",
+            )
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::create_dir(scratch.join("crates")).unwrap();
+        std::fs::write(scratch.join("crates/lib.rs"), "compiled").unwrap();
+        std::fs::write(scratch.join("Cargo.toml"), "manifest").unwrap();
+        std::fs::write(scratch.join("Cargo.lock"), "lock").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "fixture",
+        ]);
+        std::fs::write(scratch.join("notes.md"), "not compiled").unwrap();
+        let dirty = || {
+            let output = crate::bounded::child_output(
+                &mut super::build_support::dirty_command(scratch.path()),
+                std::time::Duration::from_secs(10),
+                "compiled input status",
+            )
+            .unwrap();
+            assert!(output.status.success());
+            !output.stdout.is_empty()
+        };
+        assert!(!dirty());
+        std::fs::write(scratch.join("crates/lib.rs"), "edited").unwrap();
+        assert!(dirty());
+    }
+
+    #[test]
+    fn regression_dirty_command_cannot_refresh_the_watched_index() {
+        let command = super::build_support::dirty_command(std::path::Path::new("."));
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "GIT_OPTIONAL_LOCKS"
+                && value == Some(std::ffi::OsStr::new("0"))));
+    }
+    #[test]
+    fn regression_github_and_connection_schemas_admit_handler_fields() {
+        let github = tool(
+            GITHUB_TOOL,
+            "",
+            ExecutionMode::Unfenceable,
+            &["bot_request", "bindings.read"],
+        );
+        let connections = tool(
+            CONNECTIONS_TOOL,
+            "",
+            ExecutionMode::Mutating,
+            &["configure"],
+        );
+        // This tool request posts an eyes reaction, matching the existing
+        // scoped bot-write handler test.
+        let aft = json!({"op":"bot_request","request_nonce":"module-nonce",
+            "request":{"action":"issue reaction","repository":"org/repo","target":{"number":"42"},"body":{"reaction":"eyes"}}});
+        let reaction = json!({"op":"bot_request","request_nonce":"reaction", "connection_id":"github-bot",
+            "request":{"action":"issue reaction","repository":"org/repo","target":{"number":42},"body":{"reaction":"eyes"}}});
+        for call in [
+            aft,
+            reaction,
+            json!({"op":"bindings.read", "connection_id":"github-bot"}),
+        ] {
+            assert_object_schema_accepts(&github.schema, &call);
+        }
+        assert_object_schema_accepts(
+            &connections.schema,
+            &json!({"op":"configure", "connection":"github-bot", "resource_filters":{"repositories":["org/repo"]}}),
+        );
+    }
+
+    fn assert_object_schema_accepts(schema: &serde_json::Value, call: &serde_json::Value) {
+        assert_eq!(schema["type"], "object");
+        for required in schema["required"].as_array().unwrap() {
+            assert!(call.get(required.as_str().unwrap()).is_some());
+        }
+        for (key, value) in call.as_object().unwrap() {
+            let property = schema["properties"].get(key);
+            assert!(
+                property.is_some() || schema["additionalProperties"] != false,
+                "field {key} refused by {schema}"
+            );
+            let Some(property) = property else { continue };
+            match property.get("type").and_then(serde_json::Value::as_str) {
+                Some("string") => assert!(value.is_string()),
+                Some("object") => assert!(value.is_object()),
+                None => {}
+                other => panic!("unsupported test schema type {other:?}"),
+            }
+            if let Some(choices) = property.get("enum") {
+                assert!(choices.as_array().unwrap().contains(value));
+            }
+        }
+    }
     use super::*;
     use std::collections::BTreeSet;
     use subc_protocol::manifest::{ExecutionMode, ProviderRole};

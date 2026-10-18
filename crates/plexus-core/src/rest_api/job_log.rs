@@ -1,7 +1,6 @@
 //! Credentialed API lookup followed by one credentialless HTTPS storage hop.
 //! No storage response or signed URL is included in failure diagnostics.
 use super::*;
-use std::collections::VecDeque;
 use std::io::Read;
 
 pub(super) const MAX_LOG_READ_BYTES: u64 = 64 * 1024 * 1024;
@@ -29,6 +28,7 @@ fn destination_allowed(url: &reqwest::Url, hosts: &[String]) -> bool {
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
+        || url.port_or_known_default() != Some(443)
     {
         return false;
     }
@@ -46,8 +46,12 @@ fn destination_allowed(url: &reqwest::Url, hosts: &[String]) -> bool {
     })
 }
 
+// Keep the credentialed API inputs explicit: its throttle belongs to the
+// connection, while the returned URL is used only by credentialless requests.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn api_redirect(
     client: &Client,
+    throttle_until: &mut Option<Instant>,
     config: &RestConfig,
     operation: &HttpOperation,
     tail: &crate::manifest::CredentiallessTail,
@@ -57,7 +61,8 @@ pub(super) fn api_redirect(
 ) -> Result<reqwest::Url, Box<TransportResponse>> {
     let prepared = match prepare_request(&config.base_url, operation, args) {
         Ok(prepared) if prepared.method == reqwest::Method::GET => prepared,
-        _ => return Err(Box::new(local_not_sent())),
+        Err(error) => return Err(Box::new(preparation_failure(error))),
+        Ok(_) => return Err(Box::new(local_not_sent())),
     };
     let headers = build_headers(&config.credential_bindings, credential)
         .map_err(|_| Box::new(local_not_sent()))?;
@@ -66,19 +71,44 @@ pub(super) fn api_redirect(
         .headers(headers)
         .timeout(deadline)
         .send()
-        .map_err(|_| Box::new(refused("job_log_download_failed")))?;
+        .map_err(|error| {
+            Box::new(request_failure_response(
+                error,
+                &prepared.method,
+                &prepared.path,
+            ))
+        })?;
     if missing_log(response.status().as_u16()) {
         return Err(Box::new(refused("job_log_unavailable")));
     }
     if response.status().as_u16() != 302 {
-        return Err(Box::new(refused("job_log_redirect_refused")));
+        if response.status().as_u16() < 400 {
+            return Err(Box::new(refused("job_log_redirect_refused")));
+        }
+        return Err(Box::new(classify_response(
+            response,
+            throttle_until,
+            &prepared.method,
+            &prepared.path,
+            false,
+        )));
     }
     let url = response
         .headers()
         .get(reqwest::header::LOCATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| reqwest::Url::parse(value).ok());
-    let Some(url) = url.filter(|url| destination_allowed(url, &tail.allowed_hosts)) else {
+    let Some(url) = url.filter(|url| {
+        // A fixture's explicit trust root permits its ephemeral TLS port. The
+        // deployed client has no such setting and accepts only HTTPS port 443.
+        #[cfg(test)]
+        if config.test_root_certificate.is_some() {
+            let mut standard = url.clone();
+            let _ = standard.set_port(None);
+            return destination_allowed(&standard, &tail.allowed_hosts);
+        }
+        destination_allowed(url, &tail.allowed_hosts)
+    }) else {
         return Err(Box::new(refused("job_log_redirect_refused")));
     };
     Ok(url)
@@ -91,6 +121,15 @@ pub(super) fn redact(bytes: &[u8], url: &reqwest::Url, credential: &ResolvedCred
     if let Ok(secret) = std::str::from_utf8(credential.payload()) {
         if !secret.is_empty() {
             text = text.replace(secret, "[credential redacted]");
+            // A byte tail may start inside a credential. Do not return a long
+            // leading suffix merely because its prefix fell outside the tail.
+            for (offset, _) in secret.char_indices().skip(1) {
+                let suffix = &secret[offset..];
+                if suffix.len() >= 8 && text.starts_with(suffix) {
+                    text.replace_range(..suffix.len(), "[credential redacted]");
+                    break;
+                }
+            }
         }
     }
     text
@@ -98,6 +137,7 @@ pub(super) fn redact(bytes: &[u8], url: &reqwest::Url, credential: &ResolvedCred
 
 pub(super) fn download(
     client: &Client,
+    throttle_until: &mut Option<Instant>,
     config: &RestConfig,
     operation: &HttpOperation,
     tail: &crate::manifest::CredentiallessTail,
@@ -117,7 +157,16 @@ pub(super) fn download(
     if let Some(args) = args.as_object_mut() {
         args.remove("max_bytes");
     }
-    let url = match api_redirect(client, config, operation, tail, &args, credential, deadline) {
+    let url = match api_redirect(
+        client,
+        throttle_until,
+        config,
+        operation,
+        tail,
+        &args,
+        credential,
+        deadline,
+    ) {
         Ok(url) => url,
         Err(response) => return *response,
     };
@@ -199,7 +248,8 @@ pub(super) fn download(
     if content_length(&response).is_some_and(|length| length > MAX_LOG_READ_BYTES) {
         return refused("job_log_read_limit");
     }
-    let (bytes, read) = match read_tail(response, max_bytes, started, MAX_LOG_READ_BYTES) {
+    let (bytes, read) = match read_tail(response, max_bytes, started, deadline, MAX_LOG_READ_BYTES)
+    {
         Ok(result) => result,
         Err(code) => return refused(code),
     };
@@ -229,13 +279,14 @@ fn read_tail(
     response: Response,
     max_bytes: usize,
     started: Instant,
+    deadline: Duration,
     read_limit: u64,
 ) -> Result<(Vec<u8>, u64), &'static str> {
     tail_bytes(
         response,
         max_bytes,
         started,
-        LOG_DEADLINE,
+        deadline,
         read_limit,
         "job_log_download_failed",
         "job_log_read_limit",
@@ -251,12 +302,12 @@ pub(super) fn tail_bytes<R: Read>(
     io_code: &'static str,
     limit_code: &'static str,
 ) -> Result<(Vec<u8>, u64), &'static str> {
-    let mut tail = VecDeque::with_capacity(max_bytes);
+    let mut tail = Vec::with_capacity(max_bytes);
     let mut read = 0u64;
     let mut buffer = [0u8; 8192];
     loop {
         if started.elapsed() >= deadline {
-            return Err("job_log_read_limit");
+            return Err(limit_code);
         }
         let count = response.read(&mut buffer).map_err(|_| io_code)?;
         if count == 0 {
@@ -266,14 +317,15 @@ pub(super) fn tail_bytes<R: Read>(
         if read > read_limit {
             return Err(limit_code);
         }
-        for byte in &buffer[..count] {
-            if tail.len() == max_bytes {
-                tail.pop_front();
-            }
-            tail.push_back(*byte);
-        }
+        let chunk = &buffer[count.saturating_sub(max_bytes)..count];
+        let discard = tail
+            .len()
+            .saturating_add(chunk.len())
+            .saturating_sub(max_bytes);
+        tail.drain(..discard);
+        tail.extend_from_slice(chunk);
     }
-    Ok((tail.into_iter().collect(), read))
+    Ok((tail, read))
 }
 
 pub(super) fn strip_ansi(bytes: &[u8]) -> String {

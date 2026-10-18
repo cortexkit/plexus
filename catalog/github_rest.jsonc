@@ -553,7 +553,7 @@
       },
       {
         "name": "remove_issue_assignees", "risk": "write", "facade_only": true,
-        "http": {"method": "DELETE", "path": "/repos/{owner}/{repo}/issues/{issue_number}/assignees",
+        "http": {"method": "DELETE", "parameters": "body", "path": "/repos/{owner}/{repo}/issues/{issue_number}/assignees",
           "args_schema": {"type": "object", "properties": {
             "owner": {"type": "string"}, "repo": {"type": "string"},
             "issue_number": {"type": "integer"},

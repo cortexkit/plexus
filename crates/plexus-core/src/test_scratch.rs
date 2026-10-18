@@ -70,8 +70,8 @@ fn unique_name(label: &str) -> String {
         .unwrap_or(0);
     format!(
         "{SCRATCH_PREFIX}{}-{}-{nanos}-{}",
-        sanitize(label),
         std::process::id(),
+        sanitize(label),
         NEXT.fetch_add(1, Ordering::Relaxed)
     )
 }
@@ -394,13 +394,16 @@ mod tests {
 
     #[test]
     fn scratch_names_keep_the_pid_as_the_first_numeric_token() {
-        let scratch = Scratch::directory("pid-token");
+        let scratch = Scratch::directory("seeded-schema-49");
         let name = scratch
             .path()
             .file_name()
             .and_then(|name| name.to_str())
             .expect("scratch directory name");
-        assert!(name.starts_with("plexus-pid-token-"), "unexpected: {name}");
+        assert!(
+            name.starts_with(&format!("plexus-{}-seeded-schema-49-", std::process::id())),
+            "unexpected: {name}"
+        );
         let first_number = name
             .split('-')
             .find(|token| token.chars().all(|c| c.is_ascii_digit()) && !token.is_empty())

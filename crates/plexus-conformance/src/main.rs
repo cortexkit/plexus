@@ -139,6 +139,14 @@ fn run_args(mut args: Vec<String>) -> Result<ExitCode, String> {
                 );
             }
 
+            if credential_id.is_some() {
+                if let Some(url) = endpoint.as_deref() {
+                    let source = fixture.load_manifest_source()?;
+                    let manifest = plexus_conformance::drift::parse_manifest(&source)?;
+                    validate_credential_endpoint(url, &manifest.transport.url)?;
+                }
+            }
+
             let transport_override = if live {
                 Some(TransportTarget::ManifestEndpoint)
             } else {
@@ -168,15 +176,13 @@ fn run_args(mut args: Vec<String>) -> Result<ExitCode, String> {
             let json = serde_json::to_string_pretty(&evidence)
                 .map_err(|error| format!("serialize evidence: {error}"))?;
             if let Some(path) = output {
-                // Evidence carries credential fingerprints and audit topology:
-                // owner-only like the wire trace, enforced (not umask-derived).
-                use std::io::Write;
-                plexus_conformance::open_owner_only(&path)
-                    .and_then(|mut file| file.write_all(json.as_bytes()))
-                    .map_err(|error| format!("write evidence file: {error}"))?;
-                eprintln!("wrote {}", path.display());
-            } else {
-                println!("{json}");
+                if path == Path::new("-") {
+                    println!("{json}");
+                } else {
+                    plexus_conformance::write_owner_only(&path, json.as_bytes())
+                        .map_err(|error| format!("write evidence file: {error}"))?;
+                    eprintln!("wrote {}", path.display());
+                }
             }
             eprintln!("{}", evidence.human_summary());
             if evidence.passed {
@@ -249,10 +255,7 @@ fn run_args(mut args: Vec<String>) -> Result<ExitCode, String> {
             let paths = match (&catalog_dir, &manifest) {
                 (Some(directory), _) => plexus_conformance::catalog_manifests(directory)?,
                 (None, Some(path)) => vec![path.clone()],
-                (None, None) => {
-                    let default = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog");
-                    plexus_conformance::catalog_manifests(&default)?
-                }
+                (None, None) => plexus_conformance::catalog_manifests(Path::new("catalog"))?,
             };
 
             println!(
@@ -277,6 +280,54 @@ fn run_args(mut args: Vec<String>) -> Result<ExitCode, String> {
         }
         other => Err(format!("unknown command '{other}'")),
     }
+}
+
+/// Keep operator credentials on the reviewed HTTPS host. The catalog uses ASCII
+/// DNS names; ambiguous authorities, userinfo and non-numeric ports are refused.
+fn validate_credential_endpoint(endpoint: &str, manifest: &str) -> Result<(), String> {
+    fn host(url: &str) -> Option<&str> {
+        let authority = url
+            .strip_prefix("https://")?
+            .split(['/', '?', '#'])
+            .next()?;
+        let (host, port) = authority
+            .split_once(':')
+            .map_or((authority, None), |(host, port)| (host, Some(port)));
+        if host.is_empty()
+            || !host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte))
+            || port.is_some_and(|port| port.parse::<u16>().is_err())
+            || url.contains('\\')
+        {
+            return None;
+        }
+        Some(host)
+    }
+    match (host(endpoint), host(manifest)) {
+        (Some(actual), Some(expected)) if actual.eq_ignore_ascii_case(expected) => Ok(()),
+        _ => Err("credentialed endpoint override must use HTTPS on the manifest host".into()),
+    }
+}
+
+#[test]
+fn credentialed_overrides_cannot_change_host_or_downgrade_tls() {
+    for endpoint in [
+        "http://vendor.example/mcp",
+        "https://evil.example/mcp",
+        "https://vendor.example@evil.example/mcp",
+        "https://vendor.example\\@evil.example/mcp",
+    ] {
+        assert!(
+            validate_credential_endpoint(endpoint, "https://vendor.example/mcp").is_err(),
+            "unsafe credential destination was accepted"
+        );
+    }
+    assert!(validate_credential_endpoint(
+        "https://VENDOR.example:443/test",
+        "https://vendor.example/mcp"
+    )
+    .is_ok());
 }
 
 /// Take the value of the flag at `args[*index]`, advancing past it.
@@ -388,10 +439,10 @@ fn build_live_credential_source(
 fn print_usage() {
     let fixtures = ConnectorFixture::known_names().join("|");
     eprintln!(
-        "Usage:\n  plexus-conformance run --fixture <{fixtures}> [options]\n  plexus-conformance drift [--catalog <dir> | --manifest <path>]
+        "Usage:\n  plexus-conformance run --fixture <{fixtures}> [options]\n  plexus-conformance drift [--catalog <dir> | --manifest <path>] (default: ./catalog)
   plexus-conformance drift --manifest <path> --token-file <path>\n  plexus-conformance list\n\n\
 drift compares each reviewed manifest's declared actions against the tools its\nvendor actually serves. Exit 0 clean, 1 drift found, 2 the check could not run\n— an UNCHECKED vendor is never counted as clean.\n\n\
-Options:\n  --fixture <name>          fixture to run (required)\n  --output <path>         write evidence JSON to a file\n  --live                  run against the reviewed manifest endpoint (requires --credential-id)\n  --endpoint <url>        run against an explicit endpoint (mutually exclusive with --live)\n  --credential-id <id>    vault reference (for example apikey:exa), not a secret or file path\n  --subc-connection <path> subc route connection file for the CKCRED route (live mode)\n  --wire-trace <path>     write a redacted CKCRED wire trace (0600, JSON lines; live mode)\n  --schema-out <path>     write the vendor's observed tool schemas (0600); the input for\n                          writing a manifest poll shape, which must never be guessed\n                          from vendor API docs\n  --token-file <path>     raw vendor token for drift discovery. REQUIRES --manifest:\n                          a token belongs to ONE vendor, and a catalog-wide sweep\n                          would send it to every endpoint in the catalog\n\n\
+Options:\n  --fixture <name>          fixture to run (required)\n  --output <path|->       write evidence JSON (file or explicit stdout; summary only by default)\n  --live                  run against the reviewed manifest endpoint (requires --credential-id)\n  --endpoint <url>        explicit endpoint; with credentials, HTTPS on the manifest host only\n  --credential-id <id>    vault reference (for example apikey:exa), not a secret or file path\n  --subc-connection <path> subc route connection file for the CKCRED route (live mode)\n  --wire-trace <path>     write a redacted CKCRED wire trace (0600, JSON lines; live mode)\n  --schema-out <path>     write the vendor's observed tool schemas (0600); the input for\n                          writing a manifest poll shape, which must never be guessed\n                          from vendor API docs\n  --token-file <path>     raw vendor token for drift discovery. REQUIRES --manifest:\n                          a token belongs to ONE vendor, and a catalog-wide sweep\n                          would send it to every endpoint in the catalog\n\n\
 Live mode also reads PLEXUS_CKCRED_MODULE_ID (route module id) and optionally\nPLEXUS_PROJECT_ROOT from the environment."
     );
 }

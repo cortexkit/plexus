@@ -48,7 +48,13 @@ impl StubRestRoute {
             .iter()
             .zip(path_segments.iter())
             .all(|(template, actual)| {
-                template.starts_with('{') && template.ends_with('}') || template == actual
+                (template.starts_with('{')
+                    && template.ends_with('}')
+                    && !actual.is_empty()
+                    && !actual.contains(['{', '}'])
+                    && !actual.to_ascii_lowercase().contains("%7b")
+                    && !actual.to_ascii_lowercase().contains("%7d"))
+                    || template == actual
             })
     }
 }
@@ -97,8 +103,7 @@ fn response_for_request(
             _ => return http_json(401, r#"{"error":"unauthorized"}"#),
         }
     }
-    let path = target.split('?').next().unwrap_or("/");
-    let Some(route) = routes.iter().find(|route| route.matches(&method, path)) else {
+    let Some(route) = routes.iter().find(|route| route.matches(&method, &target)) else {
         return http_json(404, r#"{"error":"not_found"}"#);
     };
     // Body-carrying methods must actually carry a JSON body: a transport that
@@ -134,7 +139,7 @@ pub struct ExpectedCredential {
 /// looked for `Authorization` would report success for a transport that sent
 /// the credential under the wrong header name entirely — it would be asserting
 /// its own assumption rather than the manifest's contract.
-fn credential_header(request: &str, header_name: &str) -> Option<String> {
+pub(crate) fn credential_header(request: &str, header_name: &str) -> Option<String> {
     let headers = request.split("\r\n\r\n").next()?;
     headers.lines().skip(1).find_map(|line| {
         let (name, value) = line.split_once(':')?;
@@ -150,6 +155,25 @@ fn credential_header(request: &str, header_name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_concrete_route_requires_the_exact_path_and_query() {
+        let route = StubRestRoute::new("GET", "/projects/42/issues?limit=1", 200, json!({}));
+        assert!(route.matches("GET", "/projects/42/issues?limit=1"));
+        for target in [
+            "/projects/42/issues",
+            "/projects/other/issues?limit=1",
+            "/projects/42/issues?limit=2",
+        ] {
+            let request = format!("GET {target} HTTP/1.1\r\n\r\n");
+            assert!(
+                response_for_request(&request, std::slice::from_ref(&route), &None)
+                    .starts_with("HTTP/1.1 404")
+            );
+        }
+        assert!(!StubRestRoute::new("GET", "/projects/{id}", 200, json!({}))
+            .matches("GET", "/projects/"));
+    }
 
     #[test]
     fn lowercase_write_methods_require_a_json_body() {
@@ -228,9 +252,13 @@ mod tests {
             200,
             json!({"ok":true}),
         )];
-        let post = "POST /v1/issues HTTP/1.1\r\nContent-Length: 15\r\n\r\n{\"title\":\"hello\"}";
+        let body = r#"{"title":"hello"}"#;
+        let post = format!(
+            "POST /v1/issues HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
         let post_no_body = "POST /v1/issues HTTP/1.1\r\n\r\n";
-        assert!(response_for_request(post, &routes, &None).starts_with("HTTP/1.1 200"));
+        assert!(response_for_request(&post, &routes, &None).starts_with("HTTP/1.1 200"));
         assert!(response_for_request(post_no_body, &routes, &None).starts_with("HTTP/1.1 400"));
     }
 }

@@ -37,6 +37,10 @@ const CREDENTIAL_RECHECK: Duration = Duration::from_secs(300);
 const NOT_HOME_RECHECK: Duration = Duration::from_secs(30);
 const INITIAL_CREDENTIAL_RECHECK: Duration = Duration::from_secs(5);
 const HEALTHY_RELAY_WINDOW: Duration = Duration::from_secs(3600);
+const PING_PERIOD: Duration = Duration::from_secs(30);
+const RECEIVE_DEADLINE: Duration = Duration::from_secs(60);
+const SUPERSEDED_MESSAGE: &str =
+    "The relay was superseded by another machine also acting as connector home.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -173,10 +177,13 @@ impl Status {
     }
     pub fn status(&self) -> Value {
         let s = self.0.lock().unwrap();
-        json!({"sources":[{"source":SOURCE,"state":s.state.name(),"last_event_at":s.last_event_at,"message":s.state.message()}]})
+        json!({"sources":[{"source":SOURCE,"state":s.state.name(),"last_event_at":s.last_event_at,"message":if s.superseded { Some(SUPERSEDED_MESSAGE) } else { s.state.message() }}]})
     }
     pub(crate) fn degraded_message(&self) -> Option<&'static str> {
         let snapshot = self.0.lock().unwrap();
+        if snapshot.superseded {
+            return Some(SUPERSEDED_MESSAGE);
+        }
         let s = snapshot.state;
         (snapshot.superseded || matches!(s, State::CredentialRejected | State::SourceNotServed))
             .then(|| s.message())
@@ -337,18 +344,18 @@ async fn consume(
 ) -> Failure {
     let mut stream = None;
     let mut next = 0;
-    let mut ping = tokio::time::interval_at(
-        tokio::time::Instant::now() + Duration::from_secs(30),
-        Duration::from_secs(30),
-    );
+    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_PERIOD, PING_PERIOD);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut claim = tokio::time::interval(Duration::from_secs(1));
+    let mut claim = home.decisions();
+    let mut received_at = tokio::time::Instant::now();
     loop {
         let message = tokio::select! {
-            _ = claim.tick() => { if !home.held() { return Failure::NotHome; } continue; }
-            _ = ping.tick() => { if socket.send(Message::Ping(Vec::new().into())).await.is_err() { return Failure::Reconnecting; } continue; }
+            _ = tokio::time::sleep_until(received_at + RECEIVE_DEADLINE) => return Failure::Reconnecting,
+            _ = async { let _ = claim.wait_for(|held| !*held).await; } => return Failure::NotHome,
+            _ = ping.tick() => { if !matches!(tokio::time::timeout_at(received_at + RECEIVE_DEADLINE, socket.send(Message::Ping(Vec::new().into()))).await, Ok(Ok(()))) { return Failure::Reconnecting; } continue; }
             message = socket.next() => message,
         };
+        received_at = tokio::time::Instant::now();
         match message {
             Some(Ok(Message::Text(text))) => {
                 let Ok(frame) = serde_json::from_str::<Frame>(&text) else {
@@ -464,8 +471,9 @@ async fn run(
     let mut failures = 0u32;
     let mut delay = Duration::ZERO;
     let mut credential_recheck = INITIAL_CREDENTIAL_RECHECK;
+    let mut claim = home.decisions();
     loop {
-        tokio::select! { biased; _ = stop.recv() => return, _ = tokio::time::sleep(delay) => {} }
+        tokio::select! { biased; _ = stop.recv() => return, _ = claim.changed() => {}, _ = tokio::time::sleep(delay) => {} }
         let provider = credentials.clone();
         let credential = tokio::select! {
             biased;

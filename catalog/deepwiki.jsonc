@@ -30,7 +30,7 @@
   "credential_bindings": [],
   "resource_filters": {
     "required": [],
-    "optional": ["repo_allowlist"],
+    "optional": [],
     "write_enabling": []
   },
   "actions_baseline": [

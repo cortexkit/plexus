@@ -31,7 +31,12 @@
   },
   "actions_baseline": [
     { "name": "read_item", "risk": "read" },
-    { "name": "write_item", "risk": "write" },
+    { "name": "write_item", "risk": "write",
+      "input_schema": {"type":"object", "properties": {
+        "q":{"type":"string"}, "team":{"type":"string"},
+        "title":{"type":"string"}, "workspace":{"type":"string"}
+      }}
+    },
     { "name": "quarantine_candidate", "risk": "read" }
   ],
   "defaults": {

@@ -12,9 +12,8 @@ use plexus_core::web_search::WebSearchService;
 use plexus_core::{
     AgentRegistry, CatalogReconciler, CatalogRefreshPolicy, CkcredCredentialSource, ConsentCards,
     CredentialSource, FailClosedAgentRegistry, FailClosedCredentialSource, Freshness,
-    GovernanceEngine, McpRemoteTransport, McpRoutePeer, McpRouteTransport, PlexusStore,
-    PrefrontalAgentRegistry, RestTransport, SubcCkcredRoutePeer, SubcMcpRoutePeer,
-    SubcPrefrontalRoutePeer, Transport, TransportRequest, TransportResponse,
+    GovernanceEngine, McpRemoteTransport, PlexusStore, PrefrontalAgentRegistry, RestTransport,
+    SubcCkcredRoutePeer, SubcPrefrontalRoutePeer, Transport, TransportRequest, TransportResponse,
 };
 #[cfg(any(test, feature = "test-support"))]
 use plexus_core::{MockTransport, StubAgentRegistry, StubCredentialSource};
@@ -52,19 +51,13 @@ fn configured_peer<T, E>(result: Result<T, E>, role: &str, target: &str) -> Opti
 /// handler code stays monomorphic.
 pub type FacadeEngine = GovernanceEngine<dyn CredentialSource, dyn Transport>;
 
-/// Dispatch router for REST, remote MCP, and adapter-owned local MCP.
-///
-/// A registered local route connection takes the route-plane arm; REST remains
-/// separate and remote MCP is the fail-closed fallback for an unregistered
-/// connection. Registration is explicit so a manifest cannot direct a call to a
-/// local adapter unless that adapter-owned server was configured for the connection.
-struct VendorTransportRouter<P: McpRoutePeer = SubcMcpRoutePeer> {
+/// Dispatch registered REST connections, with remote MCP as the fail-closed fallback.
+struct VendorTransportRouter {
     mcp: Arc<McpRemoteTransport>,
-    mcp_route: Option<Arc<McpRouteTransport<P>>>,
     rest: Arc<RestTransport>,
 }
 
-impl<P: McpRoutePeer> Transport for VendorTransportRouter<P> {
+impl Transport for VendorTransportRouter {
     fn dispatch_github_facade(
         &self,
         request: TransportRequest,
@@ -84,15 +77,6 @@ impl<P: McpRoutePeer> Transport for VendorTransportRouter<P> {
     ) -> TransportResponse {
         if self.rest.has_connection(&request.connection_id) {
             self.rest.dispatch(request, credential)
-        } else if self
-            .mcp_route
-            .as_ref()
-            .is_some_and(|transport| transport.has_connection(&request.connection_id))
-        {
-            self.mcp_route
-                .as_ref()
-                .expect("route transport was checked above")
-                .dispatch(request, credential)
         } else {
             self.mcp.dispatch(request, credential)
         }
@@ -105,7 +89,6 @@ pub struct ModuleRuntime {
     pub engine: FacadeEngine,
     pub reconciler: CatalogReconciler,
     pub mcp_transport: Arc<McpRemoteTransport>,
-    pub mcp_route_transport: Option<Arc<McpRouteTransport<SubcMcpRoutePeer>>>,
     pub rest_transport: Arc<RestTransport>,
     /// Registry lookup runs when an operator sets an explicit delivery target
     /// and in the scheduler's hourly sweep for retired agents' grants.
@@ -123,14 +106,13 @@ pub struct ModuleRuntime {
 }
 
 impl ModuleRuntime {
-    /// Production composition: remote MCP plus optional route-plane local MCP,
+    /// Production composition: REST and remote MCP transports,
     /// and credentials supplied by the claustrum vault when its route is
     /// configured and reachable. Missing or unreachable credential routes fail
     /// closed; they never fall back to stubs.
     pub fn production(store: Arc<PlexusStore>, connection_file: &Path) -> Self {
         let mcp_transport = Arc::new(McpRemoteTransport::default());
         let rest_transport = Arc::new(RestTransport::default());
-        let mcp_route_transport = production_mcp_route_transport(connection_file);
         let credentials = production_credential_source(connection_file);
         let agent_registry = production_agent_registry(connection_file);
         let github_handle_credentials = production_handle_credential_provider(connection_file);
@@ -144,7 +126,6 @@ impl ModuleRuntime {
             credentials,
             Arc::new(VendorTransportRouter {
                 mcp: Arc::clone(&mcp_transport),
-                mcp_route: mcp_route_transport.clone(),
                 rest: Arc::clone(&rest_transport),
             }) as Arc<dyn Transport>,
         )
@@ -176,7 +157,6 @@ impl ModuleRuntime {
             engine,
             reconciler,
             mcp_transport,
-            mcp_route_transport,
             rest_transport,
             agent_registry,
             flow_audiences: crate::flow_audience::FlowAudiences::new(
@@ -222,7 +202,6 @@ impl ModuleRuntime {
             engine,
             reconciler,
             mcp_transport,
-            mcp_route_transport: None,
             rest_transport,
             agent_registry,
             flow_audiences: crate::flow_audience::FlowAudiences::global_fixture(),
@@ -248,9 +227,8 @@ impl ModuleRuntime {
         let engine = GovernanceEngine::new(
             Arc::clone(&store),
             credentials as Arc<dyn CredentialSource>,
-            Arc::new(VendorTransportRouter::<SubcMcpRoutePeer> {
+            Arc::new(VendorTransportRouter {
                 mcp: Arc::clone(&mcp_transport),
-                mcp_route: None,
                 rest: Arc::clone(&rest_transport),
             }) as Arc<dyn Transport>,
         );
@@ -267,7 +245,6 @@ impl ModuleRuntime {
             engine,
             reconciler,
             mcp_transport,
-            mcp_route_transport: None,
             rest_transport,
             agent_registry,
             flow_audiences: crate::flow_audience::FlowAudiences::global_fixture(),
@@ -378,28 +355,6 @@ fn with_freshness_check(
     }))
 }
 
-fn production_mcp_route_transport(
-    connection_file: &Path,
-) -> Option<Arc<McpRouteTransport<SubcMcpRoutePeer>>> {
-    let module_id = local_mcp_route_module_id()?;
-    let identity = plexus_bind_identity();
-    configured_peer(
-        SubcMcpRoutePeer::connect(connection_file, module_id.as_str(), identity),
-        "local MCP",
-        &module_id,
-    )
-    .map(|peer| Arc::new(McpRouteTransport::new(Arc::new(peer))))
-}
-
-/// The local-MCP adapter is optional until it is deployed; its module id stays
-/// deployment configuration so a rename does not require a Plexus release.
-fn local_mcp_route_module_id() -> Option<String> {
-    std::env::var("PLEXUS_MCP_STDIO_MODULE_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 fn production_handle_credential_provider(
     connection_file: &Path,
 ) -> Option<Arc<dyn HandleCredentialProvider>> {
@@ -413,11 +368,7 @@ fn production_handle_credential_provider(
     let source = CkcredCredentialSource::new(Arc::new(peer));
     Some(Arc::new(HandleCredentialPreparer::new(
         source,
-        Arc::new(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |time| time.as_millis().min(i64::MAX as u128) as i64)
-        }),
+        Arc::new(plexus_core::storage::now_ms),
     )))
 }
 
@@ -574,38 +525,10 @@ mod tests {
         );
     }
 
-    struct StubRoutePeer;
-
-    impl McpRoutePeer for StubRoutePeer {
-        fn call(
-            &self,
-            request: serde_json::Value,
-        ) -> Result<plexus_core::McpRouteFrame, plexus_core::McpRouteError> {
-            assert_eq!(request["server"], "local-fixture");
-            assert_eq!(request["op"], "tools/call");
-            assert_eq!(request["payload"]["method"], "tools/call");
-            Ok(plexus_core::McpRouteFrame::Success {
-                served_from: plexus_core::McpRouteServedFrom::Live,
-                observed_at_ms: 1,
-                payload: json!({
-                    "result": {"content": [{
-                        "type": "text", "text": "{\"through\":\"route\"}"
-                    }]}
-                }),
-            })
-        }
-    }
-
     #[test]
-    fn registered_local_mcp_connection_uses_the_route_transport() {
-        let route = Arc::new(McpRouteTransport::new(Arc::new(StubRoutePeer)));
-        route.register_connection(plexus_core::McpRouteConnection::new(
-            "local",
-            "local-fixture",
-        ));
+    fn unregistered_connections_fail_closed_in_the_remote_transport() {
         let router = VendorTransportRouter {
             mcp: Arc::new(McpRemoteTransport::default()),
-            mcp_route: Some(route),
             rest: Arc::new(RestTransport::default()),
         };
         let response = router.dispatch(
@@ -618,10 +541,7 @@ mod tests {
             },
             &plexus_core::ResolvedCredential::anonymous(),
         );
-        assert_eq!(
-            response.response.expect("route response")["through"],
-            "route"
-        );
+        assert!(response.response.is_none());
     }
 }
 

@@ -47,7 +47,8 @@ pub(super) fn run(
         .unwrap_or(METHOD)
         .into();
     audit.args_redaction_summary = Some(json!({"event":METHOD,"caller":{"agent_id":params["agent_id"],"flow_id":params["flow_id"]},"counts":counts}).to_string());
-    if state.store().append_audit_scoped(&audit, scope).is_err() {
+    if let Err(error) = state.store().append_audit_scoped(&audit, scope) {
+        eprintln!(error governance: "could not audit grants.would_ask: {error}");
         return tool_error("store_failure", "could not audit grants.would_ask");
     }
     reply
@@ -59,10 +60,13 @@ fn evaluate(
     scope: Option<&plexus_core::scope::CallScope>,
     request: &serde_json::Map<String, Value>,
 ) -> Value {
-    if !matches!(caller, "reserved:basal" | "reserved:prefrontal-core") {
+    if !matches!(
+        caller,
+        principal::BASAL_PRINCIPAL | plexus_core::github::PREFRONTAL_PRINCIPAL
+    ) {
         return tool_error("principal_denied", "grants.would_ask is reserved to reserved:prefrontal-core and flow-scoped reserved:basal");
     }
-    if caller == "reserved:basal" && !scope.is_some_and(|scope| scope.flow_id.is_some()) {
+    if caller == principal::BASAL_PRINCIPAL && !scope.is_some_and(|scope| scope.flow_id.is_some()) {
         return tool_error(
             "flow_scope_required",
             "reserved:basal requires a flow scope for grants.would_ask",
@@ -95,7 +99,7 @@ fn evaluate(
     else {
         return invalid("flow_id", "string_required");
     };
-    if caller == "reserved:basal" {
+    if caller == principal::BASAL_PRINCIPAL {
         let scope = scope.expect("checked scope");
         if scope.agent_id.as_deref() != agent {
             return tool_error(
@@ -113,6 +117,9 @@ fn evaluate(
     let Some(items) = params.get("items").and_then(Value::as_array) else {
         return invalid("items", "array_required");
     };
+    if items.len() > 100 {
+        return invalid("items", "at_most_100_items");
+    }
     // Unknown fields refuse the whole request before any item's evaluation.
     for item in items {
         let Some(fields) = item.as_object() else {
@@ -151,7 +158,7 @@ fn evaluate(
                 state,
                 agent,
                 flow,
-                if caller == "reserved:basal" {
+                if caller == principal::BASAL_PRINCIPAL {
                     scope
                 } else {
                     None
@@ -188,7 +195,7 @@ fn evaluate_item(
                 if item.get("connection").is_none_or(Value::is_null) =>
             {
                 Some(plexus_core::web_search::WebSearchService::grant_target(
-                    "reserved:basal",
+                    principal::BASAL_PRINCIPAL,
                 ))
             }
             (Some(tool @ ("invoke" | "github")), Some(action)) if !action.is_empty() => item
@@ -198,7 +205,7 @@ fn evaluate_item(
                 .map(|connection| {
                     GrantTarget::new(
                         Layer::Module,
-                        "reserved:basal",
+                        principal::BASAL_PRINCIPAL,
                         tool,
                         Some(connection),
                         action,
@@ -208,7 +215,7 @@ fn evaluate_item(
         }
     };
     let Some(target) = target.filter(|target| match target.layer {
-        Layer::Module => target.grantee == "reserved:basal",
+        Layer::Module => target.grantee == principal::BASAL_PRINCIPAL,
         Layer::Agent => Some(target.grantee.as_str()) == agent,
     }) else {
         return verdict(result, "no", "invalid_target");
@@ -219,13 +226,15 @@ fn evaluate_item(
         return verdict(result, "no", "invalid_target");
     }
     let decision = if target.tool == "web_search" {
-        if target != plexus_core::web_search::WebSearchService::grant_target("reserved:basal") {
+        if target
+            != plexus_core::web_search::WebSearchService::grant_target(principal::BASAL_PRINCIPAL)
+        {
             return verdict(result, "no", "invalid_target");
         }
         match state
             .runtime
             .web_search
-            .would_ask(state.store(), "reserved:basal")
+            .would_ask(state.store(), principal::BASAL_PRINCIPAL)
         {
             Ok(effect) => Ok(effect),
             Err(plexus_core::web_search::WebSearchRefusal::Grant(refusal)) => {
@@ -235,8 +244,12 @@ fn evaluate_item(
         }
     } else if let Some(connection) = target.connection.as_deref().filter(|s| !s.is_empty()) {
         if target.tool == "github" && target.action == "bindings.read" {
-            plexus_core::github::control::bindings_read(state.store(), "reserved:basal", connection)
-                .map(|_| "allow")
+            plexus_core::github::control::bindings_read(
+                state.store(),
+                principal::BASAL_PRINCIPAL,
+                connection,
+            )
+            .map(|_| "allow")
         } else {
             state.runtime.engine.would_ask(
                 agent,

@@ -9,9 +9,11 @@
 //! module runs on a clock; a caller invokes [`Poller::poll_once`] once.
 
 mod accounting;
+mod budget;
 mod ci_runs;
 pub(crate) use accounting::forget_subscription;
 pub use accounting::{poll_accounting_metrics, DropReason};
+use budget::expired as pass_budget_expired;
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -29,14 +31,15 @@ use crate::governance::{
 };
 use crate::manifest::PollShape;
 use crate::storage::{
-    event_outbox::{RepoIdUpdate, RepoResolutionAdmission},
+    event_outbox::{
+        RepoIdUpdate, RepoResolutionAdmission, RETENTION_MAX_WINDOW_MS as MAX_WINDOW_MS,
+        SORTED_HEAD_REPLAY_WINDOW_MS,
+    },
     now_ms, ActorSource, EventHeaders, KeyedEventIdentity, KeyedPollEventInput, PollEventInput,
     PollGapInput, TriggerEventInsertOutcome, TriggerSubscription,
 };
 use crate::transport::Transport;
-use plexus_probe::{
-    ActionInvoker, ProbeError, ProbeSandbox, ProbeValue, ReturnSchema, WALL_TIMEOUT,
-};
+use plexus_probe::{ActionInvoker, ProbeError, ProbeSandbox, ProbeValue, ReturnSchema};
 
 /// Stored-cursor and request-argument field used by the sync-token strategy.
 const CURSOR_TOKEN_KEY: &str = "sync_token";
@@ -52,8 +55,8 @@ const ITEM_ID_KEY: &str = "id";
 /// for the ordered-timestamp strategy.
 const WATERMARK_MS_KEY: &str = "watermark_ms";
 /// Stored-cursor field holding the stable id of the row that set the watermark
-/// for diagnostics. The dispatched resume point currently uses the timestamp and
-/// overlap window; this id does not alter the request.
+/// as the composite watermark's tiebreaker. It orders equal-timestamp rows;
+/// the request filter itself uses the timestamp and overlap window.
 const WATERMARK_ID_KEY: &str = "watermark_id";
 /// Stored-cursor field holding the adaptive overlap window (milliseconds).
 const WINDOW_MS_KEY: &str = "window_ms";
@@ -63,6 +66,9 @@ const WINDOW_MS_KEY: &str = "window_ms";
 /// this is the start of the current quiet period. Absent means the quiet period
 /// starts at the next poll.
 const WINDOW_CHANGED_MS_KEY: &str = "window_changed_ms";
+const PAGE_RESUME_KEY: &str = "page_resume";
+const RESPONSE_SHAPE_INVALID: &str = "response_shape_invalid";
+const SUBSCRIPTION_NOT_ACTIVE: &str = "subscription_not_active";
 /// Default REQUEST parameter for the ordered-timestamp resume point. GitHub
 /// issues and notifications use `since`; a manifest may declare another name
 /// (PostHog uses `after`) through `PollShape::request_since_field`.
@@ -83,15 +89,6 @@ const REQUEST_SINCE_KEY: &str = "since";
 const INITIAL_WINDOW_MS: i64 = 60_000;
 /// Bound sequential work to five list pages per ordered-timestamp poll.
 const ORDERED_TIMESTAMP_MAX_PAGES_PER_POLL: usize = 5;
-/// Ceiling for the adaptive overlap window: one hour.
-///
-/// Beyond an hour of overlap the re-fetched duplicates stop being a rounding
-/// error and start costing real quota, and a vendor whose write/visibility skew
-/// exceeds an hour is not reliably pollable by ANY window — that is a coverage
-/// gap to surface, not a window to keep growing. Doubling stops here; the
-/// widened state reaching this ceiling is itself the recorded evidence that the
-/// skew is larger than the strategy can absorb.
-const MAX_WINDOW_MS: i64 = 60 * 60 * 1000;
 /// How long a widened overlap window must go without a late row before it is
 /// halved back toward [`INITIAL_WINDOW_MS`]: one day.
 ///
@@ -259,6 +256,38 @@ pub struct SyncTokenStrategy {
     items_field: String,
     next_cursor_field: String,
     request_token_field: String,
+}
+
+/// Commit a bounded drain's continuation in the same transaction as its events.
+struct DrainedStrategy<'a> {
+    inner: &'a dyn CursorStrategy,
+    resume: Option<Value>,
+}
+
+impl CursorStrategy for DrainedStrategy<'_> {
+    fn build_args(&self, state: &Value) -> Result<Value, CursorError> {
+        self.inner.build_args(state)
+    }
+
+    fn derive(&self, state: &Value, response: &Value) -> Result<CursorAdvance, CursorError> {
+        let mut advance = self.inner.derive(state, response)?;
+        let next = advance
+            .cursor_state
+            .as_object_mut()
+            .ok_or_else(|| CursorError::InvalidState("ordered cursor must be an object".into()))?;
+        next.remove(PAGE_RESUME_KEY);
+        if let Some(resume) = &self.resume {
+            next.insert(PAGE_RESUME_KEY.into(), resume.clone());
+        }
+        Ok(advance)
+    }
+
+    fn owned_keys(&self) -> Vec<String> {
+        self.inner.owned_keys()
+    }
+    fn state_keys(&self) -> Vec<String> {
+        self.inner.state_keys()
+    }
 }
 
 impl SyncTokenStrategy {
@@ -492,9 +521,7 @@ impl SortedHeadStrategy {
         // both the name and a positive integer behind it, so a shape reaching
         // here without one is refused rather than silently defaulted -- a default
         // would restore exactly the false-gap behaviour this field exists to end.
-        let page_size = non_empty_trimmed(poll.request_page_size_field.as_deref())
-            .and_then(|key| poll.request_constants.as_ref()?.get(key)?.as_u64())
-            .filter(|cap| *cap > 0)? as usize;
+        let page_size = declared_page_size(poll)? as usize;
         Some(Self {
             items_field: non_empty_trimmed(poll.items_field.as_deref()).map(str::to_string),
             timestamp_field: timestamp_field.to_string(),
@@ -597,7 +624,7 @@ impl CursorStrategy for SortedHeadStrategy {
             // exactly on it are ambiguous because some vendors expose timestamps
             // only to the second: the same item may have changed without moving
             // its timestamp. Mark the boundary for a storage-owned content
-            // comparison; items older than the watermark remain excluded.
+            // comparison. The overlap also admits rows that became visible late.
             let (is_new, replay_candidate) = match prior_ms {
                 None => (true, false),
                 Some(watermark_ms) if timestamp_ms > watermark_ms => (true, false),
@@ -607,6 +634,12 @@ impl CursorStrategy for SortedHeadStrategy {
                         Some(watermark_id_or(prior_id.as_deref())),
                     );
                     (is_new, !is_new)
+                }
+                Some(watermark_ms)
+                    if timestamp_ms
+                        >= watermark_ms.saturating_sub(SORTED_HEAD_REPLAY_WINDOW_MS) =>
+                {
+                    (false, true)
                 }
                 Some(_) => (false, false),
             };
@@ -973,6 +1006,15 @@ fn scalar_identity(observed: &Value) -> String {
 }
 
 /// A manifest field value that must be present and non-empty, trimmed.
+fn declared_page_size(poll: &PollShape) -> Option<u64> {
+    let key = non_empty_trimmed(poll.request_page_size_field.as_deref())?;
+    poll.request_constants
+        .as_ref()?
+        .get(key)?
+        .as_u64()
+        .filter(|size| *size > 0)
+}
+
 fn non_empty_trimmed(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|field| !field.is_empty())
 }
@@ -989,14 +1031,19 @@ fn stable_id_string(value: &Value) -> Option<String> {
 }
 
 /// Compare equal-timestamp tiebreakers without ordering numeric-looking
-/// identifiers as text (`10` must sort after `2`); other identifiers are lexical.
+/// identifiers as text (`10` must sort after `2`). Numeric ids sort before
+/// non-numeric ids so mixed formats still have a transitive order.
 fn tiebreaker_id_is_greater(candidate: &str, current: Option<&str>) -> bool {
     let Some(current) = current else {
         return true;
     };
     match (candidate.parse::<i128>(), current.parse::<i128>()) {
-        (Ok(candidate), Ok(current)) => candidate > current,
-        _ => candidate > current,
+        (Ok(candidate_number), Ok(current_number)) => {
+            (candidate_number, candidate) > (current_number, current)
+        }
+        (Ok(_), Err(_)) => false,
+        (Err(_), Ok(_)) => true,
+        (Err(_), Err(_)) => candidate > current,
     }
 }
 
@@ -1101,6 +1148,26 @@ fn settle_ordered_window(prior_state: &Value, next_state: &mut Value, late_row: 
 
 impl CursorStrategy for OrderedTimestampStrategy {
     fn build_args(&self, cursor_state: &Value) -> Result<Value, CursorError> {
+        if let Some(resume) = cursor_state.get(PAGE_RESUME_KEY) {
+            let valid = resume.as_object().is_some_and(|args| {
+                self.request_page_cursor_field
+                    .as_ref()
+                    .is_some_and(|field| {
+                        args.get(field)
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.is_empty())
+                            && args
+                                .keys()
+                                .all(|key| key == field || key == &self.request_since_field)
+                    })
+            });
+            if !valid {
+                return Err(CursorError::InvalidState(
+                    "page_resume must contain a vendor cursor and its original filter".into(),
+                ));
+            }
+            return Ok(resume.clone());
+        }
         // No watermark yet (first poll): request everything the vendor will give
         // by sending no filter argument, and derive the first watermark from
         // what comes back.
@@ -1127,6 +1194,7 @@ impl CursorStrategy for OrderedTimestampStrategy {
             WATERMARK_ID_KEY.to_string(),
             WINDOW_MS_KEY.to_string(),
             WINDOW_CHANGED_MS_KEY.to_string(),
+            PAGE_RESUME_KEY.to_string(),
         ]
     }
 
@@ -1351,6 +1419,17 @@ const REPO_IDENTITY_COUNTER_NAMES: [&str; 6] = [
     "repository_identity_changed",
 ];
 
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum RepoIdentityCounter {
+    Unresolved,
+    GrantMissing,
+    Deferred,
+    RefreshFailed,
+    RefreshDeferred,
+    IdentityChanged,
+}
+
 struct RepoIdentityCounters([std::sync::atomic::AtomicU64; 6]);
 
 impl RepoIdentityCounters {
@@ -1358,12 +1437,8 @@ impl RepoIdentityCounters {
         Self([const { std::sync::atomic::AtomicU64::new(0) }; 6])
     }
 
-    fn record(&self, name: &str, count: u64) {
-        let slot = REPO_IDENTITY_COUNTER_NAMES
-            .iter()
-            .position(|n| *n == name)
-            .expect("known repository identity counter");
-        self.0[slot].fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+    fn record(&self, counter: RepoIdentityCounter, count: u64) {
+        self.0[counter as usize].fetch_add(count, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn snapshot(&self) -> Value {
@@ -1439,6 +1514,9 @@ impl CallBudget {
 
     /// Consume `n` calls, or return `None` without changing the budget.
     fn try_take(&self, n: usize) -> Option<CallPermit<'_>> {
+        if pass_budget_expired() {
+            return None;
+        }
         let remaining = self.remaining.get();
         let next = remaining.checked_sub(n)?;
         self.remaining.set(next);
@@ -1613,7 +1691,23 @@ where
                 }
             }
         };
-        let cycle = self.poll_subscription(principal, &subscription);
+        self.poll_loaded(principal, &subscription, None)
+    }
+
+    pub(crate) fn poll_loaded(
+        &self,
+        principal: &str,
+        subscription: &TriggerSubscription,
+        deadline: Option<std::time::Instant>,
+    ) -> PollCycle {
+        let cycle = budget::with_deadline(deadline, || {
+            if pass_budget_expired() {
+                return PollCycle::Deferred {
+                    reason: "poll_pass_budget".into(),
+                };
+            }
+            self.poll_subscription(principal, subscription)
+        });
         track_credential_repair(principal, &subscription.connection_id, &cycle);
         cycle
     }
@@ -1674,14 +1768,30 @@ where
         // Cursor arguments are extended last so a malformed legacy row cannot
         // pin the watermark even if it bypassed subscribe-time validation.
         args.extend(cursor_args.clone());
-        // A page cursor belongs only to this cycle, never to a fixed legacy row.
+        // Only the cursor state may supply a continuation, never fixed legacy args.
         let pagination = poll_shape
             .as_ref()
             .filter(|_| subscription.cursor_kind == "ordered_timestamp")
             .and_then(|shape| shape.pagination.as_ref());
         if let Some(pagination) = pagination {
-            args.remove(&pagination.request_cursor_field);
+            if !cursor_args.contains_key(&pagination.request_cursor_field) {
+                args.remove(&pagination.request_cursor_field);
+            }
         }
+        let page_size = if pagination.is_some() {
+            match poll_shape.as_ref().and_then(declared_page_size) {
+                Some(size) => size,
+                None => {
+                    return self.suspend(
+                        principal,
+                        subscription_id,
+                        "response_shape_invalid: positive request page size required",
+                    )
+                }
+            }
+        } else {
+            0
+        };
         let mut args = Value::Object(args);
         // Identity resolution precedes the watched vendor read. A changed name
         // suspends all its watches atomically, so this cycle must stop here.
@@ -1696,7 +1806,7 @@ where
             Ok(true) => {}
             Ok(false) => {
                 return PollCycle::NotEligible {
-                    reason: "subscription_not_active".to_string(),
+                    reason: SUBSCRIPTION_NOT_ACTIVE.to_string(),
                 }
             }
             Err(error) => {
@@ -1708,6 +1818,12 @@ where
         let mut combined_response: Option<Value> = None;
         let mut pages = 0;
         let mut seen_cursors = std::collections::BTreeSet::new();
+        if let Some(cursor) = pagination
+            .and_then(|p| args.get(&p.request_cursor_field))
+            .and_then(Value::as_str)
+        {
+            seen_cursors.insert(cursor.to_owned());
+        }
         loop {
             // The only route to poll authority. It reads the catalog before any gate
             // runs and refuses to even build a request for an action that is no
@@ -1730,6 +1846,7 @@ where
                 }
             };
             let mut coverage_gap = None;
+            let mut resume = None;
             if let (Some(pagination), Some(shape)) = (pagination, poll_shape.as_ref()) {
                 pages += 1;
                 let items_field = shape.items_field.as_deref().unwrap_or(RESPONSE_ITEMS_KEY);
@@ -1739,32 +1856,33 @@ where
                     .and_then(Value::as_array);
                 // A malformed page is not an empty successful answer.
                 let (Some(body), Some(items)) = (body, items) else {
-                    return self.suspend(principal, subscription_id, "response_shape_invalid");
+                    return self.suspend(
+                        principal,
+                        subscription_id,
+                        &format!("{RESPONSE_SHAPE_INVALID}: {items_field} must be an array"),
+                    );
                 };
-                let page_size = shape
-                    .request_page_size_field
-                    .as_deref()
-                    .and_then(|key| shape.request_constants.as_ref()?.get(key))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
                 let full = items.len() as u64 >= page_size;
                 let next_cursor = body
                     .pointer(&pagination.response_cursor_pointer)
                     .and_then(Value::as_str)
                     .filter(|cursor| !cursor.is_empty())
                     .map(str::to_owned);
+                let mut body = response.take().expect("validated body");
+                let Value::Array(page_items) = body[items_field].take() else {
+                    unreachable!("validated items")
+                };
                 if let Some(combined) = combined_response.as_mut() {
                     combined[items_field]
                         .as_array_mut()
                         .expect("validated items")
-                        .extend(items.iter().cloned());
+                        .extend(page_items);
                 } else {
-                    combined_response = Some(body.clone());
+                    body[items_field] = Value::Array(page_items);
+                    combined_response = Some(body);
                 }
                 if full {
-                    let reason = if pages >= ORDERED_TIMESTAMP_MAX_PAGES_PER_POLL {
-                        Some("ordered_timestamp_page_limit")
-                    } else if next_cursor
+                    let reason = if next_cursor
                         .as_ref()
                         .is_none_or(|cursor| !seen_cursors.insert(cursor.clone()))
                     {
@@ -1778,15 +1896,39 @@ where
                         // Keep the original filter and ordering: a cursor must
                         // traverse the same result set, not a newly widened one.
                         args[&pagination.request_cursor_field] = json!(next_cursor);
-                        continue;
+                        if pages >= ORDERED_TIMESTAMP_MAX_PAGES_PER_POLL || pass_budget_expired() {
+                            let mut saved = serde_json::Map::new();
+                            saved.insert(
+                                pagination.request_cursor_field.clone(),
+                                args[&pagination.request_cursor_field].clone(),
+                            );
+                            if let Some(field) = shape.request_since_field.as_deref() {
+                                if let Some(value) = args.get(field) {
+                                    saved.insert(field.into(), value.clone());
+                                }
+                            } else if let Some(value) = args.get(REQUEST_SINCE_KEY) {
+                                saved.insert(REQUEST_SINCE_KEY.into(), value.clone());
+                            }
+                            resume = Some(Value::Object(saved));
+                        } else {
+                            continue;
+                        }
                     }
                 }
                 response = combined_response.take();
             }
+            let drained = DrainedStrategy {
+                inner: strategy.as_ref(),
+                resume,
+            };
             return self.complete(
                 principal,
                 subscription,
-                strategy.as_ref(),
+                if pagination.is_some() {
+                    &drained
+                } else {
+                    strategy.as_ref()
+                },
                 response.as_ref(),
                 observed_at_ms,
                 poll_shape.as_ref().map(|shape| shape.item_kind.as_str()),
@@ -1796,10 +1938,10 @@ where
         }
     }
 
-    fn count_repo_identity(&self, name: &str, count: u64) {
+    fn count_repo_identity(&self, counter: RepoIdentityCounter, count: u64) {
         #[cfg(test)]
-        self.repo_identity_counts.record(name, count);
-        REPO_IDENTITY_COUNTERS.record(name, count);
+        self.repo_identity_counts.record(counter, count);
+        REPO_IDENTITY_COUNTERS.record(counter, count);
     }
 
     /// Rows this ordered-timestamp poll returned that storage has never seen at
@@ -1844,7 +1986,10 @@ where
             &candidates,
         ) {
             Ok(stored) => stored.iter().filter(|stored| !**stored).count(),
-            Err(_) => 0,
+            Err(error) => {
+                eprintln!(warn poller: "late row lookup failed subscription={:?}: {error}", subscription.subscription_id);
+                0
+            }
         }
     }
 
@@ -1908,10 +2053,10 @@ where
         let unclaimed = |error: &dyn std::fmt::Display| {
             eprintln!(warn poller: "repository identity skipped for {name}: store failure: {error}");
         };
-        let request = if cache_entry
+        let resolution_due = cache_entry
             .as_ref()
-            .is_none_or(|entry| entry.resolution_due(at_ms))
-        {
+            .is_none_or(|entry| entry.resolution_due(at_ms));
+        let request = if resolution_due {
             match store.catalog_action(principal, GITHUB_ACTIONS_CONNECTION, "get_repository") {
                 Err(error) => {
                     unclaimed(&error);
@@ -1948,6 +2093,18 @@ where
         } else {
             None
         };
+        if request.is_none() || pass_budget_expired() {
+            if resolution_due && request.is_none() {
+                store
+                    .record_repo_id_resolution(&name, None, at_ms)
+                    .map_err(store_failure)?;
+            }
+            return Ok(Some(PollRepository {
+                name,
+                event_name,
+                repo_id: cached,
+            }));
+        }
         let admission = store
             .reserve_repo_id_resolution(principal, &subscription.subscription_id, &name, at_ms)
             .map_err(store_failure)?;
@@ -1968,9 +2125,9 @@ where
             RepoResolutionAdmission::Deferred => {
                 self.count_repo_identity(
                     if cached.is_some() {
-                        "repo_id_refresh_deferred"
+                        RepoIdentityCounter::RefreshDeferred
                     } else {
-                        "repo_id_deferred"
+                        RepoIdentityCounter::Deferred
                     },
                     1,
                 );
@@ -2010,16 +2167,16 @@ where
         };
         if resolved.is_none() {
             if cached.is_some() {
-                self.count_repo_identity("repo_id_refresh_failed", 1);
+                self.count_repo_identity(RepoIdentityCounter::RefreshFailed, 1);
             } else if grant_missing {
-                self.count_repo_identity("repo_id_grant_missing", 1);
+                self.count_repo_identity(RepoIdentityCounter::GrantMissing, 1);
             }
         }
         let update = store
             .record_repo_id_resolution(&name, resolved, at_ms)
             .map_err(store_failure)?;
         if matches!(update, RepoIdUpdate::IdentityChanged { .. }) {
-            self.count_repo_identity("repository_identity_changed", 1);
+            self.count_repo_identity(RepoIdentityCounter::IdentityChanged, 1);
             return Err(PollCycle::Suspended {
                 reason: "repository_identity_changed".to_string(),
             });
@@ -2079,7 +2236,7 @@ where
             Ok(true) => {}
             Ok(false) => {
                 return PollCycle::NotEligible {
-                    reason: "subscription_not_active".to_string(),
+                    reason: SUBSCRIPTION_NOT_ACTIVE.to_string(),
                 }
             }
             Err(error) => {
@@ -2100,9 +2257,7 @@ where
         let sandbox = match ProbeSandbox::new(probe.actions.iter().cloned()) {
             Ok(sandbox) => sandbox,
             Err(error) => {
-                return PollCycle::Inconclusive {
-                    code: probe_reason_code(&error).to_string(),
-                }
+                return self.probe_failure_cycle(principal, &subscription.subscription_id, &error)
             }
         };
         // `plexus-probe` deliberately exposes only string failures to guest code.
@@ -2116,6 +2271,7 @@ where
             subscription_id: subscription.subscription_id.clone(),
             fixed_args: subscription.fixed_args.clone(),
             action_failure: Arc::clone(&action_failure),
+            deadline: budget::deadline(),
         };
         let observed = match sandbox.run(&probe.script_source, json!({}), &schema, invoker) {
             Ok(value) => probe_value_json(&value),
@@ -2130,7 +2286,9 @@ where
                         &subscription.subscription_id,
                         failure,
                     ),
-                    None => probe_run_outcome(&error),
+                    None => {
+                        self.probe_failure_cycle(principal, &subscription.subscription_id, &error)
+                    }
                 };
             }
         };
@@ -2200,11 +2358,26 @@ where
                 }
             }
             Err(crate::storage::PollCommitError::Inactive) => PollCycle::NotEligible {
-                reason: "subscription_not_active".into(),
+                reason: SUBSCRIPTION_NOT_ACTIVE.into(),
             },
             Err(error) => PollCycle::StoreFailed {
                 reason: error.to_string(),
             },
+        }
+    }
+
+    fn probe_failure_cycle(
+        &self,
+        principal: &str,
+        subscription_id: &str,
+        error: &ProbeError,
+    ) -> PollCycle {
+        match probe_run_outcome(error) {
+            PollCycle::VendorFailed { code } => {
+                self.vendor_failure_cycle(principal, subscription_id, code)
+            }
+            PollCycle::Suspended { reason } => self.suspend(principal, subscription_id, &reason),
+            cycle => cycle,
         }
     }
 
@@ -2264,6 +2437,11 @@ where
             GovernedReadFailure::Denied(ref denial) => {
                 self.suspend(principal, subscription_id, denial.reason_code())
             }
+            GovernedReadFailure::NotSent { ref code, .. } if code == "poll_pass_budget" => {
+                PollCycle::Deferred {
+                    reason: code.clone(),
+                }
+            }
             GovernedReadFailure::OutcomeUnknown | GovernedReadFailure::NotSent { .. } => {
                 PollCycle::Inconclusive {
                     code: failure.code(),
@@ -2286,7 +2464,7 @@ where
         {
             Ok(true) => PollCycle::VendorFailed { code },
             Ok(false) => PollCycle::NotEligible {
-                reason: "subscription_not_active".into(),
+                reason: SUBSCRIPTION_NOT_ACTIVE.into(),
             },
             Err(error) => PollCycle::StoreFailed {
                 reason: error.to_string(),
@@ -2317,11 +2495,11 @@ where
         let mut advance = match response {
             Some(response) => match strategy.derive(&subscription.cursor_state, response) {
                 Ok(advance) => advance,
-                Err(_) => {
+                Err(error) => {
                     return self.suspend(
                         principal,
                         &subscription.subscription_id,
-                        "response_shape_invalid",
+                        &format!("{RESPONSE_SHAPE_INVALID}: {error:?}"),
                     )
                 }
             },
@@ -2342,28 +2520,11 @@ where
                 .ok()
                 .flatten()
                 .unwrap_or(observed_at_ms);
-            // A page-limit gap is recorded only when the drain has stalled:
-            // the new watermark is no later than the previous watermark plus
-            // the previous overlap window (the span each poll re-reads below
-            // its watermark). When the watermark moves past that point, the
-            // next ascending poll resumes later in the backlog and keeps
-            // draining, so no gap is needed. When it does not, repeated full
-            // pages may be hiding more rows that share the boundary timestamp,
-            // so record the `ordered_timestamp_page_limit` gap as a warning.
-            // Gaps for any other reason are always recorded.
-            let stalled = watermark
-                <= ordered_watermark(&subscription.cursor_state)
-                    .ok()
-                    .flatten()
-                    .unwrap_or(MIN_WATERMARK_MS)
-                    .saturating_add(ordered_window(&subscription.cursor_state).unwrap_or(0));
-            if reason != "ordered_timestamp_page_limit" || stalled {
-                advance.coverage_gap = Some(CoverageGap {
-                    from_ms: watermark,
-                    to_ms: watermark.max(observed_at_ms),
-                    reason,
-                });
-            }
+            advance.coverage_gap = Some(CoverageGap {
+                from_ms: watermark,
+                to_ms: watermark.max(observed_at_ms),
+                reason,
+            });
         }
         if subscription.cursor_kind == "ordered_timestamp" {
             let late_rows = self.count_late_rows(principal, subscription, &advance.events);
@@ -2379,7 +2540,9 @@ where
             );
         }
         retain_changed_replay_candidates(&mut advance.events, &mut advance.dropped, |candidates| {
-            store.unchanged_event_payloads(principal, &subscription.subscription_id, candidates)
+            store.unchanged_event_payloads(principal, &subscription.subscription_id, candidates).inspect_err(|error| {
+                eprintln!(warn poller: "stored payload lookup failed subscription={:?}: {error}", subscription.subscription_id);
+            })
         });
         // Only a watch with an actor source spends vendor reads on enrichment,
         // so only it pays for the extra per-item lookup. Without one, an
@@ -2400,7 +2563,9 @@ where
                         principal,
                         &subscription.subscription_id,
                         candidates,
-                    )
+                    ).inspect_err(|error| {
+                        eprintln!(warn poller: "stored payload lookup failed subscription={:?}: {error}", subscription.subscription_id);
+                    })
                 },
             )
         } else {
@@ -2411,29 +2576,9 @@ where
         // Reading it from the same place the strategy came from means the kind
         // recorded on an event and the strategy that produced it can never
         // disagree about which action they describe.
-        let (actor_logins, envelope_contexts) =
-            self.enrich_actor_logins(principal, subscription, &advance.events, item_kind);
         // Keep vendor bodies byte-identical. In particular, `change` belongs to
         // the marker only, so legacy payload-hash dedup still sees the same item.
-        let identities = advance.events.iter().map(|event| {
-            let Some(repository) = repository.filter(|repo| repo.repo_id.is_some()) else {
-                return Ok(None);
-            };
-            let repo_id = repository.repo_id.expect("resolved repository");
-            let fields = json!({"repo_id": repo_id, "number": event.payload.get("number"),
-                "updated_at": event.payload.get("updated_at"), "release_id": event.payload.get("id")});
-            let key = crate::event_key::derive_event_key(repository.event_name, &fields)?;
-            let change = if repository.event_name == crate::event_key::GITHUB_ISSUE_CHANGED {
-                event.payload.get("created_at").and_then(Value::as_str).zip(
-                    event.payload.get("updated_at").and_then(Value::as_str))
-                    .map(|(created, updated)| if created == updated { "opened" } else { "updated" })
-            } else { None };
-            Ok(Some(PollEventIdentity { key, change, headers: EventHeaders {
-                repo: repository.name.clone(), project: subscription.project_id.clone(),
-                pr: (repository.event_name == crate::event_key::GITHUB_PR_CHANGED).then(|| event.payload["number"].to_string()),
-                branch: None, conclusion: None,
-            } }))
-        }).collect::<Result<Vec<_>, crate::event_key::EventKeyError>>();
+        let identities = poll_event_identities(subscription, &advance.events, repository);
         let identities = match identities {
             Ok(identities) => identities,
             Err(_) => {
@@ -2444,6 +2589,8 @@ where
                 )
             }
         };
+        let (actor_logins, envelope_contexts) =
+            self.enrich_actor_logins(principal, subscription, &advance.events, item_kind);
         let inputs: Vec<KeyedPollEventInput<'_>> = advance
             .events
             .iter()
@@ -2496,7 +2643,7 @@ where
             Ok(outcomes) => {
                 if repository.is_some_and(|repo| repo.repo_id.is_none()) {
                     self.count_repo_identity(
-                        "repo_id_unresolved",
+                        RepoIdentityCounter::Unresolved,
                         outcomes
                             .iter()
                             .filter(|outcome| {
@@ -2554,7 +2701,7 @@ where
                 }
             }
             Err(crate::storage::PollCommitError::Inactive) => PollCycle::NotEligible {
-                reason: "subscription_not_active".into(),
+                reason: SUBSCRIPTION_NOT_ACTIVE.into(),
             },
             Err(error) => PollCycle::StoreFailed {
                 reason: error.to_string(),
@@ -2575,21 +2722,20 @@ where
         Vec<crate::event_envelope::EnvelopeContext>,
     ) {
         let unknown = |failure: EnrichmentFailure| {
+            if let Some(event) = events.first() {
+                log_actor_unknown(
+                    subscription,
+                    event,
+                    &format!("{} count={}", failure.detail, events.len()),
+                );
+            }
             events
                 .iter()
-                .map(|event| {
-                    log_actor_unknown(subscription, event, &failure.detail);
-                    (failure.clone().into_attribution(), Default::default())
-                })
+                .map(|_event| (failure.clone().into_attribution(), Default::default()))
                 .unzip()
         };
         let Some(source) = subscription.actor_source.as_ref() else {
-            // No actor source means no enrichment applies (a release watch, or
-            // a watch the operator never bound). Logged as before, but not
-            // stored as a reason: such events carry neither actor field.
-            for event in events {
-                log_actor_unknown(subscription, event, "actor_source_unbound");
-            }
+            // An unbound watch has no enrichment to fail and needs no warning.
             return (
                 vec![ActorAttribution::NotEnriched; events.len()],
                 vec![Default::default(); events.len()],
@@ -2622,7 +2768,8 @@ where
             }
         };
         let budget = CallBudget::new(ACTOR_ENRICHMENT_MAX_CALLS_PER_CYCLE);
-        events
+        let mut diagnostics = std::collections::BTreeMap::new();
+        let result = events
             .iter()
             .map(|event| {
                 let mut envelope_context = crate::event_envelope::EnvelopeContext::default();
@@ -2738,13 +2885,22 @@ where
                 let attribution = match result {
                     Ok(actors) => ActorAttribution::Known(actors),
                     Err(failure) => {
-                        log_actor_unknown(subscription, event, &failure.detail);
+                        let entry = diagnostics.entry(failure.code.as_str()).or_insert((
+                            0usize,
+                            event,
+                            failure.detail.clone(),
+                        ));
+                        entry.0 += 1;
                         failure.into_attribution()
                     }
                 };
                 (attribution, envelope_context)
             })
-            .unzip()
+            .unzip();
+        for (_, (count, event, detail)) in diagnostics {
+            log_actor_unknown(subscription, event, &format!("{detail} count={count}"));
+        }
+        result
     }
 
     fn dispatch_actor_read(
@@ -2942,12 +3098,15 @@ where
                     budget,
                 },
             )?;
-            let page_entries = response.as_array().ok_or_else(unrecognized)?;
-            if page_entries.len() > ACTOR_TIMELINE_PAGE_SIZE {
+            let Value::Array(page_entries) = response else {
+                return Err(unrecognized());
+            };
+            let page_len = page_entries.len();
+            if page_len > ACTOR_TIMELINE_PAGE_SIZE {
                 return Err(unrecognized());
             }
-            entries.extend(page_entries.iter().cloned());
-            if page_entries.len() < ACTOR_TIMELINE_PAGE_SIZE {
+            entries.extend(page_entries);
+            if page_len < ACTOR_TIMELINE_PAGE_SIZE {
                 return timeline_window_actors(&entries, previous_observed_at_ms);
             }
         }
@@ -2979,6 +3138,32 @@ where
             },
         }
     }
+}
+
+fn poll_event_identities(
+    subscription: &TriggerSubscription,
+    events: &[DerivedEvent],
+    repository: Option<&PollRepository>,
+) -> Result<Vec<Option<PollEventIdentity>>, crate::event_key::EventKeyError> {
+    events.iter().map(|event| {
+            let Some(repository) = repository.filter(|repo| repo.repo_id.is_some()) else {
+                return Ok(None);
+            };
+            let repo_id = repository.repo_id.expect("resolved repository");
+            let fields = json!({"repo_id": repo_id, "number": event.payload.get("number"),
+                "updated_at": event.payload.get("updated_at"), "release_id": event.payload.get("id")});
+            let key = crate::event_key::derive_event_key(repository.event_name, &fields)?;
+            let change = if repository.event_name == crate::event_key::GITHUB_ISSUE_CHANGED {
+                event.payload.get("created_at").and_then(Value::as_str).zip(
+                    event.payload.get("updated_at").and_then(Value::as_str))
+                    .map(|(created, updated)| if created == updated { "opened" } else { "updated" })
+            } else { None };
+            Ok(Some(PollEventIdentity { key, change, headers: EventHeaders {
+                repo: repository.name.clone(), project: subscription.project_id.clone(),
+                pr: (repository.event_name == crate::event_key::GITHUB_PR_CHANGED).then(|| event.payload["number"].to_string()),
+                branch: None, conclusion: None,
+            } }))
+        }).collect::<Result<Vec<_>, crate::event_key::EventKeyError>>()
 }
 
 fn log_actor_unknown(subscription: &TriggerSubscription, event: &DerivedEvent, reason: &str) {
@@ -3513,8 +3698,17 @@ fn probe_reason_code(error: &ProbeError) -> &'static str {
 }
 
 fn probe_run_outcome(error: &ProbeError) -> PollCycle {
-    PollCycle::Inconclusive {
-        code: probe_reason_code(error).to_string(),
+    let code = probe_reason_code(error).to_string();
+    match error {
+        ProbeError::Timeout { .. } | ProbeError::MemoryLimit { .. } => {
+            PollCycle::VendorFailed { code }
+        }
+        _ => PollCycle::Suspended {
+            reason: format!(
+                "{code}: {}",
+                error.to_string().chars().take(512).collect::<String>()
+            ),
+        },
     }
 }
 
@@ -3660,6 +3854,12 @@ where
     C: CredentialSource + ?Sized,
     T: Transport + ?Sized,
 {
+    if pass_budget_expired() {
+        return Err(GovernedReadFailure::NotSent {
+            code: "poll_pass_budget".into(),
+            message: "poll pass deadline reached".into(),
+        });
+    }
     let reservation = engine.authorize(request).map_err(|denial| match denial {
         Denial::StoreFailure => GovernedReadFailure::StoreFailed {
             reason: "store_failure".to_string(),
@@ -3740,6 +3940,7 @@ where
     subscription_id: String,
     fixed_args: Value,
     action_failure: Arc<Mutex<Option<ProbeActionFailure>>>,
+    deadline: Option<std::time::Instant>,
 }
 
 impl<C, T> ActionInvoker for ProbeActionDispatch<C, T>
@@ -3748,10 +3949,6 @@ where
     T: Transport + ?Sized + 'static,
 {
     fn invoke(&self, action: &str, argument: Value) -> Result<Value, String> {
-        *self
-            .action_failure
-            .lock()
-            .expect("probe action failure lock") = None;
         let mut args = match argument {
             Value::Object(map) => map,
             _ => {
@@ -3759,10 +3956,10 @@ where
                     code: "probe_action_failed".to_string(),
                     message: "probe action argument must be an object".to_string(),
                 };
-                *self
-                    .action_failure
+                self.action_failure
                     .lock()
-                    .expect("probe action failure lock") = Some(failure.clone());
+                    .expect("probe action failure lock")
+                    .get_or_insert_with(|| failure.clone());
                 return Err(failure.message());
             }
         };
@@ -3783,10 +3980,10 @@ where
                 message: "an earlier action call of this probe is still running".to_string(),
             };
             let message = failure.message();
-            *self
-                .action_failure
+            self.action_failure
                 .lock()
-                .expect("probe action failure lock") = Some(failure);
+                .expect("probe action failure lock")
+                .get_or_insert(failure);
             return Err(message);
         };
         let engine = self.engine.clone();
@@ -3794,19 +3991,22 @@ where
         let connection_id = self.connection_id.clone();
         let subscription_id = self.subscription_id.clone();
         let action = action.to_string();
+        let deadline = self.deadline;
         let abandoned = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_abandoned = Arc::clone(&abandoned);
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let result = dispatch_probe_action(
-                &engine,
-                &principal,
-                &connection_id,
-                &subscription_id,
-                &action,
-                args,
-                &worker_abandoned,
-            );
+            let result = budget::with_deadline(deadline, || {
+                dispatch_probe_action(
+                    &engine,
+                    &principal,
+                    &connection_id,
+                    &subscription_id,
+                    &action,
+                    args,
+                    &worker_abandoned,
+                )
+            });
             // Release the claim before replying, so a caller that waited sees
             // the subscription free as soon as it has the answer.
             drop(in_flight);
@@ -3828,22 +4028,22 @@ where
         };
         result.map_err(|failure| {
             let message = failure.message();
-            *self
-                .action_failure
+            self.action_failure
                 .lock()
-                .expect("probe action failure lock") = Some(failure);
+                .expect("probe action failure lock")
+                .get_or_insert(failure);
             message
         })
     }
 }
 
-/// Same budget as the sandbox wall clock. The two clocks are independent: this
-/// one bounds the host callback the sandbox cannot interrupt. Unit tests use a
-/// short deadline so a test of the abandoned-call path does not wait seconds.
+/// Bounds a vendor callback independently of the sandbox's guest execution
+/// budget: synchronous vendor I/O cannot be interrupted by the sandbox clock.
+/// Tests use a short deadline to exercise abandoned-call recovery.
 const ACTION_CALLBACK_DEADLINE: Duration = if cfg!(test) {
     Duration::from_millis(300)
 } else {
-    WALL_TIMEOUT
+    Duration::from_secs(5)
 };
 
 /// Inconclusive code for a probe whose earlier action call is still running.
@@ -4156,6 +4356,7 @@ pub(crate) mod iso8601 {
 
 #[cfg(test)]
 mod tests {
+    mod liveness_tests;
     use super::*;
 
     #[test]
@@ -5976,7 +6177,7 @@ mod tests {
         assert!(
             matches!(
                 cycle,
-                PollCycle::Suspended { ref reason } if reason == "response_shape_invalid"
+                PollCycle::Suspended { ref reason } if reason.starts_with("response_shape_invalid:")
             ),
             "expected response_shape_invalid suspension, got {cycle:?}"
         );
@@ -6015,7 +6216,7 @@ mod tests {
         let poller = Poller::new(engine);
         let cycle = poller.poll_once("direct", &subscription.subscription_id);
         assert!(
-            matches!(cycle, PollCycle::Suspended { ref reason } if reason == "response_shape_invalid"),
+            matches!(cycle, PollCycle::Suspended { ref reason } if reason.starts_with("response_shape_invalid:")),
             "a malformed item must suspend the poll, got {cycle:?}"
         );
         let events = store
@@ -6065,20 +6266,17 @@ mod tests {
             .expect("store")
             .expect("accepted");
         let cycle = Poller::new(engine).poll_once("direct", &subscription.subscription_id);
-        assert_eq!(
-            cycle,
-            PollCycle::Inconclusive {
-                code: "probe_return_invalid".to_string(),
-            },
-            "a type-mismatched return is non-completing, not a fire: {cycle:?}"
+        assert!(
+            matches!(&cycle, PollCycle::Suspended { reason } if reason.starts_with("probe_return_invalid:")),
+            "a type-mismatched return must pause visibly: {cycle:?}"
         );
         let stored = store
             .subscription("direct", &subscription.subscription_id)
             .expect("read")
             .expect("present");
         assert_eq!(
-            stored.status, "active",
-            "a validation failure must not retire a once probe"
+            stored.status, "suspended",
+            "a validation failure must suspend, not retire a once probe"
         );
     }
 
@@ -6976,8 +7174,8 @@ mod repository_identity_tests {
         assert_eq!(f.mock.requests().len(), 20);
         assert_eq!(
             f.count("github_actions_quota"),
-            1,
-            "absent connection is retried only hourly"
+            0,
+            "absent connection must not consume a vendor quota reservation"
         );
         let scheduler = crate::scheduler::Scheduler::new(f.engine.clone(), 604_800_000);
         let pass = scheduler.run_pass(&[PRINCIPAL.to_string()], now_ms() + 300_001);
@@ -7800,11 +7998,7 @@ mod sorted_head_tests {
         assert_eq!(tied.cursor_state, prior);
     }
 
-    /// Items strictly older than the timestamp watermark remain outside the
-    /// replay boundary and are not widened into a historical rescan.
-    ///
-    /// Mutation-proved: changing the equality boundary to `<=` marks id `1` as a
-    /// replay candidate and fails both the event count and identity assertions.
+    /// Items outside the replay window remain excluded from historical rescans.
     #[test]
     fn items_older_than_the_watermark_remain_excluded() {
         let state = json!({
@@ -7816,7 +8010,7 @@ mod sorted_head_tests {
                 &state,
                 &json!([
                     item(2, "2026-08-13T11:00:00Z"),
-                    item(1, "2026-08-13T10:59:59Z")
+                    item(1, "2026-08-13T10:58:59Z")
                 ]),
             )
             .expect("derive boundary and older item");

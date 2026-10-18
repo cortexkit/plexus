@@ -216,6 +216,7 @@
         "method": "GET",
         "path": "/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip",
         "credentialless_tail": {
+          "kind": "artifact_file",
           "allowed_hosts": ["*.blob.core.windows.net", "results-receiver.actions.githubusercontent.com"]
         },
         "args_schema": {

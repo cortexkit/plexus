@@ -16,6 +16,7 @@ pub enum ListRead {
 }
 
 impl ListRead {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn action(self) -> &'static str {
         match self {
             Self::IssueComments => "github.issue_comments.list",
@@ -56,9 +57,14 @@ impl CompletedWalk {
         if self.read != ListRead::IssueComments {
             return None;
         }
-        let login = format!("{slug}[bot]");
+        let login = crate::github::credential::bot_login(&format!(
+            "{}{slug}",
+            crate::github::credential::APP_PREFIX
+        ))?;
         self.items.iter().rev().find(|item| {
-            item.pointer("/user/login").and_then(Value::as_str) == Some(login.as_str())
+            item.pointer("/user/login")
+                .and_then(Value::as_str)
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(&login))
                 && item.pointer("/user/type").and_then(Value::as_str) == Some("Bot")
         })
     }
@@ -66,6 +72,7 @@ impl CompletedWalk {
 
 /// A list-dependent request must not dispatch without proof of its completed
 /// pre-dispatch read. An incomplete or failed walk cannot yield this proof.
+#[cfg(any(test, feature = "test-support"))]
 pub fn may_dispatch(read_table: &[ListRead], completed: &[CompletedWalk]) -> bool {
     read_table
         .iter()
@@ -78,8 +85,48 @@ pub fn may_dispatch(read_table: &[ListRead], completed: &[CompletedWalk]) -> boo
 pub fn walk<F, C>(
     read: ListRead,
     started_at_ms: i64,
+    now_ms: C,
+    fetch: F,
+) -> Result<CompletedWalk, WalkError>
+where
+    F: FnMut(PageRequest) -> Result<Value, WalkError>,
+    C: FnMut() -> i64,
+{
+    walk_selected(read, started_at_ms, now_ms, fetch, None)
+}
+
+/// Complete the walk while retaining only the newest matching bot comment.
+/// The full thread is not needed for an edit-last ownership check.
+pub fn walk_newest_bot_comment<F, C>(
+    slug: &str,
+    started_at_ms: i64,
+    now_ms: C,
+    fetch: F,
+) -> Result<CompletedWalk, WalkError>
+where
+    F: FnMut(PageRequest) -> Result<Value, WalkError>,
+    C: FnMut() -> i64,
+{
+    let login = crate::github::credential::bot_login(&format!(
+        "{}{slug}",
+        crate::github::credential::APP_PREFIX
+    ))
+    .ok_or(WalkError::InvalidResponse)?;
+    walk_selected(
+        ListRead::IssueComments,
+        started_at_ms,
+        now_ms,
+        fetch,
+        Some(&login),
+    )
+}
+
+fn walk_selected<F, C>(
+    read: ListRead,
+    started_at_ms: i64,
     mut now_ms: C,
     mut fetch: F,
+    newest_login: Option<&str>,
 ) -> Result<CompletedWalk, WalkError>
 where
     F: FnMut(PageRequest) -> Result<Value, WalkError>,
@@ -88,7 +135,7 @@ where
     let mut items = Vec::new();
     for page in 1..=MAX_PAGES {
         if now_ms().saturating_sub(started_at_ms)
-            >= crate::github::config::claim_lease_seconds(None) * 1000
+            >= crate::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS * 1000
         {
             return Err(WalkError::LeaseExpired);
         }
@@ -98,7 +145,7 @@ where
             per_page: PER_PAGE,
         })?;
         if now_ms().saturating_sub(started_at_ms)
-            >= crate::github::config::claim_lease_seconds(None) * 1000
+            >= crate::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS * 1000
         {
             return Err(WalkError::LeaseExpired);
         }
@@ -113,7 +160,19 @@ where
             return Err(WalkError::InvalidResponse);
         }
         let done = page_items.len() < PER_PAGE;
-        items.extend(page_items.iter().cloned());
+        if let Some(login) = newest_login {
+            if let Some(newest) = page_items.iter().rev().find(|item| {
+                item.pointer("/user/login")
+                    .and_then(Value::as_str)
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(login))
+                    && item.pointer("/user/type").and_then(Value::as_str) == Some("Bot")
+            }) {
+                items.clear();
+                items.push(newest.clone());
+            }
+        } else {
+            items.extend(page_items.iter().cloned());
+        }
         if done {
             return Ok(CompletedWalk { read, items });
         }

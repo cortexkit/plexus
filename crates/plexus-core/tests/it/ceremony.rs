@@ -55,7 +55,7 @@ fn vendor_manifest(actions: Value) -> Value {
             "prefix": "Bearer ",
             "required": true
         }],
-        "resource_filters": { "required": [], "optional": [], "write_enabling": ["team"] },
+        "resource_filters": { "required": [], "optional": [], "write_enabling": [] },
         "actions_baseline": actions,
         "defaults": {
             "ask_first_risk": ["write"],
@@ -944,8 +944,15 @@ fn a_revoked_connection_stays_revoked_when_a_ticket_is_used() {
     let (store, path) = test_store("ticket-revoked");
     install_manifest(&store, two_action_manifest());
     let read = ceiling(&store, "read", &["search"]);
-    let first = issue(&store, "conn-a", "mock", &read).expect("first ticket");
-    let outstanding = issue(&store, "conn-a", "mock", &read).expect("second ticket while pending");
+    let outstanding = issue(&store, "conn-a", "mock", &read).expect("first ticket");
+    let first = issue(&store, "conn-a", "mock", &read).expect("latest ticket while pending");
+    assert!(
+        store
+            .connect_with_ticket("direct", &outstanding.ticket_id)
+            .unwrap()
+            .is_none(),
+        "a superseded ticket must not activate the newer binding"
+    );
     store
         .connect_with_ticket("direct", &first.ticket_id)
         .expect("consume")
@@ -957,6 +964,14 @@ fn a_revoked_connection_stays_revoked_when_a_ticket_is_used() {
         Err(CeremonyRefusal::ConnectionExists)
     );
 
+    // Simulate an older binary leaving a duplicate ticket issued on a live connection.
+    rusqlite::Connection::open(path.path())
+        .unwrap()
+        .execute(
+            "UPDATE binding_tickets SET status='issued' WHERE ticket_id=?1",
+            [&outstanding.ticket_id],
+        )
+        .unwrap();
     assert!(store.revoke_connection("direct", "conn-a").expect("revoke"));
     assert_eq!(
         store
@@ -1086,8 +1101,15 @@ fn a_re_issued_ticket_never_widens_the_connection_ceiling() {
     install_manifest(&store, two_action_manifest());
     let read = ceiling(&store, "read", &["search"]);
     let write = ceiling(&store, "write", &["search", "write_item"]);
-    let first = issue(&store, "conn-a", "mock", &read).unwrap();
     let early_wide = issue(&store, "conn-a", "mock", &write).unwrap();
+    let first = issue(&store, "conn-a", "mock", &read).unwrap();
+    assert!(
+        store
+            .connect_with_ticket("direct", &early_wide.ticket_id)
+            .unwrap()
+            .is_none(),
+        "a superseded wide ticket must not activate the newer narrow binding"
+    );
     store
         .connect_with_ticket("direct", &first.ticket_id)
         .unwrap()

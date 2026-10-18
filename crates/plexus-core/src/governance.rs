@@ -123,8 +123,8 @@ pub struct AuthorizationRequest {
     /// A tool call that arrives over a route can file an approval card only
     /// when the daemon has stamped the route with a head or worker session,
     /// because the card is filed under that session. Authorization called from
-    /// inside plexus can still hold a request without a card; only the operator
-    /// can then approve it, through the `requests` tool.
+    /// inside plexus can hold a cardless request only when consent cards are
+    /// not configured; a composed daemon refuses unscoped approval requests.
     requires_session_consent: bool,
     supports_per_call_approval: bool,
     /// The key the carrier (`principal`) gave this call. Stored on the
@@ -145,11 +145,61 @@ pub struct AuthorizationRequest {
     /// to the vendor, which does not declare it. No caller argument or wire
     /// field can set it.
     resolved_repository: Option<String>,
+    resolved_github_search_repositories: Option<Vec<String>>,
     diagnostic_tool: String,
 }
 
 /// Authority claimed by an interactive call an agent or operator made.
 pub const AUTHORITY_INVOKE: &str = "invoke";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestStatus {
+    Pending,
+    Approved,
+    Consumed,
+    Denied,
+    Expired,
+    Cancelled,
+    Unknown,
+}
+
+impl RequestStatus {
+    fn of(status: &str) -> Self {
+        match status {
+            "pending" => Self::Pending,
+            "approved" => Self::Approved,
+            "consumed" => Self::Consumed,
+            "denied" => Self::Denied,
+            "expired" => Self::Expired,
+            REQUEST_CANCELLED => Self::Cancelled,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PolicyEffect {
+    Allow,
+    AskFirst,
+    Block,
+}
+
+impl PolicyEffect {
+    fn of(effect: &str) -> Self {
+        match effect {
+            "allow" => Self::Allow,
+            "ask_first" => Self::AskFirst,
+            _ => Self::Block,
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::AskFirst => "ask_first",
+            Self::Block => "block",
+        }
+    }
+}
 
 /// Web search and code search can't wait for a per-call approval, so an
 /// `ask_first` policy on them is refused rather than filing a card. The search
@@ -202,6 +252,9 @@ pub const AUTHORITY_POLL: &str = "poll";
 pub const AUTHORITY_EVENTS_CONSUME: &str = "events_consume";
 
 impl AuthorizationRequest {
+    fn routing_context(&self) -> Value {
+        serde_json::json!({"repository": self.resolved_repository, "tool": self.diagnostic_tool, "supports_per_call_approval": self.supports_per_call_approval})
+    }
     pub fn new(
         principal: impl Into<String>,
         connection_id: impl Into<String>,
@@ -232,6 +285,7 @@ impl AuthorizationRequest {
             receipt: None,
             ownership_proof: None,
             resolved_repository: None,
+            resolved_github_search_repositories: None,
             diagnostic_tool: "invoke".into(),
         }
     }
@@ -345,11 +399,6 @@ impl AuthorizationRequest {
         self.scope.as_ref().and_then(CallScope::acting_agent)
     }
 
-    /// Inspect the authority kind without exposing a setter for it.
-    pub fn authority_kind(&self) -> &str {
-        &self.authority_kind
-    }
-
     pub fn origin(&self) -> RequestOrigin {
         self.origin
     }
@@ -371,6 +420,19 @@ impl AuthorizationRequest {
     pub(crate) fn resolved_repository(&self) -> Option<&str> {
         self.resolved_repository.as_deref()
     }
+
+    pub(crate) fn with_resolved_github_search(mut self, repositories: Vec<String>) -> Self {
+        self.resolved_github_search_repositories = Some(repositories);
+        self
+    }
+
+    pub(crate) fn resolved_github_search(&self) -> bool {
+        self.resolved_github_search_repositories().is_some()
+    }
+
+    pub(crate) fn resolved_github_search_repositories(&self) -> Option<&[String]> {
+        self.resolved_github_search_repositories.as_deref()
+    }
 }
 
 /// Only the facade router can mint this internal origin; ordinary invoke
@@ -391,7 +453,6 @@ pub(crate) mod facade_origin {
 
     /// Only the verified facade can attach an effect's durable claim. The
     /// catalog args remain untouched and are safe to hand to the transport.
-    #[allow(dead_code)] // The facade router attaches a durable claim before each effect dispatch.
     pub(crate) fn receipt_request(
         mut request: AuthorizationRequest,
         approval: Option<ReceiptApproval>,
@@ -557,6 +618,8 @@ pub enum Denial {
     Catalog(CatalogDenial),
     Resolver(ResolverDenial),
     BotActionRequiresFacade,
+    OwnershipProofMissing,
+    CredentialMaterialForbidden,
     ConsentUnavailable {
         action: String,
     },
@@ -653,6 +716,8 @@ impl Denial {
         match self {
             Self::ConnectorHomeNotHeld { .. } => "connector_home_not_held",
             Self::BotActionRequiresFacade => "bot_action_requires_facade",
+            Self::OwnershipProofMissing => "ownership_proof_missing",
+            Self::CredentialMaterialForbidden => "credential_material_forbidden",
             Self::ConsentUnavailable { .. } => "consent_unavailable",
             Self::AccessPending { .. } => "access_pending",
             Self::ConsentRefused { code, .. } => code,
@@ -726,8 +791,9 @@ impl Denial {
         true
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn retryability(&self) -> Retryability {
-        if matches!(self, Self::Resolver(ResolverDenial::StoreFailure)) {
+        if self.clears_by_waiting() {
             Retryability::AutoRetryable
         } else {
             Retryability::Terminal
@@ -773,6 +839,24 @@ pub struct DispatchOutcome {
     /// Optional vendor retry delay in milliseconds, when the transport supplied one.
     pub retry_after_ms: Option<u64>,
     pub outcome: TransportOutcome,
+}
+
+impl DispatchOutcome {
+    fn not_sent(
+        reservation: &Reservation,
+        code: String,
+        message: String,
+        retryability: Retryability,
+    ) -> Self {
+        Self {
+            retry_after_ms: None,
+            reconciliation: None,
+            reservation_id: reservation.reservation_id.clone(),
+            transmission: TransmissionState::NotSent,
+            retryability,
+            outcome: TransportOutcome::NotSent { code, message },
+        }
+    }
 }
 
 /// In-memory portion of a persisted single-use reservation. It contains args
@@ -936,19 +1020,9 @@ pub fn catalog_policy_effect(
 }
 
 pub fn compose_policy_effect(module_or_default: &str, agent_effect: Option<&str>) -> &'static str {
-    fn rank(effect: &str) -> u8 {
-        match effect {
-            "allow" => 0,
-            "ask_first" => 1,
-            "block" => 2,
-            _ => 2, // Unknown effects fail closed.
-        }
-    }
-    match rank(module_or_default).max(agent_effect.map_or(0, rank)) {
-        0 => "allow",
-        1 => "ask_first",
-        _ => "block",
-    }
+    PolicyEffect::of(module_or_default)
+        .max(agent_effect.map_or(PolicyEffect::Allow, PolicyEffect::of))
+        .as_str()
 }
 
 /// Authority state captured when a facade receipt is claimed, compared again
@@ -995,6 +1069,7 @@ pub fn compare_authority_baseline(
 
 /// Known pre-transmit refusal codes emitted by governed reservations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "test-support"))]
 pub enum FacadeNotSentCode {
     AbortedStaleAuthorization,
     GrantHashMismatch,
@@ -1002,6 +1077,7 @@ pub enum FacadeNotSentCode {
     CredentialMissing,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl FacadeNotSentCode {
     #[cfg(any(test, feature = "test-support"))]
     pub fn transport_code(self) -> &'static str {
@@ -1070,6 +1146,8 @@ pub fn pipeline_denial(denial: &Denial, gate: &str) -> String {
             ResolverDenial::RequestFieldForbidden { .. } => "Resolver(RequestFieldForbidden)",
         },
         Denial::BotActionRequiresFacade => "BotActionRequiresFacade",
+        Denial::OwnershipProofMissing => "OwnershipProofMissing",
+        Denial::CredentialMaterialForbidden => "CredentialMaterialForbidden",
         Denial::Grant(reason) => match reason {
             GrantDenial::Missing => "Grant(Missing)",
             GrantDenial::Expired => "Grant(Expired)",
@@ -1156,6 +1234,10 @@ pub struct ReceiptApprovalRow {
 /// Resolve repository bindings and handle catalog authority before loading a
 /// connection. Reject repository fields that could select a different wire path.
 pub trait GovernanceSeams: Send + Sync {
+    /// Build vendor arguments from checked internal routing, never caller queries.
+    fn prepare_invoke(&self, _request: &mut AuthorizationRequest) -> Result<(), ResolverDenial> {
+        Ok(())
+    }
     fn resolve_invoke(&self, request: &AuthorizationRequest) -> Result<(), ResolverDenial>;
     fn facade_only(&self, action: &CatalogAction) -> bool;
 
@@ -1394,10 +1476,6 @@ where
         cards.wait_until(scope, id, deadline)
     }
 
-    pub fn consent_cards(&self) -> Option<&Arc<ConsentCards>> {
-        self.consent_cards.as_ref()
-    }
-
     /// Attach the daemon scope reader used to re-check a stored approval's
     /// scope just before the approval is claimed for sending.
     pub fn with_scope_reader(mut self, reader: Arc<dyn ScopeReader>) -> Self {
@@ -1527,6 +1605,9 @@ where
 
     /// Inspect grant and policy authority for a proposed flow, without authorizing
     /// or reserving a call. The proposed scope is never persisted as a daemon stamp.
+    /// This is only a grant- and policy-level projection: it does not check
+    /// arguments, recipients, resource filters, credentials or severity. An
+    /// `allow` here is not permission to dispatch; execution runs every gate.
     pub fn would_ask(
         &self,
         agent: Option<&str>,
@@ -1745,15 +1826,23 @@ where
         })
     }
 
-    pub fn authorize(&self, request: AuthorizationRequest) -> Result<Reservation, Denial> {
+    pub fn authorize(&self, mut request: AuthorizationRequest) -> Result<Reservation, Denial> {
         if let Some(denial) = self.connector_home_denial() {
             return Err(denial);
         }
-        let args_hash = jcs::jcs_sha256(&request.args).map_err(|_| Denial::StoreFailure)?;
-        let args_snapshot_hash = args_hash.clone();
+        let mut args_hash = jcs::jcs_sha256(&request.args).map_err(|_| Denial::StoreFailure)?;
+        if crate::secret_input::contains_secret_input(&request.args) {
+            let denial = Denial::CredentialMaterialForbidden;
+            self.audit_denial(&request, &args_hash, None, None, None, &denial);
+            return Err(denial);
+        }
         if request.authority_kind == AUTHORITY_INVOKE {
             if let Some(seams) = &self.seams {
-                if let Err(reason) = seams.resolve_invoke(&request) {
+                let original_args = request.args.clone();
+                if let Err(reason) = seams
+                    .prepare_invoke(&mut request)
+                    .and_then(|()| seams.resolve_invoke(&request))
+                {
                     let denial = Denial::Resolver(reason);
                     let mut unattributed = request.clone();
                     unattributed.attributed_agent_id = None;
@@ -1761,8 +1850,12 @@ where
                     self.audit_denial(&unattributed, &args_hash, None, None, None, &denial);
                     return Err(denial);
                 }
+                if request.args != original_args {
+                    args_hash = jcs::jcs_sha256(&request.args).map_err(|_| Denial::StoreFailure)?;
+                }
             }
         }
+        let args_snapshot_hash = args_hash.clone();
         let connection = match if request.authority_kind == AUTHORITY_INVOKE {
             self.store
                 .connection_for_invoke(&request.principal, &request.connection_id)
@@ -1891,7 +1984,7 @@ where
             grant,
             agent_grant_pin,
             policy,
-            policy_inputs,
+            policy_inputs: _,
             policy_effect,
         } = match self.evaluate_authority(&request, &connection, &action, now) {
             Ok(value) => value,
@@ -1948,6 +2041,30 @@ where
             );
             return Err(denial);
         }
+        let severity = effective_severity(&action, &connection.app_key, &self.store)
+            .map_err(|_| Denial::StoreFailure)?;
+        if matches!(severity, Severity::S3 | Severity::S4) && self.decision_plane.is_none() {
+            let denial = self
+                .evaluate_decision_plane(
+                    &request,
+                    &connection,
+                    &action,
+                    severity,
+                    &args_snapshot_hash,
+                    now,
+                )
+                .err()
+                .unwrap_or(Denial::StoreFailure);
+            self.audit_denial(
+                &request,
+                &args_hash,
+                Some(&connection),
+                Some(&action),
+                Some(&grant),
+                &denial,
+            );
+            return Err(denial);
+        }
         let approval_id = request
             .receipt_approval
             .as_ref()
@@ -1978,6 +2095,14 @@ where
                 })?,
             _ => None,
         };
+        let routing_matches = if let Some(row) = ordinary_approval.as_ref() {
+            self.store
+                .action_request_routing(&connection.principal, &row.request_id)
+                .map_err(|_| Denial::StoreFailure)?
+                .is_none_or(|routing| routing == request.routing_context())
+        } else {
+            true
+        };
         // True when an ordinary approval was already consumed by an earlier
         // dispatch of this very call (same schema, same arguments). That retry
         // is refused by name so the caller does not mistake it for a lapsed
@@ -1993,7 +2118,7 @@ where
                     approved.action_request_id == receipt.action_request_id
                         && approved.agent_id == receipt.agent_id
                         && request.attributed_agent_id.as_deref() == Some(receipt.agent_id.as_str())
-                        && approved.status == "approved"
+                        && RequestStatus::of(&approved.status) == RequestStatus::Approved
                         && approved.expires_at_ms > now
                 })
             })
@@ -2008,20 +2133,26 @@ where
                     && row.action == request.action
                     && row.requester == request.principal
                     && row.schema_hash == action.schema_hash
+                    && routing_matches
             };
             match ordinary_approval.as_ref() {
                 Some(approved)
-                    if approved.status == "approved"
+                    if RequestStatus::of(&approved.status) == RequestStatus::Approved
                         && same_call(approved)
                         && approved.expires_at > now =>
                 {
                     approved.args_snapshot == request.args
                 }
-                Some(consumed) if consumed.status == "consumed" && same_call(consumed) => {
+                Some(consumed)
+                    if RequestStatus::of(&consumed.status) == RequestStatus::Consumed
+                        && same_call(consumed) =>
+                {
                     ordinary_approval_consumed = consumed.args_snapshot == request.args;
                     false
                 }
-                Some(withdrawn) if withdrawn.status == REQUEST_CANCELLED => {
+                Some(withdrawn)
+                    if RequestStatus::of(&withdrawn.status) == RequestStatus::Cancelled =>
+                {
                     ordinary_approval_withdrawn = true;
                     false
                 }
@@ -2072,7 +2203,10 @@ where
                 );
                 return Err(denial);
             }
-            if per_call_approval_unsupported(policy_effect, request.supports_per_call_approval) {
+            if per_call_approval_unsupported(
+                policy_effect,
+                request.supports_per_call_approval && request.authority_kind == AUTHORITY_INVOKE,
+            ) {
                 let denial = Denial::Policy(PolicyDenial::AskFirst);
                 self.audit_denial(
                     &request,
@@ -2229,6 +2363,20 @@ where
                 }
                 Err(_) => return Err(Denial::StoreFailure),
             };
+            if !self
+                .store
+                .bind_action_request_routing(
+                    &connection.principal,
+                    &request_id,
+                    &request.routing_context(),
+                )
+                .map_err(|_| Denial::StoreFailure)?
+            {
+                return Err(self.audited_refusal(
+                    &request,
+                    Denial::Policy(PolicyDenial::ApprovalShapeMismatch),
+                ));
+            }
             self.file_consent_card(
                 &connection,
                 &action,
@@ -2247,60 +2395,12 @@ where
             );
             return Err(denial);
         }
-        let severity = match effective_severity(&action, &connection.app_key, &self.store) {
-            Ok(severity) => severity,
-            Err(error) => {
-                eprintln!(error governance:
-                    "manifest for {} unreadable while judging severity: {error}",
-                    connection.app_key
-                );
-                let denial = Denial::StoreFailure;
-                self.audit_denial(
-                    &request,
-                    &args_hash,
-                    Some(&connection),
-                    Some(&action),
-                    Some(&grant),
-                    &denial,
-                );
-                return Err(denial);
-            }
-        };
-        let mut decision_id = None;
-        let mut grant_hash = None;
-        let mut intent_id = None;
-        if matches!(severity, Severity::S3 | Severity::S4) {
-            match self.evaluate_decision_plane(
-                &request,
-                &connection,
-                &action,
-                severity,
-                &args_snapshot_hash,
-                now,
-            ) {
-                Ok(DecisionAuthorization {
-                    decision_id: id,
-                    grant_hash: hash,
-                    intent_id: intent,
-                }) => {
-                    decision_id = Some(id);
-                    grant_hash = Some(hash);
-                    intent_id = Some(intent);
-                }
-                Err(denial) => {
-                    self.audit_denial(
-                        &request,
-                        &args_hash,
-                        Some(&connection),
-                        Some(&action),
-                        Some(&grant),
-                        &denial,
-                    );
-                    return Err(denial);
-                }
-            }
-        }
-        if let Some(reason) = resource_denial(&connection, &action, &request.args) {
+        if let Some(reason) = resource_denial_with_repositories(
+            &connection,
+            &action,
+            &request.args,
+            request.resolved_github_search_repositories(),
+        ) {
             let denial = Denial::ResourceFilter(reason);
             self.audit_denial(
                 &request,
@@ -2347,15 +2447,13 @@ where
         } else {
             None
         };
-        let policy_generation = policy_inputs
-            .as_ref()
-            .map(|value| value.module_generation)
-            .unwrap_or_else(|| policy.as_ref().map_or(0, |value| value.generation));
+        let policy_generation = policy.as_ref().map_or(0, |value| value.generation);
         let snapshot = SnapshotGenerations {
             connection: connection.generation,
             catalog_action: action.generation,
             grant: grant.generation,
             policy: policy_generation,
+            policy_id: policy.as_ref().map(|value| value.policy_id.clone()),
         };
         if request.origin == RequestOrigin::Facade
             && is_write(&action.risk)
@@ -2364,7 +2462,7 @@ where
                 .as_ref()
                 .is_some_and(|seams| seams.ownership_reads_complete(&request))
         {
-            let denial = Denial::StoreFailure;
+            let denial = Denial::OwnershipProofMissing;
             self.audit_denial(
                 &request,
                 &args_hash,
@@ -2374,6 +2472,36 @@ where
                 &denial,
             );
             return Err(denial);
+        }
+        let mut decision_id = None;
+        let mut grant_hash = None;
+        let mut intent_id = None;
+        if matches!(severity, Severity::S3 | Severity::S4) {
+            match self.evaluate_decision_plane(
+                &request,
+                &connection,
+                &action,
+                severity,
+                &args_snapshot_hash,
+                now,
+            ) {
+                Ok(authorization) => {
+                    decision_id = Some(authorization.decision_id);
+                    grant_hash = Some(authorization.grant_hash);
+                    intent_id = Some(authorization.intent_id);
+                }
+                Err(denial) => {
+                    self.audit_denial(
+                        &request,
+                        &args_hash,
+                        Some(&connection),
+                        Some(&action),
+                        Some(&grant),
+                        &denial,
+                    );
+                    return Err(denial);
+                }
+            }
         }
         let stored = match self.store.create_reservation(
             &connection.principal,
@@ -2397,7 +2525,27 @@ where
             agent_grant_pin.as_ref(),
         ) {
             Ok(stored) => stored,
-            Err(_) => return Err(Denial::StoreFailure),
+            Err(_) => {
+                if let Some(id) = decision_id.as_deref() {
+                    self.report_unsent_plane_allow(
+                        &request,
+                        &connection,
+                        &action,
+                        &args_hash,
+                        id,
+                        &Denial::StoreFailure,
+                    );
+                }
+                self.audit_denial(
+                    &request,
+                    &args_hash,
+                    Some(&connection),
+                    Some(&action),
+                    Some(&grant),
+                    &Denial::StoreFailure,
+                );
+                return Err(Denial::StoreFailure);
+            }
         };
         self.audit_authorization_decision(
             &request,
@@ -2450,6 +2598,39 @@ where
             agent_grant: agent_grant_pin,
             approval_scope,
         })
+    }
+
+    fn report_unsent_plane_allow(
+        &self,
+        request: &AuthorizationRequest,
+        connection: &ConnectionRecord,
+        action: &CatalogAction,
+        args_hash: &str,
+        decision_id: &str,
+        denial: &Denial,
+    ) {
+        let Some(plane) = self.decision_plane.as_ref() else {
+            return;
+        };
+        let report = OutcomeReport {
+            decision_id: decision_id.into(),
+            terminal: OutcomeTerminal::Refused {
+                reason: denial.reason_code().into(),
+            },
+        };
+        if !(0..OUTCOME_REPORT_ATTEMPTS).any(|_| plane.report_outcome(&report).is_ok()) {
+            self.audit_authorization_decision(
+                request,
+                args_hash,
+                Some(connection),
+                Some(action),
+                None,
+                "decision_plane",
+                "deny",
+                "outcome_report_failed",
+                None,
+            );
+        }
     }
 
     fn evaluate_decision_plane(
@@ -2531,6 +2712,18 @@ where
             }
         };
 
+        if request.origin != RequestOrigin::Facade
+            && !self
+                .store
+                .bind_action_request_routing(
+                    &connection.principal,
+                    &intent_id,
+                    &request.routing_context(),
+                )
+                .map_err(|_| Denial::StoreFailure)?
+        {
+            return Err(Denial::Policy(PolicyDenial::ApprovalShapeMismatch));
+        }
         let risk = parse_risk(&action.risk);
         let envelope = DecisionEnvelope {
             acting_principal: request.principal.clone(),
@@ -2577,7 +2770,16 @@ where
                         }
                         _ => SeverityDenial::DecisionPlaneFailure,
                     };
-                    return Err(Denial::Severity(Box::new(reason)));
+                    let denial = Denial::Severity(Box::new(reason));
+                    self.report_unsent_plane_allow(
+                        request,
+                        connection,
+                        action,
+                        args_snapshot_hash,
+                        &decision_id,
+                        &denial,
+                    );
+                    return Err(denial);
                 }
                 let recorded = self.store.record_decision_plane_verdict(
                     &connection.principal,
@@ -2587,10 +2789,20 @@ where
                     Some(&decision_id),
                 ).map_err(|error| {
                     eprintln!(error governance: "could not record decision {decision_id} on request {intent_id}: {error}");
+                    self.report_unsent_plane_allow(request, connection, action, args_snapshot_hash, &decision_id, &Denial::StoreFailure);
                     Denial::StoreFailure
                 })?;
                 if !recorded {
-                    return Err(Denial::Policy(PolicyDenial::ApprovalAlreadyDecided));
+                    let denial = Denial::Policy(PolicyDenial::ApprovalAlreadyDecided);
+                    self.report_unsent_plane_allow(
+                        request,
+                        connection,
+                        action,
+                        args_snapshot_hash,
+                        &decision_id,
+                        &denial,
+                    );
+                    return Err(denial);
                 }
                 Ok(DecisionAuthorization {
                     decision_id,
@@ -2696,17 +2908,12 @@ where
                 self.audit_dispatch_denial(reservation, "store_failure");
                 return Err(Box::new(self.maybe_report_decision_outcome(
                     reservation,
-                    DispatchOutcome {
-                        retry_after_ms: None,
-                        reconciliation: None,
-                        reservation_id: reservation.reservation_id.clone(),
-                        transmission: TransmissionState::NotSent,
-                        retryability: Retryability::AutoRetryable,
-                        outcome: TransportOutcome::NotSent {
-                            code: "store_failure".to_string(),
-                            message: "the connection could not be read".to_string(),
-                        },
-                    },
+                    DispatchOutcome::not_sent(
+                        reservation,
+                        "store_failure".to_string(),
+                        "the connection could not be read".to_string(),
+                        Retryability::AutoRetryable,
+                    ),
                     OutcomeTerminal::Refused {
                         reason: "store_failure".to_string(),
                     },
@@ -2784,17 +2991,12 @@ where
         self.audit_dispatch_denial(reservation, &code);
         self.maybe_report_decision_outcome(
             reservation,
-            DispatchOutcome {
-                retry_after_ms: None,
-                reconciliation: None,
-                reservation_id: reservation.reservation_id.clone(),
-                transmission: TransmissionState::NotSent,
-                retryability: Retryability::Terminal,
-                outcome: TransportOutcome::NotSent {
-                    code: code.clone(),
-                    message: "authority changed before transmission".into(),
-                },
-            },
+            DispatchOutcome::not_sent(
+                reservation,
+                code.clone(),
+                "authority changed before transmission".into(),
+                Retryability::Terminal,
+            ),
             OutcomeTerminal::Refused { reason: code },
         )
     }
@@ -2860,19 +3062,12 @@ where
                 );
             }
             self.audit_dispatch_denial(reservation, crate::scope::APPROVED_WAITING);
-            return Some(DispatchOutcome {
-                retry_after_ms: None,
-                reconciliation: None,
-                reservation_id: reservation.reservation_id.clone(),
-                transmission: TransmissionState::NotSent,
-                retryability: Retryability::AutoRetryable,
-                outcome: TransportOutcome::NotSent {
-                    code: crate::scope::APPROVED_WAITING.to_string(),
-                    message: format!(
-                        "the approval is kept unsent until its scope is confirmed ({code})"
-                    ),
-                },
-            });
+            return Some(DispatchOutcome::not_sent(
+                reservation,
+                crate::scope::APPROVED_WAITING.to_string(),
+                format!("the approval is kept unsent until its scope is confirmed ({code})"),
+                Retryability::AutoRetryable,
+            ));
         }
         eprintln!(warn governance:
             "approval {} not run ({code}): scope {}/{}@{}",
@@ -2890,17 +3085,12 @@ where
         self.audit_dispatch_denial(reservation, code);
         Some(self.maybe_report_decision_outcome(
             reservation,
-            DispatchOutcome {
-                retry_after_ms: None,
-                reconciliation: None,
-                reservation_id: reservation.reservation_id.clone(),
-                transmission: TransmissionState::NotSent,
-                retryability: Retryability::Terminal,
-                outcome: TransportOutcome::NotSent {
-                    code: code.to_string(),
-                    message: "the approval's scope no longer allows it to run".to_string(),
-                },
-            },
+            DispatchOutcome::not_sent(
+                reservation,
+                code.to_string(),
+                "the approval's scope no longer allows it to run".to_string(),
+                Retryability::Terminal,
+            ),
             OutcomeTerminal::Refused {
                 reason: code.to_string(),
             },
@@ -2980,18 +3170,12 @@ where
                     self.audit_dispatch_denial(reservation, "grant_hash_mismatch");
                     return self.maybe_report_decision_outcome(
                         reservation,
-                        DispatchOutcome {
-                            retry_after_ms: None,
-                            reconciliation: None,
-                            reservation_id: reservation.reservation_id.clone(),
-                            transmission: TransmissionState::NotSent,
-                            retryability: Retryability::Terminal,
-                            outcome: TransportOutcome::NotSent {
-                                code: "grant_hash_mismatch".to_string(),
-                                message: "args could not be canonicalized before dispatch"
-                                    .to_string(),
-                            },
-                        },
+                        DispatchOutcome::not_sent(
+                            reservation,
+                            "grant_hash_mismatch".to_string(),
+                            "args could not be canonicalized before dispatch".to_string(),
+                            Retryability::Terminal,
+                        ),
                         OutcomeTerminal::Refused {
                             reason: "grant_hash_mismatch".to_string(),
                         },
@@ -3007,20 +3191,16 @@ where
             }) {
                 Ok(computed) if computed == *expected_grant_hash => {}
                 _ => {
+                    self.abandon_unsent_reservation(reservation);
                     self.audit_dispatch_denial(reservation, "grant_hash_mismatch");
                     return self.maybe_report_decision_outcome(
                         reservation,
-                        DispatchOutcome {
-                            retry_after_ms: None,
-                            reconciliation: None,
-                            reservation_id: reservation.reservation_id.clone(),
-                            transmission: TransmissionState::NotSent,
-                            retryability: Retryability::Terminal,
-                            outcome: TransportOutcome::NotSent {
-                                code: "grant_hash_mismatch".to_string(),
-                                message: "grant_hash no longer matches dispatch args".to_string(),
-                            },
-                        },
+                        DispatchOutcome::not_sent(
+                            reservation,
+                            "grant_hash_mismatch".to_string(),
+                            "grant_hash no longer matches dispatch args".to_string(),
+                            Retryability::Terminal,
+                        ),
                         OutcomeTerminal::Refused {
                             reason: "grant_hash_mismatch".to_string(),
                         },
@@ -3044,6 +3224,9 @@ where
         // approval stays usable. A reservation that cannot be claimed anyway
         // (stale or expired) skips this and is refused by the claim below.
         let claimable = !stale && crate::storage::now_ms() < reservation.expires_at_ms;
+        if !claimable {
+            self.abandon_unsent_reservation(reservation);
+        }
         let prepared = if claimable {
             match self.prepare_dispatch_credential(reservation) {
                 Ok(prepared) => Some(prepared),
@@ -3070,17 +3253,12 @@ where
                     self.audit_dispatch_denial(reservation, "store_failure");
                     return self.maybe_report_decision_outcome(
                         reservation,
-                        DispatchOutcome {
-                            retry_after_ms: None,
-                            reconciliation: None,
-                            reservation_id: reservation.reservation_id.clone(),
-                            transmission: TransmissionState::NotSent,
-                            retryability: Retryability::AutoRetryable,
-                            outcome: TransportOutcome::NotSent {
-                                code: "store_failure".to_string(),
-                                message: "the reservation could not be claimed".to_string(),
-                            },
-                        },
+                        DispatchOutcome::not_sent(
+                            reservation,
+                            "store_failure".to_string(),
+                            "the reservation could not be claimed".to_string(),
+                            Retryability::AutoRetryable,
+                        ),
                         OutcomeTerminal::Refused {
                             reason: "store_failure".to_string(),
                         },
@@ -3107,21 +3285,16 @@ where
             };
             return self.maybe_report_decision_outcome(
                 reservation,
-                DispatchOutcome {
-                    retry_after_ms: None,
-                    reconciliation: None,
-                    reservation_id: reservation.reservation_id.clone(),
-                    transmission: TransmissionState::NotSent,
-                    retryability: Retryability::Terminal,
-                    outcome: TransportOutcome::NotSent {
-                        code: reason.to_string(),
-                        message: if expired {
-                            "reservation expired".to_string()
-                        } else {
-                            "authorization changed before dispatch".to_string()
-                        },
+                DispatchOutcome::not_sent(
+                    reservation,
+                    reason.to_string(),
+                    if expired {
+                        "reservation expired".to_string()
+                    } else {
+                        "authorization changed before dispatch".to_string()
                     },
-                },
+                    Retryability::Terminal,
+                ),
                 terminal,
             );
         }
@@ -3333,7 +3506,7 @@ where
         action: Some(reservation.action.clone()),
         risk: Some(risk_str(reservation.risk).to_string()),
         severity: Some(reservation.severity.as_str().to_string()),
-        decision: "deny".to_string(),
+        decision: if matches!(report.terminal, OutcomeTerminal::Executed { .. } | OutcomeTerminal::OutcomeUnknown { .. }) { "allow" } else { "deny" }.to_string(),
         reason_code: "outcome_report_failed".to_string(),
         gate: Some("decision_plane".to_string()),
         args_redaction_summary: Some(format!("decision_id:{decision_id}; detail:{detail}")),
@@ -3373,11 +3546,7 @@ where
             .action_request(principal, request_id)
             .map_err(|_| Denial::StoreFailure)?
             .ok_or(Denial::Policy(PolicyDenial::ApprovalMissing))?;
-        if !self
-            .store
-            .has_connection_admin_grant(principal, &request.connection_id, decider)
-            .map_err(|_| Denial::StoreFailure)?
-        {
+        if !self.request_admin(&request, decider)? {
             return Err(Denial::Grant(GrantDenial::ConnectionAdminRequired));
         }
         if !self
@@ -3393,10 +3562,12 @@ where
                 .action_request(principal, request_id)
                 .map_err(|_| Denial::StoreFailure)?
                 .ok_or(Denial::Policy(PolicyDenial::ApprovalMissing))?;
-            let reason = match current.status.as_str() {
-                "consumed" => PolicyDenial::ApprovalConsumed,
-                "approved" | "denied" => PolicyDenial::ApprovalAlreadyDecided,
-                REQUEST_CANCELLED => PolicyDenial::ApprovalWithdrawn,
+            let reason = match RequestStatus::of(&current.status) {
+                RequestStatus::Consumed => PolicyDenial::ApprovalConsumed,
+                RequestStatus::Approved | RequestStatus::Denied => {
+                    PolicyDenial::ApprovalAlreadyDecided
+                }
+                RequestStatus::Cancelled => PolicyDenial::ApprovalWithdrawn,
                 _ => PolicyDenial::ApprovalExpired,
             };
             return Err(Denial::Policy(reason));
@@ -3418,6 +3589,10 @@ where
         decider: &str,
     ) -> Result<DispatchOutcome, Denial> {
         let request_id = request.request_id.clone();
+        let routing = self
+            .store
+            .action_request_routing(&request.principal, &request_id)
+            .map_err(|_| Denial::StoreFailure)?;
         let mut authorization = AuthorizationRequest::new(
             request.requester,
             request.connection_id,
@@ -3427,6 +3602,13 @@ where
         .with_actor(decider)
         .with_schema_hash(request.schema_hash)
         .approved_from(request_id.clone());
+        if let Some(routing) = routing {
+            authorization.resolved_repository = routing["repository"].as_str().map(str::to_owned);
+            authorization.diagnostic_tool = routing["tool"].as_str().unwrap_or("invoke").to_owned();
+            authorization.supports_per_call_approval = routing["supports_per_call_approval"]
+                .as_bool()
+                .unwrap_or(true);
+        }
         if let Some(scope) = request.scope.as_ref() {
             if let Some(agent_id) = scope.agent_id.as_deref() {
                 authorization = authorization.with_attributed_agent(agent_id);
@@ -3441,7 +3623,12 @@ where
         let reservation = match self.authorize(authorization) {
             Ok(reservation) => reservation,
             Err(denial) => {
-                if denial.clears_by_waiting() {
+                // A caller's deadline cannot recover in the scheduler. Preserve
+                // the approval for an explicit recall instead of queuing a send
+                // after the caller has moved on.
+                let recall_only = matches!(&denial, Denial::ConnectorHomeNotHeld { state }
+                    if state.pointer("/error/code").and_then(Value::as_str) == Some("request_deadline_exceeded"));
+                if denial.clears_by_waiting() && !recall_only {
                     self.hold_approval_for_retry(&request.principal, &request_id);
                 }
                 return Err(denial);
@@ -3450,16 +3637,99 @@ where
         // The target may have changed while the request waited for approval,
         // so it is checked again here, after re-authorization.
         let outcome = self.dispatch_checked(&reservation);
-        // Nothing was sent for a passing reason (the store or vault could not
-        // be read) and nothing consumed the approval: hold it for the
-        // scheduler's retry rather than leave it decided but never run.
-        if outcome.retryability == Retryability::AutoRetryable
-            && matches!(&outcome.outcome, TransportOutcome::NotSent { code, .. }
+        // Any pre-claim refusal leaves consent unspent. Retry from full
+        // authorization instead of stranding an approved request forever.
+        if matches!(&outcome.outcome, TransportOutcome::NotSent { code, .. }
                 if code != crate::scope::APPROVED_WAITING)
         {
             self.hold_approval_for_retry(&request.principal, &request_id);
         }
         Ok(outcome)
+    }
+
+    fn request_admin(&self, request: &ActionRequestRecord, decider: &str) -> Result<bool, Denial> {
+        let action = self
+            .store
+            .catalog_action(&request.principal, &request.connection_id, &request.action)
+            .map_err(|_| Denial::StoreFailure)?
+            .ok_or(Denial::Catalog(CatalogDenial::NotFound))?;
+        let now = crate::storage::now_ms();
+        let grant = self
+            .store
+            .matching_grant(
+                &request.principal,
+                &request.connection_id,
+                decider,
+                &request.action,
+                "connection_admin",
+                now,
+                Some(&action.risk),
+            )
+            .map_err(|_| Denial::StoreFailure)?;
+        Ok(scoped_grant_refusal(grant.as_ref(), &request.action, &action.risk, now).is_none())
+    }
+
+    fn audit_approval_resolution(&self, request: &ActionRequestRecord, actor: &str, reason: &str) {
+        let mut authorization = AuthorizationRequest::new(
+            &request.requester,
+            &request.connection_id,
+            &request.action,
+            request.args_snapshot.clone(),
+        )
+        .with_actor(actor);
+        authorization.request_id = request.request_id.clone();
+        authorization.scope = request.scope.as_ref().map(|scope| scope.to_call_scope());
+        authorization.relay_origin = request.relay_origin.clone();
+        let connection = self
+            .store
+            .connection(&request.principal, &request.connection_id)
+            .ok()
+            .flatten();
+        let action = self
+            .store
+            .catalog_action(&request.principal, &request.connection_id, &request.action)
+            .ok()
+            .flatten();
+        self.audit_authorization_decision(
+            &authorization,
+            &request.args_hash,
+            connection.as_ref(),
+            action.as_ref(),
+            None,
+            "policy",
+            "deny",
+            reason,
+            None,
+        );
+    }
+
+    fn audited_refusal(&self, request: &AuthorizationRequest, denial: Denial) -> Denial {
+        let connection = self
+            .store
+            .connection_for_invoke(&request.principal, &request.connection_id)
+            .ok()
+            .flatten();
+        let action = connection.as_ref().and_then(|connection| {
+            self.store
+                .catalog_action(
+                    &connection.principal,
+                    &request.connection_id,
+                    &request.action,
+                )
+                .ok()
+                .flatten()
+        });
+        if let Ok(hash) = jcs::jcs_sha256(&request.args) {
+            self.audit_denial(
+                request,
+                &hash,
+                connection.as_ref(),
+                action.as_ref(),
+                None,
+                &denial,
+            );
+        }
+        denial
     }
 
     /// Mark an approved request as waiting, so `retry_waiting_approvals` runs
@@ -3507,6 +3777,28 @@ where
                 continue;
             }
             let decider = request.decider.clone().unwrap_or_else(|| principal.clone());
+            if let Some(bound) = approval_scope_of(&request) {
+                let answer = self
+                    .scope_reader
+                    .as_ref()
+                    .map(|reader| reader.describe(&bound.owner, &bound.scope_ref))
+                    .unwrap_or_else(|| {
+                        Err(ScopeReadError(
+                            "no daemon scope reader is configured".into(),
+                        ))
+                    });
+                match approval_scope_verdict(&bound, answer.as_ref()) {
+                    ApprovalScopeVerdict::Run => {}
+                    ApprovalScopeVerdict::Hold(_) => continue,
+                    ApprovalScopeVerdict::Refuse(code) => {
+                        let _ = self
+                            .store
+                            .refuse_scoped_approval(&principal, &request_id, code);
+                        self.audit_approval_resolution(&request, &decider, code);
+                        continue;
+                    }
+                }
+            }
             if let Err(denial) = self.dispatch_approved(request, &decider) {
                 if denial.clears_by_waiting() {
                     // A passing condition (store, vault, connector home, ...)
@@ -3549,11 +3841,7 @@ where
             .action_request(principal, request_id)
             .map_err(|_| Denial::StoreFailure)?
             .ok_or(Denial::Policy(PolicyDenial::ApprovalMissing))?;
-        if !self
-            .store
-            .has_connection_admin_grant(principal, &request.connection_id, decider)
-            .map_err(|_| Denial::StoreFailure)?
-        {
+        if !self.request_admin(&request, decider)? {
             return Err(Denial::Grant(GrantDenial::ConnectionAdminRequired));
         }
         let denied = self
@@ -3561,6 +3849,7 @@ where
             .decide_action_request(principal, request_id, false, decider)
             .map_err(|_| Denial::StoreFailure)?;
         if denied {
+            self.audit_approval_resolution(&request, decider, "approval_denied");
             self.withdraw_consent_card(&request);
         }
         if !denied
@@ -3568,7 +3857,9 @@ where
                 .store
                 .action_request(principal, request_id)
                 .map_err(|_| Denial::StoreFailure)?
-                .is_some_and(|current| current.status == REQUEST_CANCELLED)
+                .is_some_and(|current| {
+                    RequestStatus::of(&current.status) == RequestStatus::Cancelled
+                })
         {
             // Named rather than reported as merely no longer pending, so the
             // approver learns the call was withdrawn.
@@ -3633,7 +3924,7 @@ where
         };
         // The call may have reused a request the operator already approved;
         // that request needs no card.
-        if request.status != "pending" {
+        if RequestStatus::of(&request.status) != RequestStatus::Pending {
             return;
         }
         let expires_in_ms = request.expires_at.saturating_sub(crate::storage::now_ms());
@@ -3672,16 +3963,11 @@ where
     /// else its key.
     fn service_label(&self, app_key: &str) -> String {
         self.store
-            .manifest_json(crate::storage::CATALOG_PRINCIPAL, app_key)
+            .cached_manifest(app_key)
             .ok()
-            .flatten()
             .and_then(|manifest| {
-                manifest
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .map(str::to_string)
+                let name = manifest.name.trim();
+                (!name.is_empty()).then(|| name.to_owned())
             })
             .unwrap_or_else(|| app_key.to_string())
     }
@@ -3712,17 +3998,19 @@ where
                     .keyed_action_request(&request.principal, key)
                     .map_err(|_| Denial::StoreFailure)?
                 {
-                    let same_scope = held.scope.as_ref().is_some_and(|bound| {
-                        bound.owner == scope.owner
-                            && bound.scope_ref == scope.scope_ref
-                            && bound.scope_epoch == scope.scope_epoch
-                    });
+                    let same_scope = held
+                        .scope
+                        .as_ref()
+                        .is_some_and(|bound| scope.same_session(&bound.to_call_scope()));
                     if held.args_snapshot != request.args
                         || held.connection_id != request.connection_id
                         || held.action != request.action
                         || !same_scope
                     {
-                        return Err(Denial::Policy(PolicyDenial::CallKeyReused));
+                        return Err(self.audited_refusal(
+                            &request,
+                            Denial::Policy(PolicyDenial::CallKeyReused),
+                        ));
                     }
                 }
             }
@@ -3737,13 +4025,19 @@ where
                         .as_deref()
                         .is_some_and(|pin| pin != held.schema_hash)
                     {
-                        return Err(Denial::Catalog(CatalogDenial::SchemaMismatch));
+                        return Err(self.audited_refusal(
+                            &request,
+                            Denial::Catalog(CatalogDenial::SchemaMismatch),
+                        ));
                     }
                     let id = held.elicitation_id.as_deref().ok_or(Denial::StoreFailure)?;
                     match cards.get(scope, id) {
                         Ok(mut record) => {
-                            if held.status == "consumed" {
-                                return Err(Denial::Policy(PolicyDenial::ApprovalConsumed));
+                            if RequestStatus::of(&held.status) == RequestStatus::Consumed {
+                                return Err(self.audited_refusal(
+                                    &request,
+                                    Denial::Policy(PolicyDenial::ApprovalConsumed),
+                                ));
                             }
                             if let Some(key) = request.call_key.as_deref() {
                                 if !self
@@ -3751,7 +4045,10 @@ where
                                     .remember_consent_call_key(&held, key)
                                     .map_err(|_| Denial::StoreFailure)?
                                 {
-                                    return Err(Denial::Policy(PolicyDenial::CallKeyReused));
+                                    return Err(self.audited_refusal(
+                                        &request,
+                                        Denial::Policy(PolicyDenial::CallKeyReused),
+                                    ));
                                 }
                             }
                             if record["state"] == "pending" {
@@ -3766,7 +4063,10 @@ where
                             code, ..
                         }) if code == "elicitation_not_found" => {}
                         Err(error) => {
-                            return Err(self.consent_route_denial(&request.action, &error))
+                            return Err(self.audited_refusal(
+                                &request,
+                                self.consent_route_denial(&request.action, &error),
+                            ))
                         }
                     }
                 }
@@ -3782,11 +4082,21 @@ where
                     .map_err(|_| Denial::StoreFailure)?
                     .ok_or(Denial::StoreFailure)?;
                 let Some(id) = stored.elicitation_id.as_deref() else {
+                    self.audit_approval_resolution(
+                        &stored,
+                        &stored.requester,
+                        "consent_unavailable",
+                    );
                     return Err(Denial::ConsentUnavailable {
                         action: stored.action,
                     });
                 };
                 let (Some(cards), Some(scope)) = (&self.consent_cards, scope) else {
+                    self.audit_approval_resolution(
+                        &stored,
+                        &stored.requester,
+                        "consent_unavailable",
+                    );
                     return Err(Denial::ConsentUnavailable {
                         action: stored.action,
                     });
@@ -3825,6 +4135,7 @@ where
             || record["kind"] != "consent"
             || record["args_digest"] != request.args_hash
         {
+            self.audit_approval_resolution(&request, &request.requester, "consent_unavailable");
             return Err(Denial::ConsentUnavailable {
                 action: request.action,
             });
@@ -3859,7 +4170,7 @@ where
             (Some("answered"), Some(crate::consent_card::OPTION_APPROVE)) => {
                 let cards = self.consent_cards.as_ref().ok_or(Denial::StoreFailure)?;
                 let decider = format!("{CONSENT_CARD_DECIDER_PREFIX}{id}");
-                if request.status == "pending" {
+                if RequestStatus::of(&request.status) == RequestStatus::Pending {
                     self.store
                         .decide_action_request(
                             &request.principal,
@@ -3874,7 +4185,7 @@ where
                     .action_request(&request.principal, &request.request_id)
                     .map_err(|_| Denial::StoreFailure)?
                     .ok_or(Denial::StoreFailure)?;
-                if current.status == "consumed" {
+                if RequestStatus::of(&current.status) == RequestStatus::Consumed {
                     return Err(Denial::Policy(PolicyDenial::ApprovalConsumed));
                 }
                 let result = if current.args_snapshot != request.args_snapshot
@@ -3882,20 +4193,22 @@ where
                     || current.schema_hash != request.schema_hash
                 {
                     Err(Denial::Policy(PolicyDenial::ApprovalShapeMismatch))
-                } else if current.status == "approved"
+                } else if RequestStatus::of(&current.status) == RequestStatus::Approved
                     && current.decider.as_deref() == Some(&decider)
                 {
                     self.dispatch_approved(current, &decider)
                 } else {
-                    Err(Denial::Policy(if current.status == REQUEST_CANCELLED {
-                        PolicyDenial::ApprovalWithdrawn
-                    } else if current.expires_at <= crate::storage::now_ms()
-                        || current.status == "expired"
-                    {
-                        PolicyDenial::ApprovalExpired
-                    } else {
-                        PolicyDenial::ApprovalAlreadyDecided
-                    }))
+                    Err(Denial::Policy(
+                        if RequestStatus::of(&current.status) == RequestStatus::Cancelled {
+                            PolicyDenial::ApprovalWithdrawn
+                        } else if current.expires_at <= crate::storage::now_ms()
+                            || RequestStatus::of(&current.status) == RequestStatus::Expired
+                        {
+                            PolicyDenial::ApprovalExpired
+                        } else {
+                            PolicyDenial::ApprovalAlreadyDecided
+                        },
+                    ))
                 };
                 let execution = result
                     .as_ref()
@@ -3931,6 +4244,11 @@ where
                         &format!("{CONSENT_CARD_DECIDER_PREFIX}{id}"),
                     )
                     .map_err(|_| Denial::StoreFailure)?;
+                self.audit_approval_resolution(
+                    &request,
+                    &format!("{CONSENT_CARD_DECIDER_PREFIX}{id}"),
+                    code,
+                );
                 Err(Denial::ConsentRefused {
                     code,
                     elicitation_id: id.to_string(),
@@ -4079,7 +4397,13 @@ where
             app_key: connection.map(|value| value.app_key.clone()),
             action: Some(request.action.clone()),
             risk: action.map(|value| value.risk.clone()),
-            severity: action.map(|value| value.severity.clone()),
+            severity: action
+                .and_then(|action| {
+                    connection.and_then(|connection| {
+                        effective_severity(action, &connection.app_key, &self.store).ok()
+                    })
+                })
+                .map(|severity| severity.as_str().to_string()),
             decision: decision.to_string(),
             reason_code: reason.to_string(),
             gate: Some(gate.to_string()),
@@ -4196,12 +4520,11 @@ where
         denial: CredentialDenial,
     ) -> DispatchOutcome {
         self.audit_dispatch_denial(reservation, denial.reason_code());
-        DispatchOutcome {
-            retry_after_ms: None,
-            reconciliation: None,
-            reservation_id: reservation.reservation_id.clone(),
-            transmission: TransmissionState::NotSent,
-            retryability: if matches!(
+        DispatchOutcome::not_sent(
+            reservation,
+            denial.reason_code().to_string(),
+            "credential could not be resolved".to_string(),
+            if matches!(
                 denial,
                 CredentialDenial::Transient(_) | CredentialDenial::StoreUnavailable
             ) {
@@ -4209,11 +4532,7 @@ where
             } else {
                 Retryability::Terminal
             },
-            outcome: TransportOutcome::NotSent {
-                code: denial.reason_code().to_string(),
-                message: "credential could not be resolved".to_string(),
-            },
-        }
+        )
     }
 
     fn audit_dispatch_result(&self, reservation: &Reservation, response: &TransportResponse) {
@@ -4453,6 +4772,9 @@ pub(crate) fn connection_denial(connection: &ConnectionRecord) -> Option<Connect
 /// when its reviewed manifest offers no `http.args_schema`, which the boot logs
 /// as a catalog gap. No other governed path relies on an open schema.
 fn undeclared_argument(schema: &Value, args: &Value) -> Option<String> {
+    if !args.is_object() && !args.is_null() {
+        return Some("<arguments must be an object or null>".into());
+    }
     let schema = schema.as_object()?;
     let properties = schema.get("properties")?.as_object()?;
     if schema
@@ -4492,15 +4814,12 @@ fn effective_severity(
     app_key: &str,
     store: &PlexusStore,
 ) -> Result<Severity, cortexkit_store::StoreError> {
-    // The app's manifest sets the minimum severity for a write. If the manifest
-    // or its tier is missing, use S4, the strongest severity, just as
-    // `parse_tier` does for an unknown value. Using S1, the weakest severity,
-    // could let a write skip the separate approval service that high-severity
-    // actions require. Return a store read failure so the caller can retry;
-    // do not interpret that failure as a severity.
+    // Missing or unknown reviewed tiers use the strongest severity. Actual
+    // store read failures still propagate; they are not a severity decision.
     let tier_floor = store
-        .manifest_json(crate::storage::CATALOG_PRINCIPAL, app_key)?
-        .and_then(|manifest| manifest.get("tier").and_then(Value::as_str).map(parse_tier))
+        .parsed_manifest(crate::storage::CATALOG_PRINCIPAL, app_key)?
+        .and_then(Result::ok)
+        .map(|manifest| manifest.tier)
         .unwrap_or(Tier::S4);
     let tier_sev = match tier_floor {
         Tier::S1 => Severity::S1,
@@ -4535,6 +4854,39 @@ pub(crate) fn action_severity(risk: &str, tier: Severity) -> Severity {
     }
 }
 
+fn resource_denial_with_repositories(
+    connection: &ConnectionRecord,
+    action: &CatalogAction,
+    args: &Value,
+    repositories: Option<&[String]>,
+) -> Option<ResourceDenial> {
+    if connection.app_key == "github_rest" && action.name == "github.issue.search" {
+        if let Some(repositories) = repositories {
+            if repositories.is_empty() {
+                return Some(ResourceDenial::MissingRequiredFilter("repositories".into()));
+            }
+            for repository in repositories {
+                let Some((owner, repo)) = repository.split_once('/').filter(|(owner, repo)| {
+                    !owner.is_empty() && !repo.is_empty() && !repo.contains('/')
+                }) else {
+                    return Some(ResourceDenial::ValueNotAllowed("repositories".into()));
+                };
+                let mut checked = args.clone();
+                let Some(object) = checked.as_object_mut() else {
+                    return Some(ResourceDenial::MissingRequiredFilter("repositories".into()));
+                };
+                object.insert("owner".into(), Value::String(owner.into()));
+                object.insert("repo".into(), Value::String(repo.into()));
+                if let Some(denial) = resource_denial(connection, action, &checked) {
+                    return Some(denial);
+                }
+            }
+            return None;
+        }
+    }
+    resource_denial(connection, action, args)
+}
+
 fn resource_denial(
     connection: &ConnectionRecord,
     action: &CatalogAction,
@@ -4551,15 +4903,14 @@ fn resource_denial(
         .and_then(Value::as_array)
         .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
         .unwrap_or_default();
-    // Writes keep the structural write-enabling / required-key checks. Reads
-    // also evaluate connection allowlists (`values`) when those keys appear in
-    // args, so read-only vendors (e.g. calendar allowlists) are enforceable.
+    // A missing argument must not let vendor defaults escape an allowlist.
+    // Dot-delimited paths use the same convention as manifest filter keys.
     if is_write(&action.risk) {
         if write_enabling.is_empty() {
             return Some(ResourceDenial::WriteFiltersAbsent);
         }
         for key in required.iter().chain(write_enabling.iter()) {
-            let Some(value) = args.get(*key) else {
+            let Some(value) = resource_path(args, key) else {
                 return Some(ResourceDenial::MissingRequiredFilter((*key).to_string()));
             };
             if value.is_null() || (value.as_str() == Some("")) {
@@ -4572,7 +4923,7 @@ fn resource_denial(
         .and_then(Value::as_object)
     {
         for (key, allowed) in values {
-            if let Some(actual) = args.get(key) {
+            if let Some(actual) = resource_path(args, key) {
                 let matches = |candidate: &Value| {
                     filter_value_matches(&connection.app_key, key, candidate, actual)
                 };
@@ -4583,10 +4934,16 @@ fn resource_denial(
                 } else if !matches(allowed) {
                     return Some(ResourceDenial::ValueNotAllowed(key.clone()));
                 }
+            } else {
+                return Some(ResourceDenial::MissingRequiredFilter(key.clone()));
             }
         }
     }
     None
+}
+
+fn resource_path<'a>(args: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.').try_fold(args, |value, key| value.get(key))
 }
 
 /// Whether an argument value equals one allowed by a connection's filter.
@@ -4615,6 +4972,8 @@ fn gate_for_denial(denial: &Denial) -> &'static str {
     match denial {
         Denial::Resolver(_) => "resolver",
         Denial::BotActionRequiresFacade => "catalog",
+        Denial::OwnershipProofMissing => "facade",
+        Denial::CredentialMaterialForbidden => "credential",
         Denial::Connection(_) => "connection",
         // An undeclared argument is judged against the schema pinned on the
         // catalog row, so it is audited as a catalog gate refusal.
@@ -4672,21 +5031,6 @@ fn risk_str(risk: Risk) -> &'static str {
     }
 }
 
-fn parse_tier(value: &str) -> Tier {
-    match value {
-        "S1" => Tier::S1,
-        "S2" => Tier::S2,
-        "S3" => Tier::S3,
-        "S4" => Tier::S4,
-        // An unrecognized severity is a row this binary does not understand -
-        // written by a newer schema, or corrupted. Reading it as the WEAKEST
-        // tier would wave exactly the actions that most need the decision
-        // plane past it, so the unknown maps to the strongest gating instead:
-        // S4 demands external approval, which is the recoverable direction.
-        _ => Tier::S4,
-    }
-}
-
 fn new_request_id() -> String {
     crate::storage::new_id("req")
 }
@@ -4698,6 +5042,644 @@ mod tests {
     use crate::storage::{CatalogActionInput, GrantInput};
     use crate::transport::MockTransport;
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+
+    fn ordinary_test_engine() -> GovernanceEngine<StubCredentialSource, MockTransport> {
+        let (engine, seams) = facade_test_engine();
+        seams.0.lock().unwrap().facade_only = false;
+        engine
+    }
+
+    fn ordinary_request() -> AuthorizationRequest {
+        AuthorizationRequest::new(
+            "direct",
+            "connection",
+            "write_item",
+            serde_json::json!({"repo":"o/r"}),
+        )
+    }
+
+    fn pending_request(
+        engine: &GovernanceEngine<StubCredentialSource, MockTransport>,
+        ceiling: &str,
+        selectors: Vec<String>,
+    ) -> String {
+        engine
+            .store()
+            .insert_grant(&GrantInput {
+                grant_id: "admin".into(),
+                principal: "direct".into(),
+                connection_id: "connection".into(),
+                grantee_principal: "operator".into(),
+                risk_ceiling: ceiling.into(),
+                action_selectors: selectors,
+                authority_kind: "connection_admin".into(),
+                expires_at: None,
+            })
+            .unwrap();
+        let action = engine
+            .store()
+            .catalog_action("direct", "connection", "write_item")
+            .unwrap()
+            .unwrap();
+        engine
+            .store()
+            .create_action_request(
+                "direct",
+                "connection",
+                "write_item",
+                &ordinary_request().args,
+                &action.schema_hash,
+                "direct",
+                crate::storage::now_ms() + 60_000,
+                None,
+                None,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn severe_ask_first_refuses_before_creating_consent() {
+        let engine = ordinary_test_engine();
+        install_system_manifest(engine.store(), "mock", "S3");
+        engine
+            .store()
+            .set_policy("direct", "connection", "*", "ask_first", None)
+            .unwrap();
+        assert!(matches!(
+            engine.authorize(ordinary_request()),
+            Err(Denial::NeedsDecisionPlane(_))
+        ));
+        assert!(engine
+            .store()
+            .list_action_requests("direct")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn poll_authority_cannot_create_interactive_approval() {
+        let engine = ordinary_test_engine();
+        engine
+            .store()
+            .insert_grant(&GrantInput {
+                grant_id: "poll".into(),
+                principal: "direct".into(),
+                connection_id: "connection".into(),
+                grantee_principal: "direct".into(),
+                risk_ceiling: "write".into(),
+                action_selectors: vec!["*".into()],
+                authority_kind: AUTHORITY_POLL.into(),
+                expires_at: None,
+            })
+            .unwrap();
+        engine
+            .store()
+            .set_policy("direct", "connection", "*", "ask_first", None)
+            .unwrap();
+        assert_eq!(
+            engine.authorize(ordinary_request().for_poll("subscription")),
+            Err(Denial::Policy(PolicyDenial::AskFirst))
+        );
+        assert!(engine
+            .store()
+            .list_action_requests("direct")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn internal_calls_refuse_recursive_credential_material() {
+        let engine = ordinary_test_engine();
+        let request = AuthorizationRequest::new(
+            "direct",
+            "connection",
+            "write_item",
+            serde_json::json!({"nested":{"api_key":"never-forward"}}),
+        );
+        assert_eq!(
+            engine.authorize(request),
+            Err(Denial::CredentialMaterialForbidden)
+        );
+        assert!(engine.transport().requests().is_empty());
+    }
+
+    #[test]
+    fn decision_and_dispatch_audit_use_effective_severity() {
+        let engine = ordinary_test_engine();
+        let reservation = engine.authorize(ordinary_request()).unwrap();
+        let rows = engine.store().list_audit("direct").unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row.reason_code == "credential_resolved")
+            .unwrap();
+        assert_eq!(row.severity.as_deref(), Some(reservation.severity.as_str()));
+        assert_eq!(row.severity.as_deref(), Some("S2"));
+    }
+
+    #[test]
+    fn terminal_preclaim_refusal_keeps_approval_retryable() {
+        let engine = ordinary_test_engine().with_freshness_check(Arc::new(|_| {
+            Err(("catalog_stale_write".into(), "refresh unavailable".into()))
+        }));
+        let id = pending_request(&engine, "write", vec!["*".into()]);
+        let outcome = engine.approve_request("direct", &id, "operator").unwrap();
+        assert!(matches!(outcome.outcome, TransportOutcome::NotSent { .. }));
+        let row = engine
+            .store()
+            .action_request("direct", &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.scope_outcome.as_deref(),
+            Some(crate::scope::APPROVED_WAITING)
+        );
+    }
+
+    #[test]
+    fn admin_approval_and_denial_honor_selector_and_risk() {
+        for (risk, selector) in [("read", "*"), ("write", "other_action")] {
+            let engine = ordinary_test_engine();
+            let id = pending_request(&engine, risk, vec![selector.into()]);
+            assert_eq!(
+                engine.approve_request("direct", &id, "operator"),
+                Err(Denial::Grant(GrantDenial::ConnectionAdminRequired))
+            );
+            assert_eq!(
+                engine.deny_request("direct", &id, "operator"),
+                Err(Denial::Grant(GrantDenial::ConnectionAdminRequired))
+            );
+        }
+    }
+
+    #[test]
+    fn operator_denial_is_in_append_only_audit() {
+        let engine = ordinary_test_engine();
+        let id = pending_request(&engine, "write", vec!["*".into()]);
+        assert!(engine.deny_request("direct", &id, "operator").unwrap());
+        assert!(engine
+            .store()
+            .list_audit("direct")
+            .unwrap()
+            .iter()
+            .any(|row| row.reason_code == "approval_denied" && row.actor == "operator"));
+    }
+
+    #[test]
+    fn consent_denial_expiry_and_withdrawal_are_audited() {
+        for (state, code) in [
+            ("answered", "consent_denied"),
+            ("expired", "consent_expired"),
+            ("withdrawn", "consent_withdrawn"),
+        ] {
+            let engine = ordinary_test_engine();
+            let id = pending_request(&engine, "write", vec!["*".into()]);
+            let mut request = engine
+                .store()
+                .action_request("direct", &id)
+                .unwrap()
+                .unwrap();
+            request.elicitation_id = Some("card".into());
+            let digest = request.args_hash.clone();
+            let scope = CallScope {
+                owner: "direct".into(),
+                scope_ref: "session".into(),
+                scope_epoch: 1,
+                kind: None,
+                parent: None,
+                parent_state: None,
+                agent_id: None,
+                flow_id: None,
+                delegates: false,
+                owner_authorized: true,
+            };
+            let result = engine.finish_consent(request, &scope, serde_json::json!({"elicitation_id":"card", "kind":"consent", "args_digest":digest, "state":state, "answered_choice_id":"deny"}));
+            assert!(matches!(result, Err(Denial::ConsentRefused { .. })));
+            assert!(engine
+                .store()
+                .list_audit("direct")
+                .unwrap()
+                .iter()
+                .any(|row| row.reason_code == code && row.actor == "consent_card:card"));
+        }
+    }
+
+    #[test]
+    fn shape_reuse_never_crosses_requesters() {
+        let engine = ordinary_test_engine();
+        let action = engine
+            .store()
+            .catalog_action("direct", "connection", "write_item")
+            .unwrap()
+            .unwrap();
+        let mut ids = Vec::new();
+        for requester in ["carrier-a", "carrier-b"] {
+            ids.push(
+                engine
+                    .store()
+                    .ensure_action_request(
+                        "direct",
+                        "connection",
+                        "write_item",
+                        &serde_json::json!({"repo":"o/r"}),
+                        &action.schema_hash,
+                        requester,
+                        crate::storage::now_ms() + 60_000,
+                        None,
+                        None,
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    #[test]
+    fn approved_routing_is_persistent_and_immutable() {
+        let engine = ordinary_test_engine();
+        let id = pending_request(&engine, "write", vec!["*".into()]);
+        let routing = serde_json::json!({"repository":"o/r", "tool":"github_read", "supports_per_call_approval":true});
+        assert!(engine
+            .store()
+            .bind_action_request_routing("direct", &id, &routing)
+            .unwrap());
+        assert_eq!(
+            engine
+                .store()
+                .action_request_routing("direct", &id)
+                .unwrap(),
+            Some(routing)
+        );
+        assert!(!engine
+            .store()
+            .bind_action_request_routing(
+                "direct",
+                &id,
+                &serde_json::json!({"repository":"other/repo"})
+            )
+            .unwrap());
+        engine
+            .store()
+            .decide_action_request("direct", &id, true, "operator")
+            .unwrap();
+        let request = ordinary_request().approved_from(id);
+        assert_eq!(
+            engine.authorize(request),
+            Err(Denial::Policy(PolicyDenial::ApprovalShapeMismatch))
+        );
+    }
+
+    #[test]
+    fn approved_dispatch_restores_internal_repository() {
+        let (engine, seams) = facade_test_engine();
+        {
+            let mut state = seams.0.lock().unwrap();
+            state.facade_only = false;
+            state.expected_repository = Some("o/r".into());
+        }
+        let id = pending_request(&engine, "write", vec!["*".into()]);
+        let routing = serde_json::json!({"repository":"o/r", "tool":"github_read", "supports_per_call_approval":true});
+        engine
+            .store()
+            .bind_action_request_routing("direct", &id, &routing)
+            .unwrap();
+        let outcome = engine.approve_request("direct", &id, "operator").unwrap();
+        assert!(matches!(
+            outcome.outcome,
+            TransportOutcome::Completed { .. }
+        ));
+        assert_eq!(engine.transport().requests().len(), 1);
+    }
+
+    #[test]
+    fn unknown_effects_and_statuses_fail_closed() {
+        assert_eq!(compose_policy_effect("misspelled", Some("allow")), "block");
+        assert_eq!(RequestStatus::of("approvd"), RequestStatus::Unknown);
+        assert_ne!(RequestStatus::of("approvd"), RequestStatus::Approved);
+    }
+
+    #[test]
+    fn stale_arguments_and_grant_hash_abandon_reservations() {
+        for grant_hash in [false, true] {
+            let engine = ordinary_test_engine();
+            let mut reservation = engine.authorize(ordinary_request()).unwrap();
+            if grant_hash {
+                reservation.decision_id = Some("decision".into());
+                reservation.grant_hash = Some("wrong".into());
+            } else {
+                reservation.args = serde_json::json!({"repo":"changed"});
+            }
+            engine.revalidate_and_dispatch(&reservation);
+            assert_eq!(
+                engine
+                    .store()
+                    .reservation("direct", &reservation.reservation_id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "invalidated"
+            );
+        }
+    }
+
+    #[test]
+    fn waiting_approval_batches_back_off_between_attempts() {
+        let engine = ordinary_test_engine();
+        let id = pending_request(&engine, "write", vec!["*".into()]);
+        engine
+            .store()
+            .decide_action_request("direct", &id, true, "operator")
+            .unwrap();
+        engine.store().hold_scoped_approval("direct", &id).unwrap();
+        assert_eq!(
+            engine.store().waiting_scoped_approvals(10).unwrap().len(),
+            1
+        );
+        assert!(engine
+            .store()
+            .waiting_scoped_approvals(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn waiting_scope_precheck_does_not_reserve_or_audit_again() {
+        let scratch = crate::test_scratch::Scratch::file("waiting-scope-precheck", "store.db");
+        let (engine, seams) = facade_test_engine_at(scratch.path().to_str().unwrap());
+        seams.0.lock().unwrap().facade_only = false;
+        let scope = CallScope {
+            owner: "direct".into(),
+            scope_ref: "session".into(),
+            scope_epoch: 1,
+            kind: None,
+            parent: None,
+            parent_state: None,
+            agent_id: None,
+            flow_id: None,
+            delegates: false,
+            owner_authorized: true,
+        };
+        let action = engine
+            .store()
+            .catalog_action("direct", "connection", "write_item")
+            .unwrap()
+            .unwrap();
+        let id = engine
+            .store()
+            .create_action_request(
+                "direct",
+                "connection",
+                "write_item",
+                &ordinary_request().args,
+                &action.schema_hash,
+                "direct",
+                crate::storage::now_ms() + 60_000,
+                Some(&scope),
+                None,
+            )
+            .unwrap();
+        engine
+            .store()
+            .decide_action_request("direct", &id, true, "operator")
+            .unwrap();
+        engine.store().hold_scoped_approval("direct", &id).unwrap();
+        assert_eq!(engine.retry_waiting_approvals(10), 1);
+        let count: i64 = rusqlite::Connection::open(scratch.path())
+            .unwrap()
+            .query_row("SELECT count(*) FROM reservations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "an unconfirmed scope must not create another reservation"
+        );
+        assert!(engine.store().list_audit("direct").unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_connection_or_action_invalidates_claim_without_store_error() {
+        for table in ["connections", "catalog_actions"] {
+            let scratch = crate::test_scratch::Scratch::file("claim-missing-row", "store.db");
+            let (engine, seams) = facade_test_engine_at(scratch.path().to_str().unwrap());
+            seams.0.lock().unwrap().facade_only = false;
+            let reservation = engine.authorize(ordinary_request()).unwrap();
+            rusqlite::Connection::open(scratch.path())
+                .unwrap()
+                .execute(&format!("DELETE FROM {table}"), [])
+                .unwrap();
+            assert!(!engine
+                .store()
+                .claim_reservation(&reservation_record(&reservation), "attempt")
+                .unwrap());
+            assert_eq!(
+                engine
+                    .store()
+                    .reservation("direct", &reservation.reservation_id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "invalidated"
+            );
+        }
+    }
+
+    #[test]
+    fn revoked_agent_identity_is_preserved_in_immutable_snapshot() {
+        let scratch = crate::test_scratch::Scratch::file("agent-revocation", "store.db");
+        let engine = hash_test_engine_at(scratch.path().to_str().unwrap());
+        let conn = rusqlite::Connection::open(scratch.path()).unwrap();
+        conn.execute(
+            "UPDATE grants SET agent_id='agent-a' WHERE grant_id='grant'",
+            [],
+        )
+        .unwrap();
+        assert!(engine.store().revoke_grant("direct", "grant").unwrap());
+        let agent: String = conn
+            .query_row(
+                "SELECT agent_id FROM grant_revocations WHERE grant_id='grant'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(agent, "agent-a");
+    }
+
+    #[test]
+    fn claim_pins_policy_identity_not_only_generation() {
+        let (engine, seams) = facade_test_engine();
+        seams.0.lock().unwrap().facade_only = false;
+        engine
+            .store()
+            .set_policy("direct", "connection", "*", "allow", None)
+            .unwrap();
+        let reservation = engine
+            .authorize(AuthorizationRequest::new(
+                "direct",
+                "connection",
+                "write_item",
+                serde_json::json!({"repo":"o/r"}),
+            ))
+            .unwrap();
+        engine
+            .store()
+            .set_policy("direct", "connection", "write_item", "block", None)
+            .unwrap();
+        assert!(!engine
+            .store()
+            .claim_reservation(&reservation_record(&reservation), "attempt")
+            .unwrap());
+        assert!(engine.transport().requests().is_empty());
+    }
+
+    #[test]
+    fn claim_rechecks_module_and_agent_expiry() {
+        for agent in [false, true] {
+            let scratch = crate::test_scratch::Scratch::file("claim-expiry", "store.db");
+            let (engine, seams) = facade_test_engine_at(scratch.path().to_str().unwrap());
+            seams.0.lock().unwrap().facade_only = false;
+            let reservation = engine
+                .authorize(AuthorizationRequest::new(
+                    "direct",
+                    "connection",
+                    "write_item",
+                    serde_json::json!({"repo":"o/r"}),
+                ))
+                .unwrap();
+            let mut record = reservation_record(&reservation);
+            if agent {
+                record.agent_grant = Some(crate::storage::PinnedGrant {
+                    grant_id: "agent-grant".into(),
+                    generation: 1,
+                });
+            }
+            let conn = rusqlite::Connection::open(scratch.path()).unwrap();
+            if agent {
+                conn.execute("INSERT INTO grants(grant_id,principal,connection_id,grantee_principal,risk_ceiling,action_selectors,authority_kind,expires_at,generation,created_at_ms,agent_id) VALUES('agent-grant','direct','connection','direct','write','[\"write_item\"]','invoke',1,1,1,'agent-a')", []).unwrap();
+                conn.execute("UPDATE reservations SET agent_grant_id='agent-grant'", [])
+                    .unwrap();
+            } else {
+                conn.execute("UPDATE grants SET expires_at=1 WHERE grant_id='grant'", [])
+                    .unwrap();
+            }
+            assert!(
+                !engine
+                    .store()
+                    .claim_reservation(&record, "attempt")
+                    .unwrap(),
+                "agent={agent}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_matching_never_uses_an_agent_row() {
+        let scratch = crate::test_scratch::Scratch::file("module-grant-layer", "store.db");
+        let engine = hash_test_engine_at(scratch.path().to_str().unwrap());
+        rusqlite::Connection::open(scratch.path())
+            .unwrap()
+            .execute(
+                "UPDATE grants SET agent_id='agent-a' WHERE grant_id='grant'",
+                [],
+            )
+            .unwrap();
+        assert!(engine
+            .store()
+            .matching_grant(
+                "direct",
+                "connection",
+                "direct",
+                "write_item",
+                AUTHORITY_INVOKE,
+                crate::storage::now_ms(),
+                Some("write")
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn non_object_arguments_are_not_reviewable() {
+        for args in [
+            serde_json::json!([]),
+            serde_json::json!("value"),
+            serde_json::json!(1),
+            serde_json::json!(false),
+        ] {
+            assert!(undeclared_argument(&serde_json::json!({"type":"object"}), &args).is_some());
+        }
+    }
+
+    #[test]
+    fn missing_allowlisted_read_path_is_refused_and_nested_paths_resolve() {
+        let engine = hash_test_engine();
+        let mut connection = engine
+            .store()
+            .connection("direct", "connection")
+            .unwrap()
+            .unwrap();
+        let mut action = engine
+            .store()
+            .catalog_action("direct", "connection", "write_item")
+            .unwrap()
+            .unwrap();
+        action.risk = "read".into();
+        connection.resource_filters = serde_json::json!({"values":{"target.repo":["o/r"]}});
+        assert_eq!(
+            resource_denial(&connection, &action, &serde_json::json!({})),
+            Some(ResourceDenial::MissingRequiredFilter("target.repo".into()))
+        );
+        assert_eq!(
+            resource_denial(
+                &connection,
+                &action,
+                &serde_json::json!({"target":{"repo":"o/r"}})
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn checked_search_selection_requires_every_repository_to_be_allowed() {
+        let engine = hash_test_engine();
+        let mut connection = engine
+            .store()
+            .connection("direct", "connection")
+            .unwrap()
+            .unwrap();
+        let mut action = engine
+            .store()
+            .catalog_action("direct", "connection", "write_item")
+            .unwrap()
+            .unwrap();
+        connection.app_key = "github_rest".into();
+        connection.resource_filters =
+            serde_json::json!({"values":{"owner":"org","repo":["a","b"]}});
+        action.name = "github.issue.search".into();
+        action.risk = "read".into();
+        let args = serde_json::json!({"terms":["open"]});
+        let allowed = AuthorizationRequest::new("direct", "connection", &action.name, args.clone())
+            .with_resolved_github_search(vec!["org/a".into(), "org/b".into()]);
+        let outside = AuthorizationRequest::new("direct", "connection", &action.name, args.clone())
+            .with_resolved_github_search(vec!["org/a".into(), "other/b".into()]);
+        assert_eq!(
+            resource_denial_with_repositories(
+                &connection,
+                &action,
+                &args,
+                allowed.resolved_github_search_repositories()
+            ),
+            None
+        );
+        assert!(resource_denial_with_repositories(
+            &connection,
+            &action,
+            &args,
+            outside.resolved_github_search_repositories()
+        )
+        .is_some());
+        assert!(resource_denial_with_repositories(&connection, &action, &args, None).is_some());
+        assert!(
+            resource_denial_with_repositories(&connection, &action, &args, Some(&[])).is_some()
+        );
+    }
 
     /// Which schema shapes close the top level, and which argument is named.
     #[test]
@@ -4749,6 +5731,7 @@ mod tests {
         handle_read_failure: bool,
         generation_read_failure: bool,
         facade_only: bool,
+        expected_repository: Option<String>,
         abandoned_reservations: Vec<String>,
         /// When set, replaces the single default agent row (or module row) with
         /// one row per entry: its action selectors and optional expiry, in the
@@ -4760,7 +5743,14 @@ mod tests {
     struct TestHandleSeams(std::sync::Mutex<SeamState>);
 
     impl GovernanceSeams for TestHandleSeams {
-        fn resolve_invoke(&self, _request: &AuthorizationRequest) -> Result<(), ResolverDenial> {
+        fn resolve_invoke(&self, request: &AuthorizationRequest) -> Result<(), ResolverDenial> {
+            if let Some(expected) = &self.0.lock().unwrap().expected_repository {
+                assert_eq!(
+                    request.resolved_repository.as_ref(),
+                    Some(expected),
+                    "approved dispatch lost its routing repository"
+                );
+            }
             Ok(())
         }
         fn facade_only(&self, action: &CatalogAction) -> bool {
@@ -4975,6 +5965,7 @@ mod tests {
             handle_read_failure: false,
             generation_read_failure: false,
             facade_only: true,
+            expected_repository: None,
             abandoned_reservations: Vec::new(),
             agent_rows: None,
             module_rows: None,
@@ -5180,7 +6171,7 @@ mod tests {
                     claim_owner: owner.into(),
                     effect_index: 0,
                 },
-                crate::github::facade::effects::OwnershipProof::new("reaction", vec![], true),
+                crate::github::facade::effects::OwnershipProof::new("reaction", vec![]),
             ))
             .expect("facade receipt reservation")
     }
@@ -5336,7 +6327,7 @@ mod tests {
                 claim_owner: "worker".into(),
                 effect_index: 0,
             },
-            crate::github::facade::effects::OwnershipProof::new("reaction", vec![], true),
+            crate::github::facade::effects::OwnershipProof::new("reaction", vec![]),
         );
         let reservation = engine.authorize(request).expect("facade reservation");
         assert_eq!(reservation.receipt.as_ref().unwrap().claim_owner, "worker");
@@ -5354,7 +6345,7 @@ mod tests {
         seams.0.lock().unwrap().ownership_complete = false;
         assert_eq!(
             engine.authorize(facade_request()),
-            Err(Denial::StoreFailure)
+            Err(Denial::OwnershipProofMissing)
         );
         assert!(engine
             .store()
@@ -5368,7 +6359,7 @@ mod tests {
                 .list_audit("direct")
                 .unwrap()
                 .iter()
-                .any(|row| row.reason_code == "store_failure"),
+                .any(|row| row.reason_code == "ownership_proof_missing"),
             "ownership refusal went unaudited"
         );
         seams.0.lock().unwrap().ownership_complete = true;
@@ -6027,7 +7018,7 @@ mod tests {
                 "prefix": "Bearer ", "required": true
             }],
             "resource_filters": {"required": [], "optional": [], "write_enabling": ["repo"]},
-            "actions_baseline": [{"name": "write_item", "risk": "write"}],
+            "actions_baseline": [{"name": "write_item", "risk": "write", "input_schema":{"type":"object","properties":{"repo":{"type":"string"}}}}],
             "defaults": {"ask_first_risk": ["write", "destructive"], "rate_limit": {"calls_per_min": 30}},
             "availability": "ga"
         }))
@@ -6111,6 +7102,7 @@ mod tests {
                 catalog_action: 1,
                 grant: 1,
                 policy: 0,
+                policy_id: None,
             },
             expires_at_ms: crate::storage::now_ms() + 60_000,
             request_id: "request".to_string(),
@@ -6182,19 +7174,39 @@ mod tests {
         );
     }
 
-    /// Map unknown severity strings to S4, the strongest tier, so a newer or
-    /// corrupt stored value cannot bypass the separate approval service.
-    /// Check unknown values as well as the recognized spellings to preserve
-    /// the existing behavior for valid tiers.
     #[test]
     fn an_unknown_severity_string_gates_at_the_strongest_tier() {
-        assert!(matches!(parse_tier("S5"), Tier::S4));
-        assert!(matches!(parse_tier(""), Tier::S4));
-        assert!(matches!(parse_tier("s1"), Tier::S4));
-        assert!(matches!(parse_tier("S1"), Tier::S1));
-        assert!(matches!(parse_tier("S2"), Tier::S2));
-        assert!(matches!(parse_tier("S3"), Tier::S3));
-        assert!(matches!(parse_tier("S4"), Tier::S4));
+        let path = crate::test_scratch::Scratch::database("unknown-tier");
+        let engine = hash_test_engine_at(path.to_str().unwrap());
+        let action = engine
+            .store()
+            .catalog_action("direct", "connection", "write_item")
+            .unwrap()
+            .unwrap();
+        let db = rusqlite::Connection::open(&*path).unwrap();
+        for tier in ["S5", "", "s1", "S1", "S2", "S3", "S4"] {
+            db.execute("UPDATE app_manifests SET manifest_json=json_set(manifest_json,'$.tier',?1),content_hash=?1", [tier]).unwrap();
+            let expected = match tier {
+                "S1" | "S2" => Severity::S2,
+                "S3" => Severity::S3,
+                _ => Severity::S4,
+            };
+            assert_eq!(
+                effective_severity(&action, "mock", engine.store()).unwrap(),
+                expected,
+                "{tier}"
+            );
+        }
+        db.execute("DELETE FROM app_manifests", []).unwrap();
+        assert_eq!(
+            effective_severity(&action, "mock", engine.store()).unwrap(),
+            Severity::S4
+        );
+        db.execute("DROP TABLE app_manifests", []).unwrap();
+        assert!(
+            effective_severity(&action, "mock", engine.store()).is_err(),
+            "store errors must not become S4"
+        );
     }
 
     /// A ROUTING failure and a VAULT failure must not render as the same code.

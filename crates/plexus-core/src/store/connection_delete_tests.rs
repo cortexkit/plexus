@@ -13,12 +13,13 @@ use crate::test_scratch::Scratch;
 /// Tables that hold a connection's rows but are not in
 /// [`CONNECTION_KEYED_TABLES`]: the connection row itself, the audit trail
 /// that `delete_connection` keeps, and the handle table whose connections it
-/// refuses.
-const KEPT_OR_REFUSED: [&str; 4] = [
+/// refuses, together with repository bindings owned by those handles.
+const KEPT_OR_REFUSED: [&str; 5] = [
     "connections",
     "audit_journal",
     "grant_revocations",
     "github_app_handle",
+    "github_repo_binding",
 ];
 
 // Migration 40 deleted from the tables that existed at that schema version.
@@ -152,6 +153,17 @@ fn seed_connection(
              10, 1)",
         params![c, principal],
     )?;
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='consent_call_keys')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? {
+        conn.execute(
+            "INSERT INTO consent_call_keys (requester,call_key,principal,request_id)
+             VALUES ('reserved:aft','alias-' || ?1,?2,'request-' || ?1)",
+            params![c, principal],
+        )?;
+    }
     conn.execute(
         "INSERT INTO reservations (reservation_id, principal, connection_id, action,
              snapshot_generations, approved_args_hash, schema_hash, expires_at, status,
@@ -197,6 +209,17 @@ fn seed_connection(
         // checking an empty table would pass even if deletion were omitted.
         conn.execute("INSERT INTO event_outbox(event_key, event_id, event_name, repo_id, repo, created_at_ms)
             VALUES ('key-' || ?1, 'event-' || ?1, 'github_issue_changed', 101, 'owner/repo', 1)", [c])?;
+    }
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='event_outbox_failures')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? {
+        conn.execute(
+            "INSERT INTO event_outbox_failures(event_key,version,failed_at_ms,failure_reason)
+            VALUES ('key-' || ?1,1,1,'invalid_body')",
+            [c],
+        )?;
     }
     conn.execute(
         "INSERT INTO write_reconciliation_results (principal, request_id, acting_principal,
@@ -291,8 +314,8 @@ fn insert_handle(conn: &Connection, principal: &str, connection_id: &str) -> rus
 }
 
 /// Every table that names a connection is either deleted by
-/// `delete_connection` or deliberately kept or refused. A new table with a
-/// `connection_id` column fails here until someone decides which.
+/// `delete_connection` or deliberately kept or refused. Foreign-key descendants
+/// count too, even when they do not repeat the parent's `connection_id` column.
 #[test]
 fn every_connection_keyed_table_is_deleted_or_deliberately_kept() {
     let conn = Connection::open_in_memory().unwrap();
@@ -322,6 +345,25 @@ fn every_connection_keyed_table_is_deleted_or_deliberately_kept() {
     with_connection_column.insert("probe_subscriptions".to_string());
     with_connection_column.insert("pending_write_reconciliations".to_string());
     with_connection_column.insert("event_outbox".to_string());
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for table in &tables {
+            let parents: Vec<String> = conn
+                .prepare("SELECT \"table\" FROM pragma_foreign_key_list(?1)")
+                .unwrap()
+                .query_map([table], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            if parents
+                .iter()
+                .any(|parent| with_connection_column.contains(parent))
+            {
+                changed |= with_connection_column.insert(table.clone());
+            }
+        }
+    }
     let accounted: BTreeSet<String> = CONNECTION_KEYED_TABLES
         .iter()
         .map(|(table, _)| *table)

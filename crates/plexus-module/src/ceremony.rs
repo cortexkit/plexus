@@ -219,12 +219,30 @@ fn requested_selectors(params: &Value) -> Result<Vec<String>, Value> {
 fn parse_optional_expiry(params: &Value) -> Result<Option<i64>, Value> {
     match params.get("expires_at") {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => value.as_i64().map(Some).ok_or_else(|| {
-            json!({"error": {
-                "code": "invalid_request",
-                "message": "expires_at must be an epoch milliseconds integer"
-            }})
-        }),
+        Some(value) => {
+            let expiry = value.as_i64().ok_or_else(|| {
+                json!({"error": {
+                    "code": "invalid_request",
+                    "message": "expires_at must be an epoch milliseconds integer"
+                }})
+            })?;
+            if expiry <= plexus_core::storage::now_ms() {
+                return Err(
+                    json!({"error":{"code":"invalid_request", "message":"expires_at must be a future epoch timestamp in milliseconds"}}),
+                );
+            }
+            Ok(Some(expiry))
+        }
+    }
+}
+
+fn boolean_flag(params: &Value, name: &str, default: bool) -> Result<bool, Value> {
+    match params.get(name) {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => Err(
+            json!({"error":{"code":"invalid_request", "message":format!("{name} must be a boolean")}}),
+        ),
     }
 }
 
@@ -470,6 +488,7 @@ pub(crate) fn grant(state: &Arc<ModuleState>, principal_key: &str, params: &Valu
                 "authority_kind": minted.authority_kind,
                 "risk_ceiling": minted.risk_ceiling,
                 "action_selectors": minted.action_selectors,
+                "state": minted.state,
                 "expires_at": minted.expires_at
             }}})
         }
@@ -798,10 +817,10 @@ pub(crate) fn delete_connection(
     let Some(connection_id) = params.get("connection_id").and_then(Value::as_str) else {
         return json!({"error": {"code": "invalid_request", "message": "delete_connection requires connection_id"}});
     };
-    let dry_run = params
-        .get("dry_run")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let dry_run = match boolean_flag(params, "dry_run", true) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     let outcome = match state
         .store()
         .delete_connection(principal_key, connection_id, !dry_run)
@@ -922,10 +941,10 @@ pub(crate) fn set_web_search_limit(
         per_caller_per_minute: per_caller,
         per_backend_per_minute: per_backend,
     };
-    let dry_run = params
-        .get("dry_run")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let dry_run = match boolean_flag(params, "dry_run", true) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     let limits_json = |limits: WebSearchLimits| {
         json!({
             "per_caller_per_minute": limits.per_caller_per_minute,
@@ -1069,10 +1088,10 @@ pub(crate) fn set_web_search_order(
             return json!({"error": {"code": "invalid_request", "message": "duplicate web search provider"}});
         }
     }
-    let dry_run = params
-        .get("dry_run")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let dry_run = match boolean_flag(params, "dry_run", true) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     let previous = if dry_run {
         state.store().web_search_order()
     } else if clear {
@@ -1129,10 +1148,10 @@ pub(crate) fn set_web_search_allowance(
         };
         Some(count as u32)
     };
-    let dry_run = params
-        .get("dry_run")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let dry_run = match boolean_flag(params, "dry_run", true) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     let previous = if dry_run {
         state.store().web_search_allowance(provider)
     } else if let Some(count) = proposed {
@@ -1214,7 +1233,10 @@ pub(crate) fn recipients(state: &Arc<ModuleState>, params: &Value, method: &str)
         return json!({"error":{"code":"invalid_request","message":"recipient is required"}});
     };
     let add = method == crate::manifest::ADMIN_RECIPIENTS_ADD_OP;
-    let apply = params.get("dry_run") == Some(&Value::Bool(false));
+    let apply = match boolean_flag(params, "dry_run", true) {
+        Ok(value) => !value,
+        Err(error) => return error,
+    };
     match state
         .store()
         .change_recipient(&owner, connection, agent, &recipient, add, apply)
@@ -1797,6 +1819,76 @@ mod tests {
             .list_grants("direct", TEST_CONNECTION)
             .expect("list grants after refusal")
             .is_empty());
+    }
+
+    #[test]
+    fn regression_past_and_seconds_unit_expiries_are_refused() {
+        let (state, store) = grant_test_state("grant-past-expiry");
+        for expiry in [-1, 0, 1_792_246_701, plexus_core::now_ms() - 1] {
+            let mut params = grant_params();
+            params["expires_at"] = json!(expiry);
+            let reply = grant(&state, "direct", &params);
+            assert_eq!(reply["error"]["code"], "invalid_request", "{reply}");
+            assert!(reply["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("milliseconds"));
+            let reply = set_policy(
+                &state,
+                "direct",
+                &json!({"connection_id":TEST_CONNECTION, "action_selector":"read_item", "effect":"allow", "expires_at":expiry}),
+            );
+            assert_eq!(reply["error"]["code"], "invalid_request", "{reply}");
+        }
+        assert!(store
+            .list_grants("direct", TEST_CONNECTION)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .list_policies("direct", Some(TEST_CONNECTION))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn regression_malformed_preview_flags_are_named_refusals() {
+        let (state, _) = grant_test_state("malformed-preview");
+        for flag in [json!("false"), json!(0), Value::Null, json!({})] {
+            let params = json!({"connection_id":TEST_CONNECTION,"connection":TEST_CONNECTION,
+                "recipient":"person@example.com","backend":state.runtime.web_search.backend_name(),
+                "per_caller_per_minute":10,"per_backend_per_minute":100,"dry_run":flag});
+            for reply in [
+                delete_connection(&state, "direct", &params),
+                set_web_search_limit(&state, "direct", &params),
+                recipients(&state, &params, crate::manifest::ADMIN_RECIPIENTS_ADD_OP),
+            ] {
+                assert_eq!(reply["error"]["code"], "invalid_request", "{reply}");
+                assert_eq!(
+                    reply["error"]["message"], "dry_run must be a boolean",
+                    "{reply}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn web_search_preview_flags_are_named_refusals() {
+        let (state, _) = grant_test_state("web-search-preview");
+        for flag in [json!("false"), json!(0), Value::Null, json!({})] {
+            let params = json!({"providers":["exa"],"provider":"exa","count":10,"dry_run":flag});
+            for reply in [
+                set_web_search_order(&state, "direct", &params),
+                set_web_search_allowance(&state, "direct", &params),
+            ] {
+                assert_eq!(reply["error"]["code"], "invalid_request", "{reply}");
+                assert_eq!(
+                    reply["error"]["message"], "dry_run must be a boolean",
+                    "{reply}"
+                );
+            }
+            assert_eq!(state.store().web_search_order().unwrap(), None);
+            assert_eq!(state.store().web_search_allowance("exa").unwrap(), None);
+        }
     }
 
     #[test]

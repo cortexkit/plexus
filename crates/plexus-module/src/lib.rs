@@ -30,6 +30,7 @@ mod connector_home_tests;
 mod consent_capacity_tests;
 #[cfg(test)]
 mod consent_test_support;
+mod engram_catalog;
 pub mod health;
 pub mod manifest;
 pub mod principal;
@@ -88,8 +89,7 @@ pub const DEFAULT_MODULE_ID: &str = "plexus";
 const AUDIT_RETENTION_DAYS_ENV: &str = "PLEXUS_AUDIT_RETENTION_DAYS";
 const HELLO_CORRELATION: u64 = 1;
 const EGRESS_BUFFER: usize = 64;
-/// Idle re-stamp cadence for the dispatch heartbeat; half the 2s staleness
-/// threshold in `health.rs` so an idle loop always re-stamps well inside it.
+/// Refresh the diagnostic heartbeat age even while the dispatcher is idle.
 const IDLE_HEARTBEAT_WAKE: std::time::Duration = std::time::Duration::from_millis(1_000);
 /// How often the trigger scheduler wakes to look for due subscriptions.
 ///
@@ -123,6 +123,7 @@ const HEALTH_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 /// scope the route was opened under when the bind carried one.
 #[derive(Clone)]
 struct RouteBinding {
+    admission: Arc<tokio::sync::Semaphore>,
     principal: Principal,
     scope: Option<CallScope>,
     mode: CallMode,
@@ -133,12 +134,21 @@ struct RouteBinding {
 // requests do not occupy blocking threads, and controls acquire neither permit.
 const MAX_IN_FLIGHT_REQUESTS: usize = 256;
 const MAX_BLOCKING_REQUESTS: usize = 32;
+// One caller may retain a quarter of admission, leaving room for other modules.
+const MAX_PRINCIPAL_REQUESTS: usize = 64;
+// A quiet route still carries authority; bound retention instead of expiring it.
+const MAX_ROUTE_BINDINGS: usize = 4096;
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_PROBE_SCRIPT_BYTES: usize = 64 * 1024;
+const MAX_PROBE_ACTIONS: usize = 100;
 
 #[derive(Clone)]
 pub struct RouteBindings {
     inner: Arc<RwLock<HashMap<(u16, u32), RouteBinding>>>,
     in_flight: Arc<tokio::sync::Semaphore>,
     blocking: Arc<tokio::sync::Semaphore>,
+    last_capacity_warning: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    principals: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Semaphore>>>>,
 }
 
 impl Default for RouteBindings {
@@ -147,6 +157,8 @@ impl Default for RouteBindings {
             inner: Arc::default(),
             in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
             blocking: Arc::new(tokio::sync::Semaphore::new(MAX_BLOCKING_REQUESTS)),
+            last_capacity_warning: Arc::default(),
+            principals: Arc::default(),
         }
     }
 }
@@ -189,9 +201,33 @@ impl RouteBindings {
             .inner
             .write()
             .map_err(|_| ModuleError::Message("route binding state was poisoned".to_string()))?;
+        // The daemon's bind for a reused channel supersedes its released epoch.
+        routes.retain(|(bound_channel, _), _| *bound_channel != channel);
+        if routes.len() >= MAX_ROUTE_BINDINGS {
+            if self.should_log_route_capacity(std::time::Instant::now()) {
+                eprintln!(warn wire: "route binding capacity exhausted ({MAX_ROUTE_BINDINGS} open routes); daemon close notifications may be missing");
+            }
+            return Err(ModuleError::RouteCapacity);
+        }
+        let admission = {
+            let mut principals = self.principals.lock().map_err(|_| {
+                ModuleError::Message("principal capacity state was poisoned".into())
+            })?;
+            principals.retain(|_, semaphore| semaphore.strong_count() > 0);
+            let key = principal::principal_key(&principal);
+            match principals.get(&key).and_then(std::sync::Weak::upgrade) {
+                Some(semaphore) => semaphore,
+                None => {
+                    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_PRINCIPAL_REQUESTS));
+                    principals.insert(key, Arc::downgrade(&semaphore));
+                    semaphore
+                }
+            }
+        };
         routes.insert(
             (channel, epoch),
             RouteBinding {
+                admission,
                 principal,
                 scope,
                 mode,
@@ -200,14 +236,24 @@ impl RouteBindings {
         Ok(())
     }
 
+    fn should_log_route_capacity(&self, now: std::time::Instant) -> bool {
+        let mut last = self
+            .last_capacity_warning
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if last.is_some_and(|at| {
+            now.saturating_duration_since(at) < std::time::Duration::from_secs(60)
+        }) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
+
+    #[cfg(test)]
     fn get(&self, channel: u16, epoch: u32) -> Result<Option<Principal>, ModuleError> {
-        let routes = self
-            .inner
-            .read()
-            .map_err(|_| ModuleError::Message("route binding state was poisoned".to_string()))?;
-        Ok(routes
-            .get(&(channel, epoch))
-            .map(|binding| binding.principal.clone()))
+        self.binding(channel, epoch)
+            .map(|binding| binding.map(|binding| binding.principal))
     }
 
     /// The whole binding on `(channel, epoch)`: principal, daemon scope and
@@ -222,12 +268,27 @@ impl RouteBindings {
         Ok(routes.get(&(channel, epoch)).cloned())
     }
 
+    fn clear(&self) {
+        self.inner
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
     fn remove(&self, channel: u16, epoch: u32) -> Result<(), ModuleError> {
         self.inner
             .write()
             .map_err(|_| ModuleError::Message("route binding state was poisoned".into()))?
             .remove(&(channel, epoch));
         Ok(())
+    }
+}
+
+/// A daemon connection owns its bindings; every loop exit invalidates the cache.
+struct ClearBindingsOnClose(Arc<RouteBindings>);
+impl Drop for ClearBindingsOnClose {
+    fn drop(&mut self) {
+        self.0.clear();
     }
 }
 
@@ -421,9 +482,12 @@ where
     send_hello(&writer, config).await?;
     let hello_ack = expect_hello_ack(reader).await?;
     let store = blocking_section(|| {
-        let store = initialize_store(&hello_ack).map(Arc::new)?;
+        let (store, data_directory) = initialize_store(&hello_ack)?;
+        if let Some(data_directory) = data_directory {
+            engram_catalog::write_best_effort(&data_directory);
+        }
         ingest_catalog(&store)?;
-        Ok::<_, ModuleError>(store)
+        Ok::<_, ModuleError>(Arc::new(store))
     })?;
     // Production composition opens configured route peers synchronously. Run
     // these connections outside the async worker because dropping a runtime
@@ -514,6 +578,9 @@ where
             }
         }
     });
+    if let Err(error) = blocking_section(plexus_probe::ProbeSandbox::warm_up) {
+        eprintln!(warn scheduler: "probe sandbox warm-up failed; initialization will retry on use: {error}");
+    }
     let (scheduler_shutdown, scheduler_stop) = mpsc::channel::<()>(1);
     let scheduler_task = spawn_trigger_scheduler(
         Arc::clone(&state),
@@ -581,13 +648,9 @@ async fn dispatch_loop<R>(
 where
     R: AsyncRead + Unpin,
 {
+    let _clear_on_exit = ClearBindingsOnClose(route_bindings.clone());
     loop {
-        // Bounded idle wake-up: the heartbeat means "the dispatch loop is
-        // responsive", not "a frame arrived recently". A frame-driven-only
-        // stamp makes every idle module self-report a Degraded false positive
-        // under supervision. Re-stamping on a periodic wake while parked here
-        // keeps an idle-but-healthy module Ok; a handler that wedges the loop
-        // still goes stale because the wake only runs between frames.
+        // Keep the diagnostic heartbeat age fresh while idle.
         //
         // The read future is pinned and polled through select! rather than
         // wrapped in `timeout()`: a timeout would DROP the future on expiry,
@@ -627,6 +690,14 @@ where
             return Ok(());
         }
     }
+}
+
+fn connector_gate_transition(gate: &Value) -> (Value, Value, Value) {
+    (
+        gate["state"].clone(),
+        gate["epoch"].clone(),
+        gate["holder_name"].clone(),
+    )
 }
 
 fn spawn_trigger_scheduler(
@@ -673,7 +744,7 @@ fn spawn_trigger_scheduler(
                     // two clock reads and an atomic load, writing only on the
                     // rare tick that follows a wake.
                     let gate = state.runtime.connector_home.status();
-                    let transition = (gate["state"].clone(), gate["epoch"].clone(), gate["holder"].clone());
+                    let transition = connector_gate_transition(&gate);
                     if last_gate_state.as_ref() != Some(&transition) {
                         eprintln!(info scheduler: "connector home scheduler gate: {gate}");
                         last_gate_state = Some(transition);
@@ -909,8 +980,9 @@ async fn expect_hello_ack<R>(reader: &mut R) -> Result<ModuleHelloAckBody, Modul
 where
     R: AsyncRead + Unpin,
 {
-    let frame = read_frame(reader)
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(reader))
         .await
+        .map_err(|_| ModuleError::Message("HELLO_ACK timeout".into()))?
         .map_err(|error| ModuleError::Message(error.to_string()))?
         .ok_or_else(|| ModuleError::Message("connection closed before HELLO_ACK".to_string()))?;
     match frame.header.ty {
@@ -928,14 +1000,18 @@ where
     }
 }
 
-fn initialize_store(hello_ack: &ModuleHelloAckBody) -> Result<PlexusStore, ModuleError> {
+fn initialize_store(
+    hello_ack: &ModuleHelloAckBody,
+) -> Result<(PlexusStore, Option<PathBuf>), ModuleError> {
     let value = hello_ack.storage.as_ref().ok_or_else(|| {
         ModuleError::Message("subc HELLO_ACK omitted the storage descriptor".to_string())
     })?;
     let descriptor: StorageDescriptor = serde_json::from_value(value.clone())
         .map_err(|error| ModuleError::Message(format!("invalid storage descriptor: {error}")))?;
-    PlexusStore::open(&descriptor)
-        .map_err(|error| ModuleError::Message(format!("open plexus store: {error}")))
+    let data_directory = engram_catalog::data_directory(&descriptor);
+    let store = PlexusStore::open(&descriptor)
+        .map_err(|error| ModuleError::Message(format!("open plexus store: {error}")))?;
+    Ok((store, data_directory))
 }
 
 fn ingest_catalog(store: &PlexusStore) -> Result<(), ModuleError> {
@@ -1200,7 +1276,53 @@ async fn handle_frame(
             Ok(true)
         }
         FrameType::Request => {
-            let Ok(permit) = route_bindings.in_flight.clone().try_acquire_owned() else {
+            let budget = request_execution::RequestBudget::new();
+            if frame.body.len() > MAX_REQUEST_BYTES {
+                send_tool_error(
+                    writer,
+                    frame.header.ver,
+                    frame.header.channel,
+                    frame.header.epoch,
+                    frame.header.corr,
+                    "invalid_request",
+                    "request body exceeds the 1 MiB limit",
+                )
+                .await?;
+                return Ok(true);
+            }
+            let binding = match route_bindings.binding(frame.header.channel, frame.header.epoch) {
+                Ok(Some(binding)) => binding,
+                Ok(None) => {
+                    send_tool_error(
+                        writer,
+                        frame.header.ver,
+                        frame.header.channel,
+                        frame.header.epoch,
+                        frame.header.corr,
+                        "route_not_bound",
+                        "plexus tools require an accepted route.bind",
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+                Err(error) => {
+                    eprintln!(error wire: "request on channel {} epoch {} correlation {} failed before its reply was sent: {error}", frame.header.channel, frame.header.epoch, frame.header.corr);
+                    send_tool_error(
+                        writer,
+                        frame.header.ver,
+                        frame.header.channel,
+                        frame.header.epoch,
+                        frame.header.corr,
+                        "internal_error",
+                        "plexus failed while serving this request; the module log names the cause",
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+            };
+            let principal_permit = binding.admission.try_acquire_owned();
+            let permit = route_bindings.in_flight.clone().try_acquire_owned();
+            let (Ok(permit), Ok(principal_permit)) = (permit, principal_permit) else {
                 let response = Frame::build_with_version(
                     frame.header.ver, FrameType::Error, wire::control_flags(),
                     frame.header.channel, frame.header.epoch, frame.header.corr,
@@ -1216,33 +1338,77 @@ async fn handle_frame(
             let route_bindings = Arc::clone(route_bindings);
             tokio::spawn(async move {
                 let _permit = permit;
-                let blocking = route_bindings
-                    .blocking
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .expect("request semaphore is never closed");
+                let _principal_permit = principal_permit;
+                let coordinates = (
+                    frame.header.ver,
+                    frame.header.channel,
+                    frame.header.epoch,
+                    frame.header.corr,
+                );
+                let queue_deadline = tokio::time::Instant::from_std(budget.deadline)
+                    .min(tokio::time::Instant::now() + std::time::Duration::from_secs(5));
+                let Ok(Ok(blocking)) = tokio::time::timeout_at(
+                    queue_deadline,
+                    route_bindings.blocking.clone().acquire_owned(),
+                )
+                .await
+                else {
+                    let _ = send_tool_error(
+                        &writer,
+                        coordinates.0,
+                        coordinates.1,
+                        coordinates.2,
+                        coordinates.3,
+                        "resource_exhausted",
+                        "request expired while waiting for work capacity; nothing was sent",
+                    )
+                    .await;
+                    return;
+                };
+                let failure_writer = writer.clone();
                 // All synchronous route/store/vendor work, including denial and
                 // agent resolution, runs on the blocking pool. The async sends
                 // can still await writer capacity without occupying a worker.
                 let runtime = tokio::runtime::Handle::current();
-                if let Err(error) = tokio::task::spawn_blocking(move || {
+                let worker_result = tokio::task::spawn_blocking(move || {
                     let _blocking = request_execution::RequestSlot::enter(
                         route_bindings.blocking.clone(),
                         blocking,
+                        budget.clone(),
                     );
                     runtime.block_on(async {
-                        serve_tool_request(frame, &writer, &state, &route_bindings).await;
+                        serve_tool_request(frame, &writer, &state, &route_bindings, budget).await;
                     })
                 })
-                .await
-                {
-                    eprintln!(warn wire: "request worker failed: {error}");
-                }
+                .await;
+                answer_worker_failure(worker_result, coordinates, &failure_writer).await;
             });
             Ok(true)
         }
         _ => Ok(true),
+    }
+}
+
+async fn answer_worker_failure(
+    result: Result<(), tokio::task::JoinError>,
+    coordinates: (u8, u16, u32, u64),
+    writer: &mpsc::Sender<Frame>,
+) {
+    if let Err(error) = result {
+        eprintln!(warn wire: "request worker failed: {error}");
+        if let Err(error) = send_tool_error(
+            writer,
+            coordinates.0,
+            coordinates.1,
+            coordinates.2,
+            coordinates.3,
+            "internal_error",
+            "request worker failed; the module log names the cause",
+        )
+        .await
+        {
+            eprintln!(error wire: "could not send request worker failure: {error}");
+        }
     }
 }
 
@@ -1259,12 +1425,15 @@ async fn serve_tool_request(
     writer: &mpsc::Sender<Frame>,
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
+    budget: Arc<request_execution::RequestBudget>,
 ) {
     let version = frame.header.ver;
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
     let correlation = frame.header.corr;
-    let Err(error) = handle_tool_request(frame, writer, state, route_bindings).await else {
+    let Err(error) =
+        handle_tool_request_with_budget(frame, writer, state, route_bindings, budget).await
+    else {
         return;
     };
     eprintln!(error wire:
@@ -1298,7 +1467,7 @@ fn warn_audit_failed(response: &mut Value, what: &str, error: &dyn std::fmt::Dis
             "warning".into(),
             json!({
                 "code": "audit_append_failed",
-                "message": format!("{what} took effect, but its audit row could not be written: {error}"),
+                "message": format!("{what} took effect, but its audit row could not be written; the module log names the cause"),
             }),
         );
     }
@@ -1310,6 +1479,17 @@ async fn handle_control_request(
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
 ) -> Result<(), ModuleError> {
+    if frame.body.len() > MAX_REQUEST_BYTES {
+        let response = wire::build_error_frame(
+            frame.header.ver,
+            0,
+            0,
+            frame.header.corr,
+            "invalid_request",
+            "control request body exceeds the 1 MiB limit",
+        )?;
+        return send(writer, response).await;
+    }
     let request: ModuleControlRequest = match serde_json::from_slice(&frame.body) {
         Ok(request) => request,
         Err(error) => {
@@ -1367,14 +1547,10 @@ async fn handle_control_request(
             // Accepted binds are logged too. Logging only refusals would make an
             // ABSENT line ambiguous between "never arrived" and "arrived and was
             // fine", and the first of those is a real diagnosis.
-            let bind_label = match &principal {
-                Some(subc_protocol::Principal::Direct) => "direct".to_string(),
-                Some(subc_protocol::Principal::Reserved { module_id }) => {
-                    format!("reserved:{module_id}")
-                }
-                Some(subc_protocol::Principal::Unverified) => "unverified".to_string(),
-                None => "absent".to_string(),
-            };
+            let bind_label = principal
+                .as_ref()
+                .map(principal::principal_key)
+                .unwrap_or_else(|| "absent".into());
             eprintln!(info wire:
                 "route bind from principal '{bind_label}' on channel {route_channel}: {}",
                 if trust.is_first_party() {
@@ -1411,7 +1587,21 @@ async fn handle_control_request(
                     scope.owner_authorized
                 );
             }
-            route_bindings.insert_mode(route_channel, epoch, accepted, scope, mode)?;
+            match route_bindings.insert_mode(route_channel, epoch, accepted, scope, mode) {
+                Ok(()) => {}
+                Err(ModuleError::RouteCapacity) => {
+                    let response = wire::build_error_frame(
+                        frame.header.ver,
+                        0,
+                        0,
+                        frame.header.corr,
+                        "resource_exhausted",
+                        "route binding capacity exhausted",
+                    )?;
+                    return send(writer, response).await;
+                }
+                Err(error) => return Err(error),
+            }
             ModuleControlResponse::RouteBindAck {}
         }
         ModuleControlRequest::HealthCheck {} => {
@@ -1419,12 +1609,6 @@ async fn handle_control_request(
             // seconds to answer. A probe makes sequential blocking vendor calls
             // across every connection, so it runs on the scheduler task and this
             // path reports the last observed state instead.
-            //
-            // Honest rather than a mask: reaching this line proves the loop
-            // handled a control frame. The failure this heartbeat exists to
-            // catch is a handler that never returns, and that case never gets
-            // here at all.
-            state.health.stamp_heartbeat();
             connector_home_health(state)
         }
     };
@@ -1450,11 +1634,7 @@ async fn send_principal_denied(
 ) -> Result<(), ModuleError> {
     let label = principal
         .as_ref()
-        .map(|value| match value {
-            Principal::Direct => "direct".to_string(),
-            Principal::Reserved { module_id } => format!("reserved:{module_id}"),
-            Principal::Unverified => "unverified".to_string(),
-        })
+        .map(principal::principal_key)
         .unwrap_or_else(|| "absent".to_string());
     let frame = wire::build_error_frame(
         version,
@@ -1602,7 +1782,7 @@ async fn handle_management_request(
         )
         .await;
     }
-    let Some(principal) = route_bindings.get(channel, epoch)? else {
+    let Some(binding) = route_bindings.binding(channel, epoch)? else {
         return send_tool_error(
             writer,
             version,
@@ -1614,10 +1794,14 @@ async fn handle_management_request(
         )
         .await;
     };
-    if !matches!(principal, Principal::Direct) {
+    let principal = binding.principal;
+    if !matches!(principal, Principal::Direct)
+        || binding.mode != CallMode::Classic
+        || binding.scope.is_some()
+    {
         let mut response = tool_error(
             "operator_authority_required",
-            "plexus management operations require a direct (non-module) principal",
+            "plexus management operations require an unscoped Classic direct principal",
         );
         if matches!(
             method,
@@ -1632,7 +1816,7 @@ async fn handle_management_request(
                 None,
                 params.get("app_handle_id").and_then(Value::as_str),
                 method,
-                &format!("gh-{correlation}"),
+                &fresh_request_id(),
                 Some("operator_authority_required"),
             ) {
                 warn_audit_failed(&mut response, "github control refusal", &error);
@@ -1689,7 +1873,10 @@ async fn handle_management_request(
                         Err(code) => json!({"error":{"code":code}}),
                     }
                 }
-                (Err(_), _) => json!({"error":{"code":"inventory_invalid"}}),
+                (Err(error), _) => {
+                    eprintln!(warn wire: "GitHub inventory could not be decoded: {error}");
+                    json!({"error":{"code":"inventory_invalid"}})
+                }
                 (_, None) => json!({"error":{"code":"handle_credential_unresolvable"}}),
             }
         }
@@ -1722,7 +1909,7 @@ async fn handle_management_request(
         manifest::GITHUB_GRANT_OP => github_handle_grant(state, &principal_key, params),
         manifest::GITHUB_BIND_OP => github_handle_bind(state, &principal_key, params),
         manifest::GITHUB_UNBIND_OP => {
-            github_handle_unbind(state, &principal_key, params, &format!("gh-{correlation}"))
+            github_handle_unbind(state, &principal_key, params, &fresh_request_id())
         }
         manifest::ADMIN_ISSUE_TICKET_OP => ceremony::issue_ticket(state, &principal_key, params),
         manifest::ADMIN_REBIND_CREDENTIAL_OP => {
@@ -1765,7 +1952,7 @@ async fn handle_management_request(
             None,
             params.get("app_handle_id").and_then(Value::as_str),
             method,
-            &format!("gh-{correlation}"),
+            &fresh_request_id(),
             response.pointer("/error/code").and_then(Value::as_str),
         ) {
             warn_audit_failed(&mut response, method, &error);
@@ -1960,15 +2147,44 @@ fn github_handle_refusal(code: &str, app_handle_id: &str) -> Value {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 async fn handle_tool_request(
     frame: Frame,
     writer: &mpsc::Sender<Frame>,
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
 ) -> Result<(), ModuleError> {
+    handle_tool_request_with_budget(
+        frame,
+        writer,
+        state,
+        route_bindings,
+        request_execution::RequestBudget::new(),
+    )
+    .await
+}
+
+async fn handle_tool_request_with_budget(
+    frame: Frame,
+    writer: &mpsc::Sender<Frame>,
+    state: &Arc<ModuleState>,
+    route_bindings: &Arc<RouteBindings>,
+    budget: Arc<request_execution::RequestBudget>,
+) -> Result<(), ModuleError> {
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
     let correlation = frame.header.corr;
+    if budget.expired() {
+        return send_tool_response(
+            writer,
+            frame.header.ver,
+            channel,
+            epoch,
+            correlation,
+            request_expired_reply(),
+        )
+        .await;
+    }
     // Record entry to the body handler before its validation and authority
     // gates. Saturated requests are refused earlier by handle_frame, so an
     // absent entry log can also mean admission capacity was exhausted.
@@ -1977,6 +2193,18 @@ async fn handle_tool_request(
         "tool frame received on channel {channel} epoch {epoch} ({} bytes)",
         frame.body.len()
     );
+    if frame.body.len() > MAX_REQUEST_BYTES {
+        return send_tool_error(
+            writer,
+            frame.header.ver,
+            channel,
+            epoch,
+            correlation,
+            "invalid_request",
+            "request body exceeds the 1 MiB limit",
+        )
+        .await;
+    }
     let value: Value = match serde_json::from_slice(&frame.body) {
         Ok(value) => value,
         Err(error) => {
@@ -2007,6 +2235,23 @@ async fn handle_tool_request(
             .await;
         }
     };
+    if object.contains_key("method") {
+        if let Some(field) = object
+            .get("params")
+            .and_then(Value::as_object)
+            .and_then(retired_identity_field)
+        {
+            return send_tool_response(
+                writer,
+                frame.header.ver,
+                channel,
+                epoch,
+                correlation,
+                retired_identity_refusal(field),
+            )
+            .await;
+        }
+    }
     // Management-surface calls arrive on the same route frame type as tool calls
     // but carry {method, params} rather than {name, arguments}.
     if object.get("method").and_then(Value::as_str) == Some(grants_would_ask::METHOD) {
@@ -2071,20 +2316,9 @@ async fn handle_tool_request(
         .await;
     }
     let tool = object.get("name").and_then(Value::as_str);
-    let reply = if tool == Some(manifest::EVENTS_GET_TOOL)
-        || (tool == Some(manifest::EVENTS_TOOL)
-            && object
-                .get("arguments")
-                .and_then(|args| args.get("op"))
-                .and_then(Value::as_str)
-                == Some("get"))
-    {
-        // Stored bodies can be large: SQLite and byte hashing belong on the
-        // blocking pool, not on a Tokio worker running the wire dispatcher.
-        blocking_section(|| facade_tool_reply(&frame, object, state, route_bindings))?
-    } else {
-        blocking_section(|| facade_tool_reply(&frame, object, state, route_bindings))?
-    };
+    let reply = blocking_section(|| {
+        facade_tool_reply_with_budget(&frame, object, state, route_bindings, budget)
+    })?;
     if tool.is_some_and(tool_provider::is_metadata_op) {
         // Role metadata is not an MCP tool result: consumers decode the role's
         // answer directly, and refusals are terminal ERROR frames.
@@ -2137,7 +2371,7 @@ mod permissions;
 // stamp would use them with no flow attached, outside the flow rules
 // (`consent_unavailable` would not apply, so an ask_first action could file a
 // consent card), and with no owning flow on the audit row.
-const ADMITTED_FLOW_CARRIERS: &[&str] = &["reserved:basal"];
+const ADMITTED_FLOW_CARRIERS: &[&str] = &[principal::BASAL_PRINCIPAL];
 
 /// Serve one facade tool call (a `{name, arguments}` request naming one of
 /// the tools in `manifest`, as opposed to a `{method, params}` management
@@ -2145,13 +2379,30 @@ const ADMITTED_FLOW_CARRIERS: &[&str] = &["reserved:basal"];
 /// `{"result": ...}` or `{"error": ...}`. The caller sends it, adding the MCP
 /// `CallToolResult` fields in one place, so every early refusal below returns
 /// its body rather than sending a frame of its own.
+#[cfg(test)]
 fn facade_tool_reply(
     frame: &Frame,
     object: &serde_json::Map<String, Value>,
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
 ) -> Result<Value, ModuleError> {
-    let reply = facade_tool_reply_inner(frame, object, state, route_bindings)?;
+    facade_tool_reply_with_budget(
+        frame,
+        object,
+        state,
+        route_bindings,
+        request_execution::RequestBudget::new(),
+    )
+}
+
+fn facade_tool_reply_with_budget(
+    frame: &Frame,
+    object: &serde_json::Map<String, Value>,
+    state: &Arc<ModuleState>,
+    route_bindings: &Arc<RouteBindings>,
+    budget: Arc<request_execution::RequestBudget>,
+) -> Result<Value, ModuleError> {
+    let reply = facade_tool_reply_inner(frame, object, state, route_bindings, budget)?;
     let name = object.get("name").and_then(Value::as_str).unwrap_or("");
     if let Some(error) = reply.get("error") {
         if tool_provider::is_metadata_op(name)
@@ -2211,11 +2462,11 @@ fn facade_tool_reply_inner(
     object: &serde_json::Map<String, Value>,
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
+    budget: Arc<request_execution::RequestBudget>,
 ) -> Result<Value, ModuleError> {
-    let held_deadline = std::time::Instant::now() + plexus_core::consent_card::HELD_CALL_BUDGET;
+    let held_deadline = budget.deadline;
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
-    let correlation = frame.header.corr;
     let name = match object.get("name").and_then(Value::as_str) {
         Some(name) => name,
         None => {
@@ -2238,16 +2489,8 @@ fn facade_tool_reply_inner(
     // Retired identity tokens are undeclared on every tool, even if their
     // value is null or contains secrets. Refuse the field before any handler
     // can read credentials, send a request or silently discard it.
-    if let Some(field) = ["assertion", "agent_assertion"]
-        .into_iter()
-        .find(|field| arguments.contains_key(*field))
-    {
-        return Ok(json!({"error": {
-            "code": "argument_undeclared",
-            "field": field,
-            "message": format!("argument_undeclared{{field: {field}}}"),
-            "transmission": "not_sent"
-        }}));
+    if let Some(field) = retired_identity_field(arguments) {
+        return Ok(retired_identity_refusal(field));
     }
     // Broca, the model runner, copies the preset name from the session's plan
     // ("worker", "reader" or "head") onto every request it sends a provider, the
@@ -2332,6 +2575,7 @@ fn facade_tool_reply_inner(
         principal,
         scope: route_scope,
         mode,
+        ..
     }) = route_bindings.binding(channel, epoch)?
     else {
         // THE CHANNEL AND EPOCH ARE PRINTED because this refusal can follow a
@@ -2465,14 +2709,19 @@ fn facade_tool_reply_inner(
         None
     };
     if name == manifest::EVENTS_GET_TOOL
-        && arguments
-            .keys()
-            .any(|key| !matches!(key.as_str(), "event_key" | "event_name" | "version"))
+        || (name == manifest::EVENTS_TOOL
+            && arguments.get("op").and_then(Value::as_str) == Some("get"))
     {
-        return Ok(tool_error(
-            "invalid_request",
-            "events_get accepts only event_key, event_name and version",
-        ));
+        let invalid_key = arguments.keys().any(|key| {
+            !matches!(key.as_str(), "event_key" | "event_name" | "version")
+                && !(name == manifest::EVENTS_TOOL && key == "op")
+        });
+        if invalid_key {
+            return Ok(tool_error(
+                "invalid_request",
+                "event reads accept only event_key, event_name and version",
+            ));
+        }
     }
     let op = arguments.get("op").and_then(Value::as_str);
     if name == manifest::EVENTS_TOOL
@@ -2520,6 +2769,12 @@ fn facade_tool_reply_inner(
             return Ok(refusal);
         }
     }
+    let call = FacadeArguments {
+        state,
+        arguments,
+        principal_key: &principal_key,
+        op,
+    };
     let response = match (name, op) {
         (manifest::GITHUB_TOOL, Some("bindings.read")) => {
             let mut response = match arguments.get("connection_id").and_then(Value::as_str) {
@@ -2538,7 +2793,7 @@ fn facade_tool_reply_inner(
                 None,
                 None,
                 "github.bindings.read",
-                &format!("gh-{correlation}"),
+                &fresh_request_id(),
                 response.pointer("/error/code").and_then(Value::as_str),
             ) {
                 warn_audit_failed(&mut response, "github.bindings.read", &error);
@@ -2574,7 +2829,7 @@ fn facade_tool_reply_inner(
                         denial_response(&denial)
                     }
                     Err(plexus_core::github::reads::ReadError::Dispatch(outcome)) => {
-                        json!({"error":{"code":"read_dispatch_failed","outcome":format!("{outcome:?}")}})
+                        github_read_failure(outcome)
                     }
                     Err(plexus_core::github::reads::ReadError::InvalidResponse) => {
                         json!({"error":{"code":"read_response_invalid"}})
@@ -2612,8 +2867,8 @@ fn facade_tool_reply_inner(
                         .unwrap_or(""),
                 ),
             };
-            let request_id = format!("gh-{correlation}");
-            let owner = format!("{channel}-{correlation}");
+            let request_id = fresh_request_id();
+            let owner = request_id.clone();
             let now = plexus_core::now_ms();
             blocking_section(|| {
                 plexus_core::github::facade::bot_request_scoped(
@@ -2629,238 +2884,18 @@ fn facade_tool_reply_inner(
                 )
             })
         }
-        (manifest::CONNECTIONS_TOOL, Some("list")) => {
-            match state.store().list_connections(&principal_key) {
-                Ok(connections) => json!({"result": {"connections": connections}}),
-                Err(error) => crate::wire::store_failure(
-                    "connections listed",
-                    "connections could not be listed",
-                    &error,
-                ),
-            }
-        }
-        (manifest::CONNECTIONS_TOOL, Some("connect")) => {
-            let Some(ticket_id) = arguments.get("ticket_id").and_then(Value::as_str) else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "connect requires ticket_id"}}),
-                );
-            };
-            match state.store().connect_with_ticket(&principal_key, ticket_id) {
-                Ok(Some(connection)) => {
-                    // The connection's catalog is first seeded from the
-                    // reviewed manifest, and discovery then reconciles it with
-                    // the vendor. A failed seed leaves the connection active
-                    // (the ticket is spent) but its catalog incomplete, so it
-                    // is reported as degraded discovery, never as complete.
-                    if let Err(error) = state.store().seed_catalog_from_manifest(
-                        &principal_key,
-                        &connection.connection_id,
-                        &connection.app_key,
-                    ) {
-                        eprintln!(warn catalog:
-                            "catalog seed failed during connect of {}: {error}",
-                            connection.connection_id
-                        );
-                        return Ok(json!({"result": {
-                            "connection": connection,
-                            "discovery": "degraded",
-                            "reason": "the reviewed manifest's actions could not be seeded; the module log names the cause",
-                        }}));
-                    }
-                    // Consuming the ticket has already committed the binding and
-                    // activated the connection, and the ticket is now spent. So a
-                    // discovery failure here is NOT a failed connect: reporting
-                    // one would tell the operator to retry a ticket that no longer
-                    // exists, while an active connection they cannot see sits in
-                    // the store. Every outcome therefore returns the connection,
-                    // with discovery reported separately and honestly — the
-                    // catalog is refreshed again at invoke time.
-                    match blocking_section(|| {
-                        state.runtime.reconciler.discover_for_connection(
-                            &principal_key,
-                            &connection.connection_id,
-                            state.runtime.credential_source().as_ref(),
-                            state.runtime.endpoint_override.as_deref(),
-                        )
-                    }) {
-                        Ok(_) => {
-                            json!({"result": {"connection": connection, "discovery": "complete"}})
-                        }
-                        Err(CatalogError::TransportUnavailable { kind }) => {
-                            json!({"result": {"connection": connection, "discovery": "unavailable", "reason": format!("transport kind '{kind}' is not available")}})
-                        }
-                        Err(CatalogError::Credential) => {
-                            json!({"result": {"connection": connection, "discovery": "credential_unresolved", "reason": "credential could not be resolved during connect discovery"}})
-                        }
-                        // Not a store failure and deliberately not an error:
-                        // connect SUCCEEDS while reporting that discovery did
-                        // not complete, because refusing here would consume the
-                        // single-use ticket and leave the operator with neither
-                        // a connection nor a ticket. The cause is still logged,
-                        // since a degraded discovery with no recorded reason is
-                        // the same dead end this pass exists to close.
-                        Err(error) => {
-                            eprintln!(warn catalog: "discovery degraded during connect: {error}");
-                            json!({"result": {"connection": connection, "discovery": "degraded"}})
-                        }
-                    }
-                }
-                Ok(None) => {
-                    json!({"error": {"code": "binding_ticket_invalid", "message": "binding ticket is expired, consumed, or unknown"}})
-                }
-                Err(error) => crate::wire::store_failure(
-                    "connection completed",
-                    "connection could not be completed",
-                    &error,
-                ),
-            }
-        }
+        (manifest::CONNECTIONS_TOOL, Some("list")) => return facade_connections_list(&call),
+        (manifest::CONNECTIONS_TOOL, Some("connect")) => return facade_connections_connect(&call),
         // Without configure, a connection's filters stay at their empty
         // default and every write action is denied as write_filters_absent
         // with no way to narrow scope through the tool surface. The store
         // bounds the request against the vendor's reviewed manifest.
         (manifest::CONNECTIONS_TOOL, Some("configure")) => {
-            let Some(connection_id) = arguments.get("connection").and_then(Value::as_str) else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "configure requires connection"}}),
-                );
-            };
-            let Some(filters) = arguments.get("resource_filters") else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "configure requires resource_filters"}}),
-                );
-            };
-            match state.store().has_connection_admin_grant(
-                &principal_key,
-                connection_id,
-                &principal_key,
-            ) {
-                Ok(false) => {
-                    json!({"error": {"code": "connection_admin_required", "message": "connection administration grant required"}})
-                }
-                Err(error) => crate::wire::store_failure(
-                    "connection authorization checked",
-                    "connection authorization could not be checked",
-                    &error,
-                ),
-                Ok(true) => match state.store().configure_connection_filters(
-                    &principal_key,
-                    connection_id,
-                    filters,
-                ) {
-                    Ok(ConfigureOutcome::Configured(stored)) => {
-                        json!({"result": {"resource_filters": stored}})
-                    }
-                    Ok(ConfigureOutcome::ConnectionNotFound) => {
-                        json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
-                    }
-                    Ok(ConfigureOutcome::ManifestMissing) => {
-                        json!({"error": {"code": "manifest_missing", "message": "vendor manifest is not in the catalog"}})
-                    }
-                    Ok(ConfigureOutcome::UndeclaredFilter(key)) => {
-                        json!({"error": {"code": "undeclared_filter", "message": format!("filter key '{key}' is not declared by the vendor manifest"), "key": key}})
-                    }
-                    // Distinct from undeclared_filter because the fixes differ:
-                    // an undeclared filter names a key the VENDOR does not have,
-                    // while this names one this OPERATION does not read. Telling
-                    // an operator their key is not in the manifest when they
-                    // actually mistyped `write_enabling` sends them to read
-                    // vendor documentation for a spelling mistake.
-                    Ok(ConfigureOutcome::UnreadFilterKey { key, accepted }) => {
-                        json!({"error": {
-                            "code": "unread_filter_key",
-                            "message": format!(
-                                "resource_filters key '{key}' is not read by configure (accepted: {})",
-                                accepted.join(", ")
-                            ),
-                            "key": key,
-                            "accepted": accepted
-                        }})
-                    }
-                    Ok(ConfigureOutcome::MalformedFilters { field, expected }) => {
-                        json!({"error": {
-                            "code": "malformed_filters",
-                            "message": format!("resource_filters {field} must be {expected}"),
-                            "field": field,
-                            "expected": expected
-                        }})
-                    }
-                    Err(error) => crate::wire::store_failure(
-                        "filters configured",
-                        "filters could not be configured",
-                        &error,
-                    ),
-                },
-            }
+            return facade_connections_configure(&call)
         }
-        (manifest::CONNECTIONS_TOOL, Some("revoke")) => {
-            let Some(connection_id) = arguments.get("connection").and_then(Value::as_str) else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "revoke requires connection"}}),
-                );
-            };
-            match state.store().has_connection_admin_grant(
-                &principal_key,
-                connection_id,
-                &principal_key,
-            ) {
-                Ok(false) => {
-                    json!({"error": {"code": "connection_admin_required", "message": "connection administration grant required"}})
-                }
-                Err(error) => crate::wire::store_failure(
-                    "connection authorization checked",
-                    "connection authorization could not be checked",
-                    &error,
-                ),
-                Ok(true) => match state
-                    .store()
-                    .revoke_connection(&principal_key, connection_id)
-                {
-                    Ok(true) => {
-                        state
-                            .runtime
-                            .mcp_transport
-                            .unregister_connection(connection_id);
-                        state
-                            .runtime
-                            .rest_transport
-                            .unregister_connection(connection_id);
-                        json!({"result": {"revoked": true}})
-                    }
-                    Ok(false) => {
-                        json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
-                    }
-                    Err(error) => crate::wire::store_failure(
-                        "connection revoked",
-                        "connection could not be revoked",
-                        &error,
-                    ),
-                },
-            }
-        }
+        (manifest::CONNECTIONS_TOOL, Some("revoke")) => return facade_connections_revoke(&call),
         (manifest::CONNECTIONS_TOOL, Some("check" | "inspect")) => {
-            let Some(connection_id) = arguments.get("connection").and_then(Value::as_str) else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "check requires connection"}}),
-                );
-            };
-            match state.store().connection(&principal_key, connection_id) {
-                Ok(Some(connection)) => json!({"result": {"connection": {
-                    "connection_id": connection.connection_id,
-                    "app_key": connection.app_key,
-                    "status": connection.status,
-                    "generation": connection.generation,
-                    "credential_bound": connection.has_credential_binding
-                }}}),
-                Ok(None) => {
-                    json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
-                }
-                Err(error) => crate::wire::store_failure(
-                    "connection read",
-                    "connection could not be read",
-                    &error,
-                ),
-            }
+            return facade_connections_check(&call)
         }
         (manifest::CONNECTIONS_TOOL, _) => {
             json!({"error": {"code": "invalid_operation", "message": "unsupported connection operation"}})
@@ -2868,32 +2903,8 @@ fn facade_tool_reply_inner(
         // Pre-connection discovery: which vendors can be connected at all.
         // Every other catalog projection is connection-scoped, so on a fresh
         // install this is the only way to see what the module carries.
-        (manifest::CATALOG_TOOL, Some("apps")) => {
-            match state.store().list_manifest_summaries(&principal_key) {
-                Ok(apps) => json!({"result": {"apps": apps}}),
-                Err(error) => crate::wire::store_failure(
-                    "app catalog read",
-                    "app catalog could not be read",
-                    &error,
-                ),
-            }
-        }
-        (manifest::CATALOG_TOOL, Some("list" | "inspect")) => {
-            let Some(connection_id) = arguments.get("connection").and_then(Value::as_str) else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "catalog list/inspect requires connection; use op=apps to discover connectable vendors"}}),
-                );
-            };
-            match state
-                .store()
-                .list_catalog_actions(&principal_key, connection_id)
-            {
-                Ok(actions) => json!({"result": {"actions": actions}}),
-                Err(error) => {
-                    crate::wire::store_failure("catalog read", "catalog could not be read", &error)
-                }
-            }
-        }
+        (manifest::CATALOG_TOOL, Some("apps")) => return facade_catalog_apps(&call),
+        (manifest::CATALOG_TOOL, Some("list" | "inspect")) => return facade_catalog_list(&call),
         (manifest::CATALOG_TOOL, _) => {
             json!({"error": {"code": "invalid_operation", "message": "catalog requires apps, list, or inspect"}})
         }
@@ -2939,12 +2950,20 @@ fn facade_tool_reply_inner(
             // Authorization first: the freshness check `dispatch_checked`
             // runs before sending may contact the vendor, so it never runs for
             // a caller the engine refused.
-            blocking_section(
-                || match state.runtime.engine.invoke_held(request, held_deadline) {
-                    Ok(outcome) => dispatch_response(outcome),
-                    Err(denial) => denial_response(&denial),
-                },
-            )
+            let home = state.runtime.connector_home.clone();
+            let guard_budget = budget.clone();
+            let engine = state
+                .runtime
+                .engine
+                .clone()
+                .with_connector_home_guard(Arc::new(move || {
+                    home.refusal()
+                        .or_else(|| guard_budget.expired().then(request_expired_reply))
+                }));
+            blocking_section(|| match engine.invoke_held(request, held_deadline) {
+                Ok(outcome) => dispatch_response(outcome),
+                Err(denial) => denial_response(&denial),
+            })
         }
         (manifest::INVOKE_TOOL, _) => {
             // Name the whole shape rather than only the missing op. A caller who
@@ -2995,232 +3014,17 @@ fn facade_tool_reply_inner(
                 arguments,
             )
         }),
-        (manifest::REQUESTS_TOOL, Some("list" | "inspect")) => {
-            match state
-                .store()
-                .list_action_requests(&principal_key)
-                .and_then(|requests| {
-                    state
-                        .store()
-                        .list_write_reconciliations(&principal_key)
-                        .map(|reconciliations| (requests, reconciliations))
-                }) {
-                Ok((requests, reconciliations)) => {
-                    json!({"result": {"requests": requests, "reconciliations": reconciliations}})
-                }
-                Err(error) => crate::wire::store_failure(
-                    "requests read",
-                    "requests could not be read",
-                    &error,
-                ),
-            }
-        }
-        (manifest::REQUESTS_TOOL, Some("approve")) => {
-            let Some(request_id) = arguments.get("request_id").and_then(Value::as_str) else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "approve requires request_id"}}),
-                );
-            };
-            // Approving dispatches the call, which may reach a blocking vendor
-            // transport and, for a request raised under a daemon scope, waits
-            // on the daemon's scope.describe reply.
-            blocking_section(|| {
-                match state.runtime.engine.approve_request(
-                    &principal_key,
-                    request_id,
-                    &principal_key,
-                ) {
-                    Ok(outcome) => dispatch_response(outcome),
-                    Err(denial) => denial_response(&denial),
-                }
-            })
-        }
-        (manifest::REQUESTS_TOOL, Some("deny")) => {
-            let Some(request_id) = arguments.get("request_id").and_then(Value::as_str) else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "deny requires request_id"}}),
-                );
-            };
-            match state
-                .runtime
-                .engine
-                .deny_request(&principal_key, request_id, &principal_key)
-            {
-                Ok(true) => json!({"result": {"denied": true}}),
-                Ok(false) => {
-                    json!({"error": {"code": "request_not_pending", "message": "request is no longer pending"}})
-                }
-                Err(denial) => denial_response(&denial),
-            }
-        }
+        (manifest::REQUESTS_TOOL, Some("inspect")) => return facade_requests_inspect(&call),
+        (manifest::REQUESTS_TOOL, Some("list")) => return facade_requests_list(&call),
+        (manifest::REQUESTS_TOOL, Some("approve")) => return facade_requests_approve(&call),
+        (manifest::REQUESTS_TOOL, Some("deny")) => return facade_requests_deny(&call),
         (manifest::REQUESTS_TOOL, _) => {
             json!({"error": {"code": "invalid_operation", "message": "unsupported request operation"}})
         }
         (manifest::EVENTS_TOOL, Some("register_probe")) => {
-            let mut missing =
-                missing_string_fields(arguments, &["connection", "name", "script_source"])
-                    .unwrap_or_default();
-            let cadence = arguments.get("cadence_s").and_then(Value::as_i64);
-            if cadence.is_none_or(|value| value <= 0) {
-                missing.push("cadence_s".to_string());
-            }
-            let actions = arguments.get("actions").and_then(Value::as_array);
-            if actions.is_none() {
-                missing.push("actions".to_string());
-            }
-            if arguments.get("return_schema").is_none() {
-                missing.push("return_schema".to_string());
-            }
-            if arguments.get("rearm").and_then(Value::as_str).is_none() {
-                missing.push("rearm".to_string());
-            }
-            if !missing.is_empty() {
-                return Ok(json!({"error": {
-                    "code": "invalid_request",
-                    "message": format!("register_probe requires {}", missing.join(" and ")),
-                    "missing": missing
-                }}));
-            }
-            let connection_id = arguments
-                .get("connection")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let name = arguments
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let script_source = arguments
-                .get("script_source")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let rearm = arguments
-                .get("rearm")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let action_names = actions
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if action_names.len() != actions.map_or(0, Vec::len) {
-                return Ok(json!({"error": {
-                    "code": "invalid_request",
-                    "message": "actions must contain only strings"
-                }}));
-            }
-            let return_schema = arguments
-                .get("return_schema")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            let fixed_args = arguments
-                .get("fixed_args")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            let cursor_state = arguments
-                .get("cursor_state")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            match state.store().register_probe(
-                &principal_key,
-                connection_id,
-                plexus_core::ProbeRegistration {
-                    name,
-                    actions: &action_names,
-                    script_source,
-                    return_schema: &return_schema,
-                    rearm,
-                    cadence_s: cadence.unwrap_or_default(),
-                    fixed_args: &fixed_args,
-                    cursor_state: &cursor_state,
-                },
-            ) {
-                Ok(Ok(subscription)) => json!({"result": {"subscription": subscription}}),
-                Ok(Err(refusal)) => json!({
-                    "error": {
-                        "code": refusal.code(),
-                        "message": refusal.to_string()
-                    }
-                }),
-                Err(error) => crate::wire::store_failure(
-                    "probe registered",
-                    "probe could not be registered",
-                    &error,
-                ),
-            }
+            return facade_events_register_probe(&call)
         }
-        (manifest::EVENTS_TOOL, Some("subscribe")) => {
-            let mut missing =
-                missing_string_fields(arguments, &["connection", "action"]).unwrap_or_default();
-            let cadence = arguments.get("cadence_s").and_then(Value::as_i64);
-            if cadence.is_none_or(|value| value <= 0) {
-                missing.push("cadence_s".to_string());
-            }
-            let mut invalid = Vec::new();
-            if arguments
-                .get("fixed_args")
-                .is_some_and(|value| !value.is_object())
-            {
-                invalid.push("fixed_args".to_string());
-            }
-            if !missing.is_empty() || !invalid.is_empty() {
-                let mut reasons = Vec::new();
-                if !missing.is_empty() {
-                    reasons.push(format!("requires {}", missing.join(" and ")));
-                }
-                if !invalid.is_empty() {
-                    reasons.push(format!("{} must be an object", invalid.join(" and ")));
-                }
-                return Ok(json!({"error": {
-                    "code": "invalid_request",
-                    "message": format!("subscribe {}", reasons.join("; ")),
-                    "missing": missing,
-                    "invalid": invalid,
-                    "example": {"op": "subscribe", "connection": "conn-exa", "action": "web_search_exa", "cadence_s": 300, "fixed_args": {}}
-                }}));
-            }
-            let connection_id = arguments
-                .get("connection")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let action = arguments
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let cadence_s = cadence.unwrap_or_default();
-            let cursor_state = arguments
-                .get("cursor_state")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            let fixed_args = arguments
-                .get("fixed_args")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            match state.store().subscribe_with_cursor_state(
-                &principal_key,
-                connection_id,
-                action,
-                cadence_s,
-                &cursor_state,
-                &fixed_args,
-            ) {
-                Ok(Ok(subscription)) => json!({"result": {"subscription": subscription}}),
-                Ok(Err(refusal)) => json!({
-                    "error": {
-                        "code": refusal.code(),
-                        "message": refusal.to_string()
-                    }
-                }),
-                Err(error) => crate::wire::store_failure(
-                    "subscription created",
-                    "subscription could not be created",
-                    &error,
-                ),
-            }
-        }
+        (manifest::EVENTS_TOOL, Some("subscribe")) => return facade_events_subscribe(&call),
         (manifest::EVENTS_TOOL, Some("get")) | (manifest::EVENTS_GET_TOOL, _) => event_get_reply(
             state.store(),
             arguments,
@@ -3228,362 +3032,16 @@ fn facade_tool_reply_inner(
             route_scope.as_ref(),
             audience.as_ref(),
         ),
-        (manifest::EVENTS_TOOL, Some("resume")) => {
-            let Some(subscription_id) = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str)
-            else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "resume requires subscription_id"}}),
-                );
-            };
-            match state.store().resume(&principal_key, subscription_id) {
-                Ok(Ok(subscription)) => json!({"result": {"subscription": subscription}}),
-                Ok(Err(refusal)) => json!({
-                    "error": {
-                        "code": refusal.code(),
-                        "message": refusal.to_string()
-                    }
-                }),
-                Err(error) => crate::wire::store_failure(
-                    "subscription resumed",
-                    "subscription could not be resumed",
-                    &error,
-                ),
-            }
-        }
-        (manifest::EVENTS_TOOL, Some("list")) => {
-            let connection_id = arguments.get("connection").and_then(Value::as_str);
-            let subscription_id = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str);
-            // The principal is the ONE fact a consumer cannot observe about its
-            // own call, and it decides everything this op returns.
-            //
-            // Two seats spent an evening on an empty lane that turned out to be
-            // an identity question: the consumer could prove its bind was
-            // evaluated (a wrong nonce hard-fails) but not what principal it was
-            // finally minted as, and this module could prove the grant was
-            // correct but not who was asking. Both halves were right and neither
-            // could see the join.
-            //
-            // Logged rather than returned: the caller already knows what it
-            // MEANT to be, so echoing it back on the wire would confirm its own
-            // assumption. What is missing is what plexus RESOLVED, which belongs
-            // where the operator reads it.
-            eprintln!(info governance:
-                "events list from principal '{principal_key}' (connection={}, subscription={})",
-                connection_id.unwrap_or("<any>"),
-                subscription_id.unwrap_or("<any>")
-            );
-            // This projection names every grant the caller can exercise, so a
-            // principal and connection absent from `grants` has no consume grant.
-            // It reveals none of another principal's authority. Keep each stored
-            // grant separate: one connection can be live while another is
-            // expired, and a caller-wide scalar would hide that failure.
-            let now = plexus_core::now_ms();
-            match (
-                state.store().list_events_with_consume_authority(
-                    &principal_key,
-                    connection_id,
-                    subscription_id,
-                    now,
-                ),
-                state.store().list_subscriptions_including_granted(
-                    &principal_key,
-                    connection_id,
-                    subscription_id,
-                    now,
-                ),
-            ) {
-                (Ok(listing), Ok(subscriptions)) => json!({"result": {
-                    "events": listing.events,
-                    "subscriptions": subscriptions,
-                    "events_consume_authority": {
-                        "grants": listing.consume_authority
-                    }
-                }}),
-                // Each failed read is logged with its cause; the reply stays
-                // the same generic store_failure.
-                (Err(error), _) => {
-                    crate::wire::store_failure("events listed", "events could not be read", &error)
-                }
-                (Ok(_), Err(error)) => crate::wire::store_failure(
-                    "subscriptions listed",
-                    "events could not be read",
-                    &error,
-                ),
-            }
-        }
-        (manifest::EVENTS_TOOL, Some("ack")) => {
-            let Some(event_ids) = arguments.get("event_ids").and_then(Value::as_array) else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "ack requires event_ids"}}),
-                );
-            };
-            let event_ids = event_ids
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>();
-            if event_ids.len() != arguments["event_ids"].as_array().map_or(0, Vec::len) {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "event_ids must contain only strings"}}),
-                );
-            }
-            let mut event_ids = event_ids;
-            event_ids.sort();
-            event_ids.dedup();
-            match state.store().ack_events_including_granted(
-                &principal_key,
-                &event_ids,
-                plexus_core::now_ms(),
-            ) {
-                // Report the count AND which ids did not land. A consumer acks
-                // what it has delivered, so an id that acks nothing means the
-                // two sides disagree about what exists: a wrong id, another
-                // principal's event, or one already acked. Returning only a
-                // count makes that indistinguishable from success -- the caller
-                // would have to compare it against its own request length to
-                // notice, and the failure is silent redelivery forever while
-                // both sides report healthy.
-                //
-                // Not an error: a partial ack genuinely acked something, and
-                // failing the whole call would make one stale id block a batch
-                // of good ones. The unacked list is the actionable half.
-                Ok(acked) if acked == event_ids.len() => {
-                    json!({"result": {"acked": acked, "unacked": []}})
-                }
-                Ok(acked) => {
-                    partial_ack_reply(acked, state.store().unacked_of(&principal_key, &event_ids))
-                }
-                Err(error) => crate::wire::store_failure(
-                    "events acknowledged",
-                    "events could not be acknowledged",
-                    &error,
-                ),
-            }
-        }
-        (manifest::EVENTS_TOOL, Some("unsubscribe")) => {
-            let Some(subscription_id) = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str)
-            else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "unsubscribe requires subscription_id"}}),
-                );
-            };
-            match state.store().unsubscribe(&principal_key, subscription_id) {
-                Ok(true) => json!({"result": {"unsubscribed": true}}),
-                Ok(false) => {
-                    json!({"error": {"code": "subscription_not_found", "message": "subscription was not found"}})
-                }
-                Err(error) => crate::wire::store_failure(
-                    "subscription removed",
-                    "subscription could not be removed",
-                    &error,
-                ),
-            }
-        }
-        (manifest::EVENTS_TOOL, Some("set_project")) => {
-            let Some(subscription_id) = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str)
-            else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "set_project requires subscription_id"}}),
-                );
-            };
-            // An explicit null clears the binding. An absent `project_id` is
-            // refused rather than read as a clear: otherwise a misspelled
-            // field name (projectId, project) would silently wipe the binding
-            // the caller meant to set. Any other value is refused for the same
-            // reason.
-            let project_id = match arguments.get("project_id") {
-                None => {
-                    return Ok(json!({"error": {
-                        "code": "invalid_request",
-                        "message": "set_project requires project_id (a string, or null to clear)",
-                        "missing": ["project_id"],
-                    }}));
-                }
-                Some(Value::Null) => None,
-                Some(Value::String(project_id)) => Some(project_id.as_str()),
-                Some(_) => {
-                    return Ok(json!({"error": {
-                        "code": "invalid_request",
-                        "message": "project_id must be a string, or null to clear",
-                    }}));
-                }
-            };
-            match state.store().set_subscription_project(
-                &principal_key,
-                subscription_id,
-                project_id,
-            ) {
-                Ok(true) => json!({"result": {
-                    "subscription_id": subscription_id,
-                    "project_id": project_id
-                }}),
-                Ok(false) => {
-                    json!({"error": {"code": "subscription_not_found", "message": "subscription was not found"}})
-                }
-                Err(error) => crate::wire::store_failure(
-                    "subscription project set",
-                    "subscription project could not be set",
-                    &error,
-                ),
-            }
-        }
+        (manifest::EVENTS_TOOL, Some("resume")) => return facade_events_resume(&call),
+        (manifest::EVENTS_TOOL, Some("list")) => return facade_events_list(&call),
+        (manifest::EVENTS_TOOL, Some("ack")) => return facade_events_ack(&call),
+        (manifest::EVENTS_TOOL, Some("unsubscribe")) => return facade_events_unsubscribe(&call),
+        (manifest::EVENTS_TOOL, Some("set_project")) => return facade_events_set_project(&call),
         (manifest::EVENTS_TOOL, Some("set_deliver_to")) => {
-            let mut missing = Vec::new();
-            // Prefer `subscription_id` over its `subscription` alias, as the
-            // other operations do. Calls supplying both fields must act on the
-            // same subscription regardless of the operation.
-            let subscription_id = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty());
-            if subscription_id.is_none() {
-                missing.push("subscription_id".to_string());
-            }
-            let deliver_to = match arguments.get("deliver_to") {
-                Some(Value::Null) => Some(None),
-                Some(Value::String(agent_id)) => Some(Some(agent_id.as_str())),
-                Some(_) => None,
-                None => {
-                    missing.push("deliver_to".to_string());
-                    None
-                }
-            };
-            if !missing.is_empty() {
-                return Ok(json!({"error": {
-                    "code": "invalid_request",
-                    "message": format!("set_deliver_to requires {}", missing.join(" and ")),
-                    "missing": missing,
-                }}));
-            }
-            let Some(subscription_id) = subscription_id else {
-                unreachable!("missing subscription returned above");
-            };
-            let Some(deliver_to) = deliver_to else {
-                return Ok(json!({"error": {
-                    "code": "invalid_request",
-                    "message": "deliver_to must be a string or null",
-                }}));
-            };
-            match deliver_to {
-                Some(agent_id) => match state.runtime.agent_registry.lookup(agent_id) {
-                    plexus_core::AgentLookup::Known => {
-                        match state.store().set_subscription_deliver_to(
-                            &principal_key,
-                            subscription_id,
-                            Some(agent_id),
-                        ) {
-                            Ok(true) => json!({"result": {
-                                "subscription_id": subscription_id,
-                                "deliver_to": agent_id,
-                            }}),
-                            Ok(false) => {
-                                json!({"error": {"code": "subscription_not_found", "message": "subscription was not found"}})
-                            }
-                            Err(error) => crate::wire::store_failure(
-                                "subscription delivery target set",
-                                "subscription delivery target could not be set",
-                                &error,
-                            ),
-                        }
-                    }
-                    plexus_core::AgentLookup::Unknown => json!({"error": {
-                        "code": "deliver_to_unknown_agent",
-                        "message": "deliver_to does not name a known agent",
-                    }}),
-                    plexus_core::AgentLookup::Retired => json!({"error": {
-                        "code": "deliver_to_agent_retired",
-                        "message": "deliver_to names a retired agent",
-                    }}),
-                    plexus_core::AgentLookup::Unavailable => json!({"error": {
-                        "code": "agent_registry_unavailable",
-                        "message": "agent registry is unavailable; retry later",
-                    }}),
-                },
-                None => match state.store().set_subscription_deliver_to(
-                    &principal_key,
-                    subscription_id,
-                    None,
-                ) {
-                    Ok(true) => json!({"result": {
-                        "subscription_id": subscription_id,
-                        "deliver_to": Value::Null,
-                    }}),
-                    Ok(false) => {
-                        json!({"error": {"code": "subscription_not_found", "message": "subscription was not found"}})
-                    }
-                    Err(error) => crate::wire::store_failure(
-                        "subscription delivery target cleared",
-                        "subscription delivery target could not be cleared",
-                        &error,
-                    ),
-                },
-            }
+            return facade_events_set_deliver_to(&call)
         }
         (manifest::EVENTS_TOOL, Some("set_actor_source")) => {
-            let Some(subscription_id) = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str)
-            else {
-                return Ok(
-                    json!({"error": {"code": "invalid_request", "message": "set_actor_source requires subscription_id"}}),
-                );
-            };
-            // An explicit null clears; a missing key is refused, matching
-            // `set_project` and `set_deliver_to`, so a misspelled field cannot
-            // wipe the binding. An object is decoded through the closed
-            // ActorSource shape before any store write, so malformed types or
-            // unknown fields cannot be persisted as a complete-looking binding.
-            let actor_source = match arguments.get("actor_source") {
-                None => {
-                    return Ok(json!({"error": {
-                        "code": "invalid_request",
-                        "message": "set_actor_source requires actor_source (an object, or null to clear)",
-                        "missing": ["actor_source"],
-                    }}));
-                }
-                Some(Value::Null) => None,
-                Some(value) => match serde_json::from_value::<ActorSource>(value.clone()) {
-                    Ok(source) => Some(source),
-                    Err(error) => {
-                        return Ok(json!({"error": {
-                            "code": "invalid_request",
-                            "message": format!("actor_source is invalid: {error}")
-                        }}));
-                    }
-                },
-            };
-            match state.store().set_subscription_actor_source(
-                &principal_key,
-                subscription_id,
-                actor_source.as_ref(),
-            ) {
-                Ok(true) => json!({"result": {
-                    "subscription_id": subscription_id,
-                    "actor_source": actor_source
-                }}),
-                Ok(false) => {
-                    json!({"error": {"code": "subscription_not_found", "message": "subscription was not found"}})
-                }
-                Err(error) => crate::wire::store_failure(
-                    "subscription actor source set",
-                    "subscription actor source could not be set",
-                    &error,
-                ),
-            }
+            return facade_events_set_actor_source(&call)
         }
         (manifest::EVENTS_TOOL, _) => {
             json!({"error": {"code": "invalid_operation", "message": "unsupported events operation"}})
@@ -3591,6 +3049,1030 @@ fn facade_tool_reply_inner(
         _ => json!({"error": {"code": "unknown_method", "message": "unknown plexus facade tool"}}),
     };
     Ok(response)
+}
+
+struct FacadeArguments<'a> {
+    state: &'a Arc<ModuleState>,
+    arguments: &'a serde_json::Map<String, Value>,
+    principal_key: &'a str,
+    op: Option<&'a str>,
+}
+
+fn facade_connections_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let principal_key = call.principal_key;
+    Ok({
+        match state.store().list_connections(principal_key) {
+            Ok(connections) => json!({"result": {"connections": connections}}),
+            Err(error) => crate::wire::store_failure(
+                "connections listed",
+                "connections could not be listed",
+                &error,
+            ),
+        }
+    })
+}
+
+fn facade_connections_connect(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(ticket_id) = arguments.get("ticket_id").and_then(Value::as_str) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "connect requires ticket_id"}}),
+            );
+        };
+        match state.store().connect_with_ticket(principal_key, ticket_id) {
+            Ok(Some(connection)) => {
+                // The connection's catalog is first seeded from the
+                // reviewed manifest, and discovery then reconciles it with
+                // the vendor. A failed seed leaves the connection active
+                // (the ticket is spent) but its catalog incomplete, so it
+                // is reported as degraded discovery, never as complete.
+                if let Err(error) = state.store().seed_catalog_from_manifest(
+                    principal_key,
+                    &connection.connection_id,
+                    &connection.app_key,
+                ) {
+                    eprintln!(warn catalog:
+                        "catalog seed failed during connect of {}: {error}",
+                        connection.connection_id
+                    );
+                    return Ok(json!({"result": {
+                        "connection": connection,
+                        "discovery": "degraded",
+                        "reason": "the reviewed manifest's actions could not be seeded; the module log names the cause",
+                    }}));
+                }
+                // Consuming the ticket has already committed the binding and
+                // activated the connection, and the ticket is now spent. So a
+                // discovery failure here is NOT a failed connect: reporting
+                // one would tell the operator to retry a ticket that no longer
+                // exists, while an active connection they cannot see sits in
+                // the store. Every outcome therefore returns the connection,
+                // with discovery reported separately and honestly — the
+                // catalog is refreshed again at invoke time.
+                match blocking_section(|| {
+                    state.runtime.reconciler.discover_for_connection(
+                        principal_key,
+                        &connection.connection_id,
+                        state.runtime.credential_source().as_ref(),
+                        state.runtime.endpoint_override.as_deref(),
+                    )
+                }) {
+                    Ok(_) => {
+                        json!({"result": {"connection": connection, "discovery": "complete"}})
+                    }
+                    Err(CatalogError::TransportUnavailable { kind }) => {
+                        json!({"result": {"connection": connection, "discovery": "unavailable", "reason": format!("transport kind '{kind}' is not available")}})
+                    }
+                    Err(CatalogError::Credential) => {
+                        json!({"result": {"connection": connection, "discovery": "credential_unresolved", "reason": "credential could not be resolved during connect discovery"}})
+                    }
+                    // Not a store failure and deliberately not an error:
+                    // connect SUCCEEDS while reporting that discovery did
+                    // not complete, because refusing here would consume the
+                    // single-use ticket and leave the operator with neither
+                    // a connection nor a ticket. The cause is still logged,
+                    // since a degraded discovery with no recorded reason is
+                    // the same dead end this pass exists to close.
+                    Err(error) => {
+                        eprintln!(warn catalog: "discovery degraded during connect: {error}");
+                        json!({"result": {"connection": connection, "discovery": "degraded"}})
+                    }
+                }
+            }
+            Ok(None) => {
+                json!({"error": {"code": "binding_ticket_invalid", "message": "binding ticket is expired, consumed, or unknown"}})
+            }
+            Err(error) => crate::wire::store_failure(
+                "connection completed",
+                "connection could not be completed",
+                &error,
+            ),
+        }
+    })
+}
+
+fn facade_connections_configure(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(connection_id) = arguments.get("connection").and_then(Value::as_str) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "configure requires connection"}}),
+            );
+        };
+        let Some(filters) = arguments.get("resource_filters") else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "configure requires resource_filters"}}),
+            );
+        };
+        match state
+            .store()
+            .has_connection_admin_grant(principal_key, connection_id, principal_key)
+        {
+            Ok(false) => {
+                json!({"error": {"code": "connection_admin_required", "message": "connection administration grant required"}})
+            }
+            Err(error) => crate::wire::store_failure(
+                "connection authorization checked",
+                "connection authorization could not be checked",
+                &error,
+            ),
+            Ok(true) => match state.store().configure_connection_filters(
+                principal_key,
+                connection_id,
+                filters,
+            ) {
+                Ok(ConfigureOutcome::Configured(stored)) => {
+                    json!({"result": {"resource_filters": stored}})
+                }
+                Ok(ConfigureOutcome::ConnectionNotFound) => {
+                    json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
+                }
+                Ok(ConfigureOutcome::ManifestMissing) => {
+                    json!({"error": {"code": "manifest_missing", "message": "vendor manifest is not in the catalog"}})
+                }
+                Ok(ConfigureOutcome::UndeclaredFilter(key)) => {
+                    json!({"error": {"code": "undeclared_filter", "message": format!("filter key '{key}' is not declared by the vendor manifest"), "key": key}})
+                }
+                // Distinct from undeclared_filter because the fixes differ:
+                // an undeclared filter names a key the VENDOR does not have,
+                // while this names one this OPERATION does not read. Telling
+                // an operator their key is not in the manifest when they
+                // actually mistyped `write_enabling` sends them to read
+                // vendor documentation for a spelling mistake.
+                Ok(ConfigureOutcome::UnreadFilterKey { key, accepted }) => {
+                    json!({"error": {
+                        "code": "unread_filter_key",
+                        "message": format!(
+                            "resource_filters key '{key}' is not read by configure (accepted: {})",
+                            accepted.join(", ")
+                        ),
+                        "key": key,
+                        "accepted": accepted
+                    }})
+                }
+                Ok(ConfigureOutcome::MalformedFilters { field, expected }) => {
+                    json!({"error": {
+                        "code": "malformed_filters",
+                        "message": format!("resource_filters {field} must be {expected}"),
+                        "field": field,
+                        "expected": expected
+                    }})
+                }
+                Err(error) => crate::wire::store_failure(
+                    "filters configured",
+                    "filters could not be configured",
+                    &error,
+                ),
+            },
+        }
+    })
+}
+
+fn facade_connections_revoke(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(connection_id) = arguments.get("connection").and_then(Value::as_str) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "revoke requires connection"}}),
+            );
+        };
+        match state
+            .store()
+            .has_connection_admin_grant(principal_key, connection_id, principal_key)
+        {
+            Ok(false) => {
+                json!({"error": {"code": "connection_admin_required", "message": "connection administration grant required"}})
+            }
+            Err(error) => crate::wire::store_failure(
+                "connection authorization checked",
+                "connection authorization could not be checked",
+                &error,
+            ),
+            Ok(true) => match state
+                .store()
+                .revoke_connection(principal_key, connection_id)
+            {
+                Ok(true) => {
+                    state
+                        .runtime
+                        .mcp_transport
+                        .unregister_connection(connection_id);
+                    state
+                        .runtime
+                        .rest_transport
+                        .unregister_connection(connection_id);
+                    json!({"result": {"revoked": true}})
+                }
+                Ok(false) => {
+                    json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
+                }
+                Err(error) => crate::wire::store_failure(
+                    "connection revoked",
+                    "connection could not be revoked",
+                    &error,
+                ),
+            },
+        }
+    })
+}
+
+fn facade_connections_check(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(connection_id) = arguments.get("connection").and_then(Value::as_str) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "check requires connection"}}),
+            );
+        };
+        match state.store().connection(principal_key, connection_id) {
+            Ok(Some(connection)) => json!({"result": {"connection": {
+                "connection_id": connection.connection_id,
+                "app_key": connection.app_key,
+                "status": connection.status,
+                "generation": connection.generation,
+                "credential_bound": connection.has_credential_binding
+            }}}),
+            Ok(None) => {
+                json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
+            }
+            Err(error) => crate::wire::store_failure(
+                "connection read",
+                "connection could not be read",
+                &error,
+            ),
+        }
+    })
+}
+
+fn facade_catalog_apps(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let principal_key = call.principal_key;
+    Ok({
+        match state.store().list_manifest_summaries(principal_key) {
+            Ok(apps) => json!({"result": {"apps": apps}}),
+            Err(error) => crate::wire::store_failure(
+                "app catalog read",
+                "app catalog could not be read",
+                &error,
+            ),
+        }
+    })
+}
+
+fn facade_catalog_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let op = call.op;
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(connection_id) = arguments.get("connection").and_then(Value::as_str) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "catalog list/inspect requires connection; use op=apps to discover connectable vendors"}}),
+            );
+        };
+        match state
+            .store()
+            .list_catalog_actions(principal_key, connection_id)
+        {
+            Ok(actions) => {
+                let actions = if op == Some("inspect") {
+                    let Some(action) = arguments
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .filter(|action| !action.is_empty())
+                    else {
+                        return Ok(tool_error(
+                            "invalid_request",
+                            "catalog inspect requires action",
+                        ));
+                    };
+                    actions
+                        .into_iter()
+                        .filter(|row| row.name == action)
+                        .collect::<Vec<_>>()
+                } else {
+                    actions
+                };
+                json!({"result": {"actions": actions}})
+            }
+            Err(error) => {
+                crate::wire::store_failure("catalog read", "catalog could not be read", &error)
+            }
+        }
+    })
+}
+
+fn facade_requests_inspect(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(id) = arguments
+            .get("request_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return Ok(tool_error(
+                "invalid_request",
+                "requests inspect requires request_id",
+            ));
+        };
+        match state.store().list_action_requests(principal_key) {
+            Ok(requests) => {
+                json!({"result":{"requests":requests.into_iter().filter(|request| request.request_id == id).collect::<Vec<_>>(),"reconciliations":[]}})
+            }
+            Err(error) => {
+                wire::store_failure("request inspected", "request could not be read", &error)
+            }
+        }
+    })
+}
+
+fn facade_requests_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let principal_key = call.principal_key;
+    Ok({
+        match state
+            .store()
+            .list_action_requests(principal_key)
+            .and_then(|requests| {
+                state
+                    .store()
+                    .list_write_reconciliations(principal_key)
+                    .map(|reconciliations| (requests, reconciliations))
+            }) {
+            Ok((requests, (reconciliations, reconciliations_truncated))) => {
+                json!({"result": {"requests": requests, "reconciliations": reconciliations, "reconciliations_truncated": reconciliations_truncated}})
+            }
+            Err(error) => {
+                crate::wire::store_failure("requests read", "requests could not be read", &error)
+            }
+        }
+    })
+}
+
+fn facade_requests_approve(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(request_id) = arguments.get("request_id").and_then(Value::as_str) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "approve requires request_id"}}),
+            );
+        };
+        // Approving dispatches the call, which may reach a blocking vendor
+        // transport and, for a request raised under a daemon scope, waits
+        // on the daemon's scope.describe reply.
+        blocking_section(|| {
+            match state
+                .runtime
+                .engine
+                .approve_request(principal_key, request_id, principal_key)
+            {
+                Ok(outcome) => dispatch_response(outcome),
+                Err(denial) => denial_response(&denial),
+            }
+        })
+    })
+}
+
+fn facade_requests_deny(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(request_id) = arguments.get("request_id").and_then(Value::as_str) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "deny requires request_id"}}),
+            );
+        };
+        match state
+            .runtime
+            .engine
+            .deny_request(principal_key, request_id, principal_key)
+        {
+            Ok(true) => json!({"result": {"denied": true}}),
+            Ok(false) => {
+                json!({"error": {"code": "request_not_pending", "message": "request is no longer pending"}})
+            }
+            Err(denial) => denial_response(&denial),
+        }
+    })
+}
+
+fn facade_events_register_probe(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let mut missing =
+            missing_string_fields(arguments, &["connection", "name", "script_source"])
+                .unwrap_or_default();
+        let cadence = arguments.get("cadence_s").and_then(Value::as_i64);
+        if cadence.is_none_or(|value| value <= 0) {
+            missing.push("cadence_s".to_string());
+        }
+        let actions = arguments.get("actions").and_then(Value::as_array);
+        if actions.is_none() {
+            missing.push("actions".to_string());
+        }
+        if arguments.get("return_schema").is_none() {
+            missing.push("return_schema".to_string());
+        }
+        if arguments.get("rearm").and_then(Value::as_str).is_none() {
+            missing.push("rearm".to_string());
+        }
+        if !missing.is_empty() {
+            return Ok(json!({"error": {
+                "code": "invalid_request",
+                "message": format!("register_probe requires {}", missing.join(" and ")),
+                "missing": missing
+            }}));
+        }
+        let connection_id = arguments
+            .get("connection")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let name = arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let script_source = arguments
+            .get("script_source")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if script_source.len() > MAX_PROBE_SCRIPT_BYTES
+            || actions.is_some_and(|items| items.len() > MAX_PROBE_ACTIONS)
+        {
+            return Ok(tool_error(
+                "invalid_request",
+                "probe script exceeds 64 KiB or actions exceed 100",
+            ));
+        }
+        let rearm = arguments
+            .get("rearm")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let action_names = actions
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if action_names.len() != actions.map_or(0, Vec::len) {
+            return Ok(json!({"error": {
+                "code": "invalid_request",
+                "message": "actions must contain only strings"
+            }}));
+        }
+        let return_schema = arguments
+            .get("return_schema")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let fixed_args = arguments
+            .get("fixed_args")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let cursor_state = arguments
+            .get("cursor_state")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        match state.store().register_probe(
+            principal_key,
+            connection_id,
+            plexus_core::ProbeRegistration {
+                name,
+                actions: &action_names,
+                script_source,
+                return_schema: &return_schema,
+                rearm,
+                cadence_s: cadence.unwrap_or_default(),
+                fixed_args: &fixed_args,
+                cursor_state: &cursor_state,
+            },
+        ) {
+            Ok(Ok(subscription)) => json!({"result": {"subscription": subscription}}),
+            Ok(Err(refusal)) => json!({
+                "error": {
+                    "code": refusal.code(),
+                    "message": refusal.to_string()
+                }
+            }),
+            Err(error) => crate::wire::store_failure(
+                "probe registered",
+                "probe could not be registered",
+                &error,
+            ),
+        }
+    })
+}
+
+fn facade_events_subscribe(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let mut missing =
+            missing_string_fields(arguments, &["connection", "action"]).unwrap_or_default();
+        let cadence = arguments.get("cadence_s").and_then(Value::as_i64);
+        if cadence.is_none_or(|value| value <= 0) {
+            missing.push("cadence_s".to_string());
+        }
+        let mut invalid = Vec::new();
+        if arguments
+            .get("fixed_args")
+            .is_some_and(|value| !value.is_object())
+        {
+            invalid.push("fixed_args".to_string());
+        }
+        if !missing.is_empty() || !invalid.is_empty() {
+            let mut reasons = Vec::new();
+            if !missing.is_empty() {
+                reasons.push(format!("requires {}", missing.join(" and ")));
+            }
+            if !invalid.is_empty() {
+                reasons.push(format!("{} must be an object", invalid.join(" and ")));
+            }
+            return Ok(json!({"error": {
+                "code": "invalid_request",
+                "message": format!("subscribe {}", reasons.join("; ")),
+                "missing": missing,
+                "invalid": invalid,
+                "example": {"op": "subscribe", "connection": "conn-exa", "action": "web_search_exa", "cadence_s": 300, "fixed_args": {}}
+            }}));
+        }
+        let connection_id = arguments
+            .get("connection")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let action = arguments
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let cadence_s = cadence.unwrap_or_default();
+        let cursor_state = arguments
+            .get("cursor_state")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let fixed_args = arguments
+            .get("fixed_args")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        match state.store().subscribe_with_cursor_state(
+            principal_key,
+            connection_id,
+            action,
+            cadence_s,
+            &cursor_state,
+            &fixed_args,
+        ) {
+            Ok(Ok(subscription)) => json!({"result": {"subscription": subscription}}),
+            Ok(Err(refusal)) => json!({
+                "error": {
+                    "code": refusal.code(),
+                    "message": refusal.to_string()
+                }
+            }),
+            Err(error) => crate::wire::store_failure(
+                "subscription created",
+                "subscription could not be created",
+                &error,
+            ),
+        }
+    })
+}
+
+fn facade_events_resume(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(subscription_id) = subscription_id_arg(arguments) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "resume requires subscription_id"}}),
+            );
+        };
+        match state.store().resume(principal_key, subscription_id) {
+            Ok(Ok(subscription)) => json!({"result": {"subscription": subscription}}),
+            Ok(Err(refusal)) => json!({
+                "error": {
+                    "code": refusal.code(),
+                    "message": refusal.to_string()
+                }
+            }),
+            Err(error) => crate::wire::store_failure(
+                "subscription resumed",
+                "subscription could not be resumed",
+                &error,
+            ),
+        }
+    })
+}
+
+fn facade_events_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let limit = match arguments.get("limit") {
+            None => None,
+            Some(value) => match value.as_u64().filter(|size| (1..=1000).contains(size)) {
+                Some(size) => Some(size as usize),
+                None => {
+                    return Ok(tool_error(
+                        "invalid_request",
+                        "limit must be an integer from 1 to 1000",
+                    ))
+                }
+            },
+        };
+        let after = match arguments.get("after") {
+            None => None,
+            Some(value) => match (
+                value.get("created_at_ms").and_then(Value::as_i64),
+                value.get("event_id").and_then(Value::as_str),
+            ) {
+                (Some(at), Some(id))
+                    if !id.is_empty()
+                        && value.as_object().is_some_and(|cursor| cursor.len() == 2) =>
+                {
+                    Some((at, id))
+                }
+                _ => {
+                    return Ok(tool_error(
+                        "invalid_request",
+                        "after requires only created_at_ms and event_id",
+                    ))
+                }
+            },
+        };
+        let connection_id = arguments.get("connection").and_then(Value::as_str);
+        let subscription_id = subscription_id_arg(arguments);
+        // Log the principal resolved from the route stamp so an operator can
+        // distinguish a quiet feed from a consumer using the wrong identity.
+        // The caller's intended identity does not establish its actual authority.
+        eprintln!(info governance:
+            "events list from principal '{principal_key}' (connection={}, subscription={})",
+            connection_id.unwrap_or("<any>"),
+            subscription_id.unwrap_or("<any>")
+        );
+        // This projection names every grant the caller can exercise, so a
+        // principal and connection absent from `grants` has no consume grant.
+        // It reveals none of another principal's authority. Keep each stored
+        // grant separate: one connection can be live while another is
+        // expired, and a caller-wide scalar would hide that failure.
+        let now = plexus_core::now_ms();
+        match (
+            state.store().list_events_page_with_consume_authority(
+                principal_key,
+                connection_id,
+                subscription_id,
+                now,
+                limit,
+                after,
+            ),
+            state.store().list_subscriptions_including_granted(
+                principal_key,
+                connection_id,
+                subscription_id,
+                now,
+            ),
+        ) {
+            (Ok((listing, has_more)), Ok(subscriptions)) => {
+                let next_after = has_more.then(|| listing.events.last().map(|event| json!({"created_at_ms":event.created_at_ms,"event_id":event.event_id}))).flatten();
+                let mut reply = json!({"result": {
+                    "events": listing.events,
+                    "subscriptions": subscriptions,
+                    "events_consume_authority": {"grants": listing.consume_authority}
+                }});
+                if let Some(cursor) = next_after {
+                    reply["result"]["next_after"] = cursor;
+                }
+                reply
+            }
+            // Each failed read is logged with its cause; the reply stays
+            // the same generic store_failure.
+            (Err(error), _) => {
+                crate::wire::store_failure("events listed", "events could not be read", &error)
+            }
+            (Ok(_), Err(error)) => crate::wire::store_failure(
+                "subscriptions listed",
+                "events could not be read",
+                &error,
+            ),
+        }
+    })
+}
+
+fn facade_events_ack(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(event_ids) = arguments.get("event_ids").and_then(Value::as_array) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "ack requires event_ids"}}),
+            );
+        };
+        let event_ids = event_ids
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if event_ids.len() != arguments["event_ids"].as_array().map_or(0, Vec::len) {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "event_ids must contain only strings"}}),
+            );
+        }
+        let mut event_ids = event_ids;
+        event_ids.sort();
+        event_ids.dedup();
+        let ack_now = plexus_core::now_ms();
+        match state
+            .store()
+            .ack_events_including_granted(principal_key, &event_ids, ack_now)
+        {
+            // Report the count AND which ids did not land. A consumer acks
+            // what it has delivered, so an id that acks nothing means the
+            // two sides disagree about what exists: a wrong id, another
+            // principal's event, or one already acked. Returning only a
+            // count makes that indistinguishable from success -- the caller
+            // would have to compare it against its own request length to
+            // notice, and the failure is silent redelivery forever while
+            // both sides report healthy.
+            //
+            // Not an error: a partial ack genuinely acked something, and
+            // failing the whole call would make one stale id block a batch
+            // of good ones. The unacked list is the actionable half.
+            Ok(acked) if acked == event_ids.len() => {
+                json!({"result": {"acked": acked, "unacked": []}})
+            }
+            Ok(acked) => partial_ack_reply(
+                acked,
+                state
+                    .store()
+                    .unacked_of_at(principal_key, &event_ids, ack_now),
+            ),
+            Err(error) => crate::wire::store_failure(
+                "events acknowledged",
+                "events could not be acknowledged",
+                &error,
+            ),
+        }
+    })
+}
+
+fn facade_events_unsubscribe(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(subscription_id) = subscription_id_arg(arguments) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "unsubscribe requires subscription_id"}}),
+            );
+        };
+        match state.store().unsubscribe(principal_key, subscription_id) {
+            Ok(true) => json!({"result": {"unsubscribed": true}}),
+            Ok(false) => {
+                json!({"error": {"code": "subscription_not_found", "message": "subscription was not found"}})
+            }
+            Err(error) => crate::wire::store_failure(
+                "subscription removed",
+                "subscription could not be removed",
+                &error,
+            ),
+        }
+    })
+}
+
+fn facade_events_set_project(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(subscription_id) = subscription_id_arg(arguments) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "set_project requires subscription_id"}}),
+            );
+        };
+        // An explicit null clears the binding. An absent `project_id` is
+        // refused rather than read as a clear: otherwise a misspelled
+        // field name (projectId, project) would silently wipe the binding
+        // the caller meant to set. Any other value is refused for the same
+        // reason.
+        let project_id = match arguments.get("project_id") {
+            None => {
+                return Ok(json!({"error": {
+                    "code": "invalid_request",
+                    "message": "set_project requires project_id (a string, or null to clear)",
+                    "missing": ["project_id"],
+                }}));
+            }
+            Some(Value::Null) => None,
+            Some(Value::String(project_id)) if project_id.chars().any(char::is_control) => {
+                return Ok(json!({"error": {
+                    "code": "invalid_request",
+                    "message": "project_id must not contain control characters",
+                }}));
+            }
+            Some(Value::String(project_id)) => Some(project_id.as_str()),
+            Some(_) => {
+                return Ok(json!({"error": {
+                    "code": "invalid_request",
+                    "message": "project_id must be a string, or null to clear",
+                }}));
+            }
+        };
+        match state
+            .store()
+            .set_subscription_project(principal_key, subscription_id, project_id)
+        {
+            Ok(true) => json!({"result": {
+                "subscription_id": subscription_id,
+                "project_id": project_id
+            }}),
+            Ok(false) => {
+                json!({"error": {"code": "subscription_not_found", "message": "subscription was not found"}})
+            }
+            Err(error) => crate::wire::store_failure(
+                "subscription project set",
+                "subscription project could not be set",
+                &error,
+            ),
+        }
+    })
+}
+
+fn facade_events_set_deliver_to(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let mut missing = Vec::new();
+        // Prefer `subscription_id` over its `subscription` alias, as the
+        // other operations do. Calls supplying both fields must act on the
+        // same subscription regardless of the operation.
+        let subscription_id = subscription_id_arg(arguments).filter(|value| !value.is_empty());
+        if subscription_id.is_none() {
+            missing.push("subscription_id".to_string());
+        }
+        let deliver_to = match arguments.get("deliver_to") {
+            Some(Value::Null) => Some(None),
+            Some(Value::String(agent_id)) => Some(Some(agent_id.as_str())),
+            Some(_) => None,
+            None => {
+                missing.push("deliver_to".to_string());
+                None
+            }
+        };
+        if !missing.is_empty() {
+            return Ok(json!({"error": {
+                "code": "invalid_request",
+                "message": format!("set_deliver_to requires {}", missing.join(" and ")),
+                "missing": missing,
+            }}));
+        }
+        let Some(subscription_id) = subscription_id else {
+            unreachable!("missing subscription returned above");
+        };
+        let Some(deliver_to) = deliver_to else {
+            return Ok(json!({"error": {
+                "code": "invalid_request",
+                "message": "deliver_to must be a string or null",
+            }}));
+        };
+        match deliver_to {
+            Some(agent_id) => match state.runtime.agent_registry.lookup(agent_id) {
+                plexus_core::AgentLookup::Known => {
+                    match state.store().set_subscription_deliver_to(
+                        principal_key,
+                        subscription_id,
+                        Some(agent_id),
+                    ) {
+                        Ok(true) => json!({"result": {
+                            "subscription_id": subscription_id,
+                            "deliver_to": agent_id,
+                        }}),
+                        Ok(false) => {
+                            json!({"error": {"code": "subscription_not_found", "message": "subscription was not found"}})
+                        }
+                        Err(error) => crate::wire::store_failure(
+                            "subscription delivery target set",
+                            "subscription delivery target could not be set",
+                            &error,
+                        ),
+                    }
+                }
+                plexus_core::AgentLookup::Unknown => json!({"error": {
+                    "code": "deliver_to_unknown_agent",
+                    "message": "deliver_to does not name a known agent",
+                }}),
+                plexus_core::AgentLookup::Retired => json!({"error": {
+                    "code": "deliver_to_agent_retired",
+                    "message": "deliver_to names a retired agent",
+                }}),
+                plexus_core::AgentLookup::Unavailable => json!({"error": {
+                    "code": "agent_registry_unavailable",
+                    "message": "agent registry is unavailable; retry later",
+                }}),
+            },
+            None => match state.store().set_subscription_deliver_to(
+                principal_key,
+                subscription_id,
+                None,
+            ) {
+                Ok(true) => json!({"result": {
+                    "subscription_id": subscription_id,
+                    "deliver_to": Value::Null,
+                }}),
+                Ok(false) => {
+                    json!({"error": {"code": "subscription_not_found", "message": "subscription was not found"}})
+                }
+                Err(error) => crate::wire::store_failure(
+                    "subscription delivery target cleared",
+                    "subscription delivery target could not be cleared",
+                    &error,
+                ),
+            },
+        }
+    })
+}
+
+fn facade_events_set_actor_source(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
+    let state = call.state;
+    let arguments = call.arguments;
+    let principal_key = call.principal_key;
+    Ok({
+        let Some(subscription_id) = subscription_id_arg(arguments) else {
+            return Ok(
+                json!({"error": {"code": "invalid_request", "message": "set_actor_source requires subscription_id"}}),
+            );
+        };
+        // An explicit null clears; a missing key is refused, matching
+        // `set_project` and `set_deliver_to`, so a misspelled field cannot
+        // wipe the binding. An object is decoded through the closed
+        // ActorSource shape before any store write, so malformed types or
+        // unknown fields cannot be persisted as a complete-looking binding.
+        let actor_source = match arguments.get("actor_source") {
+            None => {
+                return Ok(json!({"error": {
+                    "code": "invalid_request",
+                    "message": "set_actor_source requires actor_source (an object, or null to clear)",
+                    "missing": ["actor_source"],
+                }}));
+            }
+            Some(Value::Null) => None,
+            Some(value) => match serde_json::from_value::<ActorSource>(value.clone()) {
+                Ok(source) => Some(source),
+                Err(error) => {
+                    return Ok(json!({"error": {
+                        "code": "invalid_request",
+                        "message": format!("actor_source is invalid: {error}")
+                    }}));
+                }
+            },
+        };
+        match state.store().set_subscription_actor_source(
+            principal_key,
+            subscription_id,
+            actor_source.as_ref(),
+        ) {
+            Ok(true) => json!({"result": {
+                "subscription_id": subscription_id,
+                "actor_source": actor_source
+            }}),
+            Ok(false) => {
+                json!({"error": {"code": "subscription_not_found", "message": "subscription was not found"}})
+            }
+            Err(error) => crate::wire::store_failure(
+                "subscription actor source set",
+                "subscription actor source could not be set",
+                &error,
+            ),
+        }
+    })
+}
+
+fn subscription_id_arg(arguments: &serde_json::Map<String, Value>) -> Option<&str> {
+    arguments
+        .get("subscription_id")
+        .or_else(|| arguments.get("subscription"))
+        .and_then(Value::as_str)
 }
 
 /// Build the reply when a call acknowledges fewer events than it requested.
@@ -3621,9 +4103,9 @@ fn event_get_reply(
     route_scope: Option<&CallScope>,
     audience: Option<&flow_audience::Audience>,
 ) -> Value {
-    let is_basal_flow = principal_key == "reserved:basal"
+    let is_basal_flow = principal_key == principal::BASAL_PRINCIPAL
         && route_scope.is_some_and(|scope| scope.flow_id.is_some());
-    let is_prefrontal_core = principal_key == "reserved:prefrontal-core";
+    let is_prefrontal_core = principal_key == plexus_core::github::PREFRONTAL_PRINCIPAL;
     if !is_basal_flow && !is_prefrontal_core {
         return tool_error(
             "events_get_carrier_refused",
@@ -3758,11 +4240,14 @@ fn connector_home_health(state: &ModuleState) -> ModuleControlResponse {
         }
         if let Some(metrics) = metrics {
             metrics["connectorHome"] = state.runtime.connector_home.status();
-            if let Ok(cached) = state.health.store_metrics.lock() {
-                if let Some(cached) = cached.as_object() {
-                    for (key, value) in cached {
-                        metrics[key] = value.clone();
-                    }
+            let cached = state
+                .health
+                .store_metrics
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(cached) = cached.as_object() {
+                for (key, value) in cached {
+                    metrics[key] = value.clone();
                 }
             }
             metrics["lastPublishError"] = json!(state.health.last_publish_error());
@@ -3783,25 +4268,33 @@ fn refresh_store_health(state: &ModuleState, principals: &[String]) {
         }
         Err(error) => eprintln!(warn health: "outbox health read failed: {error}"),
     }
-    let (_, stored_cadence) = effective_ci_cadence_from_store(
+    let stored_cadence = effective_ci_cadence_from_store(
         state.store(),
         principals,
         plexus_core::scheduler::RelayPollingHealth::slow_polling(state.health.relay.as_ref()),
     );
-    metrics["effectiveCiCadenceS"] =
-        json!(stored_cadence
-            .unwrap_or_else(|| state.store().ci_quota_cadence_s().unwrap_or(i64::MAX)));
-    if let Ok(mut cached) = state.health.store_metrics.lock() {
-        *cached = metrics;
+    match stored_cadence
+        .map(Ok)
+        .unwrap_or_else(|| state.store().ci_quota_cadence_s())
+    {
+        Ok(cadence) => metrics["effectiveCiCadenceS"] = json!(cadence),
+        Err(error) => {
+            eprintln!(warn health: "CI quota cadence read failed: {error}");
+            metrics["effectiveCiCadenceS"] = Value::Null;
+        }
     }
+    *state
+        .health
+        .store_metrics
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = metrics;
 }
 
 fn effective_ci_cadence_from_store(
     store: &PlexusStore,
     principals: &[String],
     relay_slow: bool,
-) -> (i64, Option<i64>) {
-    let mut r_count = 0i64;
+) -> Option<i64> {
     let mut stored_cadence: Option<i64> = None;
     let mut cadences = plexus_core::scheduler::PollingCadences::new(store, relay_slow);
     for principal in principals {
@@ -3809,7 +4302,6 @@ fn effective_ci_cadence_from_store(
             Ok(subs) => {
                 for sub in subs {
                     if sub.status == "active" && sub.cursor_kind.as_str() == "ci_runs" {
-                        r_count += 1;
                         // The CI cadence reported is the shortest among active
                         // CI-run watches, since that watch is due soonest.
                         let cadence = cadences.effective_cadence_s(&sub);
@@ -3820,7 +4312,7 @@ fn effective_ci_cadence_from_store(
             Err(error) => eprintln!(warn health: "CI cadence read failed for {principal}: {error}"),
         }
     }
-    (r_count, stored_cadence)
+    stored_cadence
 }
 
 #[cfg(test)]
@@ -3914,6 +4406,41 @@ fn health_probe_principals(state: &ModuleState) -> Vec<String> {
     principals
 }
 
+fn fresh_request_id() -> String {
+    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = NONCE.get_or_init(|| {
+        use std::io::Read;
+        let mut bytes = [0u8; 16];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(&mut bytes))
+            .expect("request identity requires operating-system randomness");
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    });
+    format!(
+        "gh-{nonce}-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+fn request_expired_reply() -> Value {
+    json!({"error":{"code":"request_deadline_exceeded", "transmission":"not_sent", "message":"request deadline passed; recall the approved call to retry"}})
+}
+
+fn retired_identity_field(arguments: &serde_json::Map<String, Value>) -> Option<&'static str> {
+    ["assertion", "agent_assertion"]
+        .into_iter()
+        .find(|field| arguments.contains_key(*field))
+}
+
+fn retired_identity_refusal(field: &str) -> Value {
+    json!({"error":{"code":"argument_undeclared", "field":field,
+        "message":format!("argument_undeclared{{field: {field}}}"), "transmission":"not_sent"}})
+}
+
 fn contains_secret_input(value: &serde_json::Map<String, Value>) -> bool {
     value
         .iter()
@@ -3942,6 +4469,10 @@ fn denial_response(denial: &plexus_core::Denial) -> Value {
         return json!({"error": {"code": code, "message": code, "elicitation_id": elicitation_id}});
     }
     if let plexus_core::Denial::ConnectorHomeNotHeld { state } = denial {
+        if state.pointer("/error/code").and_then(Value::as_str) == Some("request_deadline_exceeded")
+        {
+            return state.clone();
+        }
         return json!({"error":{"code":"connector_home_not_held", "message":format!("connector home not held: {state}"),"connectorHome":state,"transmission":"not_sent"}});
     }
     let mut response = json!({
@@ -3951,6 +4482,10 @@ fn denial_response(denial: &plexus_core::Denial) -> Value {
             "message": "governance denied the connector operation"
         }
     });
+    if matches!(denial, plexus_core::Denial::NeedsDecisionPlane(_)) {
+        response["error"]["message"] =
+            json!("S3/S4 execution is not active: no production decision plane is configured.");
+    }
     if let plexus_core::Denial::GrantRefusal(refusal) = denial {
         response["error"]["detail"] = json!(refusal.detail());
     }
@@ -3986,6 +4521,17 @@ fn denial_response(denial: &plexus_core::Denial) -> Value {
         response["error"]["limit"] = json!(limit);
     }
     response
+}
+
+fn github_read_failure(outcome: TransportOutcome) -> Value {
+    let (transmission, code) = match outcome {
+        TransportOutcome::Completed { .. } => ("completed", None),
+        TransportOutcome::VendorFailed { code, .. } => ("failed", Some(code)),
+        TransportOutcome::OutcomeUnknown => ("unknown", None),
+        TransportOutcome::NotSent { code, .. } => ("not_sent", Some(code)),
+    };
+    json!({"error":{"code":"read_dispatch_failed", "outcome":{"transmission":transmission,"code":code,
+        "message":"GitHub read dispatch did not complete"}}})
 }
 
 fn dispatch_response(outcome: DispatchOutcome) -> Value {
@@ -4343,8 +4889,9 @@ fn diagnostic_label(value: &str) -> String {
     label
 }
 
-/// Render search replies as validated content/v1 results. Other tools keep the
-/// MCP fields and legacy facade envelope they already serve.
+/// Full envelopes remain JSON text for relays. Large events/catalog listings
+/// keep their full legacy result but summarize text and omit structuredContent.
+/// Other tools keep the MCP fields and legacy facade envelope they already serve.
 ///
 /// Model-facing callers, such as Broca routing a model's tool call here, read
 /// only `content[].text`, `structuredContent` and `isError`; relays that
@@ -4386,21 +4933,31 @@ fn with_call_tool_result_with_repo(
     if let Some(tool @ (manifest::WEB_SEARCH_TOOL | manifest::CODE_SEARCH_TOOL)) = tool {
         return search_content_result(tool, reply, code_search_repo);
     }
-    let original = reply.clone();
+    let listing = matches!(tool, Some(manifest::EVENTS_TOOL | manifest::CATALOG_TOOL))
+        && ["events", "actions", "apps"]
+            .into_iter()
+            .any(|key| reply["result"][key].is_array());
+    let bounded_listing = listing && !json_fits(&reply, 64 * 1024);
+    let text = if let Some(error) = reply.get("error") {
+        if error.get("detail").is_some() {
+            pretty_json(&reply)
+        } else {
+            refusal_text(error)
+        }
+    } else if bounded_listing {
+        json!({"result":{"summary":"Listing is large; read result for full data or request an events page.",
+            "next_after":reply["result"]["next_after"]}}).to_string()
+    } else {
+        pretty_json(&reply)
+    };
     let Some(fields) = reply.as_object_mut() else {
         return reply;
     };
-    if let Some(error) = fields.get("error") {
-        let text = if error.get("detail").is_some() {
-            pretty_json(&original)
-        } else {
-            refusal_text(error)
-        };
+    if fields.contains_key("error") {
         fields.insert("content".to_string(), text_content(text));
         fields.insert("isError".to_string(), Value::Bool(true));
     } else if let Some(result) = fields.get("result") {
-        let text = pretty_json(&original);
-        let structured = result.is_object().then(|| result.clone());
+        let structured = (!bounded_listing && result.is_object()).then(|| result.clone());
         fields.insert("content".to_string(), text_content(text));
         fields.insert("isError".to_string(), Value::Bool(false));
         if let Some(structured) = structured {
@@ -4408,6 +4965,23 @@ fn with_call_tool_result_with_repo(
         }
     }
     reply
+}
+
+fn json_fits(value: &Value, limit: usize) -> bool {
+    struct BoundedSize(usize);
+    impl std::io::Write for BoundedSize {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.0 {
+                return Err(std::io::Error::other("JSON size limit"));
+            }
+            self.0 -= bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(BoundedSize(limit), value).is_ok()
 }
 
 #[cfg(test)]
@@ -4657,6 +5231,7 @@ fn parse_subc_arg(args: impl IntoIterator<Item = OsString>) -> Result<PathBuf, M
 
 #[derive(Debug)]
 pub enum ModuleError {
+    RouteCapacity,
     Message(String),
     Json(serde_json::Error),
 }
@@ -4678,6 +5253,7 @@ fn assert_bind_ack(frame: &Frame) {
 impl std::fmt::Display for ModuleError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RouteCapacity => write!(formatter, "route binding capacity exhausted"),
             Self::Message(message) => write!(formatter, "{message}"),
             Self::Json(error) => write!(formatter, "json: {error}"),
         }
@@ -4739,7 +5315,9 @@ pub(crate) fn test_write_manifest(key: &str, url: &str) -> plexus_core::Ingested
             "prefix": "Bearer ", "required": true
         }],
         "resource_filters": {"required": [], "optional": ["team"], "write_enabling": ["team"]},
-        "actions_baseline": [{"name": "held_write", "risk": "write"}],
+        "actions_baseline": [{"name": "held_write", "risk": "write", "input_schema":{
+            "type":"object", "properties":{"team":{"type":"string"}}
+        }}],
         "defaults": {"ask_first_risk": ["write", "destructive"], "rate_limit": {"calls_per_min": 30}},
         "availability": "ga"
     }))
@@ -6481,6 +7059,49 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stderr).expect("UTF-8 stderr")
+    }
+
+    #[test]
+    fn route_capacity_log_fixture() {
+        logging::init_child();
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (_scratch, _store, state) = two_connection_fixture("route-capacity-log");
+                let routes = Arc::new(RouteBindings::new());
+                for channel in 10..(10 + MAX_ROUTE_BINDINGS as u16) {
+                    routes.insert(channel, 1, Principal::Direct).unwrap();
+                }
+                let (writer, mut responses) = mpsc::channel(4);
+                for _ in 0..3 {
+                    handle_control_request(bind(Some(Principal::Direct)), &writer, &state, &routes)
+                        .await
+                        .unwrap();
+                    let reply = recv_within(
+                        responses.recv(),
+                        std::time::Duration::from_secs(5),
+                        "route capacity refusal",
+                    )
+                    .await;
+                    assert_eq!(reply.header.ty, FrameType::Error);
+                    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+                    assert_eq!(body["code"], "resource_exhausted");
+                }
+                assert_eq!(routes.inner.read().unwrap().len(), MAX_ROUTE_BINDINGS);
+            });
+    }
+
+    #[test]
+    fn route_capacity_refusals_emit_one_warning_per_period() {
+        let stderr = module_diagnostic_output("tests::route_capacity_log_fixture");
+        assert_eq!(
+            stderr.matches("route binding capacity exhausted").count(),
+            1,
+            "cap pressure must emit exactly one warning per minute: {stderr}"
+        );
     }
 
     #[test]
@@ -8970,6 +9591,25 @@ mod subscription_lifecycle_tests {
             "the handler did not persist the project: {body}"
         );
 
+        for project_id in ["a\nb", "a\rb", "a\tb", "a\0b", "a\u{85}b"] {
+            call(
+                json!({"op":"set_project", "subscription_id":subscription.subscription_id, "project_id":project_id}),
+                writer.clone(), Arc::clone(&state), Arc::clone(&bindings),
+            ).await;
+            let body: Value = serde_json::from_slice(
+                &recv_within(
+                    responses.recv(),
+                    std::time::Duration::from_secs(5),
+                    "invalid project response",
+                )
+                .await
+                .body,
+            )
+            .unwrap();
+            assert_eq!(body["error"]["code"], "invalid_request", "{body}");
+            assert_eq!(stored(&store).as_deref(), Some("proj_plexus"));
+        }
+
         // Omitting the key is refused and leaves the binding alone: read as a
         // clear, a misspelled field name would wipe it.
         call(
@@ -9662,6 +10302,75 @@ mod events_get_tests {
         )
         .await;
         serde_json::from_slice(&frame.body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn event_pages_preserve_full_listing_and_stable_ties() {
+        let (_scratch, store, path) = test_store("event_pages");
+        seed_test_events(&path, &store);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("UPDATE trigger_events SET created_at_ms=123", [])
+            .unwrap();
+        for principal in [
+            Principal::Direct,
+            Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        ] {
+            let full = execute_tool_call(
+                store.clone(),
+                principal.clone(),
+                None,
+                manifest::EVENTS_TOOL,
+                json!({"op":"list"}),
+            )
+            .await;
+            let mut expected = store.list_events("direct", None, None).unwrap();
+            if !matches!(principal, Principal::Direct) {
+                expected.retain(|event| event.connection_id == "conn-github");
+            }
+            assert_eq!(full["result"]["events"], json!(expected));
+            let first = execute_tool_call(
+                store.clone(),
+                principal.clone(),
+                None,
+                manifest::EVENTS_TOOL,
+                json!({"op":"list","limit":1}),
+            )
+            .await;
+            assert_eq!(first["result"]["events"].as_array().unwrap().len(), 1);
+            let mut collected = first["result"]["events"].as_array().unwrap().clone();
+            if full["result"]["events"].as_array().unwrap().len() > 1 {
+                assert!(first["result"]["next_after"].is_object());
+                let second = execute_tool_call(
+                    store.clone(),
+                    principal.clone(),
+                    None,
+                    manifest::EVENTS_TOOL,
+                    json!({"op":"list","limit":1,"after":first["result"]["next_after"]}),
+                )
+                .await;
+                collected.extend(second["result"]["events"].as_array().unwrap().clone());
+                assert!(second["result"].get("next_after").is_none());
+            } else {
+                assert!(first["result"].get("next_after").is_none());
+            }
+            assert_eq!(json!(collected), full["result"]["events"]);
+            assert_eq!(
+                first["result"]["events_consume_authority"],
+                full["result"]["events_consume_authority"]
+            );
+            assert!(full["result"].get("next_after").is_none());
+        }
+        let invalid = execute_tool_call(
+            store,
+            Principal::Direct,
+            None,
+            manifest::EVENTS_TOOL,
+            json!({"op":"list","limit":1001}),
+        )
+        .await;
+        assert_eq!(invalid["error"]["code"], "invalid_request");
     }
 
     fn basal_flow_scope(agent_id: Option<&str>) -> CallScope {
@@ -11089,15 +11798,7 @@ mod connection_admin_tests {
         // Configure validates the requested filters against the vendor's
         // declared selectors, so the manifest has to be in the catalog or the
         // op refuses before reaching the store write under test.
-        let manifest_source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/linear.jsonc"),
-        )
-        .expect("read a shipped manifest");
-        let normalized = subc_jsonc::jsonc_to_json(&manifest_source).expect("normalize manifest");
-        let ingested = plexus_core::ingest_value(
-            serde_json::from_str::<Value>(&normalized).expect("parse manifest"),
-        )
-        .expect("ingest manifest");
+        let ingested = test_write_manifest("configure_fixture", "https://example.invalid/mcp");
         store
             .upsert_manifest("system", &ingested)
             .expect("seed manifest");
@@ -12066,9 +12767,6 @@ mod health_handler_tests {
             health: Arc::clone(&health),
             runtime: runtime_for_test(Arc::clone(&store)),
         });
-        // A successful response must re-stamp the heartbeat rather than report
-        // the stale value this fixture starts with.
-        health.backdate_heartbeat(5_000);
         let frame = Frame::build(
             FrameType::Request,
             wire::control_flags(),
@@ -12100,19 +12798,13 @@ mod health_handler_tests {
         else {
             panic!("expected a health check response");
         };
-        let metrics = metrics.expect("health report includes metrics");
         assert_eq!(
             status,
             HealthStatus::Ok,
-            "the handler must return a fresh heartbeat; detail={detail:?}"
+            "health check reports cached state; detail={detail:?}"
         );
-        assert!(
-            metrics
-                .get("heartbeatAgeMs")
-                .and_then(serde_json::Value::as_u64)
-                .is_some_and(|age| age < 2_000),
-            "the response must include a heartbeat within the freshness threshold: {metrics}"
-        );
+        let metrics = metrics.expect("health report includes metrics");
+
         assert!(
             metrics.get("schedulerAlive").is_some(),
             "the response must carry the regular health metrics: {metrics}"
@@ -13145,7 +13837,7 @@ mod github_read_frame_tests {
                 json!(["o/x"]),
                 json!({"terms":"bug"}),
                 json!({"items":[{"repository":{"full_name":"o/x"}},{"repository":{"full_name":"o/unbound"}}]}),
-                json!({"items":[{"repository":{"full_name":"o/x"}}]}),
+                json!({"items":[{"repository":{"full_name":"o/x"}}],"total_count":1,"incomplete":true,"incomplete_results":true}),
             ),
         ] {
             let (runtime, _store, transport, _scratch) = imported_runtime();

@@ -37,25 +37,61 @@ impl RolePeer for SubcPrefrontalRoutePeer {
 }
 struct EntorhinalPeer {
     path: std::path::PathBuf,
+    connection: Mutex<Option<SubcPrefrontalRoutePeer>>,
 }
 impl RolePeer for EntorhinalPeer {
     fn call(&self, method: &str, params: Value) -> Result<Value, ErrorBody> {
-        // Reconnect on each read so a daemon unavailable at startup can later confirm ownership.
-        let peer = SubcPrefrontalRoutePeer::connect(
-            &self.path,
-            "entorhinal",
-            subc_protocol::BindIdentity::new("connector-home", "plexus", "module"),
+        cached_role_call(
+            &self.connection,
+            || {
+                SubcPrefrontalRoutePeer::connect(
+                    &self.path,
+                    "entorhinal",
+                    subc_protocol::BindIdentity::new("connector-home", "plexus", "module"),
+                )
+                .map_err(|_| ErrorBody {
+                    code: "unavailable".into(),
+                    message: "entorhinal route unavailable".into(),
+                    detail: None,
+                })
+                .map(|peer| peer.with_call_timeout(std::time::Duration::from_secs(3)))
+            },
+            method,
+            params,
         )
-        .map_err(|_| ErrorBody {
-            code: "unavailable".into(),
-            message: "entorhinal route unavailable".into(),
-            detail: None,
-        })?
-        .with_call_timeout(std::time::Duration::from_secs(3));
-        RolePeer::call(&peer, method, params)
     }
 }
+
+fn cached_role_call<P: RolePeer>(
+    connection: &Mutex<Option<P>>,
+    connect: impl FnOnce() -> Result<P, ErrorBody>,
+    method: &str,
+    params: Value,
+) -> Result<Value, ErrorBody> {
+    let mut connection = connection.lock().unwrap();
+    if connection.is_none() {
+        *connection = Some(connect()?);
+    }
+    let reply = RolePeer::call(
+        connection.as_ref().expect("connected role peer"),
+        method,
+        params,
+    );
+    // A broken daemon route must be replaceable after a restart. Semantic
+    // refusals keep the connection; only transport failures require a dial.
+    if reply.as_ref().is_err_and(|error| {
+        matches!(
+            error.code.as_str(),
+            "unavailable" | "outcome_unknown" | "timeout" | "transport_error"
+        )
+    }) {
+        *connection = None;
+    }
+    reply
+}
+#[cfg(any(test, feature = "test-support"))]
 struct Unavailable;
+#[cfg(any(test, feature = "test-support"))]
 impl RolePeer for Unavailable {
     fn call(&self, _: &str, _: Value) -> Result<Value, ErrorBody> {
         Err(ErrorBody {
@@ -150,6 +186,7 @@ pub struct ConnectorHome {
     snapshot: Mutex<Snapshot>,
     read_lane: Mutex<()>,
     peer: Arc<dyn RolePeer>,
+    decision: tokio::sync::watch::Sender<bool>,
 }
 
 impl ConnectorHome {
@@ -158,14 +195,17 @@ impl ConnectorHome {
             snapshot: Mutex::new(Snapshot::default()),
             read_lane: Mutex::new(()),
             peer,
+            decision: tokio::sync::watch::channel(false).0,
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn unavailable() -> Self {
         Self::new(Arc::new(Unavailable))
     }
     pub fn production(path: &std::path::Path) -> Self {
         Self::new(Arc::new(EntorhinalPeer {
             path: path.to_owned(),
+            connection: Mutex::new(None),
         }))
     }
     /// Only fresh, well-formed answers replace the last decision. Route failures and
@@ -223,7 +263,16 @@ impl ConnectorHome {
         ) {
             eprintln!(info wire: "connector home: {} -> {} epoch={:?} holder_name={:?}", before.state, next.state, next.epoch, next.holder_name);
         }
+        self.decision.send_if_modified(|held| {
+            let admitted = next.state == "held";
+            let changed = *held != admitted;
+            *held = admitted;
+            changed
+        });
         reply
+    }
+    pub(crate) fn decisions(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.decision.subscribe()
     }
     pub fn held(&self) -> bool {
         self.snapshot.lock().unwrap().state == "held"
@@ -236,7 +285,7 @@ impl ConnectorHome {
         if self.held() {
             return None;
         }
-        let state = self.status();
+        let state = json!({"state":self.snapshot.lock().unwrap().state});
         Some(
             json!({"error":{"code":"connector_home_not_held", "message":format!("connector home not held: {state}"), "connectorHome":state, "transmission":"not_sent"}}),
         )
@@ -257,6 +306,7 @@ impl ConnectorHome {
             epoch: Some(1),
             ..Snapshot::default()
         };
+        home.decision.send_replace(true);
         home
     }
 }
@@ -307,5 +357,58 @@ pub fn tool_effect(name: &str, op: Option<&str>) -> bool {
         Some(ToolEffect::Ops(ops)) => op.is_some_and(|op| ops.contains(&op)),
         Some(ToolEffect::Never) => false,
         None => true,
+    }
+}
+
+#[cfg(test)]
+mod peer_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Peer(Arc<AtomicUsize>);
+    impl RolePeer for Peer {
+        fn call(&self, _: &str, _: Value) -> Result<Value, ErrorBody> {
+            match self.0.load(Ordering::SeqCst) {
+                0 => Ok(json!({})),
+                1 => Err(ErrorBody {
+                    code: "claim_integrity_failed".into(),
+                    message: "refused".into(),
+                    detail: None,
+                }),
+                _ => Err(ErrorBody {
+                    code: "unavailable".into(),
+                    message: "disconnected".into(),
+                    detail: None,
+                }),
+            }
+        }
+    }
+
+    #[test]
+    fn role_route_is_reused_until_a_transport_failure() {
+        let connections = AtomicUsize::new(0);
+        let state = Arc::new(AtomicUsize::new(0));
+        let connection = Mutex::new(None);
+        let call = || {
+            cached_role_call(
+                &connection,
+                || {
+                    connections.fetch_add(1, Ordering::SeqCst);
+                    Ok(Peer(state.clone()))
+                },
+                "role.read",
+                json!({}),
+            )
+        };
+        call().unwrap();
+        call().unwrap();
+        state.store(1, Ordering::SeqCst);
+        assert!(call().is_err());
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        state.store(2, Ordering::SeqCst);
+        assert!(call().is_err());
+        state.store(0, Ordering::SeqCst);
+        call().unwrap();
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
     }
 }

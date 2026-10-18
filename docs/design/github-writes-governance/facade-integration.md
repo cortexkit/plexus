@@ -1,6 +1,6 @@
-# Facade integration: what the landed slices leave for the facade
+# Facade integration
 
-The GitHub facade (`github.bot_request`) is where the pieces built so far become one request path. Each earlier slice recorded what it could not finish on its own; this file collects those items so the facade slices build every one of them.
+The GitHub facade (`github.bot_request`) combines repository binding, authorization and durable write receipts in one request path.
 
 ## Identity (gate G1)
 
@@ -11,7 +11,7 @@ The GitHub facade (`github.bot_request`) is where the pieces built so far become
 ## Resolution and arguments (G2, G3)
 
 - Use `crate::github::resolver` for repository-to-handle resolution. Its outcomes map onto `repository_unbound`, `agent_repository_conflict` and `request_field_forbidden`.
-- Build every vendor call's arguments with the resolver's per-kind allowlist (`mapped_args`), never by copying request fields. `RestTransport` sends every non-path argument as the JSON body and invoke arguments are not validated against `args_schema`, so a copied field reaches GitHub.
+- Build every vendor call's arguments with the resolver's per-kind allowlist (`mapped_args`), never by copying request fields. Governance checks the pinned argument schema and REST serializes non-path arguments, so each leg must receive only its own declared fields.
 
 ## Governance wiring
 
@@ -25,16 +25,16 @@ The GitHub facade (`github.bot_request`) is where the pieces built so far become
 ## Receipts (G4)
 
 - Attach a `ReceiptClaim` to each effect through the private facade constructor. It must never enter `args`.
-- A failed `pre_transmit` compare-and-set currently surfaces as `aborted_stale_authorization`. The facade translates it to `nonce_in_flight`.
+- A failed `pre_transmit` compare-and-set on a receipt returns `nonce_in_flight` without transmitting.
 - Set the audit journal's `idempotency_key_fingerprint` to the receipt's `request_fingerprint` on every facade write.
-- The sweeper returns `outcome_unknown` receipts but does not queue them. Enqueue them into the uncertain-write reconciliation queue.
-- The claim lease has two sources today: `github::config` (`claim_lease_seconds`, default 120) and `pagination::DEFAULT_CLAIM_LEASE_SECONDS` (120). Make pagination read the configured value, so there is one source.
-- The receipt rules (completed replays with zero transport; `outcome_unknown` never redispatches; one owner per nonce; takeover re-captures the baseline) were proved against a test helper that models the facade's retry decision. Prove them again through the real facade path.
+- The store sweeper records expired uncertain effects in reconciliation before returning them for diagnostics. Callers must not enqueue those effects again.
+- Pagination and receipt claims share `github::receipt::DEFAULT_CLAIM_LEASE_SECONDS` (120 seconds).
+- Integration tests exercise terminal replay, uncertainty, claim ownership and takeover through the real facade path.
 
 ## Request kinds
 
 - Own-issue `issue edit`: read the issue first, and refuse `issue_edit_not_own` unless the ISSUE's author passes the two-leg bot check (`user.login == "<slug>[bot]"` and `user.type == "Bot"`). Apply up to six fields as ordered legs (title and body through `edit_issue`, then `add_issue_labels`, `remove_issue_label`, `add_issue_assignees`, `remove_issue_assignees`), recording each in the receipt's `effects`. A 404 is `not_present`.
-- Edit-last: find the newest own comment with `pagination::walk` followed by `newest_bot_comment`. An `Incomplete` walk refuses; it never means "no comment". Gate list-dependent dispatch on `pagination::may_dispatch`.
+- Edit-last: complete `pagination::walk_newest_bot_comment`, retaining only the latest own comment. An incomplete walk refuses; it never means "no comment". Ownership is checked again on the chosen comment before dispatch.
 - Request shapes come from `crates/plexus-core/tests/fixtures/gh_shim_wire/`. Parse them as JSON and never rely on key order.
 
 ## Every reply

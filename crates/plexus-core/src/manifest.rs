@@ -103,7 +103,11 @@ pub enum AuthMode {
 #[serde(deny_unknown_fields)]
 pub struct OauthProfile {
     pub profile_id: String,
+    /// Deprecated metadata, ignored. OAuth authority comes from the registered profile.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub profile_digest: String,
+    /// Deprecated metadata, ignored; this does not request or restrict scopes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requested_scopes: Vec<String>,
 }
 
@@ -140,13 +144,14 @@ pub struct ActionBaseline {
     /// enables the per-connection, per-agent allowlist gate before dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipients: Option<Vec<String>>,
-    /// Reviewed input schema for non-REST actions declaring recipients. REST
+    /// Reviewed input schema for non-REST actions. REST
     /// actions use http.args_schema instead, so there is one authoritative schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_schema: Option<Value>,
     #[serde(default)]
     pub reconciliation: Option<Reconciliation>,
     #[serde(default)]
+    /// Deprecated metadata, ignored. It never authorizes automatic write retries.
     pub idempotency: Option<Idempotency>,
     /// The optional polling shape for this action. A missing shape means the
     /// action cannot be configured as a trigger.
@@ -167,6 +172,10 @@ pub struct HttpOperation {
     pub method: HttpMethod,
     pub path: String,
     pub args_schema: Value,
+    /// Where non-path arguments travel. Omission preserves method defaults:
+    /// GET and DELETE use the query; POST, PUT and PATCH use a JSON body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<RestParameterLocation>,
     /// Reviewed arguments supplied by the transport on every request. Callers
     /// and cursors cannot supply these keys, even with the same value: changing
     /// a page size would invalidate a poller's coverage and request budget.
@@ -178,11 +187,28 @@ pub struct HttpOperation {
     pub credentialless_tail: Option<CredentiallessTail>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RestParameterLocation {
+    Body,
+    Query,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CredentiallessTail {
+    #[serde(default)]
+    pub kind: CredentiallessTailKind,
     /// Exact hosts or a single-label wildcard such as *.blob.core.windows.net.
     pub allowed_hosts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentiallessTailKind {
+    #[default]
+    JobLog,
+    ArtifactFile,
 }
 
 /// The cursor shapes a polling action may expose.
@@ -422,6 +448,43 @@ pub struct Reconciliation {
     pub timeout_s: u64,
 }
 
+/// Reconciliation arguments are retained for at most one day.
+pub(crate) const MAX_RECONCILIATION_TIMEOUT_S: u64 = 86_400;
+
+impl Reconciliation {
+    pub(crate) fn valid(&self) -> bool {
+        !self.read_back_action.trim().is_empty()
+            && (1..=MAX_RECONCILIATION_TIMEOUT_S).contains(&self.timeout_s)
+            && !self.correlation_fields.is_empty()
+            && self
+                .correlation_fields
+                .iter()
+                .all(|field| !field.trim().is_empty())
+    }
+}
+
+/// Resolve a dot-delimited object-property path in a reviewed input schema.
+/// Arrays and dynamic additional-properties maps are not resource identities.
+pub(crate) fn schema_filter_path<'a>(schema: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = schema;
+    for component in path.split('.') {
+        if component.is_empty() {
+            return None;
+        }
+        current = current.get("properties")?.get(component)?;
+    }
+    Some(current)
+}
+
+pub(crate) fn action_asks_first(
+    risk: Risk,
+    declared: &[Risk],
+    explicit: bool,
+    recipients: bool,
+) -> bool {
+    explicit || recipients || asks_first(risk, declared)
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Idempotency {
@@ -539,7 +602,9 @@ pub(crate) fn validated_manifest(value: &Value) -> Result<AppManifest, ManifestE
 
 pub fn ingest_value(value: Value) -> Result<IngestedManifest, ManifestError> {
     let manifest = validated_manifest(&value)?;
-    let bytes = serde_json::to_vec(&value)
+    let normalized = serde_json::to_value(&manifest)
+        .map_err(|error| ManifestError::InvalidJson(error.to_string()))?;
+    let bytes = crate::jcs::canonicalize_exact_integers(&normalized)
         .map_err(|error| ManifestError::InvalidJson(error.to_string()))?;
     let digest = Sha256::digest(bytes);
     let content_hash = format!("sha256:{digest:x}");
@@ -577,7 +642,35 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
             manifest.transport.url
         )));
     }
+    if (manifest.auth.mode == AuthMode::None) != manifest.credential_bindings.is_empty() {
+        return Err(ManifestError::InvalidField(
+            "credential_bindings must match auth.mode (none requires no bindings)".into(),
+        ));
+    }
+    let mut headers = std::collections::BTreeSet::new();
     for binding in &manifest.credential_bindings {
+        let primary_role = binding.ref_role == "primary"
+            || match manifest.auth.mode {
+                AuthMode::ApiKey => binding.ref_role == "api_key",
+                AuthMode::Oauth => matches!(
+                    binding.ref_role.as_str(),
+                    "oauth" | "oauth_token" | "access_token"
+                ),
+                AuthMode::AppInstall => {
+                    matches!(binding.ref_role.as_str(), "app_install" | "access_token")
+                }
+                AuthMode::None => false,
+            };
+        if !binding.required || !primary_role {
+            return Err(ManifestError::InvalidField("credential_bindings supports only required primary credentials (including auth-matching legacy role aliases)".into()));
+        }
+        if reqwest::header::HeaderName::from_bytes(binding.key.as_bytes()).is_err()
+            || !headers.insert(binding.key.to_ascii_lowercase())
+        {
+            return Err(ManifestError::InvalidField(
+                "credential_bindings requires valid, unique header names".into(),
+            ));
+        }
         // Only header placement is implemented. A manifest naming any other
         // placement previously loaded clean and was then SKIPPED at dispatch,
         // so the request went to the vendor with no credential at all: a
@@ -640,12 +733,46 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
         )));
     }
     let is_rest = matches!(manifest.transport.kind, TransportKind::RestApi);
+    for path in manifest
+        .resource_filters
+        .required
+        .iter()
+        .chain(&manifest.resource_filters.optional)
+        .chain(&manifest.resource_filters.write_enabling)
+    {
+        if !manifest.actions_baseline.iter().any(|action| {
+            action
+                .http
+                .as_ref()
+                .map(|http| &http.args_schema)
+                .or(action.input_schema.as_ref())
+                .is_some_and(|schema| schema_filter_path(schema, path).is_some())
+        }) {
+            return Err(ManifestError::InvalidField(format!(
+                "resource filter '{path}' is not a path in a reviewed input schema"
+            )));
+        }
+    }
     let mut action_names = std::collections::BTreeSet::new();
     for action in &manifest.actions_baseline {
-        if action.name.is_empty() || !action_names.insert(&action.name) {
+        if action.name.is_empty()
+            || !action
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+            || !action_names.insert(&action.name)
+        {
             return Err(ManifestError::InvalidField(
                 "actions_baseline names must be non-empty and unique".to_string(),
             ));
+        }
+        // This reviewed denylist catches known credential-returning tools, not
+        // arbitrary vendor output. New actions still require a human secret review.
+        if matches!(action.name.as_str(), "get_connection_string") {
+            return Err(ManifestError::InvalidField(format!(
+                "action '{}' returns credential material and cannot be declared",
+                action.name
+            )));
         }
         if action.facade_only && (action.risk == Risk::Read || !is_rest) {
             return Err(ManifestError::InvalidField(format!(
@@ -653,9 +780,9 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
                 action.name
             )));
         }
-        if action.input_schema.is_some() && (is_rest || action.recipients.is_none()) {
+        if action.input_schema.is_some() && is_rest {
             return Err(ManifestError::InvalidField(format!(
-                "action '{}' input_schema is only for non-REST recipient declarations",
+                "action '{}' input_schema is only for non-REST declarations",
                 action.name
             )));
         }
@@ -682,9 +809,9 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
             }
         }
         if let Some(reconciliation) = &action.reconciliation {
-            if reconciliation.read_back_action.is_empty() || reconciliation.timeout_s == 0 {
+            if !reconciliation.valid() {
                 return Err(ManifestError::InvalidField(
-                    "reconciliation requires a read_back_action and positive timeout_s".to_string(),
+                    "reconciliation requires nonempty correlation_fields, a read_back_action and timeout_s in 1..=86400".to_string(),
                 ));
             }
         }
@@ -707,8 +834,32 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
                     action.name, target
                 )));
             }
+            if let Some(schema) = action
+                .http
+                .as_ref()
+                .map(|http| &http.args_schema)
+                .or(action.input_schema.as_ref())
+            {
+                if reconciliation.correlation_fields.iter().any(|field| {
+                    schema
+                        .get("properties")
+                        .and_then(|p| p.get(field))
+                        .is_none()
+                }) {
+                    return Err(ManifestError::InvalidField(format!(
+                        "action '{}' reconciliation field is absent from the reviewed write schema",
+                        action.name
+                    )));
+                }
+            }
         }
         if let Some(poll) = &action.poll {
+            if action.risk != Risk::Read
+                || poll.item_kind.trim().is_empty()
+                || poll.cursor_kind == CursorKind::SnapshotDiff
+            {
+                return Err(ManifestError::InvalidField(format!("action '{}' poll requires read risk, nonempty item_kind and an implemented cursor kind", action.name)));
+            }
             // A blank constant key dispatches an argument no vendor can match,
             // so it must be rejected before it can become a silent no-op.
             if poll
@@ -802,10 +953,11 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
                 // silently. `Some({})` is not accepted here, unlike
                 // ordered-timestamp, because there the default ordering only
                 // affects efficiency while here it decides correctness.
-                let declared_ordering = poll
-                    .request_constants
-                    .as_ref()
-                    .is_some_and(|constants| !constants.is_empty());
+                let declared_ordering = poll.request_constants.as_ref().is_some_and(|constants| {
+                    constants
+                        .keys()
+                        .any(|key| Some(key.as_str()) != poll.request_page_size_field.as_deref())
+                });
                 if !declared_ordering {
                     return Err(ManifestError::InvalidField(format!(
                         "action '{}' poll.sorted_head requires request_constants declaring the \
@@ -980,7 +1132,8 @@ fn validate_http_operation(action_name: &str, http: &HttpOperation) -> Result<()
             || tail.allowed_hosts.is_empty()
             || tail.allowed_hosts.iter().any(|host| {
                 let host = host.strip_prefix("*.").unwrap_or(host);
-                host.is_empty()
+                host.split('.').count() < 2
+                    || host.parse::<std::net::IpAddr>().is_ok()
                     || host.split('.').any(|label| {
                         label.is_empty()
                             || label.starts_with('-')
@@ -1121,6 +1274,258 @@ pub(crate) fn path_placeholders(path: &str) -> Result<Vec<String>, ManifestError
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rollout_mutation_controls_exist_in_the_catalogue() {
+        let controls = include_str!("../../../mutations.toml");
+        let ids: std::collections::BTreeSet<_> = controls
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("id = \"")
+                    .and_then(|line| line.strip_suffix('"'))
+            })
+            .collect();
+        let document = include_str!("../../../docs/rollout/github-events-poll-mode.md");
+        let mut checked = 0;
+        for line in document.lines().filter(|line| line.starts_with("| ")) {
+            for id in line
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .filter(|id| id.contains('-') && !id.contains(' ') && !id.contains('<'))
+            {
+                assert!(
+                    ids.contains(id),
+                    "documented mutation control does not exist: {id}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 40, "mutation table must actually be checked");
+    }
+
+    #[test]
+    fn shipped_credential_and_risk_boundaries_are_reviewed() {
+        for (app, name, risk) in [
+            ("neon", "complete_database_migration", Risk::Destructive),
+            ("resend", "remove-contact", Risk::Destructive),
+            ("resend", "remove-broadcast", Risk::Destructive),
+            ("browserbase", "navigate", Risk::Write),
+        ] {
+            let manifest = ingest_value(load_catalog(&format!("{app}.jsonc")))
+                .unwrap()
+                .manifest;
+            assert_eq!(
+                manifest
+                    .actions_baseline
+                    .iter()
+                    .find(|a| a.name == name)
+                    .unwrap()
+                    .risk,
+                risk
+            );
+        }
+        assert!(ingest_value(load_catalog("neon.jsonc"))
+            .unwrap()
+            .manifest
+            .actions_baseline
+            .iter()
+            .all(|a| a.name != "get_connection_string"));
+    }
+    #[test]
+    fn live_connected_catalog_schema_hashes_remain_unchanged() {
+        // Captured from the catalog before metadata cleanup. These hashes pin
+        // rollback-safe schemas, independently of the current manifest parser.
+        let expected: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        > = serde_json::from_str(include_str!(
+            "../tests/fixtures/live-catalog-schema-hashes.json"
+        ))
+        .unwrap();
+        assert_eq!(expected.len(), 7);
+        for (app, actions) in expected {
+            let value = load_catalog(&format!("{app}.jsonc"));
+            let declared = value["actions_baseline"].as_array().unwrap();
+            assert_eq!(actions.len(), declared.len(), "{app} action inventory");
+            for action in declared {
+                let name = action["name"].as_str().unwrap();
+                let placeholder = serde_json::json!({"type":"object","additionalProperties":true});
+                let schema = action
+                    .pointer("/http/args_schema")
+                    .or_else(|| action.get("input_schema"))
+                    .unwrap_or(&placeholder);
+                assert_eq!(
+                    crate::jcs::jcs_sha256(schema).unwrap(),
+                    actions[name],
+                    "{app}/{name}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn manifest_hash_normalizes_aliases_and_defaults_without_rounding_integers() {
+        let mut value = rest_manifest_value();
+        value["actions_baseline"][0]["poll"] = serde_json::json!({
+            "cursor_kind":"ordered_timestamp", "item_kind":"issue", "timestamp_field":"updated_at",
+            "id_field":"id", "request_constants":{}
+        });
+        let alias = ingest_value(value.clone()).unwrap();
+        assert_eq!(
+            alias.content_hash,
+            ingest_value(serde_json::to_value(&alias.manifest).unwrap())
+                .unwrap()
+                .content_hash
+        );
+        value["actions_baseline"][0]["http"]["args_schema"]["maximum"] =
+            serde_json::json!(9007199254740992_u64);
+        let first = ingest_value(value.clone()).unwrap();
+        value["actions_baseline"][0]["http"]["args_schema"]["maximum"] =
+            serde_json::json!(9007199254740993_u64);
+        assert_ne!(
+            first.content_hash,
+            ingest_value(value).unwrap().content_hash
+        );
+    }
+    #[test]
+    fn reviewed_catalog_rejects_credential_returning_actions() {
+        let mut value = rest_manifest_value();
+        value["actions_baseline"][0]["name"] = serde_json::json!("get_connection_string");
+        assert!(ingest_value(value)
+            .unwrap_err()
+            .to_string()
+            .contains("credential"));
+    }
+
+    #[test]
+    fn resource_filter_paths_must_resolve_in_a_reviewed_schema() {
+        let mut value = rest_manifest_value();
+        value["resource_filters"]["optional"] = serde_json::json!(["scope.repo"]);
+        assert!(ingest_value(value.clone()).is_err());
+        value["actions_baseline"][0]["http"]["args_schema"]["properties"]["scope"] =
+            serde_json::json!({"type":"object","properties":{"repo":{"type":"string"}}});
+        ingest_value(value.clone()).expect("nested reviewed property");
+        value["resource_filters"]["optional"] = serde_json::json!(["scope..repo"]);
+        assert!(ingest_value(value).is_err());
+    }
+
+    #[test]
+    fn sorted_head_page_size_alone_is_not_reviewed_ordering() {
+        let mut value = rest_manifest_value();
+        value["actions_baseline"][0]["poll"] = serde_json::json!({
+            "cursor_kind":"sorted_head", "item_kind":"issue", "timestamp_field":"updated_at",
+            "tiebreaker_id_field":"id", "request_constants":{"perPage":100},
+            "request_page_size_field":"perPage"
+        });
+        assert!(ingest_value(value.clone()).is_err());
+        value["actions_baseline"][0]["poll"]["request_constants"]["sort"] =
+            serde_json::json!("updated");
+        ingest_value(value).expect("ordering separate from page size");
+    }
+
+    #[test]
+    fn reconciliation_requires_nonempty_fields_and_bounded_timeout() {
+        let mut value = rest_manifest_value();
+        value["actions_baseline"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        let mut write = value["actions_baseline"][0].clone();
+        write["name"] = serde_json::json!("update_issue");
+        write["risk"] = serde_json::json!("write");
+        write["reconciliation"] = serde_json::json!({
+            "read_back_action":"get_issue", "correlation_fields":[], "timeout_s":60
+        });
+        value["actions_baseline"]
+            .as_array_mut()
+            .unwrap()
+            .push(write);
+        assert!(ingest_value(value.clone()).is_err());
+        value["actions_baseline"][1]["reconciliation"]["correlation_fields"] =
+            serde_json::json!(["issue_id"]);
+        value["actions_baseline"][1]["reconciliation"]["timeout_s"] = serde_json::json!(u64::MAX);
+        assert!(ingest_value(value.clone()).is_err());
+        value["actions_baseline"][1]["reconciliation"]["timeout_s"] = serde_json::json!(60);
+        ingest_value(value).expect("bounded correlatable declaration");
+    }
+
+    #[test]
+    fn poll_shapes_must_be_readable_implemented_and_named() {
+        let mut value = rest_manifest_value();
+        value["actions_baseline"][0]["poll"] = serde_json::json!({
+            "cursor_kind":"scalar_diff", "item_kind":"issue", "scalar_field":"id"
+        });
+        ingest_value(value.clone()).expect("read poll");
+        value["actions_baseline"][0]["risk"] = serde_json::json!("write");
+        assert!(ingest_value(value.clone()).is_err());
+        value["actions_baseline"][0]["risk"] = serde_json::json!("read");
+        value["actions_baseline"][0]["poll"]["item_kind"] = serde_json::json!(" ");
+        assert!(ingest_value(value.clone()).is_err());
+        value["actions_baseline"][0]["poll"] = serde_json::json!({
+            "cursor_kind":"snapshot_diff", "item_kind":"issue", "item_count_ceiling":100
+        });
+        assert!(ingest_value(value).is_err());
+    }
+
+    #[test]
+    fn credentials_require_valid_unique_headers_and_primary_roles() {
+        let value = rest_manifest_value();
+        for patch in [
+            serde_json::json!({"key":"X Key:"}),
+            serde_json::json!({"required":false}),
+            serde_json::json!({"ref_role":"secondary"}),
+        ] {
+            let mut invalid = value.clone();
+            for (key, field) in patch.as_object().unwrap() {
+                invalid["credential_bindings"][0][key] = field.clone();
+            }
+            assert!(ingest_value(invalid).is_err(), "{patch}");
+        }
+        let mut invalid = value.clone();
+        invalid["credential_bindings"] = serde_json::json!([]);
+        assert!(ingest_value(invalid).is_err());
+        let mut invalid = value;
+        let binding = invalid["credential_bindings"][0].clone();
+        invalid["credential_bindings"]
+            .as_array_mut()
+            .unwrap()
+            .push(binding);
+        assert!(ingest_value(invalid).is_err());
+    }
+
+    #[test]
+    fn wildcard_and_ambiguous_action_names_are_refused() {
+        for name in ["*", " padded", "line\nbreak", ""] {
+            let mut value = rest_manifest_value();
+            value["actions_baseline"][0]["name"] = serde_json::json!(name);
+            assert!(ingest_value(value).is_err(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn credentialless_tail_refuses_ip_and_single_label_hosts() {
+        for host in ["*.com", "com", "127.0.0.1", "::1"] {
+            let mut value = rest_manifest_value();
+            value["actions_baseline"][0]["http"]["credentialless_tail"] =
+                serde_json::json!({"allowed_hosts":[host]});
+            assert!(ingest_value(value).is_err(), "{host}");
+        }
+    }
+
+    #[test]
+    fn every_shipped_manifest_is_valid() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog");
+        let mut count = 0;
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "jsonc") {
+                let name = path.file_name().unwrap().to_str().unwrap();
+                ingest_value(load_catalog(name)).unwrap_or_else(|error| panic!("{name}: {error}"));
+                count += 1;
+            }
+        }
+        assert_eq!(count, 20);
+    }
+
     /// Each of these pins a rule the dispatch path DEPENDS on but cannot
     /// enforce for itself. A manifest is externally-authored configuration
     /// that decides what a connector may reach, so a rule stated in a comment
@@ -1335,11 +1740,15 @@ mod tests {
     }
 
     #[test]
-    fn linear_manifest_parses_with_reconciliation() {
+    fn linear_manifest_omits_unimplemented_reconciliation() {
         let parsed = ingest_value(load_catalog("linear.jsonc")).expect("linear manifest parses");
         assert_eq!(parsed.manifest.key, "linear");
         assert_eq!(parsed.manifest.auth.mode, AuthMode::Oauth);
-        assert!(parsed.manifest.actions_baseline[2].reconciliation.is_some());
+        assert!(parsed
+            .manifest
+            .actions_baseline
+            .iter()
+            .all(|action| action.reconciliation.is_none()));
         let round_trip =
             ingest_value(serde_json::to_value(&parsed.manifest).expect("serialize linear"))
                 .expect("round-trip linear manifest");
@@ -1347,20 +1756,14 @@ mod tests {
     }
 
     #[test]
-    fn sentry_manifest_parses_with_write_reconciliation() {
+    fn sentry_manifest_omits_unreviewed_filters_and_reconciliation() {
         let parsed = ingest_value(load_catalog("sentry.jsonc")).expect("sentry manifest parses");
         assert_eq!(parsed.manifest.key, "sentry");
         assert_eq!(parsed.manifest.tier, Tier::S2);
         assert_eq!(parsed.manifest.auth.mode, AuthMode::ApiKey);
         assert_eq!(parsed.manifest.transport.url, "https://mcp.sentry.dev/mcp");
-        assert_eq!(
-            parsed.manifest.resource_filters.required,
-            vec!["org".to_string(), "project".to_string()]
-        );
-        assert_eq!(
-            parsed.manifest.resource_filters.write_enabling,
-            vec!["project".to_string()]
-        );
+        assert!(parsed.manifest.resource_filters.required.is_empty());
+        assert!(parsed.manifest.resource_filters.write_enabling.is_empty());
         let comment = parsed
             .manifest
             .actions_baseline
@@ -1368,15 +1771,15 @@ mod tests {
             .find(|action| action.name == "comment_issue")
             .expect("comment_issue baseline");
         assert_eq!(comment.risk, Risk::Write);
-        assert!(comment.reconciliation.is_some());
-        assert_eq!(comment.idempotency, Some(Idempotency::None));
+        assert!(comment.reconciliation.is_none());
+        assert_eq!(comment.idempotency, None);
         let assign = parsed
             .manifest
             .actions_baseline
             .iter()
             .find(|action| action.name == "assign_issue")
             .expect("assign_issue baseline");
-        assert_eq!(assign.idempotency, Some(Idempotency::Natural));
+        assert_eq!(assign.idempotency, None);
         let round_trip =
             ingest_value(serde_json::to_value(&parsed.manifest).expect("serialize sentry"))
                 .expect("round-trip sentry manifest");
@@ -1390,22 +1793,9 @@ mod tests {
         assert_eq!(parsed.manifest.tier, Tier::S3);
         assert_eq!(parsed.manifest.auth.mode, AuthMode::Oauth);
         assert_eq!(parsed.manifest.transport.url, "https://mcp.notion.com/mcp");
-        assert_eq!(
-            parsed.manifest.resource_filters.required,
-            vec!["workspace".to_string()]
-        );
-        assert_eq!(
-            parsed.manifest.resource_filters.optional,
-            vec![
-                "page_allowlist".to_string(),
-                "database_allowlist".to_string(),
-                "property_filter".to_string()
-            ]
-        );
-        assert_eq!(
-            parsed.manifest.resource_filters.write_enabling,
-            vec!["parent_allowlist".to_string()]
-        );
+        assert!(parsed.manifest.resource_filters.required.is_empty());
+        assert!(parsed.manifest.resource_filters.optional.is_empty());
+        assert!(parsed.manifest.resource_filters.write_enabling.is_empty());
         let create = parsed
             .manifest
             .actions_baseline
@@ -1413,8 +1803,8 @@ mod tests {
             .find(|action| action.name == "create_page")
             .expect("create_page baseline");
         assert_eq!(create.risk, Risk::Write);
-        assert!(create.reconciliation.is_some());
-        assert_eq!(create.idempotency, Some(Idempotency::None));
+        assert!(create.reconciliation.is_none());
+        assert_eq!(create.idempotency, None);
         let oauth = parsed.manifest.auth.oauth.as_ref().expect("oauth profile");
         assert_eq!(oauth.profile_id, "notion");
         let round_trip =
@@ -1429,14 +1819,8 @@ mod tests {
         assert_eq!(parsed.manifest.key, "gcal");
         assert_eq!(parsed.manifest.tier, Tier::S2);
         assert_eq!(parsed.manifest.auth.mode, AuthMode::Oauth);
-        assert_eq!(
-            parsed.manifest.resource_filters.required,
-            vec!["calendar_allowlist".to_string()]
-        );
-        assert_eq!(
-            parsed.manifest.resource_filters.optional,
-            vec!["time_window".to_string(), "attendee_domain".to_string()]
-        );
+        assert!(parsed.manifest.resource_filters.required.is_empty());
+        assert!(parsed.manifest.resource_filters.optional.is_empty());
         assert!(parsed.manifest.resource_filters.write_enabling.is_empty());
         assert_eq!(parsed.manifest.actions_baseline.len(), 3);
         assert!(parsed

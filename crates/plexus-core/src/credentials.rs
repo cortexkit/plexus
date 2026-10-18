@@ -109,8 +109,6 @@ impl ResolvedCredential {
 
 /// The credential source is deliberately narrower than the claustrum vault's wire API.
 pub trait CredentialSource: Send + Sync {
-    fn get(&self, handle: &[u8]) -> Result<ResolvedCredential, CredentialError>;
-
     fn get_by_id(&self, _credential_id: &str) -> Result<ResolvedCredential, CredentialError> {
         Err(CredentialError::Permanent(
             PermanentCredentialError::NotFound,
@@ -118,11 +116,6 @@ pub trait CredentialSource: Send + Sync {
     }
 
     fn report_id_auth_failure(&self, _credential_id: &str, _provider_status: u16) {}
-
-    /// Report a provider rejection for the exact credential version served to a
-    /// call. Implementations must treat this as best effort; the provider call
-    /// has already reached its terminal outcome when this hook runs.
-    fn report_auth_failure(&self, _handle: &[u8], _provider_status: u16, _record_version: u64) {}
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -156,7 +149,7 @@ impl std::fmt::Debug for StubCredentialResponse {
 }
 
 /// Configurable in-process source for governance tests. It never exposes raw
-/// handles in its map keys or error messages.
+/// credential names in its map keys or error messages.
 #[derive(Clone, Default)]
 #[cfg(any(test, feature = "test-support"))]
 pub struct StubCredentialSource {
@@ -166,10 +159,9 @@ pub struct StubCredentialSource {
     /// record_version).
     ///
     /// Recorded because the trait's default implementation of
-    /// `report_auth_failure` is an empty body, so a stub that does not override
+    /// `report_id_auth_failure` is an empty body, so a stub that does not override
     /// it cannot distinguish a caller that reports from one that never does.
-    /// The fingerprint is stored rather than the handle, keeping the stub's
-    /// no-raw-handles rule intact.
+    /// The fingerprint is stored rather than the credential name.
     auth_failure_reports: Arc<Mutex<Vec<(String, u16, u64)>>>,
 }
 
@@ -231,22 +223,14 @@ impl StubCredentialSource {
 
 #[cfg(any(test, feature = "test-support"))]
 impl CredentialSource for StubCredentialSource {
-    fn get_by_id(&self, id: &str) -> Result<ResolvedCredential, CredentialError> {
-        self.get(id.as_bytes())
-    }
-
     fn report_id_auth_failure(&self, id: &str, status: u16) {
-        self.report_auth_failure(id.as_bytes(), status, 0);
-    }
-
-    fn report_auth_failure(&self, handle: &[u8], provider_status: u16, record_version: u64) {
         if let Ok(mut reports) = self.auth_failure_reports.lock() {
-            reports.push((fingerprint(handle), provider_status, record_version));
+            reports.push((fingerprint(id.as_bytes()), status, 0));
         }
     }
 
-    fn get(&self, handle: &[u8]) -> Result<ResolvedCredential, CredentialError> {
-        let key = fingerprint(handle);
+    fn get_by_id(&self, id: &str) -> Result<ResolvedCredential, CredentialError> {
+        let key = fingerprint(id.as_bytes());
         let response = self
             .responses
             .lock()
@@ -284,14 +268,10 @@ impl CredentialSource for StubCredentialSource {
 pub struct FailClosedCredentialSource;
 
 impl CredentialSource for FailClosedCredentialSource {
-    fn get(&self, _handle: &[u8]) -> Result<ResolvedCredential, CredentialError> {
+    fn get_by_id(&self, _credential_id: &str) -> Result<ResolvedCredential, CredentialError> {
         Err(CredentialError::Transient(
             TransientCredentialError::VaultLocked,
         ))
-    }
-
-    fn get_by_id(&self, _credential_id: &str) -> Result<ResolvedCredential, CredentialError> {
-        self.get(&[])
     }
 }
 
@@ -383,27 +363,30 @@ mod tests {
     }
 
     #[test]
-    fn stub_supports_each_ckcred_error_class_without_rendering_handle() {
+    fn stub_supports_each_ckcred_error_class_by_name() {
         let source = StubCredentialSource::default();
-        let handle = b"canary-handle";
+        let handle = b"canary-credential";
         source.set_error(
             handle,
             CredentialError::Permanent(PermanentCredentialError::Corrupt),
         );
         assert_eq!(
-            source.get(handle),
+            source.get_by_id(std::str::from_utf8(handle).unwrap()),
             Err(CredentialError::Permanent(
                 PermanentCredentialError::Corrupt
             ))
         );
         source.set_error(handle, CredentialError::AuthRequired);
-        assert_eq!(source.get(handle), Err(CredentialError::AuthRequired));
+        assert_eq!(
+            source.get_by_id(std::str::from_utf8(handle).unwrap()),
+            Err(CredentialError::AuthRequired)
+        );
         source.set_error(
             handle,
             CredentialError::Transient(TransientCredentialError::VaultLocked),
         );
         assert_eq!(
-            source.get(handle),
+            source.get_by_id(std::str::from_utf8(handle).unwrap()),
             Err(CredentialError::Transient(
                 TransientCredentialError::VaultLocked
             ))
@@ -506,7 +489,15 @@ pub struct CkcredCredentialSource<P> {
     peer: std::sync::Arc<P>,
     /// The queue feeding the one thread that sends auth-failure reports,
     /// started by the first report and shared by every clone of this source.
-    reports: std::sync::Arc<Mutex<Option<std::sync::mpsc::SyncSender<serde_json::Value>>>>,
+    reports: std::sync::Arc<Mutex<Option<std::sync::mpsc::SyncSender<WipingValue>>>>,
+}
+
+/// Queue ownership includes wiping reports that are dropped before delivery.
+struct WipingValue(serde_json::Value);
+impl Drop for WipingValue {
+    fn drop(&mut self) {
+        zeroize_json_strings(&mut self.0);
+    }
 }
 
 /// How many auth-failure reports may wait for the vault at once. A report is
@@ -530,10 +521,6 @@ impl<P> CkcredCredentialSource<P> {
             reports: std::sync::Arc::new(Mutex::new(None)),
         }
     }
-
-    pub fn peer(&self) -> &std::sync::Arc<P> {
-        &self.peer
-    }
 }
 
 impl<P: CkcredRoutePeer + 'static> CredentialSource for CkcredCredentialSource<P> {
@@ -552,34 +539,6 @@ impl<P: CkcredRoutePeer + 'static> CredentialSource for CkcredCredentialSource<P
             self.report_scoped_auth_failure(credential_id, provider_status);
         }
     }
-
-    fn get(&self, handle: &[u8]) -> Result<ResolvedCredential, CredentialError> {
-        // The wire contract (verified against credentials-module
-        // read_surface::GetParams on the first live run):
-        // the handle rides as the `ckh_…` STRING — only the response payload
-        // is a byte array. A non-UTF-8 handle cannot exist on the real wire.
-        let handle_copy = Zeroizing::new(handle.to_vec());
-        let handle_text = std::str::from_utf8(&handle_copy)
-            .map_err(|_| CredentialError::Permanent(PermanentCredentialError::NotFound))?;
-        let params = serde_json::json!({ "handle": handle_text });
-        let response = self
-            .peer
-            .call("credential.get", params)
-            .map_err(route_error_to_credential_error)?;
-        parse_credential_get_response(response)
-    }
-
-    fn report_auth_failure(&self, handle: &[u8], provider_status: u16, record_version: u64) {
-        let Ok(handle_text) = std::str::from_utf8(handle) else {
-            return;
-        };
-        let params = serde_json::json!({
-            "handle": handle_text,
-            "provider_status": provider_status,
-            "record_version": record_version,
-        });
-        self.queue_auth_failure_report(params);
-    }
 }
 
 impl<P: CkcredRoutePeer + 'static> CkcredCredentialSource<P> {
@@ -587,21 +546,24 @@ impl<P: CkcredRoutePeer + 'static> CkcredCredentialSource<P> {
     /// The provider call has already reached its outcome, so a report that
     /// cannot be queued is dropped rather than delaying the caller.
     fn queue_auth_failure_report(&self, params: serde_json::Value) {
+        let params = WipingValue(params);
         let mut reports = self
             .reports
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         if reports.is_none() {
             let (sender, receiver) =
-                std::sync::mpsc::sync_channel::<serde_json::Value>(AUTH_FAILURE_REPORT_QUEUE);
+                std::sync::mpsc::sync_channel::<WipingValue>(AUTH_FAILURE_REPORT_QUEUE);
             let peer = std::sync::Arc::clone(&self.peer);
             // The thread ends once every clone of this source is gone, because
             // that drops the last sender.
             let spawned = std::thread::Builder::new()
                 .name("ckcred-auth-failure-report".into())
                 .spawn(move || {
-                    for params in receiver {
-                        let _ = peer.call("credential.report_auth_failure", params);
+                    for mut params in receiver {
+                        if let Err(error) = peer.call("credential.report_auth_failure", params.0.take()) {
+                            eprintln!(warn transport: "credential auth-failure report failed: {error:?}");
+                        }
                     }
                 });
             match spawned {
@@ -632,6 +594,9 @@ impl<P: CkcredRoutePeer + 'static> CkcredCredentialSource<P> {
 impl<P: CkcredRoutePeer + 'static> CkcredCredentialSource<P> {
     /// Report a rejected scoped credential to the vault without exposing the token.
     pub fn report_scoped_auth_failure(&self, credential_id: &str, status: u16) {
+        if status != 401 {
+            return;
+        }
         self.queue_auth_failure_report(serde_json::json!({
             "credential_id": credential_id, "provider_status": status
         }));
@@ -907,15 +872,19 @@ impl CkcredRoutePeer for SubcCkcredRoutePeer {
     ) -> Result<serde_json::Value, CkcredRouteError> {
         // ReadRequest on the module side keys the operation as `method`
         // (credentials-module main.rs read dispatch), not `op`.
-        let mut params = params;
-        let body = serde_json::to_vec(&serde_json::json!({
-            "method": operation,
-            "params": params,
-        }))
-        .map_err(|_| CkcredRouteError::Transport)?;
-        // The parameters can carry a bearer handle. The serialized body is
-        // the copy that is sent; wipe the strings of this one.
-        zeroize_json_strings(&mut params);
+        let params = WipingValue(params);
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            method: &'a str,
+            params: &'a serde_json::Value,
+        }
+        let body = Zeroizing::new(
+            serde_json::to_vec(&Request {
+                method: operation,
+                params: &params.0,
+            })
+            .map_err(|_| CkcredRouteError::Transport)?,
+        );
         let consumer = std::sync::Arc::clone(&self.consumer);
         let target = self.target.clone();
         let identity = self.identity.clone();
@@ -928,7 +897,9 @@ impl CkcredRoutePeer for SubcCkcredRoutePeer {
                 .call(
                     target,
                     identity,
-                    body,
+                    // The route client takes ownership of an ordinary Vec; its
+                    // internal wire buffers cannot be wiped through this API.
+                    body.to_vec(),
                     subc_client_rs::CallOptions::default(),
                 )
                 .await
@@ -1021,62 +992,23 @@ mod ckcred_wire_tests {
     fn credential_payload_is_an_integer_array_and_base64_drift_is_rejected() {
         let (source, peer) = source();
         peer.push(serde_json::json!({
-            "result": {"payload": [67, 65, 78, 65, 82, 89], "record_version": 7}
+            "result": {"credential_id":"credential", "payload": [67, 65, 78, 65, 82, 89], "record_version": 7}
         }));
-        let resolved = source.get(b"handle").expect("integer array payload");
+        let resolved = source
+            .get_by_id("credential")
+            .expect("integer array payload");
         assert_eq!(resolved.payload(), b"CANARY");
         assert_eq!(resolved.record_version, 7);
 
         peer.push(serde_json::json!({
-            "result": {"payload": "Q0FOQVJZ", "record_version": 8}
+            "result": {"credential_id":"credential", "payload": "Q0FOQVJZ", "record_version": 8}
         }));
         assert_eq!(
-            source.get(b"handle"),
+            source.get_by_id("credential"),
             Err(CredentialError::Permanent(
                 PermanentCredentialError::Corrupt
             ))
         );
-    }
-
-    #[test]
-    fn revoked_and_unknown_handles_share_the_permanent_not_found_path() {
-        let (source, peer) = source();
-        peer.push(serde_json::json!({
-            "result": {"error": {"code": "revoked", "class": "permanent"}}
-        }));
-        peer.push(serde_json::json!({
-            "result": {"error": {"code": "unknown_handle", "class": "permanent"}}
-        }));
-        let expected = Err(CredentialError::Permanent(
-            PermanentCredentialError::NotFound,
-        ));
-        assert_eq!(source.get(b"revoked"), expected);
-        assert_eq!(source.get(b"unknown"), expected);
-    }
-
-    #[test]
-    fn auth_failure_report_is_best_effort_and_carries_the_served_version() {
-        let (source, peer) = source();
-        peer.push(serde_json::json!({"result": {"payload": [1], "record_version": 42}}));
-        let credential = source.get(b"handle").expect("credential");
-        source.report_auth_failure(b"handle", 401, credential.record_version);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        loop {
-            if peer.calls.lock().expect("call log lock").len() >= 2 {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "report should be dispatched"
-            );
-            std::thread::yield_now();
-        }
-        let calls = peer.calls.lock().expect("call log lock");
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0, "credential.get");
-        assert_eq!(calls[1].0, "credential.report_auth_failure");
-        assert_eq!(calls[1].1["provider_status"], 401);
-        assert_eq!(calls[1].1["record_version"], 42);
     }
 
     #[test]
@@ -1124,11 +1056,14 @@ mod ckcred_wire_tests {
 
         let (source, peer) = source();
         peer.push(serde_json::json!({
-            "result": {"payload": [67, 65, 78, 65, 82, 89], "record_version": 9}
+            "result": {"credential_id":"test:stale-report-handle", "payload": [67, 65, 78, 65, 82, 89], "record_version": 9}
         }));
         peer.push_error(CkcredRouteError::Transport);
-        let credential = source.get(handle).expect("credential get");
-        source.report_auth_failure(handle, 401, credential.record_version);
+        let credential = source
+            .get_by_id(std::str::from_utf8(handle).unwrap())
+            .expect("credential get");
+        assert_eq!(credential.record_version, 9);
+        source.report_id_auth_failure(std::str::from_utf8(handle).unwrap(), 401);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
@@ -1158,7 +1093,7 @@ mod ckcred_wire_tests {
     #[test]
     fn reading_a_credential_wipes_the_token_from_the_reply() {
         let mut served = serde_json::json!({
-            "result": {"payload": [67, 65, 78, 65, 82, 89], "record_version": 7}
+            "result": {"credential_id":"credential", "payload": [67, 65, 78, 65, 82, 89], "record_version": 7}
         });
         let credential = take_credential(&mut served).expect("credential");
         assert_eq!(credential.payload(), b"CANARY");
@@ -1271,7 +1206,7 @@ mod ckcred_wire_tests {
         let peer = Arc::new(ReportPeer::default());
         let source = CkcredCredentialSource::new(Arc::clone(&peer));
         for _ in 0..20 {
-            source.report_auth_failure(b"handle", 401, 1);
+            source.report_id_auth_failure("credential", 401);
         }
         wait_for_reports(&peer, 20);
         let threads = peer.threads.lock().expect("thread log lock");
@@ -1291,7 +1226,7 @@ mod ckcred_wire_tests {
         let reporter = source.clone();
         std::thread::spawn(move || {
             for _ in 0..AUTH_FAILURE_REPORT_QUEUE * 2 {
-                reporter.report_auth_failure(b"handle", 401, 1);
+                reporter.report_id_auth_failure("credential", 401);
             }
             let _ = done.send(());
         });
@@ -1323,10 +1258,77 @@ mod ckcred_wire_tests {
             "result": {"error": {"code": "new_code", "class": "future_class"}}
         }));
         assert_eq!(
-            source.get(b"handle"),
+            source.get_by_id("credential"),
             Err(CredentialError::Transient(
                 TransientCredentialError::RefreshFailed
             ))
+        );
+    }
+}
+
+#[cfg(test)]
+mod report_diagnostic_tests {
+    use super::*;
+    #[allow(dead_code)]
+    mod logging {
+        include!("../tests/support/logging.rs");
+    }
+
+    #[test]
+    fn vault_report_failures_are_logged_without_credential_material() {
+        const TEST: &str = "credentials::report_diagnostic_tests::vault_report_failures_are_logged_without_credential_material";
+        if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
+            logging::init_child();
+            struct Peer {
+                calls: std::sync::atomic::AtomicUsize,
+                reached_second: std::sync::mpsc::Sender<()>,
+            }
+            impl CkcredRoutePeer for Peer {
+                fn call(
+                    &self,
+                    operation: &str,
+                    params: serde_json::Value,
+                ) -> Result<serde_json::Value, CkcredRouteError> {
+                    assert_eq!(operation, "credential.report_auth_failure");
+                    assert_eq!(
+                        params["provider_status"], 401,
+                        "403 must never report a credential bad"
+                    );
+                    if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                        self.reached_second.send(()).unwrap();
+                    }
+                    Err(CkcredRouteError::Transport)
+                }
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let source = CkcredCredentialSource::new(std::sync::Arc::new(Peer {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                reached_second: tx,
+            }));
+            source.report_id_auth_failure("PRIVATE-CREDENTIAL-NAME", 403);
+            source.report_id_auth_failure("PRIVATE-CREDENTIAL-NAME", 401);
+            source.report_id_auth_failure("PRIVATE-CREDENTIAL-NAME", 401);
+            rx.recv_timeout(std::time::Duration::from_secs(3))
+                .expect("second report proves the first reporting-loop iteration finished");
+            return;
+        }
+        let output = crate::test_http::bounded::child_output(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+            std::time::Duration::from_secs(10),
+            "vault report diagnostic",
+        )
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(
+            stderr.contains("credential auth-failure report failed: Transport"),
+            "vault report failure must be observable: {stderr}"
+        );
+        assert!(
+            !stderr.contains("PRIVATE-CREDENTIAL-NAME"),
+            "credential material must stay out of diagnostics: {stderr}"
         );
     }
 }

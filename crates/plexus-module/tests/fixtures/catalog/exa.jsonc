@@ -23,11 +23,7 @@
       "required": true
     }
   ],
-  "resource_filters": {
-    "required": [],
-    "optional": ["domain_allowlist", "domain_denylist", "content_category", "result_limit"],
-    "write_enabling": []
-  },
+  "resource_filters": {"required":[], "optional":[], "write_enabling":[]},
   "actions_baseline": [
     { "name": "web_search_exa", "risk": "read" },
     { "name": "web_fetch_exa", "risk": "read" }

@@ -124,7 +124,7 @@ fn inventory() -> Inventory {
             agent_id: "agent-one".into(),
             app_id: 42,
             installation_id: None,
-            credential_id: "github_app:one".into(),
+            credential_id: "github_app:app-one".into(),
             status: "enabled".into(),
             grants: vec![AgentPermission {
                 action: "create_issue".into(),
@@ -133,6 +133,147 @@ fn inventory() -> Inventory {
                 policy: "allow".into(),
             }],
         }],
+    }
+}
+
+#[test]
+fn inventory_handle_and_credential_must_name_the_same_app() {
+    let store = store();
+    let provider = Credentials(AtomicUsize::new(0));
+    let reader = Reader(AtomicUsize::new(0));
+    let mut input = inventory();
+    input.handles[0].credential_id = "github_app:other".into();
+    assert_eq!(
+        control::import(&store, "direct", &input, &provider, &reader, 0, true).unwrap_err(),
+        "inventory_handle_invalid"
+    );
+    assert_eq!(provider.0.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn import_preview_detects_existing_handle_before_apply() {
+    let store = store();
+    let provider = Credentials(AtomicUsize::new(0));
+    let reader = Reader(AtomicUsize::new(0));
+    control::import(&store, "direct", &inventory(), &provider, &reader, 0, false).unwrap();
+    assert!(control::import(&store, "direct", &inventory(), &provider, &reader, 0, true).is_err());
+}
+
+#[test]
+fn import_mints_one_agent_grant_per_action_not_per_repository() {
+    let store = store();
+    let mut input = inventory();
+    let mut second = input.handles[0].grants[0].clone();
+    second.repository = "org/repo0".into();
+    input.handles[0].grants.push(second);
+    let plan = control::import(
+        &store,
+        "direct",
+        &input,
+        &Credentials(AtomicUsize::new(0)),
+        &Reader(AtomicUsize::new(0)),
+        0,
+        false,
+    )
+    .unwrap();
+    assert_eq!(plan["agents"]["agent-one"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        store
+            .list_grants("direct", "github-handle-app-one")
+            .unwrap()
+            .iter()
+            .filter(|grant| grant.grant_id.contains(":agent:"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn failed_probe_clears_previous_proof() {
+    let store = store();
+    let provider = Credentials(AtomicUsize::new(0));
+    let reader = Reader(AtomicUsize::new(0));
+    control::import(&store, "direct", &inventory(), &provider, &reader, 0, false).unwrap();
+    control::probe(&store, "direct", "app-one", &provider, &reader, 1).unwrap();
+    store
+        .bind_github_repo("org/inaccessible", "app-one")
+        .unwrap();
+    assert!(control::probe(&store, "direct", "app-one", &provider, &reader, 2).is_err());
+    assert_eq!(
+        store
+            .github_handle_and_bindings("app-one")
+            .unwrap()
+            .unwrap()
+            .0
+            .proven_at,
+        None
+    );
+}
+
+#[test]
+fn probe_cannot_prove_a_rotated_credential_or_changed_binding() {
+    struct ChangingReader<'a> {
+        store: &'a PlexusStore,
+        rotate: bool,
+    }
+    impl InstallationReader for ChangingReader<'_> {
+        fn repositories_page(
+            &self,
+            _: &ResolvedCredential,
+            _: usize,
+            _: usize,
+        ) -> Result<Value, String> {
+            if self.rotate {
+                let (mut handle, _) = self
+                    .store
+                    .github_handle_and_bindings("app-one")
+                    .unwrap()
+                    .unwrap();
+                handle.credential_generation += 1;
+                self.store.put_github_handle(&handle).unwrap();
+            } else {
+                self.store.bind_github_repo("org/new", "app-one").unwrap();
+            }
+            Ok(json!({"repositories":[{"full_name":"org/last"}]}))
+        }
+    }
+    for rotate in [false, true] {
+        let store = store();
+        let provider = Credentials(AtomicUsize::new(0));
+        control::import(
+            &store,
+            "direct",
+            &inventory(),
+            &provider,
+            &Reader(AtomicUsize::new(0)),
+            0,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            control::probe(
+                &store,
+                "direct",
+                "app-one",
+                &provider,
+                &ChangingReader {
+                    store: &store,
+                    rotate
+                },
+                1
+            )
+            .unwrap_err(),
+            "store_failure"
+        );
+        assert_eq!(
+            store
+                .github_handle_and_bindings("app-one")
+                .unwrap()
+                .unwrap()
+                .0
+                .proven_at,
+            None
+        );
     }
 }
 
@@ -283,7 +424,7 @@ fn import_rolls_back_connection_handle_bindings_and_grants_on_a_late_error() {
     let mut second = input.handles[0].clone();
     second.app_handle_id = "app-two".into();
     second.agent_id = "agent-two".into();
-    second.credential_id = "github_app:two".into();
+    second.credential_id = "github_app:app-two".into();
     second.grants[0].provenance = "today-grant-2".into();
     second.grants[0].repository = "org/last".into();
     input.handles.push(second);
@@ -327,7 +468,7 @@ fn bindings_read_requires_a_module_grant_and_reports_rebinding_generation() {
     let mut second = input.handles[0].clone();
     second.app_handle_id = "app-two".into();
     second.agent_id = "agent-two".into();
-    second.credential_id = "github_app:two".into();
+    second.credential_id = "github_app:app-two".into();
     second.grants[0].repository = "org/repo0".into();
     input.handles.push(second);
     control::import(&store, "direct", &input, &provider, &reader, 0, false).unwrap();
@@ -335,8 +476,7 @@ fn bindings_read_requires_a_module_grant_and_reports_rebinding_generation() {
         control::bindings_read(&store, plexus_core::github::AFT_PRINCIPAL, connection).unwrap();
     assert_eq!(
         before["bindings"],
-        json!([{"repository":"org/last","app_handle_id":"app-one","agent_id":"agent-one"},
-            {"repository":"org/repo0","app_handle_id":"app-two","agent_id":"agent-two"}])
+        json!([{"repository":"org/last","app_handle_id":"app-one","agent_id":"agent-one"}])
     );
     assert_eq!(
         control::bindings_read(&store, "reserved:other", connection)
@@ -360,11 +500,7 @@ fn bindings_read_requires_a_module_grant_and_reports_rebinding_generation() {
         after["repo_binding_generation"].as_i64().unwrap()
             > before["repo_binding_generation"].as_i64().unwrap()
     );
-    assert_eq!(
-        after["bindings"],
-        json!([{"repository":"org/last","app_handle_id":"app-two","agent_id":"agent-two"},
-        {"repository":"org/repo0","app_handle_id":"app-two","agent_id":"agent-two"}])
-    );
+    assert_eq!(after["bindings"], json!([]));
 }
 
 #[test]
@@ -449,6 +585,7 @@ fn inventory_rejects_ask_first_reads_unreachable_repos_and_unresolvable_credenti
             .contains("org/not-listed")
     );
     input.handles[0].credential_id = "github_app:retired".into();
+    input.handles[0].app_handle_id = "retired".into();
     assert_eq!(
         control::import(&store, "direct", &input, &provider, &reader, 0, false).unwrap_err(),
         "handle_credential_unresolvable{credential_id: github_app:retired}"
@@ -477,9 +614,7 @@ impl plexus_core::credentials::CkcredRoutePeer for CountingVault {
 }
 
 /// The probe and the bind read the installation with the handle row's own
-/// credential generation. The credential cache keeps one token per handle
-/// and generation, so a read under any other generation would evict the
-/// token dispatch holds and make the next dispatch fetch it again.
+/// credential generation, so a probe does not fetch an obsolete generation.
 #[test]
 fn probe_and_bind_keep_the_dispatch_token_of_the_handles_generation() {
     use plexus_core::credentials::CkcredCredentialSource;
@@ -509,7 +644,9 @@ fn probe_and_bind_keep_the_dispatch_token_of_the_handles_generation() {
         std::sync::Arc::new(|| 0),
     );
     // Dispatch prepares the handle's current generation.
-    preparer.prepare("app-one", 3, "github_app:one").unwrap();
+    preparer
+        .prepare("app-one", 3, "github_app:app-one")
+        .unwrap();
     control::probe(&store, "direct", "app-one", &preparer, &reader, 1).unwrap();
     control::bind(
         &store,
@@ -522,7 +659,9 @@ fn probe_and_bind_keep_the_dispatch_token_of_the_handles_generation() {
         false,
     )
     .unwrap();
-    preparer.prepare("app-one", 3, "github_app:one").unwrap();
+    preparer
+        .prepare("app-one", 3, "github_app:app-one")
+        .unwrap();
     assert_eq!(
         vault.0.load(Ordering::SeqCst),
         1,

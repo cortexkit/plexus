@@ -72,6 +72,10 @@ fi
 
 SHA_FULL="$(git rev-parse HEAD)"
 SHA="$(git rev-parse --short=7 HEAD)"
+if [ "$(uname -s)" != Darwin ]; then
+  echo "stage-binaries: this deployment lane requires macOS (codesign and LC_UUID)" >&2
+  exit 2
+fi
 
 # The binaries must exist and must carry this commit. release-binaries.sh already
 # refuses a mismatch, but staging is a separate act and a stale target/ directory
@@ -82,11 +86,8 @@ for BIN in ck-plexus ck-plexus-admin; do
     exit 1
   fi
 done
-# `grep -q` exits on the first match and closes the pipe, so `strings` takes
-# SIGPIPE and the pipeline returns 141 under `pipefail` — a MATCH would read as
-# a failure, which is the inverted form of this check and the one that refuses a
-# correct binary. Count the matches instead: no early close, no signal.
-if [ "$(strings target/release/ck-plexus | grep -cF "$SHA_FULL")" -eq 0 ]; then
+# Read the declared build identity, not a substring which also matches -dirty.
+if ! bash "$REPO_ROOT/scripts/lib/verify-build-commit.sh" target/release/ck-plexus "$SHA_FULL"; then
   echo "target/release/ck-plexus does not carry HEAD $SHA_FULL" >&2
   echo "rebuild with scripts/release-binaries.sh (it refuses this case by name)" >&2
   exit 1
@@ -148,6 +149,10 @@ printf '%s\n' "$CATALOG_CHECK"
 
 mkdir -p "$STAGING"
 echo "==> staging $SHA into $STAGING"
+STAGING_ROOT="$STAGING"
+STAGING="$(mktemp -d "$STAGING_ROOT/.candidate.XXXXXX")"
+PUBLISH_LOCK=""
+trap 'rm -rf "$CHECK_DIR" "$STAGING"; if [ -n "$PUBLISH_LOCK" ]; then rmdir "$PUBLISH_LOCK"; fi' EXIT
 
 for BIN in ck-plexus ck-plexus-admin; do
   DEST="$STAGING/SIGNED.$BIN.$SHA"
@@ -355,6 +360,26 @@ fi
 # pair CURRENT and what destroys its predecessor.
 publish_staging() {
   local stamp bin digest old retired=0
+  PUBLISH_LOCK="$STAGING_ROOT/.publish.lock"
+  if ! mkdir "$PUBLISH_LOCK"; then
+    PUBLISH_LOCK=""
+    echo "refusing: another staging publisher holds the publication lock" >&2
+    exit 1
+  fi
+  for bin in ck-plexus ck-plexus-admin; do
+    if [ -e "$STAGING_ROOT/SIGNED.$bin.$SHA" ] || [ -L "$STAGING_ROOT/SIGNED.$bin.$SHA" ]; then
+      echo "refusing: immutable staging artifact already exists for $bin at $SHA" >&2
+      exit 1
+    fi
+  done
+  for bin in ck-plexus ck-plexus-admin; do
+    mv "$STAGING/SIGNED.$bin.$SHA" "$STAGING_ROOT/"
+    mv "$STAGING/SIGNED.$bin.$SHA.sha256" "$STAGING_ROOT/"
+  done
+  rmdir "$STAGING"
+  STAGING="$STAGING_ROOT"
+  # The candidate directory is gone; cleanup must never delete the staging root.
+  trap 'rm -rf "$CHECK_DIR"; rmdir "$PUBLISH_LOCK"' EXIT
   stamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   # The currency declaration, in the form the subconscious placer settled on: a
   # keyed file at the STAGING ROOT naming which stage is current, rather than a

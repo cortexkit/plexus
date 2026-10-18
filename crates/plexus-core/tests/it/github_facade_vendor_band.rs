@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 mod pr_ready;
+mod regressions;
 
 struct Token;
 impl HandleCredentialProvider for Token {
@@ -298,17 +299,14 @@ fn close_with_comment_records_two_effects_and_replays_without_a_second_write() {
         .iter()
         .map(|request| request.action.clone())
         .collect();
-    assert_eq!(
-        actions,
-        ["github.issue.get", "add_issue_comment", "close_issue"]
-    );
+    assert_eq!(actions, ["add_issue_comment", "close_issue"]);
     let sent = transport.requests();
     assert_eq!(
-        sent[1].args,
+        sent[0].args,
         json!({"owner":"org","repo":"repo","issue_number":42,"body":"done"})
     );
     assert_eq!(
-        sent[2].args,
+        sent[1].args,
         json!({"owner":"org","repo":"repo","issue_number":42,"state":"closed"})
     );
     let receipt = store
@@ -334,7 +332,7 @@ fn close_with_comment_records_two_effects_and_replays_without_a_second_write() {
         )["result"],
         first["result"]
     );
-    assert_eq!(transport.requests().len(), 3);
+    assert_eq!(transport.requests().len(), 2);
 }
 
 #[test]
@@ -464,7 +462,7 @@ fn approved_close_with_comment_consumes_one_request_after_both_effects() {
         store.github_receipt("agent-fixture", "approval-nonce"),
         store.list_audit(plexus_core::github::AFT_PRINCIPAL)
     );
-    assert_eq!(transport.requests().len(), 3);
+    assert_eq!(transport.requests().len(), 2);
     let (count, status): (i64, String) = db
         .query_row(
             "SELECT count(*), max(status) FROM action_requests",
@@ -490,7 +488,7 @@ fn approved_close_with_comment_consumes_one_request_after_both_effects() {
         denied["result"]["refusal_code"], "approval_denied",
         "{denied}"
     );
-    assert_eq!(transport.requests().len(), 3);
+    assert_eq!(transport.requests().len(), 2);
 }
 
 #[test]
@@ -698,7 +696,7 @@ fn g9_policy_movement_after_get_stops_the_write() {
                     .execute(
                         "INSERT INTO policies
                     (policy_id,principal,connection_id,action_selector,effect,updated_at_ms)
-                    VALUES ('changed','operator','conn-fixture','close_issue','block',1)",
+                     VALUES ('changed','operator','conn-fixture','edit_issue','block',1)",
                         [],
                     )
                     .unwrap();
@@ -708,13 +706,16 @@ fn g9_policy_movement_after_get_stops_the_write() {
     }
     let (scratch, store, _, _, scope) = setup(
         "facade-g9-policy",
-        &[("github.issue.get", "read"), ("close_issue", "write")],
+        &[("github.issue.get", "read"), ("edit_issue", "write")],
     );
     let transport = Arc::new(AfterRead {
         inner: MockTransport::default(),
         path: scratch.path().into(),
         moved: AtomicBool::new(false),
     });
+    transport.inner.set_response(MockResponse::Success(
+        json!({"user":{"login":"app-fixture[bot]","type":"Bot"}}),
+    ));
     let engine = GovernanceEngine::new(
         store.clone(),
         Arc::new(
@@ -727,7 +728,7 @@ fn g9_policy_movement_after_get_stops_the_write() {
         credential_provider: Some(Arc::new(Token)),
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
-    let request = json!({"verb":"issue close","repository":"org/repo","number":"42"});
+    let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -911,7 +912,8 @@ fn swept_uncertain_facade_effect_records_argument_free_disposition_with_original
     );
     let dispositions = store
         .list_write_reconciliations(plexus_core::github::AFT_PRINCIPAL)
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(dispositions.len(), 1);
     assert_eq!(dispositions[0].request_id, *id);
     assert_eq!(dispositions[0].status, "unreconcilable");
@@ -977,7 +979,8 @@ fn swept_receipt_with_future_reconciliation_class_never_queues_empty_args() {
     store.sweep_github_receipts(now + 121_000, 100).unwrap();
     let results = store
         .list_write_reconciliations(plexus_core::github::AFT_PRINCIPAL)
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, "unreconcilable");
     assert_eq!(
@@ -1080,8 +1083,8 @@ fn missing_handle_credential_is_reported_at_the_kind_specific_gate() {
     for (label, request, actions, gate) in [
         (
             "facade-credential-read",
-            json!({"verb":"issue close","repository":"org/repo","number":"42"}),
-            vec![("github.issue.get", "read"), ("close_issue", "write")],
+            json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}}),
+            vec![("github.issue.get", "read"), ("edit_issue", "write")],
             "G8",
         ),
         (
@@ -1277,7 +1280,7 @@ fn invalid_or_expired_list_releases_claim_for_same_nonce_retry() {
 fn g8_read_ask_first_never_creates_an_inner_action_request() {
     let (scratch, store, engine, transport, scope) = setup(
         "facade-read-ask-first",
-        &[("github.issue.get", "read"), ("close_issue", "write")],
+        &[("github.issue.get", "read"), ("edit_issue", "write")],
     );
     Connection::open(scratch.path())
         .unwrap()
@@ -1286,7 +1289,7 @@ fn g8_read_ask_first_never_creates_an_inner_action_request() {
             [],
         )
         .unwrap();
-    let request = json!({"verb":"issue close","repository":"org/repo","number":"42"});
+    let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1327,13 +1330,13 @@ fn g8_read_ask_first_never_creates_an_inner_action_request() {
 fn g8_read_401_is_sticky_and_never_retransmits() {
     let (_scratch, store, engine, transport, scope) = setup(
         "facade-read-401",
-        &[("github.issue.get", "read"), ("close_issue", "write")],
+        &[("github.issue.get", "read"), ("edit_issue", "write")],
     );
     transport.set_response(MockResponse::VendorError {
         code: "http_401".into(),
         message: "expired".into(),
     });
-    let request = json!({"verb":"issue close","repository":"org/repo","number":"42"});
+    let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1415,16 +1418,16 @@ fn recording_transport_read_set_is_exact_for_every_kind() {
             vec!["github.issue_comment.get"],
         ),
         (
-            "facade-close-read",
+            "facade-close-no-read",
             json!({"verb":"issue close","number":"42"}),
-            vec![("github.issue.get", "read"), ("close_issue", "write")],
-            vec!["github.issue.get"],
+            vec![("close_issue", "write")],
+            vec![],
         ),
         (
-            "facade-reopen-read",
+            "facade-reopen-no-read",
             json!({"verb":"pr reopen","number":"42"}),
-            vec![("github.issue.get", "read"), ("reopen_issue", "write")],
-            vec!["github.issue.get"],
+            vec![("reopen_issue", "write")],
+            vec![],
         ),
     ];
     for (label, mut request, actions, expected_reads) in cases {
@@ -1699,7 +1702,8 @@ fn expired_retry_records_unknown_disposition_before_any_sweep_and_never_resends(
     assert!(transport.requests().is_empty());
     let result = store
         .list_write_reconciliations(plexus_core::github::AFT_PRINCIPAL)
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].request_id, original_request_id);
     assert_eq!(result[0].status, "unreconcilable");
@@ -1804,15 +1808,7 @@ fn close_with_comment_retries_only_unfinished_state_after_second_pretransmit_sto
         .iter()
         .map(|r| r.action.clone())
         .collect();
-    assert_eq!(
-        actions,
-        [
-            "github.issue.get",
-            "add_issue_comment",
-            "github.issue.get",
-            "close_issue"
-        ]
-    );
+    assert_eq!(actions, ["add_issue_comment", "close_issue"]);
     let final_receipt = store
         .github_receipt("agent-fixture", "two-effect-stop")
         .unwrap()
@@ -1881,20 +1877,6 @@ fn read_branch_cases() -> Vec<ReadBranchCase> {
             actions: vec![("github.issue.get", "read"), ("edit_issue", "write")],
             last_read: "github.issue.get",
             write: "edit_issue",
-        },
-        ReadBranchCase {
-            label: "issue-close",
-            request: json!({"verb":"issue close","repository":"org/repo","number":"42"}),
-            actions: vec![("github.issue.get", "read"), ("close_issue", "write")],
-            last_read: "github.issue.get",
-            write: "close_issue",
-        },
-        ReadBranchCase {
-            label: "pr-reopen",
-            request: json!({"verb":"pr reopen","repository":"org/repo","number":"42"}),
-            actions: vec![("github.issue.get", "read"), ("reopen_issue", "write")],
-            last_read: "github.issue.get",
-            write: "reopen_issue",
         },
     ]
 }
@@ -2464,7 +2446,6 @@ fn every_facade_leg_sends_only_its_actions_declared_arguments() {
             "legs-close",
             json!({"verb":"issue close","number":"42","comment":"done","reason":"not_planned"}),
             vec![
-                ("github.issue.get", issue.to_vec()),
                 ("add_issue_comment", with(&["body"])),
                 ("close_issue", with(&["state", "state_reason"])),
             ],
@@ -2473,7 +2454,6 @@ fn every_facade_leg_sends_only_its_actions_declared_arguments() {
             "legs-reopen",
             json!({"verb":"issue reopen","number":"42","comment":"again"}),
             vec![
-                ("github.issue.get", issue.to_vec()),
                 ("add_issue_comment", with(&["body"])),
                 ("reopen_issue", with(&["state"])),
             ],
@@ -2863,6 +2843,7 @@ fn validation_rest_engine(
     );
     let operation = HttpOperation {
         method: HttpMethod::Post,
+        parameters: None,
         path: "/fixture".into(),
         args_schema: json!({"type":"object"}),
         request_constants: None,
@@ -3440,9 +3421,15 @@ mod scoped {
 
     #[test]
     fn a_scope_ended_after_the_read_stops_the_write_and_the_refusal_replays() {
-        let fixture = scoped("scoped-ended-before-write", CLOSE_ACTIONS);
+        let fixture = scoped(
+            "scoped-ended-before-write",
+            &[("github.issue.get", "read"), ("edit_issue", "write")],
+        );
+        fixture.transport.set_response(MockResponse::Success(
+            json!({"user":{"login":"app-fixture[bot]","type":"Bot"}}),
+        ));
         fixture.reader.then(ended());
-        let close = json!({"verb":"issue close","repository":"org/repo","number":"42"});
+        let close = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
         let scope = stamp("agent-fixture", true);
         let first = fixture.send(&scope, &close, "ended-close", now());
         assert_eq!(
@@ -3525,7 +3512,7 @@ mod scoped {
             json!({"status":"refused","refusal_code":"scope_ended","legs_sent":["add_issue_comment"]}),
             "{first}"
         );
-        assert_eq!(fixture.actions(), ["github.issue.get", "add_issue_comment"]);
+        assert_eq!(fixture.actions(), ["add_issue_comment"]);
         let receipt = fixture
             .store
             .github_receipt("agent-fixture", "ended-between")
@@ -3542,7 +3529,7 @@ mod scoped {
         );
         let retry = fixture.send(&scope, &close, "ended-between", now() + 1);
         assert_eq!(retry["result"], first["result"]);
-        assert_eq!(fixture.actions().len(), 2);
+        assert_eq!(fixture.actions().len(), 1);
     }
 
     #[test]
@@ -3605,7 +3592,7 @@ mod scoped {
             json!({"status":"refused","refusal_code":"scope_not_synced","legs_sent":["add_issue_comment"]}),
             "{first}"
         );
-        assert_eq!(fixture.actions(), ["github.issue.get", "add_issue_comment"]);
+        assert_eq!(fixture.actions(), ["add_issue_comment"]);
         let receipt = fixture
             .store
             .github_receipt("agent-fixture", "not-synced-between")
@@ -3624,12 +3611,7 @@ mod scoped {
         assert_eq!(retry["result"]["status"], "completed", "{retry}");
         assert_eq!(
             fixture.actions(),
-            [
-                "github.issue.get",
-                "add_issue_comment",
-                "github.issue.get",
-                "close_issue"
-            ],
+            ["add_issue_comment", "close_issue"],
             "the comment is not sent twice"
         );
         assert_eq!(
@@ -3684,12 +3666,7 @@ mod scoped {
         assert_eq!(retry["result"]["status"], "completed", "{retry}");
         assert_eq!(
             fixture.actions(),
-            [
-                "github.issue.get",
-                "add_issue_comment",
-                "github.issue.get",
-                "close_issue"
-            ],
+            ["add_issue_comment", "close_issue"],
             "the comment is not sent twice"
         );
     }
@@ -3726,12 +3703,15 @@ fn handle_unbind_after_authorization_stops_dispatch() {
     }
     let (_scratch, store, _, _, scope) = setup(
         "unbind-in-flight",
-        &[("github.issue.get", "read"), ("close_issue", "write")],
+        &[("github.issue.get", "read"), ("edit_issue", "write")],
     );
     let transport = Arc::new(UnbindAfterRead {
         inner: MockTransport::default(),
         store: store.clone(),
     });
+    transport.inner.set_response(MockResponse::Success(
+        json!({"user":{"login":"app-fixture[bot]","type":"Bot"}}),
+    ));
     let engine = GovernanceEngine::new(
         store.clone(),
         Arc::new(
@@ -3753,7 +3733,7 @@ fn handle_unbind_after_authorization_stops_dispatch() {
         &engine,
         plexus_core::github::AFT_PRINCIPAL,
         Some(&scope),
-        &json!({"verb":"issue close", "repository":"org/repo", "number":"42"}),
+        &json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}}),
         "unbind-flight",
         "unbind-flight-id",
         "worker",
@@ -3788,8 +3768,7 @@ impl HandleCredentialProvider for TransientOnce {
     fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
 }
 
-/// Close an issue with a comment: the issue read, then the comment, then the
-/// close. The close's credential preparation fails once as transient, after
+/// Close an issue with a comment: the comment, then the close. The close's credential preparation fails once as transient, after
 /// the comment was sent and answered with `comment_response`. A same-nonce
 /// retry straight afterwards must resume at the close and complete, sending
 /// the comment exactly once. Returns the actions GitHub received.
@@ -3824,10 +3803,11 @@ fn close_after_a_transient_second_leg_with_generation_failure(
     )
     .with_governance_seams(Arc::new(GithubGovernanceSeams {
         store: store.clone(),
-        // The issue read is preparation 1, the comment 2, the close 3.
+        // Credential preparation runs before each write: posting the comment
+        // is the first call, and changing the issue state is the second.
         credential_provider: Some(Arc::new(TransientOnce {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            fail_at: 3,
+            fail_at: 2,
         })),
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
@@ -3912,12 +3892,7 @@ fn close_after_a_transient_second_leg_with_generation_failure(
 fn a_transient_failure_on_a_later_leg_lets_a_same_nonce_retry_resume() {
     assert_eq!(
         close_after_a_transient_second_leg("transient-second-leg", json!({"id": 9})),
-        [
-            "github.issue.get",
-            "add_issue_comment",
-            "github.issue.get",
-            "close_issue"
-        ]
+        ["add_issue_comment", "close_issue"]
     );
 }
 
@@ -3927,12 +3902,7 @@ fn a_transient_failure_on_a_later_leg_lets_a_same_nonce_retry_resume() {
 fn an_empty_success_body_on_an_earlier_leg_is_not_a_write_in_doubt() {
     assert_eq!(
         close_after_a_transient_second_leg("empty-body-first-leg", Value::Null),
-        [
-            "github.issue.get",
-            "add_issue_comment",
-            "github.issue.get",
-            "close_issue"
-        ]
+        ["add_issue_comment", "close_issue"]
     );
 }
 
@@ -4427,12 +4397,7 @@ fn generation_failure_preserves_partial_write_and_later_resume() {
             json!({"id":9}),
             true
         ),
-        [
-            "github.issue.get",
-            "add_issue_comment",
-            "github.issue.get",
-            "close_issue"
-        ],
+        ["add_issue_comment", "close_issue"],
         "a healthy same-nonce retry must send only the unfinished write leg"
     );
 }

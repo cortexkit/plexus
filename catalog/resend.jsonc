@@ -29,8 +29,8 @@
   ],
   "resource_filters": {
     "required": [],
-    "optional": ["from_domain"],
-    "write_enabling": ["from_domain"]
+    "optional": [],
+    "write_enabling": []
   },
   // Tool IDs confirmed from Resend's account MCP documentation. The subset
   // covers email, contacts, domains, and broadcasts; the docs-only MCP server
@@ -40,119 +40,53 @@
     { "name": "get-email", "risk": "read" },
     {
       "name": "send-email",
-      "risk": "destructive",
-      "reconciliation": {
-        "correlation_fields": ["from_domain", "to", "subject", "time_window"],
-        "read_back_action": "get-email",
-        "timeout_s": 120
-      },
-      "idempotency": "none"
+      "risk": "destructive"
     },
     {
       "name": "cancel-email",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["from_domain", "email_id", "time_window"],
-        "read_back_action": "get-email",
-        "timeout_s": 120
-      },
-      "idempotency": "natural"
+      "risk": "write"
     },
     { "name": "list-contacts", "risk": "read" },
     { "name": "get-contact", "risk": "read" },
     {
       "name": "create-contact",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["from_domain", "email", "time_window"],
-        "read_back_action": "get-contact",
-        "timeout_s": 120
-      },
-      "idempotency": "none"
+      "risk": "write"
     },
     {
       "name": "update-contact",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["from_domain", "email", "time_window"],
-        "read_back_action": "get-contact",
-        "timeout_s": 120
-      },
-      "idempotency": "natural"
+      "risk": "write"
     },
     {
       "name": "remove-contact",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["from_domain", "email", "time_window"],
-        "read_back_action": "get-contact",
-        "timeout_s": 120
-      },
-      "idempotency": "natural"
+      "risk": "destructive"
     },
     { "name": "list-domains", "risk": "read" },
     { "name": "get-domain", "risk": "read" },
     {
       "name": "create-domain",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["from_domain", "name", "time_window"],
-        "read_back_action": "get-domain",
-        "timeout_s": 180
-      },
-      "idempotency": "none"
+      "risk": "write"
     },
     {
       "name": "verify-domain",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["from_domain", "domain_id", "time_window"],
-        "read_back_action": "get-domain",
-        "timeout_s": 180
-      },
-      "idempotency": "natural"
+      "risk": "write"
     },
     { "name": "list-broadcasts", "risk": "read" },
     { "name": "get-broadcast", "risk": "read" },
     {
       "name": "create-broadcast",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["from_domain", "subject", "time_window"],
-        "read_back_action": "get-broadcast",
-        "timeout_s": 120
-      },
-      "idempotency": "none"
+      "risk": "write"
     },
     {
       "name": "update-broadcast",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["from_domain", "broadcast_id", "time_window"],
-        "read_back_action": "get-broadcast",
-        "timeout_s": 120
-      },
-      "idempotency": "natural"
+      "risk": "write"
     },
     {
       "name": "send-broadcast",
-      "risk": "destructive",
-      "reconciliation": {
-        "correlation_fields": ["from_domain", "broadcast_id", "time_window"],
-        "read_back_action": "get-broadcast",
-        "timeout_s": 180
-      },
-      "idempotency": "none"
+      "risk": "destructive"
     },
     {
       "name": "remove-broadcast",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["from_domain", "broadcast_id", "time_window"],
-        "read_back_action": "get-broadcast",
-        "timeout_s": 120
-      },
-      "idempotency": "natural"
+      "risk": "destructive"
     }
   ],
   "defaults": {

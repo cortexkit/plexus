@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/cortexkit/plexus"
 
 [features]
-test-support = []
+test-support = ["dep:rustix"]
 
 [[example]]
 name = "migration_rehearsal"
@@ -27,9 +27,10 @@ serde_path_to_error = { workspace = true }
 ryu-js = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+getrandom = "0.3"
 zeroize = { workspace = true }
 rusqlite = { workspace = true }
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["process"], optional = true }
 cortexkit-store = { workspace = true }
 cortexkit-store-types = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

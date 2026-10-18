@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use base64::Engine;
 use cortexkit_bus_naming::AccountNames;
 use cortexkit_bus_nats::{ConnectConfig, NatsConnection};
-use cortexkit_bus_trait::{ContentDigest, Headers, PublishReceipt, Stream};
-use plexus_core::storage::event_outbox::OutboxCursor;
+use cortexkit_bus_trait::{BusError, ContentDigest, Headers, PublishReceipt, Stream};
+use plexus_core::storage::event_outbox::{OutboxCursor, OutboxVersion};
 use plexus_core::{event_key::PUBLISHED_EVENTS, storage::now_ms, EventHeaders, PlexusStore};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -29,6 +29,22 @@ use tokio::sync::mpsc;
 use tracing_subscriber::{layer::SubscriberExt, Layer};
 
 use crate::ModuleState;
+
+const OUTBOX_BATCH: usize = 50;
+const OUTBOX_IDLE: Duration = Duration::from_secs(30);
+
+fn session_reusable(error: &str) -> bool {
+    matches!(
+        error,
+        "nats_publish_refused" | "nats_publish_clamped" | "nats_publish_capacity"
+    )
+}
+
+fn zeroizing_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<zeroize::Zeroizing<String>, D::Error> {
+    String::deserialize(deserializer).map(zeroize::Zeroizing::new)
+}
 
 // Transport trace output includes authentication headers and NATS ConnectInfo.
 // This filter is outside the fleet log filter, so CK_LOG cannot enable secret output.
@@ -65,7 +81,8 @@ pub(crate) fn init_logger_from_env() -> Result<cortexkit_log::Handle, cortexkit_
 /// Secret material (`jwt`, `credential_public`) is deliberately omitted from `Debug`.
 #[derive(Clone, Deserialize)]
 pub struct Credential {
-    pub jwt: String,
+    #[serde(deserialize_with = "zeroizing_string")]
+    pub jwt: zeroize::Zeroizing<String>,
     pub exp: i64,
     pub acct: String,
     pub account_public: String,
@@ -119,7 +136,8 @@ impl Credential {
 
 #[derive(Deserialize)]
 struct Renewal {
-    jwt: String,
+    #[serde(deserialize_with = "zeroizing_string")]
+    jwt: zeroize::Zeroizing<String>,
     exp: i64,
     credential_public: String,
     user_jwt_id: String,
@@ -338,12 +356,13 @@ async fn connect_with_signer(
                 match route.sign(&key, &nonce).await {
                     Ok(signature) => {
                         let mut auth = async_nats::Auth::new();
-                        auth.jwt = Some(jwt);
+                        auth.jwt = Some(jwt.to_string());
                         auth.signature = Some(signature);
                         return Ok(auth);
                     }
                     Err(e) => {
                         last = e;
+                        *callback_error.lock().unwrap() = Some(last.clone());
                         if fresh_required(&last) {
                             break;
                         }
@@ -370,7 +389,8 @@ async fn connect_with_signer(
         }
     })
     .ignore_discovered_servers()
-    .connection_timeout(Duration::from_secs(2));
+    // Four nonce-sign calls can each take two seconds, plus retry spacing.
+    .connection_timeout(Duration::from_secs(10));
 
     let connection = NatsConnection::connect(
         &credential.server_url,
@@ -421,7 +441,18 @@ impl EventPublisher for NatsEventPublisher {
         stream
             .publish(subject, id, digest, headers)
             .await
-            .map_err(|_| "nats_publish_failed".into())
+            .map_err(|error| {
+                match error {
+                    BusError::Denied { .. } | BusError::Absent { .. } => "nats_publish_refused",
+                    BusError::Clamped { .. } => "nats_publish_clamped",
+                    BusError::Unavailable {
+                        exhausted_limit: Some(_),
+                        ..
+                    } => "nats_publish_capacity",
+                    _ => "nats_publish_failed",
+                }
+                .into()
+            })
     }
 }
 
@@ -470,6 +501,9 @@ pub(crate) fn notice_headers(
             }
         };
         if let Some(value) = value {
+            if value.chars().any(char::is_control) {
+                return Err("header_invalid".into());
+            }
             headers.insert((*name).to_string(), value);
         }
     }
@@ -487,9 +521,11 @@ struct DrainCursorState {
     known: BTreeSet<(u8, String)>,
     seen: BTreeSet<(u8, String)>,
     after: BTreeMap<u8, OutboxCursor>,
+    refused_passes: BTreeMap<(u8, String), u32>,
 }
 
 impl UnpublishableRows {
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).known.len()
     }
@@ -541,6 +577,84 @@ impl UnpublishableRows {
         state.seen = seen.into_iter().filter(|key| key.0 != version).collect();
         state.after.remove(&version);
     }
+
+    fn isolated_refusals(
+        &self,
+        version: u8,
+        refused: &[String],
+        made_progress: bool,
+    ) -> Vec<String> {
+        let mut state = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        state
+            .refused_passes
+            .retain(|(v, key), _| *v != version || (made_progress && refused.contains(key)));
+        if !made_progress {
+            return vec![];
+        }
+        refused
+            .iter()
+            .filter_map(|key| {
+                let count = state
+                    .refused_passes
+                    .entry((version, key.clone()))
+                    .or_default();
+                *count += 1;
+                (*count >= 3).then(|| key.clone())
+            })
+            .collect()
+    }
+}
+
+fn outbox_version(version: u8) -> OutboxVersion {
+    if version == 2 {
+        OutboxVersion::V2
+    } else {
+        OutboxVersion::V1
+    }
+}
+
+async fn mark_unpublishable(
+    store: &Arc<PlexusStore>,
+    key: &str,
+    version: u8,
+    reason: &'static str,
+) -> Result<(), String> {
+    let db = store.clone();
+    let key = key.to_owned();
+    tokio::task::spawn_blocking(move || {
+        db.mark_outbox_unpublishable(&key, outbox_version(version), reason, now_ms())
+    })
+    .await
+    .map_err(|_| "outbox_dead_letter_join_failed")?
+    .map_err(|_| "outbox_dead_letter_failed".into())
+}
+
+async fn refresh_unpublishable_count(state: &ModuleState) -> Result<(), String> {
+    let db = state.store().clone();
+    let count = tokio::task::spawn_blocking(move || db.unpublishable_outbox_count())
+        .await
+        .map_err(|_| "outbox_count_join_failed")?
+        .map_err(|_| "outbox_count_failed")?;
+    state.health.stamp_outbox_unpublishable(count);
+    Ok(())
+}
+
+async fn outbox_has_pending(store: &Arc<PlexusStore>) -> Result<bool, String> {
+    let db = store.clone();
+    tokio::task::spawn_blocking(move || {
+        for &version in plexus_core::event_key::PUBLISHED_EVENT_VERSIONS {
+            if !db
+                .drain_event_outbox_version_after(1, version, None)?
+                .is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        Ok::<_, cortexkit_store::StoreError>(false)
+    })
+    .await
+    .map_err(|_| "outbox_read_join_failed")?
+    .map_err(|_| "outbox_read_failed".into())
 }
 
 /// Drain one batch of pending outbox events and publish them.
@@ -591,7 +705,9 @@ pub(crate) async fn drain_pass_skipping(
         {
             Ok(count) => published += count,
             Err(error) => {
-                first_error.get_or_insert(error);
+                if first_error.as_deref().is_none_or(session_reusable) {
+                    first_error = Some(error);
+                }
             }
         }
     }
@@ -638,6 +754,9 @@ async fn drain_version_pass(
     .map_err(|_| "outbox_read_join_failed")?
     .map_err(|e| e.to_string())?;
     let mut published = 0;
+    let mut acknowledged = Vec::new();
+    let mut refused = Vec::new();
+    let mut first_error = None;
     for (event, cursor) in &events {
         if unpublishable.contains(version, &event.event_key) {
             unpublishable.advance(version, cursor.clone());
@@ -650,6 +769,17 @@ async fn drain_version_pass(
                     "outbox event {} (v{version}, {}) cannot be published and is skipped: {reason}",
                     event.event_key, event.event_name
                 );
+                mark_unpublishable(
+                    store,
+                    &event.event_key,
+                    version,
+                    if reason == "header_invalid" {
+                        "header_invalid"
+                    } else {
+                        "notice_invalid"
+                    },
+                )
+                .await?;
                 unpublishable.insert(version, &event.event_key);
                 unpublishable.advance(version, cursor.clone());
                 continue;
@@ -673,11 +803,26 @@ async fn drain_version_pass(
         // it may have lost the claim during awaited work, including session setup
         // or the previous publish's ack.
         if !held() {
-            return Err("connector_home_not_held".into());
+            first_error = Some("connector_home_not_held".to_owned());
+            break;
         }
-        let receipt = publisher
+        let receipt = match publisher
             .publish(&subject, &notice_id, digest, headers)
-            .await?;
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) if error == "nats_publish_refused" => {
+                eprintln!(warn bus: "outbox publish refused: event_key={} version={version} code=nats_publish_refused", event.event_key);
+                refused.push(event.event_key.clone());
+                unpublishable.advance(version, cursor.clone());
+                first_error.get_or_insert(error);
+                continue;
+            }
+            Err(error) => {
+                first_error = Some(error);
+                break;
+            }
+        };
         if receipt.duplicate() {
             // A stored event has one immutable notice id per version. A duplicate
             // acknowledges that same notice after a publish-before-stamp crash.
@@ -687,23 +832,31 @@ async fn drain_version_pass(
             );
         }
 
-        // Stamp both new publishes and acknowledged retries; neither needs another
-        // stream entry to finish the pending outbox marker.
+        acknowledged.push(event.event_key.clone());
+        unpublishable.advance(version, cursor.clone());
+        published += 1;
+    }
+    // Stamp acknowledgements even if a later publish failed. A cancelled batch
+    // can replay its immutable notice IDs safely through JetStream deduplication.
+    if !acknowledged.is_empty() {
         let db = store.clone();
-        let key = event.event_key.clone();
         tokio::task::spawn_blocking(move || {
-            db.mark_event_version_published(&key, version, now_ms())
+            let keys: Vec<_> = acknowledged.iter().map(String::as_str).collect();
+            db.mark_events_published(&keys, outbox_version(version), now_ms())
         })
         .await
         .map_err(|_| "outbox_stamp_join_failed")?
         .map_err(|e| e.to_string())?;
-        unpublishable.advance(version, cursor.clone());
-        published += 1;
+    }
+    // A whole-account refusal is a bus outage, not evidence of corrupt rows.
+    // Require successful peers in three consecutive passes before quarantining.
+    for key in unpublishable.isolated_refusals(version, &refused, published > 0) {
+        mark_unpublishable(store, &key, version, "publish_refused").await?;
     }
     if events.len() < batch_size {
         unpublishable.complete_sweep(version);
     }
-    Ok(published)
+    first_error.map_or(Ok(published), Err)
 }
 
 // async-nats exposes graceful drain but no abortive close. Give each session
@@ -801,22 +954,14 @@ impl SessionFactory for ProductionSessions {
 }
 
 async fn wait_for_claim_loss(state: &ModuleState) {
-    loop {
-        if !state.runtime.connector_home.held() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let mut claim = state.runtime.connector_home.decisions();
+    let _ = claim.wait_for(|held| !*held).await;
 }
 
 // A full batch can have more rows behind it; otherwise a notification or the
 // fallback timer starts the next pass.
-fn next_outbox_delay(published: usize) -> Duration {
-    if published >= 50 {
-        Duration::ZERO
-    } else {
-        Duration::from_secs(30)
-    }
+fn reconnect_backoff(failures: u32) -> Duration {
+    Duration::from_secs(1u64 << failures.min(9)).min(Duration::from_secs(300))
 }
 
 async fn wait_for_outbox(store: &PlexusStore, delay: Duration, failures: u32) {
@@ -841,18 +986,26 @@ pub(crate) fn spawn_outbox_drain(
         let mut session: Option<BusSession> = None;
         let mut delay = Duration::ZERO;
         let mut failures = 0u32;
+        let mut claim = state.runtime.connector_home.decisions();
         loop {
             tokio::select! {
                 biased;
                 _ = stop.recv() => break,
+                _ = claim.changed() => {},
                 _ = wait_for_outbox(state.store(), delay, failures) => {}
             }
-            delay = next_outbox_delay(0);
+            delay = OUTBOX_IDLE;
+            if let Err(error) = refresh_unpublishable_count(&state).await {
+                state.health.record_publish_error(error);
+            }
             if !state.runtime.connector_home.held() {
                 session = None;
                 continue;
             }
             let work = async {
+                if !outbox_has_pending(state.store()).await? {
+                    return Ok(0);
+                }
                 if session.is_none() {
                     session = Some(factory.open().await?);
                 }
@@ -864,14 +1017,12 @@ pub(crate) fn spawn_outbox_drain(
                     state.store(),
                     &active.account,
                     active.publisher.as_ref(),
-                    50,
+                    OUTBOX_BATCH,
                     &|| state.runtime.connector_home.held(),
                     &unpublishable,
                 )
                 .await;
-                state
-                    .health
-                    .stamp_outbox_unpublishable(unpublishable.len() as u64);
+                refresh_unpublishable_count(&state).await?;
                 result
             };
             let result = tokio::select! {
@@ -882,23 +1033,27 @@ pub(crate) fn spawn_outbox_drain(
             };
             match result {
                 Ok(published) => {
-                    state.health.clear_publish_error();
+                    if published > 0 || !outbox_has_pending(state.store()).await.unwrap_or(true) {
+                        state.health.clear_publish_error();
+                    }
                     failures = 0;
                     delay = if unpublishable.pending_more() {
                         Duration::ZERO
                     } else {
-                        next_outbox_delay(published)
+                        OUTBOX_IDLE
                     };
                 }
                 Err(error) => {
                     // Dropping a session terminates its transport tasks without
                     // flushing queued messages. Timeouts and auth errors also
                     // require a fresh gated session, not an autonomous retry.
-                    session = None;
+                    if !session_reusable(&error) {
+                        session = None;
+                    }
                     if error != "connector_home_not_held" {
                         state.health.record_publish_error(error);
                         failures = failures.saturating_add(1);
-                        delay = Duration::from_millis(100 * (1 << failures.min(6)));
+                        delay = reconnect_backoff(failures);
                     }
                 }
             }
@@ -920,6 +1075,11 @@ pub mod tests {
 
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
+    fn current_health(state: &ModuleState) -> subc_protocol::session::ModuleControlResponse {
+        state.health.stamp_heartbeat();
+        crate::connector_home_health(state)
+    }
+
     struct TestSigner;
     impl NonceSigner for TestSigner {
         fn sign<'a>(&'a self, _: &'a str, _: &'a [u8]) -> SignFuture<'a> {
@@ -927,9 +1087,46 @@ pub mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn auth_callback_budget_includes_slow_nonce_retries() {
+        struct SlowSigner(std::sync::atomic::AtomicU32);
+        impl NonceSigner for SlowSigner {
+            fn sign<'a>(&'a self, _: &'a str, _: &'a [u8]) -> SignFuture<'a> {
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(900)).await;
+                    if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                        Err("ckbus_refused".into())
+                    } else {
+                        Ok(vec![1; 64])
+                    }
+                })
+            }
+        }
+        let (url, mut auth, _, _, server) =
+            loopback_with_deadlines(Duration::from_secs(8), Duration::from_secs(15)).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(12),
+            connect_with_signer(
+                Arc::new(SlowSigner(std::sync::atomic::AtomicU32::new(0))),
+                &credential(url),
+            ),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert!(
+            result.is_ok(),
+            "slow nonce retries must fit within the connection budget"
+        );
+        assert!(tokio::time::timeout(Duration::from_secs(3), auth.recv())
+            .await
+            .unwrap()
+            .is_some());
+    }
+
     fn credential(url: String) -> Credential {
         Credential {
-            jwt: "SECRET-JWT-for-loopback".into(),
+            jwt: "SECRET-JWT-for-loopback".to_string().into(),
             exp: now_ms() / 1000 + 900,
             acct: "box_test".into(),
             account_public: "ACCOUNT".into(),
@@ -1042,7 +1239,7 @@ pub mod tests {
                 let (url, mut auth, _, _, server) = loopback().await;
                 let original = credential(url);
                 let mut fresh = original.clone();
-                fresh.jwt = "NEW-JWT-after-renewal".into();
+                fresh.jwt = "NEW-JWT-after-renewal".to_string().into();
                 if replaced {
                     fresh.credential_public = "REPLACEMENT".into();
                     fresh.inbox_prefix = "_INBOX.REPLACEMENT".into();
@@ -1059,7 +1256,7 @@ pub mod tests {
                         "first CONNECT with the original JWT",
                     )
                     .await,
-                    original.jwt
+                    original.jwt.as_str()
                 );
                 ProductionSessions { path: None }
                     .renew(&mut session)
@@ -1072,7 +1269,7 @@ pub mod tests {
                         "next CONNECT after renewal",
                     )
                     .await,
-                    fresh.jwt,
+                    fresh.jwt.as_str(),
                     "next CONNECT must use renewed JWT"
                 );
                 assert_eq!(
@@ -1109,7 +1306,7 @@ pub mod tests {
             assert!(!error.contains("secret-reply"));
         }
         let renewal = Renewal {
-            jwt: "renewal-secret".into(),
+            jwt: "renewal-secret".to_string().into(),
             exp: 1,
             credential_public: "key-secret".into(),
             user_jwt_id: "id".into(),
@@ -1191,7 +1388,7 @@ pub mod tests {
                 .await
                 .expect("CONNECT observation deadline")
                 .unwrap(),
-            cred.jwt
+            cred.jwt.as_str()
         );
         tracing::trace!("trace-control-visible");
         let text = std::fs::read_to_string(handle.path()).unwrap();
@@ -1199,7 +1396,7 @@ pub mod tests {
             text.contains("trace-control-visible"),
             "trace must really be enabled: {text}"
         );
-        assert!(!text.contains(&cred.jwt), "JWT leaked: {text}");
+        assert!(!text.contains(cred.jwt.as_str()), "JWT leaked: {text}");
         drop(connection);
         server.abort();
         std::fs::remove_dir_all(logs).unwrap();
@@ -1493,10 +1690,11 @@ pub mod tests {
 
     #[tokio::test]
     async fn task_stop_cancels_connection_setup() {
-        struct Pending;
+        struct Pending(Arc<tokio::sync::Notify>);
         #[async_trait]
         impl SessionFactory for Pending {
             async fn open(&self) -> Result<BusSession, String> {
+                self.0.notify_one();
                 std::future::pending().await
             }
             async fn renew(&self, _: &mut BusSession) -> Result<(), String> {
@@ -1504,13 +1702,25 @@ pub mod tests {
             }
         }
         let (_scratch, store) = test_store("stop_setup");
+        let sub = seed_connection_and_subscription(&store, "conn-1");
+        insert_test_event(
+            &store,
+            &sub,
+            &format!("{:064x}", 1),
+            "github_issue_changed",
+            "owner/repo",
+            &json!({}),
+        );
         let state = Arc::new(ModuleState {
             runtime: crate::runtime_for_test(store),
             health: Arc::new(crate::health::HealthState::new()),
         });
         let (shutdown, stop) = mpsc::channel(1);
-        let task = spawn_outbox_drain(state, stop, Arc::new(Pending));
-        tokio::task::yield_now().await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let task = spawn_outbox_drain(state, stop, Arc::new(Pending(entered.clone())));
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
         drop(shutdown);
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
@@ -1528,7 +1738,7 @@ pub mod tests {
     async fn idle_fallback_waits_thirty_seconds_and_wakes_do_not_defeat_backoff() {
         use futures_util::FutureExt;
         let (_scratch, store) = test_store("drain-fallback");
-        let wait = wait_for_outbox(&store, next_outbox_delay(0), 0);
+        let wait = wait_for_outbox(&store, OUTBOX_IDLE, 0);
         tokio::pin!(wait);
         assert!(wait.as_mut().now_or_never().is_none());
         tokio::time::advance(Duration::from_secs(29)).await;
@@ -1558,7 +1768,7 @@ pub mod tests {
         tokio::time::advance(Duration::from_millis(1)).await;
         wait.await;
         assert!(
-            wait_for_outbox(&store, next_outbox_delay(0), 0)
+            wait_for_outbox(&store, OUTBOX_IDLE, 0)
                 .now_or_never()
                 .is_some(),
             "backoff must leave the insert permit for the recovered drain"
@@ -1592,6 +1802,163 @@ pub mod tests {
     const OUTBOX_WAKE_DEADLINE: Duration = Duration::from_secs(3);
     const OUTBOX_DRAIN_DEADLINE: Duration = Duration::from_secs(20);
 
+    #[tokio::test]
+    async fn idle_without_a_bus_is_healthy_pending_failure_degrades_and_publish_recovers() {
+        struct OutageSessions {
+            ready: std::sync::atomic::AtomicBool,
+            opens: std::sync::atomic::AtomicUsize,
+            publisher: MockPublisher,
+        }
+        #[async_trait]
+        impl SessionFactory for OutageSessions {
+            async fn open(&self) -> Result<BusSession, String> {
+                self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if !self.ready.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("nats_connect_failed".into());
+                }
+                Ok(BusSession {
+                    credential: credential("nats://127.0.0.1:4222".into()),
+                    account: AccountNames::derive("box_test").unwrap(),
+                    publisher: Box::new(self.publisher.clone()),
+                    route: None,
+                    _transport: None,
+                })
+            }
+            async fn renew(&self, _: &mut BusSession) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let (_scratch, store) = test_store("demand-health-boundary");
+        let sub = seed_connection_and_subscription(&store, "conn-1");
+        let state = Arc::new(ModuleState {
+            runtime: crate::runtime_for_test(store.clone()),
+            health: Arc::new(crate::health::HealthState::new()),
+        });
+        state.health.record_publish_error("waiting_for_idle_pass");
+        let factory = Arc::new(OutageSessions {
+            ready: std::sync::atomic::AtomicBool::new(false),
+            opens: std::sync::atomic::AtomicUsize::new(0),
+            publisher: MockPublisher::default(),
+        });
+        let (shutdown, stop) = mpsc::channel(1);
+        let task = spawn_outbox_drain(state.clone(), stop, factory.clone());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while state.health.last_publish_error().is_some() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("idle without a bus must finish healthy");
+        assert_eq!(factory.opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let subc_protocol::session::ModuleControlResponse::HealthCheck { status, .. } =
+            current_health(&state)
+        else {
+            panic!("health")
+        };
+        assert_eq!(status, subc_protocol::session::HealthStatus::Ok);
+        insert_test_event(
+            &store,
+            &sub,
+            &format!("{:064x}", 1),
+            "github_issue_changed",
+            "owner/repo",
+            &json!({}),
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while state.health.last_publish_error().is_none() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let subc_protocol::session::ModuleControlResponse::HealthCheck {
+            status, metrics, ..
+        } = current_health(&state)
+        else {
+            panic!("health")
+        };
+        assert_eq!(status, subc_protocol::session::HealthStatus::Degraded);
+        assert_eq!(metrics.unwrap()["lastPublishError"], "nats_connect_failed");
+        factory
+            .ready
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while state.health.last_publish_error().is_some() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(factory.publisher.published.lock().unwrap().len(), 2);
+        let subc_protocol::session::ModuleControlResponse::HealthCheck { status, .. } =
+            current_health(&state)
+        else {
+            panic!("health")
+        };
+        assert_eq!(status, subc_protocol::session::HealthStatus::Ok);
+        drop(shutdown);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn claim_gain_wakes_an_idle_drain_with_an_existing_backlog() {
+        let (_scratch, store) = test_store("drain-claim-gain");
+        let sub = seed_connection_and_subscription(&store, "conn-1");
+        insert_test_event(
+            &store,
+            &sub,
+            &format!("{:064x}", 1),
+            "github_issue_changed",
+            "owner/repo",
+            &json!({}),
+        );
+        store.outbox_committed().await;
+        let claim = Arc::new(Claim(std::sync::atomic::AtomicBool::new(false)));
+        let home = Arc::new(crate::connector_home::ConnectorHome::new(claim.clone()));
+        home.refresh().unwrap();
+        let mut runtime = crate::runtime_for_test(store.clone());
+        runtime.connector_home = home.clone();
+        let state = Arc::new(ModuleState {
+            runtime,
+            health: Arc::new(crate::health::HealthState::new()),
+        });
+        state.health.stamp_outbox_unpublishable(999);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (shutdown, stop) = mpsc::channel(1);
+        let task = spawn_outbox_drain(
+            state.clone(),
+            stop,
+            Arc::new(CountingSessions {
+                publisher: MockPublisher::default(),
+                passes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                entered: entered.clone(),
+            }),
+        );
+        tokio::time::timeout(OUTBOX_WAKE_DEADLINE, async {
+            loop {
+                let subc_protocol::session::ModuleControlResponse::HealthCheck { metrics, .. } =
+                    state.health.report()
+                else {
+                    panic!("health")
+                };
+                if metrics.unwrap()["outboxUnpublishable"] == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        claim.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        home.refresh().unwrap();
+        let woke = tokio::time::timeout(OUTBOX_WAKE_DEADLINE, entered.notified()).await;
+        drop(shutdown);
+        task.await.unwrap();
+        woke.expect(
+            "claim gain must wake the drain without an insert or the thirty-second fallback",
+        );
+    }
+
     async fn wait_for_outbox_empty(store: &Arc<PlexusStore>, limit: usize) {
         loop {
             let db = store.clone();
@@ -1620,8 +1987,9 @@ pub mod tests {
             health: Arc::new(crate::health::HealthState::new()),
         });
         let (shutdown, stop) = mpsc::channel(1);
+        state.health.record_publish_error("waiting_for_idle_pass");
         let task = spawn_outbox_drain(
-            state,
+            state.clone(),
             stop,
             Arc::new(CountingSessions {
                 publisher: publisher.clone(),
@@ -1629,9 +1997,13 @@ pub mod tests {
                 entered: entered.clone(),
             }),
         );
-        tokio::time::timeout(Duration::from_secs(2), entered.notified())
-            .await
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while state.health.last_publish_error().is_some() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("an empty drain must finish without opening a bus session");
         tokio::time::sleep(Duration::from_millis(800)).await;
         let idle_passes = passes.load(std::sync::atomic::Ordering::SeqCst);
         let db = store.clone();
@@ -1662,8 +2034,8 @@ pub mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            idle_passes, 1,
-            "idle drain must wait rather than poll every 250 ms"
+            idle_passes, 0,
+            "idle drain must not open a bus session without pending work"
         );
         woke.expect("a commit must wake the idle drain before its thirty-second fallback");
         published
@@ -1979,6 +2351,171 @@ pub mod tests {
             .expect("drain 2");
         assert_eq!(count2, 0);
         assert_eq!(publisher.published.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn regression_notice_headers_refuse_all_control_characters() {
+        let mut headers = EventHeaders {
+            repo: "owner/repo".into(),
+            project: None,
+            pr: None,
+            branch: None,
+            conclusion: None,
+        };
+        for control in ['\r', '\n', '\0', '\t', '\u{7f}', '\u{85}'] {
+            headers.project = Some(format!("project{control}injected"));
+            assert!(
+                notice_headers("github_issue_changed", &headers).is_err(),
+                "{control:?}"
+            );
+            headers.project = None;
+            headers.repo = format!("repo{control}injected");
+            assert!(
+                notice_headers("github_issue_changed", &headers).is_err(),
+                "{control:?}"
+            );
+            headers.repo = "owner/repo".into();
+        }
+        headers.project = Some("正常-project".into());
+        assert!(notice_headers("github_issue_changed", &headers).is_ok());
+    }
+
+    #[tokio::test]
+    async fn regression_invalid_header_does_not_block_later_notices() {
+        let (scratch, store) = test_store("bus_invalid_header");
+        let sub = seed_connection_and_subscription(&store, "conn-1");
+        let bad = format!("{:064x}", 1);
+        let good = format!("{:064x}", 2);
+        for key in [&bad, &good] {
+            insert_test_event(
+                &store,
+                &sub,
+                key,
+                "github_issue_changed",
+                "owner/repo",
+                &json!({}),
+            );
+        }
+        rusqlite::Connection::open(scratch.path())
+            .unwrap()
+            .execute(
+                "UPDATE event_outbox SET project = ?1 WHERE event_key = ?2",
+                ["bad\nproject", bad.as_str()],
+            )
+            .unwrap();
+        let account = AccountNames::derive("box_test").unwrap();
+        let publisher = MockPublisher::default();
+        drain_pass(&store, &account, &publisher, 10, &|| true)
+            .await
+            .unwrap();
+        {
+            let messages = publisher.published.lock().unwrap();
+            assert!(messages.iter().all(|m| !m.id.starts_with(&bad)));
+            assert!(messages.iter().any(|m| m.id == good));
+        }
+        drop(store);
+        let store = Arc::new(
+            PlexusStore::open(&StorageDescriptor {
+                module_id: "plexus".into(),
+                storage_namespace: "test".into(),
+                isolation: cortexkit_store_types::Isolation::Module,
+                backend: cortexkit_store_types::StorageBackend::Sqlite {
+                    path: scratch.to_string_lossy().into_owned(),
+                },
+            })
+            .unwrap(),
+        );
+        assert_eq!(store.unpublishable_outbox_count().unwrap(), 1);
+        let pending = store.drain_event_outbox_version_after(50, 1, None).unwrap();
+        assert!(pending.iter().all(|(event, _)| event.event_key != bad));
+        let state = ModuleState {
+            health: Arc::new(crate::health::HealthState::new()),
+            runtime: crate::runtime_for_test(store),
+        };
+        refresh_unpublishable_count(&state).await.unwrap();
+        let subc_protocol::session::ModuleControlResponse::HealthCheck { status, .. } =
+            state.health.report()
+        else {
+            panic!("health")
+        };
+        assert_eq!(status, subc_protocol::session::HealthStatus::Degraded);
+    }
+
+    struct SelectiveRefusal {
+        all: bool,
+        inner: MockPublisher,
+    }
+    #[async_trait]
+    impl EventPublisher for SelectiveRefusal {
+        async fn publish(
+            &self,
+            subject: &str,
+            id: &str,
+            digest: ContentDigest,
+            headers: Headers,
+        ) -> Result<PublishReceipt, String> {
+            if self.all || id.starts_with(&format!("{:064x}", 1)) {
+                return Err("nats_publish_refused".into());
+            }
+            self.inner.publish(subject, id, digest, headers).await
+        }
+    }
+
+    #[tokio::test]
+    async fn isolated_refusals_need_three_successful_peer_passes_but_systemic_refusals_never_quarantine(
+    ) {
+        for all in [false, true] {
+            let (_scratch, store) = test_store(if all {
+                "bus_systemic_refusal"
+            } else {
+                "bus_isolated_refusal"
+            });
+            let sub = seed_connection_and_subscription(&store, "conn-1");
+            insert_test_event(
+                &store,
+                &sub,
+                &format!("{:064x}", 1),
+                "github_issue_changed",
+                "owner/repo",
+                &json!({}),
+            );
+            let publisher = SelectiveRefusal {
+                all,
+                inner: MockPublisher::default(),
+            };
+            let skips = UnpublishableRows::default();
+            for pass in 1..=3 {
+                insert_test_event(
+                    &store,
+                    &sub,
+                    &format!("{:064x}", pass + 1),
+                    "github_issue_changed",
+                    "owner/repo",
+                    &json!({}),
+                );
+                assert_eq!(
+                    drain_pass_skipping(
+                        &store,
+                        &AccountNames::derive("box_test").unwrap(),
+                        &publisher,
+                        50,
+                        &|| true,
+                        &skips
+                    )
+                    .await
+                    .unwrap_err(),
+                    "nats_publish_refused"
+                );
+                assert_eq!(
+                    store.unpublishable_outbox_count().unwrap(),
+                    u64::from(!all && pass == 3)
+                );
+            }
+            if !all {
+                assert_eq!(publisher.inner.published.lock().unwrap().len(), 6);
+            }
+        }
+        assert_eq!(reconnect_backoff(30), Duration::from_secs(300));
     }
 
     /// An outbox row that can never become a notice (here its event has no
@@ -2718,7 +3255,7 @@ pub mod tests {
             .health
             .record_publish_error("nats broker connection refused");
         crate::refresh_store_health(&state, &["direct".into()]);
-        let report = crate::connector_home_health(&state);
+        let report = current_health(&state);
         let subc_protocol::session::ModuleControlResponse::HealthCheck { metrics, .. } = report
         else {
             panic!("expected HealthCheck");
@@ -2745,7 +3282,7 @@ pub mod tests {
     #[test]
     fn credential_debug_never_exposes_secret_material() {
         let cred = Credential {
-            jwt: "super-secret-jwt-token-xyz123".to_string(),
+            jwt: "super-secret-jwt-token-xyz123".to_string().into(),
             exp: 1800000000,
             acct: "box_prod".to_string(),
             account_public: "ACCTPUBKEY".to_string(),

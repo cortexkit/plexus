@@ -199,6 +199,44 @@ fn wildcard_grantee_never_matches_or_mints() {
     );
 }
 #[test]
+fn probe_registration_enforces_source_byte_limit_before_storage() {
+    let store = fixture();
+    grant(&store, "poll", "caller", "read");
+    let register = |source: &str| {
+        store
+            .register_probe(
+                "caller",
+                "connection",
+                ProbeRegistration {
+                    name: "bounded",
+                    actions: &["read".into()],
+                    script_source: source,
+                    return_schema: &json!({"kind":"bool"}),
+                    rearm: "once",
+                    cadence_s: 30,
+                    fixed_args: &json!({}),
+                    cursor_state: &json!({}),
+                },
+            )
+            .unwrap()
+    };
+    let at_limit = "é".repeat(plexus_probe::MAX_SOURCE_BYTES / 2);
+    assert_eq!(at_limit.len(), plexus_probe::MAX_SOURCE_BYTES);
+    assert_eq!(
+        register(&format!("{at_limit}é")),
+        Err(SubscriptionRefusal::ProbeSourceTooLarge)
+    );
+    assert!(store
+        .list_subscriptions("owner", None, None)
+        .unwrap()
+        .is_empty());
+    assert!(
+        register(&at_limit).is_ok(),
+        "the byte limit itself remains admissible"
+    );
+}
+
+#[test]
 fn probe_registration_rechecks_revocation_at_insert() {
     let store = Arc::new(fixture());
     grant(&store, "poll", "caller", "read");
@@ -784,6 +822,11 @@ fn retention_uses_settlement_boundaries_and_keeps_live_requests() {
         Ok(())
     }).unwrap();
     store.prune_audit(now, window).unwrap();
+    assert!(
+        store.action_request("owner", "old").unwrap().is_some(),
+        "audit retention must not trim ceremony history"
+    );
+    store.prune_ceremony_history(now, window).unwrap();
     let ids = |table: &str, column: &str| {
         store
             .inner
@@ -808,7 +851,13 @@ fn retention_uses_settlement_boundaries_and_keeps_live_requests() {
     );
     assert_eq!(
         ids("github_bot_receipt", "request_nonce"),
-        vec!["receipt-boundary", "unknown-young"]
+        vec![
+            "receipt-boundary",
+            "receipt-pending",
+            "unknown-old",
+            "unknown-young"
+        ],
+        "GitHub receipt retention belongs to its lease-aware sweeper, not audit pruning"
     );
 }
 #[test]
@@ -1062,7 +1111,7 @@ fn direct_reconciliation_finish_updates_intent_and_reenqueue_reuses_result() {
         "re-enqueue must reuse a previously terminal result row"
     );
     assert_eq!(
-        store.list_write_reconciliations("owner").unwrap()[0].status,
+        store.list_write_reconciliations("owner").unwrap().0[0].status,
         "pending"
     );
 }
@@ -1415,6 +1464,10 @@ fn event_retention_returns_at_most_one_bounded_batch() {
 fn webhook_identity_change_updates_cache_before_a_replacement_watch() {
     let store = fixture();
     watch(&store, "old");
+    store
+        .inner
+        .with_conn_fenced(|conn| conn.execute("UPDATE connections SET app_key='github'", []))
+        .unwrap();
     store.inner.with_conn_fenced(|conn|conn.execute("UPDATE trigger_subscriptions SET fixed_args='{\"owner\":\"owner\",\"repo\":\"repo\"}'",[])).unwrap();
     store
         .record_repo_id_resolution("owner/repo", Some(1), now_ms())
@@ -1483,6 +1536,11 @@ fn relay_identity_changes_warn_once_per_new_id() {
     if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
         logging::init_child();
         let store = fixture();
+        watch(&store, "identity-watch");
+        store.inner.with_conn_fenced(|conn| {
+            conn.execute("UPDATE connections SET app_key='github'",[])?;
+            conn.execute("UPDATE trigger_subscriptions SET fixed_args='{\"owner\":\"owner\",\"repo\":\"repo\"}'",[])
+        }).unwrap();
         store
             .record_repo_id_resolution("owner/repo", Some(1), 1000)
             .unwrap();

@@ -140,6 +140,12 @@ pub fn map(
         return Err("request_kind_unmapped".into());
     };
     if kind == "close" || kind == "reopen" {
+        if object
+            .get("comment")
+            .is_some_and(|comment| !comment.is_string())
+        {
+            return Err("request_field_forbidden{field: comment}".into());
+        }
         for field in ["body", "title"] {
             if object.contains_key(field) {
                 return Err(format!("request_field_forbidden{{field: {field}}}"));
@@ -221,6 +227,22 @@ pub fn map(
             return Err("request_field_forbidden{field: reaction}".into());
         }
     } else if kind == "issue_edit" {
+        for field in [
+            "labels",
+            "assignees",
+            "add_labels",
+            "remove_labels",
+            "add_assignees",
+            "remove_assignees",
+        ] {
+            if body.get(field).is_some_and(|value| {
+                !value
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(Value::is_string))
+            }) {
+                return Err(format!("request_field_forbidden{{field: {field}}}"));
+            }
+        }
         // Changing state here would bypass the close and reopen kinds, with
         // their reason and comment rules; milestone is not part of the shim's
         // issue-edit shape or the edit_issue schema.

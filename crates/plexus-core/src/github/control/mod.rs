@@ -160,9 +160,8 @@ impl InstallationReader for GithubApiReader {
 
 /// Every repository the handle's installation token can read. `generation`
 /// must be the handle row's own credential generation: the credential provider
-/// caches one token per handle and generation and evicts the handle's other
-/// generations, so reading with any other generation would evict the token
-/// dispatch is using.
+/// caches tokens per handle generation. An import of an existing handle uses
+/// its live generation rather than the initial generation of new imports.
 fn resolve_repositories(
     provider: &dyn HandleCredentialProvider,
     reader: &dyn InstallationReader,
@@ -220,8 +219,7 @@ fn validate(inventory: &Inventory) -> Result<(), String> {
         if row.app_handle_id.is_empty()
             || row.agent_id.is_empty()
             || row.app_id <= 0
-            || !row.credential_id.starts_with("github_app:")
-            || row.credential_id.len() <= 11
+            || row.credential_id != crate::github::credential::app_reference(&row.app_handle_id)
             || !matches!(row.status.as_str(), "enabled" | "disabled")
             || !agents.insert(&row.agent_id)
             || !ids.insert(&row.app_handle_id)
@@ -317,6 +315,10 @@ fn agent_grants(item: &InventoryHandle) -> Result<(Vec<GithubImportedGrant>, Vec
             provenance,
         });
     }
+    // Grants have action scope, not repository scope; the matrix keeps the
+    // repository evidence while storage needs only one grant for each action.
+    let mut actions = BTreeSet::new();
+    grants.retain(|grant| actions.insert(grant.action.clone()));
     Ok((grants, matrix))
 }
 
@@ -399,8 +401,13 @@ pub fn import(
     let mut module_grants = Vec::new();
     let mut policy_plan = BTreeMap::new();
     for item in &inventory.handles {
-        let repositories =
-            resolve_repositories(provider, reader, item, IMPORTED_CREDENTIAL_GENERATION, now)?;
+        let generation = store
+            .github_handle_and_bindings(&item.app_handle_id)
+            .map_err(|_| "store_failure")?
+            .map_or(IMPORTED_CREDENTIAL_GENERATION, |(handle, _)| {
+                handle.credential_generation
+            });
+        let repositories = resolve_repositories(provider, reader, item, generation, now)?;
         let reachable: BTreeSet<_> = repositories.iter().map(String::as_str).collect();
         for permission in &item.grants {
             if !reachable.contains(permission.repository.as_str()) {
@@ -616,7 +623,7 @@ pub fn bindings_read(
         ));
     }
     store
-        .read_github_bindings()
+        .read_github_bindings_for_connection(connection_id, principal)
         .map_err(|_| crate::governance::Denial::StoreFailure)
 }
 
@@ -741,6 +748,9 @@ pub fn probe(
     if principal != "direct" {
         return Err("operator_authority_required".into());
     }
+    let binding_generation = store
+        .github_repo_binding_generation()
+        .map_err(|_| "store_failure")?;
     let (handle, bound) = store
         .github_handle_and_bindings(app_handle_id)
         .map_err(|_| "store_failure")?
@@ -756,14 +766,20 @@ pub fn probe(
     let available: BTreeSet<_> = reachable.iter().map(String::as_str).collect();
     for repository in &bound {
         if !available.contains(repository.as_str()) {
+            store
+                .prove_github_handle(app_handle_id, generation, binding_generation, None)
+                .map_err(|_| "store_failure")?;
             return Err(format!(
                 "repository_unreachable{{repository: {repository}}}"
             ));
         }
     }
-    store
-        .prove_github_handle(app_handle_id, now)
-        .map_err(|_| "store_failure")?;
+    if !store
+        .prove_github_handle(app_handle_id, generation, binding_generation, Some(now))
+        .map_err(|_| "store_failure")?
+    {
+        return Err("store_failure".into());
+    }
     Ok(json!({"app_handle_id":app_handle_id,"repositories":bound,"proven_at":now}))
 }
 
@@ -800,8 +816,8 @@ mod tests {
         );
         // A close carrying a comment also dispatches add_issue_comment, but
         // that is its own grantable ability and is never implied.
-        assert_eq!(implied("close_issue"), ["github.issue.get"]);
-        assert_eq!(implied("reopen_issue"), ["github.issue.get"]);
+        assert_eq!(implied("close_issue"), Vec::<&str>::new());
+        assert_eq!(implied("reopen_issue"), Vec::<&str>::new());
     }
 
     #[test]
@@ -873,8 +889,15 @@ mod tests {
     #[test]
     fn a_blocked_write_keeps_what_another_allowed_write_implies() {
         assert_eq!(
-            granted(&[("close_issue", "block"), ("reopen_issue", "allow")]),
-            ["github.issue.get", "reopen_issue"]
+            granted(&[("close_issue", "block"), ("edit_issue", "allow")]),
+            [
+                "add_issue_assignees",
+                "add_issue_labels",
+                "edit_issue",
+                "github.issue.get",
+                "remove_issue_assignees",
+                "remove_issue_label"
+            ]
         );
     }
 
@@ -887,33 +910,27 @@ mod tests {
                 ("edit_issue", "allow"),
             ]))
             .unwrap_err(),
-            "inventory_block_contradicts_implied{action: github.issue.get, repository: org/repo, implied_by: close_issue,edit_issue}"
+            "inventory_block_contradicts_implied{action: github.issue.get, repository: org/repo, implied_by: edit_issue}"
         );
     }
 
     #[test]
     fn dry_run_matrix_marks_implied_rows_and_the_writes_implying_them() {
-        let (grants, matrix) = agent_grants(&handle(&[
-            ("close_issue", "allow"),
-            ("reopen_issue", "allow"),
-            ("github.issue.search", "allow"),
-        ]))
-        .unwrap();
+        let (grants, matrix) = agent_grants(&handle(&[("update_issue_comment", "allow")])).unwrap();
         assert_eq!(
             matrix,
             vec![
-                json!({"action":"close_issue","repository":"org/repo","policy":"allow",
-                    "provenance":"row-close_issue","implied":false}),
-                json!({"action":"reopen_issue","repository":"org/repo","policy":"allow",
-                    "provenance":"row-reopen_issue","implied":false}),
-                json!({"action":"github.issue.search","repository":"org/repo","policy":"allow",
-                    "provenance":"row-github.issue.search","implied":false}),
-                json!({"action":"github.issue.get","repository":"org/repo","policy":"allow",
-                    "provenance":"implied-by-close_issue","implied":true,
-                    "implied_by":["close_issue","reopen_issue"]}),
+                json!({"action":"update_issue_comment","repository":"org/repo","policy":"allow",
+                    "provenance":"row-update_issue_comment","implied":false}),
+                json!({"action":"github.issue_comment.get","repository":"org/repo","policy":"allow",
+                    "provenance":"implied-by-update_issue_comment","implied":true,
+                    "implied_by":["update_issue_comment"]}),
+                json!({"action":"github.issue_comments.list","repository":"org/repo","policy":"allow",
+                    "provenance":"implied-by-update_issue_comment","implied":true,
+                    "implied_by":["update_issue_comment"]}),
             ]
         );
-        assert_eq!(grants.len(), 4);
+        assert_eq!(grants.len(), 3);
     }
 
     fn policy_rows(rows: &[(&str, &str)]) -> Vec<(bool, String, String)> {

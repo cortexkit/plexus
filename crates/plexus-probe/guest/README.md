@@ -10,11 +10,20 @@ From the repository root, rebuild the checked-in module with:
 ./scripts/build-probe-guest.sh
 ```
 
-The script requires the Rust `wasm32-wasip1` target. It downloads and verifies
+The script requires Rust 1.99.0 (`b940084d7 2026-09-28`) and its `wasm32-wasip1`
+target, matching `rust-toolchain.toml` in this directory. The host workspace
+continues to use floating stable. It downloads and verifies
 the pinned WASI SDK 24.0 archive, then passes the extracted SDK to
 `rquickjs-sys` through `WASI_SDK`. For an offline build, set `WASI_SDK_ARCHIVE`
 to a previously downloaded release archive; the same checksum is verified.
 Review and commit guest source and the rebuilt module together.
+
+CI runs `bash scripts/build-probe-guest.sh --check` on Ubuntu. This uses the same
+compiler, locked dependencies, SDK and path mappings, then compares the rebuilt
+bytes without overwriting the checked-in asset. An unavailable target, compiler
+or SDK is a failed check, not evidence that the source matches. An explicit
+`WASI_SDK_ARCHIVE` takes precedence over a cached archive. Each run extracts the
+verified archive afresh so an interrupted extraction cannot be reused.
 
 The script remaps Rust panic locations and QuickJS C file names with
 `--remap-path-prefix` and `-ffile-prefix-map`. The source root becomes `/plexus`,

@@ -18,6 +18,7 @@ class RepositoryIdentityTests(Scratch):
         self.identity.write_text(PRIVATE_ID + "\n")
         shutil.copytree(SCRIPTS / "lib", self.checkout / "scripts/lib")
         shutil.copy2(SCRIPTS / "train-push.sh", self.checkout / "scripts/train-push.sh")
+        shutil.copy2(SCRIPTS / "install-hooks.sh", self.checkout / "scripts/install-hooks.sh")
         (self.checkout / ".githooks").mkdir()
         shutil.copy2(REPO / ".githooks/pre-push", self.checkout / ".githooks/pre-push")
         self.assertEqual(git("init", "-q", cwd=self.checkout).returncode, 0)
@@ -86,6 +87,26 @@ exec "{real_git}" "$@"
         red = self.hook(MOCK_VERDICTS="Test (ubuntu)\\tfailure")
         self.assertEqual(red.returncode, 1, red.stderr)
         self.assertIn("no check is green", red.stderr)
+
+    def test_unrelated_green_check_cannot_substitute_for_the_test_job(self):
+        result = self.hook(MOCK_VERDICTS="Unrelated app\\tsuccess")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("Test (ubuntu)", result.stderr)
+
+    def test_hook_installation_is_explicit_and_preserves_custom_hooks(self):
+        result = run(['bash', self.checkout / 'scripts/install-hooks.sh'], cwd=self.checkout, env=self.env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(git('config', '--get', 'core.hooksPath', cwd=self.checkout).stdout.strip(), str(self.checkout / '.githooks'))
+        git('config', 'core.hooksPath', '/custom/hooks', cwd=self.checkout)
+        refused = run(['bash', self.checkout / 'scripts/install-hooks.sh'], cwd=self.checkout, env=self.env)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(git('config', '--get', 'core.hooksPath', cwd=self.checkout).stdout.strip(), '/custom/hooks')
+
+    def test_matching_identity_is_read_once_per_distinct_repository(self):
+        result = self.hook()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        identity_calls = [line for line in self.calls.read_text().splitlines() if '--jq .id' in line]
+        self.assertEqual(len(identity_calls), 1)
 
     def test_hook_accepts_skipped_mutation_shards_only_beside_a_green_test_job(self):
         shard = "Mutation proofs (${{ matrix.shard }}/4)\\tskipped"

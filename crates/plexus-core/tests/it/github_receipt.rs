@@ -1,6 +1,6 @@
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::credentials::ResolvedCredential;
-use plexus_core::github::config::claim_lease_seconds;
+use plexus_core::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS;
 use plexus_core::github::receipt::{Claim, Effect, RETENTION_MS};
 use plexus_core::github::sweeper::sweep_receipts;
 use plexus_core::transport::{MockTransport, Transport, TransportRequest};
@@ -23,10 +23,34 @@ fn fixture() -> (plexus_core::test_scratch::Scratch, PlexusStore) {
 }
 
 #[test]
-fn lease_defaults_to_120_and_floors_at_60() {
-    assert_eq!(claim_lease_seconds(None), 120);
-    assert_eq!(claim_lease_seconds(Some(1)), 60);
-    assert_eq!(claim_lease_seconds(Some(180)), 180);
+fn unsettled_receipt_survives_audit_prune_until_its_own_lease_based_horizon() {
+    for state in ["pending", "pending_approval", "outcome_unknown"] {
+        let (file, store) = fixture();
+        claim(&store, "worker", 1000);
+        let db = rusqlite::Connection::open(file.path()).unwrap();
+        db.execute(
+            "UPDATE github_bot_receipt SET state=?1,updated_at=1000,claim_lease_expires_at=9000",
+            [state],
+        )
+        .unwrap();
+        store.prune_audit(8000, 1000).unwrap();
+        assert!(
+            store.github_receipt("agent", "nonce").unwrap().is_some(),
+            "audit pruning deleted {state}"
+        );
+        sweep_receipts(&store, 9000 + RETENTION_MS - 1).unwrap();
+        assert!(
+            store.github_receipt("agent", "nonce").unwrap().is_some(),
+            "lease horizon was ignored for {state}"
+        );
+        sweep_receipts(&store, 9000 + RETENTION_MS).unwrap();
+        assert!(store.github_receipt("agent", "nonce").unwrap().is_none());
+    }
+}
+
+#[test]
+fn production_receipt_lease_is_120_seconds() {
+    assert_eq!(DEFAULT_CLAIM_LEASE_SECONDS, 120);
 }
 
 fn effects() -> Vec<Effect> {

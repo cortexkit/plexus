@@ -54,6 +54,89 @@ fn hello() -> String {
     vector(HELLOS, "buffered")
 }
 
+#[tokio::test(start_paused = true)]
+async fn regression_silent_websocket_has_a_receive_deadline() {
+    let (_scratch, store, _) = fixture("relay_silent_peer");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/relay/github/ws", listener.local_addr().unwrap());
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(tcp).await.unwrap();
+        socket.send(Message::Text(hello().into())).await.unwrap();
+        ready_tx.send(()).unwrap();
+        let _ = release_rx.await;
+        drop(socket);
+    });
+    let home = Arc::new(ConnectorHome::test_admitted());
+    let socket = dial(&url, b"opaque-token", &home).await.unwrap();
+    ready_rx.await.unwrap();
+    let status = Status::default();
+    let failure = tokio::time::timeout(
+        Duration::from_secs(65),
+        consume(socket, store, &status, &home),
+    )
+    .await;
+    release_tx.send(()).unwrap();
+    server.await.unwrap();
+    assert_eq!(
+        failure.expect("silent peer must time out before the outer deadline"),
+        Failure::Reconnecting
+    );
+}
+
+#[test]
+fn regression_supersede_names_the_other_connector_home() {
+    let status = Status::default();
+    status.superseded();
+    assert!(status.degraded_message().unwrap().contains("another"));
+    assert!(status.status()["sources"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("another"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn received_pongs_keep_an_idle_relay_connection_alive() {
+    let (_scratch, store, _) = fixture("relay-pong-progress");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/relay/github/ws", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(tcp).await.unwrap();
+        socket.send(Message::Text(hello().into())).await.unwrap();
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            socket.send(Message::Pong(Vec::new().into())).await.unwrap();
+        }
+        socket.close(None).await.unwrap();
+    });
+    let home = Arc::new(ConnectorHome::test_admitted());
+    let socket = dial(&url, b"opaque-token", &home).await.unwrap();
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        consume(socket, store, &Status::default(), &home).await,
+        Failure::Reconnecting
+    );
+    assert!(started.elapsed() >= Duration::from_secs(150));
+    server.await.unwrap();
+}
+
+#[test]
+fn regression_task_death_is_not_hidden_by_relay_failure() {
+    let health = std::sync::Arc::new(crate::health::HealthState::new());
+    health.relay.set(State::CredentialRejected);
+    drop(crate::health::SchedulerLiveness::new(health.clone()));
+    let subc_protocol::session::ModuleControlResponse::HealthCheck { detail, .. } = health.report()
+    else {
+        panic!("health reply")
+    };
+    let detail = detail.unwrap();
+    assert!(detail.contains("scheduler task"));
+    assert!(detail.contains("credential"));
+}
+
 #[test]
 fn repeated_supersedes_keep_the_accumulated_backoff() {
     let mut failures = 7;
@@ -1261,7 +1344,7 @@ async fn connector_home_is_checked_before_dial_and_again_on_superseded() {
         "4009 must immediately recheck connector home"
     );
     wait_state(&status, State::Reconnecting).await;
-    assert_eq!(status.degraded_message(), State::Reconnecting.message());
+    assert_eq!(status.degraded_message(), Some(SUPERSEDED_MESSAGE));
     drop(stop);
     bounded(task).await.unwrap();
 }
@@ -1739,12 +1822,6 @@ struct ObservedCredentials {
     reads: tokio::sync::mpsc::UnboundedSender<()>,
 }
 impl CredentialSource for ObservedCredentials {
-    fn get(
-        &self,
-        handle: &[u8],
-    ) -> Result<plexus_core::ResolvedCredential, plexus_core::CredentialError> {
-        self.source.get(handle)
-    }
     fn get_by_id(
         &self,
         id: &str,
@@ -1875,6 +1952,15 @@ async fn protocol_ping_is_sent_every_thirty_seconds() {
             "relay liveness must use a WebSocket protocol ping"
         );
         server.flush().await.unwrap();
+        // Complete a round trip before advancing time again, so the client has
+        // observed this pong and reset its receive deadline.
+        server
+            .send(Message::Ping(b"barrier".to_vec().into()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(bounded(server.next()).await, Some(Ok(Message::Pong(payload))) if payload.as_ref() == b"barrier")
+        );
     }
     server.close(None).await.unwrap();
     bounded(task).await.unwrap();
@@ -2285,9 +2371,10 @@ async fn relay_polling_disconnect_catches_up_once_and_reconnects_fresh() {
     let (scratch, store, _) = fixture("relay-disconnect-catchup");
     let release = kind_watch(&store, "get_latest_release");
     kind_watch(&store, "list_workflow_runs");
+    let now = now_ms();
     sql(
         &scratch,
-        "UPDATE trigger_subscriptions SET last_polled_at_ms=9999999999999",
+        &format!("UPDATE trigger_subscriptions SET last_polled_at_ms={now}"),
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/v1/relay/github/ws", listener.local_addr().unwrap());
@@ -2318,7 +2405,7 @@ async fn relay_polling_disconnect_catches_up_once_and_reconnects_fresh() {
     wait_state(&status, State::Connected).await;
     age_relay(&status, 3600);
     assert_eq!(status.polling_status()["mode"], "relay_slow");
-    assert!(scheduler.due_now(&["direct".into()], now_ms()).is_empty());
+    assert!(scheduler.due_now(&["direct".into()], now).is_empty());
     socket.close(None).await.unwrap();
     wait_state(&status, State::Reconnecting).await;
     bounded(async {
@@ -2329,7 +2416,6 @@ async fn relay_polling_disconnect_catches_up_once_and_reconnects_fresh() {
     .await;
     assert_eq!(status.polling_status()["mode"], "normal");
     assert_eq!(status.polling_status()["last_clock_reset"], "reconnecting");
-    let now = now_ms();
     let catchup = scheduler.due_now(&["direct".into()], now);
     assert_eq!(
         catchup.len(),

@@ -140,6 +140,51 @@ INSERT INTO web_search_allowance_counts (principal, provider, month_utc, used) V
     assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE principal='former-owner' AND provider='exa' AND month_utc='2024-02'"), 1);
 }
 
+#[test]
+fn outbox_failures_follow_only_retained_publication_markers_on_import() {
+    assert_eq!(
+        identity(
+            "event_outbox_failures",
+            &Record::from([
+                ("event_key".into(), Value::Text("retained".into())),
+                ("version".into(), Value::Integer(2))
+            ])
+        ),
+        "event_outbox_failures [retained, 2]"
+    );
+    let f = Fixture::new();
+    let source = open_sqlite(&descriptor(&f.from).unwrap()).unwrap();
+    source.migrate("plexus", MIGRATIONS).unwrap();
+    source.with_conn(|conn| conn.execute_batch("INSERT INTO event_outbox(event_key,event_id,event_name,repo_id,repo,created_at_ms)
+        VALUES ('retained','unacked','github_issue_changed',1,'org/repo',1),('orphan','missing','github_issue_changed',1,'org/repo',1);
+        INSERT INTO event_outbox_failures(event_key,version,failed_at_ms,failure_reason)
+        VALUES ('retained',1,11,'invalid_headers'),('retained',2,12,'invalid_body'),('orphan',1,13,'invalid_body');")).unwrap();
+    drop(source);
+    f.import();
+    let new = f.destination();
+    let failures: Vec<(String,i64,i64,String)> = new.prepare("SELECT event_key,version,failed_at_ms,failure_reason FROM event_outbox_failures ORDER BY version").unwrap()
+        .query_map([],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(
+        failures,
+        vec![
+            ("retained".into(), 1, 11, "invalid_headers".into()),
+            ("retained".into(), 2, 12, "invalid_body".into())
+        ],
+        "cutover must retain terminal publication status only for surviving markers"
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT COUNT(*) FROM event_outbox WHERE event_key='orphan'"
+        ),
+        0
+    );
+    assert_eq!(
+        scalar::<i64>(&new, "SELECT COUNT(*) FROM pragma_foreign_key_check"),
+        0
+    );
+}
+
 /// Durable GitHub handle authority, bot-request receipts, the relay cursor,
 /// publishing markers of carried events and writes still being reconciled
 /// all survive the cutover; the marker of an acked (dropped) event does not.
@@ -406,6 +451,7 @@ fn production_v23_round_trip_dispositions_and_routing() {
             "recipient_allowlist" => (0, 0, 0),
             // Tables added after generation 23 are absent from this fixture.
             "event_outbox"
+            | "event_outbox_failures"
             | "consent_call_keys"
             | "relay_cursor"
             | "github_app_handle"
@@ -694,6 +740,38 @@ fn journal_import_reapplies_revocation() {
     );
     let grants = report.iter().find(|s| s.table == "grants").unwrap();
     assert_eq!((grants.carried, grants.scrubbed), (0, 1));
+}
+
+#[test]
+fn cross_directory_import_carries_source_and_destination_revocations() {
+    let f = Fixture::new();
+    write_revocation(&f, "g");
+    let destination = crate::test_scratch::Scratch::directory("import-revocations");
+    let journal = destination.join(crate::grant_journal::NAME);
+    crate::grant_journal::ensure(&journal).unwrap();
+    crate::grant_journal::append(
+        &journal,
+        &crate::grant_journal::Revocation {
+            principal: "direct".into(),
+            grant_id: "destination-only".into(),
+            revoked_at_ms: 2,
+        },
+    )
+    .unwrap();
+    let to = destination.join("store.db");
+    import_store(&f.from, &to).unwrap();
+    let conn = Connection::open(&to).unwrap();
+    assert_eq!(scalar::<u64>(&conn, "SELECT count(*) FROM grants"), 0);
+    let entries = crate::grant_journal::read(&journal).unwrap();
+    assert!(entries.iter().any(|entry| entry.grant_id == "g"));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.grant_id == "destination-only"));
+    assert_eq!(
+        crate::grant_journal::read(&journal_path(&f)).unwrap().len(),
+        1,
+        "source journal is not modified"
+    );
 }
 
 #[test]

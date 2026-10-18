@@ -10,20 +10,25 @@ use crate::{credentials::CredentialSource, transport::Transport};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
-pub(crate) const BOT_ACTIONS: &[&str] = &[
-    "github.issue.get",
-    "github.issue_comments.list",
-    "github.issue.search",
-];
+macro_rules! read_actions {
+    ($($bot:literal),* ; $($ci:literal),*) => {
+        pub(crate) const BOT_ACTIONS: &[&str] = &[$($bot),*];
+        pub const ACTIONS: &[&str] = &[$($bot),*, $($ci),*];
+    };
+}
+read_actions!("github.issue.get", "github.issue_comments.list", "github.issue.search";
+    "github.actions.job_log", "github.actions.artifact_file", "github.actions.run.superseded");
 
-pub const ACTIONS: &[&str] = &[
-    BOT_ACTIONS[0],
-    BOT_ACTIONS[1],
-    BOT_ACTIONS[2],
-    "github.actions.job_log",
-    "github.actions.artifact_file",
-    "github.actions.run.superseded",
-];
+/// Mark only a binding-checked selection as internal search authority. Raw
+/// caller arguments never become this marker merely by naming repositories.
+pub(crate) fn prepare_search_request(
+    mut request: AuthorizationRequest,
+    resolved: &ResolvedRepositories,
+) -> Result<AuthorizationRequest, crate::governance::ResolverDenial> {
+    let terms = request.args["terms"].as_str().unwrap_or("");
+    request.args["q"] = json!(resolver::search_query(resolved, terms)?);
+    Ok(request.with_resolved_github_search(resolved.repositories.clone()))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReadError {
@@ -66,6 +71,7 @@ fn walk_error(error: pagination::WalkError) -> ReadError {
 
 /// Resolve the entire selection from the binding table before loading any
 /// connection. Installation reachability is not evidence of a binding.
+#[cfg(any(test, feature = "test-support"))]
 pub fn resolve_read(
     store: &PlexusStore,
     action: &str,
@@ -348,6 +354,9 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         if action != "github.issue.search" {
             // The repository was resolved above; route by it without sending it.
             request = request.with_resolved_repository(resolved.repositories[0].clone());
+        } else {
+            request = prepare_search_request(request, &resolved)
+                .map_err(|reason| ReadError::Denied(Denial::Resolver(reason)))?;
         }
         let reservation = engine.authorize(request).map_err(ReadError::Denied)?;
         // Repository ownership or bot status can change during authorization;
@@ -384,6 +393,11 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             .and_then(Value::as_array_mut)
             .ok_or(ReadError::InvalidResponse)?;
         resolver::filter_search_results(&resolved, items);
+        let count = items.len();
+        response["total_count"] = json!(count);
+        // A page cannot prove the size or completeness of the bound result set.
+        response["incomplete_results"] = json!(true);
+        response["incomplete"] = json!(true);
     }
     Ok(response)
 }
@@ -396,6 +410,18 @@ mod run_superseded;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn caller_repository_arguments_cannot_set_the_private_search_marker() {
+        let request = AuthorizationRequest::new(
+            "caller",
+            "connection",
+            "github.issue.search",
+            json!({
+                "repositories":["other/private"], "resolved_github_search_repositories":["other/private"], "resolved_github_search":true,
+            }),
+        );
+        assert_eq!(request.resolved_github_search_repositories(), None);
+    }
     #[test]
     fn read_lease_expiry_has_its_own_error() {
         assert_eq!(

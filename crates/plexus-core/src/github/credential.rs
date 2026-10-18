@@ -21,6 +21,18 @@ const EXPIRY_MARGIN_MS: i64 = 60_000;
 pub const UNRESOLVABLE_TRANSIENT: &str = "handle_credential_unresolvable{class: transient}";
 pub const UNRESOLVABLE_AUTH_REQUIRED: &str = "handle_credential_unresolvable{class: auth_required}";
 pub const UNRESOLVABLE_PERMANENT: &str = "handle_credential_unresolvable{class: permanent}";
+pub(crate) const APP_PREFIX: &str = "github_app:";
+
+pub(crate) fn app_reference(app_handle_id: &str) -> String {
+    format!("{APP_PREFIX}{app_handle_id}")
+}
+
+pub(crate) fn bot_login(reference: &str) -> Option<String> {
+    reference
+        .strip_prefix(APP_PREFIX)
+        .filter(|slug| !slug.is_empty())
+        .map(|slug| format!("{slug}[bot]"))
+}
 
 /// The refusal code for a vault read failure, keyed on the class the vault's
 /// own error reports rather than a class chosen here.
@@ -73,7 +85,7 @@ impl<P: CkcredRoutePeer + 'static> HandleCredentialPreparer<P> {
         credential_generation: i64,
         reference: &str,
     ) -> Result<ResolvedCredential, &'static str> {
-        if !reference.starts_with("github_app:") || reference.len() <= "github_app:".len() {
+        if !reference.starts_with(APP_PREFIX) || reference.len() <= APP_PREFIX.len() {
             return Err(UNRESOLVABLE_PERMANENT);
         }
         let key = (app_handle_id.to_owned(), credential_generation);
@@ -119,11 +131,15 @@ impl<P: CkcredRoutePeer + 'static> HandleCredentialPreparer<P> {
                 warn transport:
                 "scoped credential for handle {app_handle_id} ({reference}) has no expiry or expires within the refresh margin"
             );
-            return Err(UNRESOLVABLE_PERMANENT);
+            return Err(if scoped.credential.expires_at_ms.is_some() {
+                UNRESOLVABLE_TRANSIENT
+            } else {
+                UNRESOLVABLE_PERMANENT
+            });
         }
         let mut cache = self.cache.lock().map_err(|_| UNRESOLVABLE_TRANSIENT)?;
         cache.retain(|(id, generation), _| {
-            id != app_handle_id || *generation == credential_generation
+            id != app_handle_id || *generation >= credential_generation
         });
         // Do not repopulate the cache from a vault read that overlapped a 401.
         // The caller still receives the vault's answer; the next call fetches

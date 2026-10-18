@@ -62,10 +62,7 @@ pub enum McpRouteFrame {
     Success {
         served_from: McpRouteServedFrom,
         observed_at_ms: u64,
-        /// Child spawn plus MCP initialization time included in this call.
-        ///
-        /// The adapter omits this field when no child was spawned; both that
-        /// omission and a reported zero normalize to zero here.
+        /// The child's MCP JSON-RPC response, without the adapter envelope.
         payload: Value,
     },
     Error {
@@ -137,6 +134,8 @@ impl<P: McpRoutePeer> McpRouteTransport<P> {
         let mut actions = Vec::new();
         let mut params = tools_list_params();
         let mut cursors = std::collections::HashSet::new();
+        let mut names = std::collections::HashSet::new();
+        let mut bytes = 0usize;
         for _ in 0..crate::mcp_remote::MAX_TOOL_PAGES {
             let frame = self
                 .peer
@@ -144,10 +143,23 @@ impl<P: McpRoutePeer> McpRouteTransport<P> {
             let McpRouteFrame::Success { payload, .. } = frame else {
                 return Err(McpRouteError::Transport);
             };
+            bytes = bytes.saturating_add(
+                serde_json::to_vec(&payload)
+                    .map_err(|_| McpRouteError::Transport)?
+                    .len(),
+            );
+            if bytes > crate::http_support::MAX_RESPONSE_BODY_BYTES {
+                return Err(McpRouteError::Transport);
+            }
             for tool in tools_from_response(&payload).map_err(|_| McpRouteError::Transport)? {
-                actions.push(
-                    DiscoveredAction::from_value(&tool).map_err(|_| McpRouteError::Transport)?,
-                );
+                let action =
+                    DiscoveredAction::from_value(tool).map_err(|_| McpRouteError::Transport)?;
+                if !names.insert(action.name.clone())
+                    || actions.len() >= crate::mcp_remote::MAX_DISCOVERED_TOOLS
+                {
+                    return Err(McpRouteError::Transport);
+                }
+                actions.push(action);
             }
             match crate::mcp_remote::next_tool_cursor(&payload, &mut cursors)
                 .map_err(|_| McpRouteError::Transport)?
@@ -183,7 +195,7 @@ impl<P: McpRoutePeer> McpRouteTransport<P> {
             Err(McpRouteError::OutcomeUnknown) => TransportResponse::unknown(),
             Err(McpRouteError::Transport) => {
                 eprintln!(warn transport: "local MCP adapter request failed");
-                TransportResponse::vendor_error(
+                TransportResponse::unknown_with_error(
                     "mcp_route_transport_error",
                     "local MCP adapter request failed",
                 )
@@ -237,7 +249,7 @@ fn adapter_response(frame: McpRouteFrame) -> TransportResponse {
             let Ok(result) = tool_result_from_response(payload) else {
                 eprintln!(warn transport: "local MCP adapter returned an invalid tool response");
                 return with_provenance(
-                    TransportResponse::vendor_error(
+                    TransportResponse::unknown_with_error(
                         "mcp_protocol_error",
                         "MCP response was invalid",
                     ),
@@ -245,6 +257,19 @@ fn adapter_response(frame: McpRouteFrame) -> TransportResponse {
                     observed_at_ms,
                 );
             };
+            if result
+                .get("isError")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return with_provenance(
+                    TransportResponse::unknown_with_error(
+                        "mcp_protocol_error",
+                        "MCP isError must be boolean",
+                    ),
+                    served_from,
+                    observed_at_ms,
+                );
+            }
             if result
                 .get("isError")
                 .and_then(Value::as_bool)
@@ -300,7 +325,7 @@ fn adapter_refusal_response(
         // A spawn failure means no child accepted the request, so the call stays
         // not-sent even though retrying after the cooldown may succeed.
         "spawn_failed" => (TransmissionState::NotSent, Retryability::Terminal),
-        "child_framing_error" => (TransmissionState::Sent, Retryability::Terminal),
+        "child_framing_error" => (TransmissionState::OutcomeUnknown, Retryability::Terminal),
         "call_outcome_unknown" | "child_unresponsive" => {
             (TransmissionState::OutcomeUnknown, Retryability::Terminal)
         }
@@ -317,7 +342,7 @@ fn adapter_refusal_response(
         // adapter may still explain itself.
         _ => {
             eprintln!(warn transport: "{}", unknown_code_log_line(&code, &message));
-            return TransportResponse::vendor_error(
+            return TransportResponse::unknown_with_error(
                 "mcp_route_protocol_error",
                 "local MCP adapter sent an unknown refusal code",
             );
@@ -425,12 +450,12 @@ impl SubcMcpRoutePeer {
 
 impl McpRoutePeer for SubcMcpRoutePeer {
     fn call(&self, request: Value) -> Result<McpRouteFrame, McpRouteError> {
-        let body = serde_json::to_vec(&request).map_err(|_| McpRouteError::Transport)?;
+        let body = serde_json::to_vec(&request).map_err(|_| McpRouteError::NotSent)?;
         let consumer = Arc::clone(&self.consumer);
         let target = self.target.clone();
         let identity = self.identity.clone();
         let Some(runtime) = self.runtime.as_ref() else {
-            return Err(McpRouteError::Transport);
+            return Err(McpRouteError::NotSent);
         };
         run_on(runtime, async move {
             match consumer
@@ -563,16 +588,6 @@ mod tests {
             &self,
             served_from: McpRouteServedFrom,
             observed_at_ms: u64,
-            payload: Value,
-        ) {
-            self.push_success_with_spawn_elapsed_ms(served_from, observed_at_ms, 0, payload);
-        }
-
-        fn push_success_with_spawn_elapsed_ms(
-            &self,
-            served_from: McpRouteServedFrom,
-            observed_at_ms: u64,
-            _spawn_elapsed_ms: u64,
             payload: Value,
         ) {
             self.responses
@@ -711,6 +726,20 @@ mod tests {
         assert!(message.contains("ck module logs plexus"), "{message}");
         assert!(!message.contains("ghs_SECRET123"), "{message}");
         assert!(!message.contains("?token=abc"), "{message}");
+        for flag in [json!("true"), json!(1), Value::Null] {
+            peer.push_success(
+                McpRouteServedFrom::Live,
+                1_710_000_000_000,
+                json!({"result":{"isError":flag,"content":[]}}),
+            );
+            let malformed = transport.dispatch(request(), &ResolvedCredential::anonymous());
+            assert_eq!(
+                malformed.transmission,
+                TransmissionState::OutcomeUnknown,
+                "invalid isError must not become a successful route result"
+            );
+            assert_eq!(malformed.error_code.as_deref(), Some("mcp_protocol_error"));
+        }
     }
 
     #[test]
@@ -905,10 +934,10 @@ mod tests {
     }
 
     #[test]
-    fn child_framing_error_frame_is_a_terminal_vendor_failure() {
+    fn child_framing_error_frame_keeps_the_write_outcome_unknown() {
         assert_refusal_posture(
             "child_framing_error",
-            TransmissionState::Sent,
+            TransmissionState::OutcomeUnknown,
             Retryability::Terminal,
         );
     }
@@ -971,7 +1000,7 @@ mod tests {
             response.error_code.as_deref(),
             Some("mcp_route_protocol_error")
         );
-        assert_eq!(response.transmission, TransmissionState::Sent);
+        assert_eq!(response.transmission, TransmissionState::OutcomeUnknown);
         assert_eq!(response.retryability, Retryability::Terminal);
 
         // The caller-facing message is a fixed phrase by design, so the naming
@@ -1147,18 +1176,15 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// A successful reply that paid a slow idle-shed spawn is still a successful
-    /// vendor call, so it cannot move the scheduler's vendor-failure streak.
+    /// A successful live reply cannot increase the scheduler's vendor-failure
+    /// streak; only a failure is evidence that the vendor is unhealthy.
     ///
-    /// Mutation-proved: mapping a nonzero `spawn_elapsed_ms` success to a vendor
-    /// failure or timeout makes the poll result and failure-streak assertion fail.
     #[test]
-    fn slow_spawn_success_leaves_the_vendor_failure_streak_at_zero() {
+    fn live_success_leaves_the_vendor_failure_streak_at_zero() {
         let (poller, engine, path, subscription_id, peer) = route_poller_fixture("slow-spawn");
-        peer.push_success_with_spawn_elapsed_ms(
+        peer.push_success(
             McpRouteServedFrom::Live,
             1_710_000_000_000,
-            4_000,
             json!({
                 "result": {
                     "structuredContent": {"items": [], "next_cursor": "after-shed"}

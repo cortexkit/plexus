@@ -4,7 +4,9 @@
 //! that does not depend on test-only cfg. The server presents a configured
 //! action set and answers tools/call with deterministic JSON.
 
+use crate::rest_stub_server::{credential_header, ExpectedCredential};
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 
 use crate::http_wire::{http_empty, http_json};
 
@@ -13,6 +15,7 @@ use crate::http_wire::{http_empty, http_json};
 pub struct StubTool {
     pub name: String,
     pub input_schema: Value,
+    pub(crate) inferred_schema: bool,
 }
 
 impl StubTool {
@@ -20,11 +23,12 @@ impl StubTool {
         Self {
             name: name.into(),
             input_schema,
+            inferred_schema: false,
         }
     }
 
     pub fn simple(name: impl Into<String>) -> Self {
-        Self::new(
+        let mut tool = Self::new(
             name,
             json!({
                 "type": "object",
@@ -35,21 +39,61 @@ impl StubTool {
                     "workspace": {"type": "string"}
                 }
             }),
-        )
+        );
+        tool.inferred_schema = true;
+        tool
     }
 }
 
 /// Long-lived local MCP stub with a fixed HTTP worker pool.
 pub struct StubMcpServer {
     server: crate::http_wire::StubHttpServer,
+    calls: Arc<Mutex<Vec<(String, Value)>>>,
 }
 
 impl StubMcpServer {
     pub fn start(tools: Vec<StubTool>) -> Result<Self, String> {
+        Self::start_checked(tools, None)
+    }
+
+    pub fn start_checked(
+        tools: Vec<StubTool>,
+        credential: Option<ExpectedCredential>,
+    ) -> Result<Self, String> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&calls);
         let server = crate::http_wire::StubHttpServer::start("/mcp", move |request| {
+            if let Some(expected) = &credential {
+                if credential_header(request, &expected.header).as_deref()
+                    != Some(expected.value.as_str())
+                {
+                    return http_json(401, r#"{"error":"unauthorized"}"#);
+                }
+            }
+            if let Some(body) = request.split_once("\r\n\r\n").map(|(_, body)| body) {
+                if let Ok(message) = serde_json::from_str::<Value>(body) {
+                    if message["method"] == "tools/call" {
+                        recorded.lock().unwrap().push((
+                            message["params"]["name"].as_str().unwrap_or("").into(),
+                            message["params"]["arguments"].clone(),
+                        ));
+                    }
+                }
+            }
             response_for_request(request, &tools)
         })?;
-        Ok(Self { server })
+        Ok(Self { server, calls })
+    }
+
+    pub fn verify_last_call(&self, name: &str, arguments: &Value) -> Result<(), String> {
+        let calls = self
+            .calls
+            .lock()
+            .map_err(|_| "stub call recording poisoned".to_string())?;
+        if calls.last() != Some(&(name.to_string(), arguments.clone())) {
+            return Err("MCP wire call differs from authorized name or arguments".into());
+        }
+        Ok(())
     }
 
     pub fn endpoint(&self) -> &str {
@@ -103,6 +147,9 @@ fn response_for_request(request: &str, tools: &[StubTool]) -> String {
                 .pointer("/params/name")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
+            if !tools.iter().any(|tool| tool.name == action) {
+                return http_json(200, &json!({"jsonrpc":"2.0", "id":id,"error":{"code":-32602,"message":"unknown tool"}}).to_string());
+            }
             rpc_result(
                 id,
                 json!({
@@ -144,6 +191,20 @@ mod tests {
     fn response_body(response: &str) -> Value {
         let body = &response[response.find("\r\n\r\n").expect("terminator") + 4..];
         serde_json::from_str(body).expect("JSON response")
+    }
+
+    #[test]
+    fn an_unknown_tool_is_not_a_successful_call() {
+        let request =
+            post(r#"{"id":7,"method":"tools/call","params":{"name":"wrong-tool","arguments":{}}}"#);
+        let reply = response_body(&response_for_request(
+            &request,
+            &[StubTool::simple("search")],
+        ));
+        assert!(
+            reply.get("error").is_some(),
+            "unknown tools must be refused: {reply}"
+        );
     }
 
     #[test]

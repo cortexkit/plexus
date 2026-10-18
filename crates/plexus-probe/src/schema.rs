@@ -7,7 +7,7 @@ const MAX_STRING_LENGTH: usize = 256;
 const MAX_STRUCT_FIELDS: usize = 16;
 
 /// The value contract for one probe execution.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReturnSchema {
     Bool,
@@ -22,7 +22,7 @@ pub enum ReturnSchema {
 }
 
 /// A non-nested field in a [`ReturnSchema::Struct`].
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScalarSchema {
     Bool,
@@ -31,6 +31,50 @@ pub enum ScalarSchema {
         /// Maximum UTF-8 byte length of the returned field.
         max_len: usize,
     },
+}
+
+// Empty struct variants make serde enforce the closed object grammar even for
+// bool and number; serde's unit variants otherwise discard additional fields.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ScalarDeclaration {
+    Bool {},
+    Number {},
+    String { max_len: usize },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ReturnDeclaration {
+    Bool {},
+    Number {},
+    String {
+        max_len: usize,
+    },
+    Struct {
+        fields: BTreeMap<String, ScalarSchema>,
+    },
+}
+
+impl<'de> Deserialize<'de> for ReturnSchema {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match ReturnDeclaration::deserialize(deserializer)? {
+            ReturnDeclaration::Bool {} => Self::Bool,
+            ReturnDeclaration::Number {} => Self::Number,
+            ReturnDeclaration::String { max_len } => Self::String { max_len },
+            ReturnDeclaration::Struct { fields } => Self::Struct { fields },
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ScalarSchema {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match ScalarDeclaration::deserialize(deserializer)? {
+            ScalarDeclaration::Bool {} => Self::Bool,
+            ScalarDeclaration::Number {} => Self::Number,
+            ScalarDeclaration::String { max_len } => Self::String { max_len },
+        })
+    }
 }
 
 /// A probe result after validation against its declared schema.
@@ -52,7 +96,7 @@ pub enum ScalarValue {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReturnSchemaError {
-    InvalidFieldName,
+    InvalidFieldName { field: String },
     StringLimitTooLarge { path: String, max_len: usize },
     TooManyFields { count: usize },
 }
@@ -107,7 +151,9 @@ impl ReturnSchema {
                 }
                 for (name, schema) in fields {
                     if name.is_empty() || name.len() > MAX_STRING_LENGTH {
-                        return Err(ReturnSchemaError::InvalidFieldName);
+                        return Err(ReturnSchemaError::InvalidFieldName {
+                            field: field_preview(name),
+                        });
                     }
                     if let ScalarSchema::String { max_len } = schema {
                         validate_string_limit(&format!("$.{name}"), *max_len)?;
@@ -248,9 +294,9 @@ fn value_kind(value: &Value) -> &'static str {
 impl fmt::Display for ReturnSchemaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidFieldName => write!(
+            Self::InvalidFieldName { field } => write!(
                 f,
-                "struct field names must have 1..={MAX_STRING_LENGTH} UTF-8 bytes"
+                "struct field {field:?} must have 1..={MAX_STRING_LENGTH} UTF-8 bytes"
             ),
             Self::StringLimitTooLarge { path, max_len } => {
                 write!(
@@ -270,27 +316,43 @@ impl fmt::Display for ReturnSchemaError {
 
 impl std::error::Error for ReturnSchemaError {}
 
-#[test]
-fn struct_field_names_and_diagnostics_are_bounded() {
-    for name in [String::new(), "x".repeat(MAX_STRING_LENGTH + 1)] {
+#[cfg(test)]
+mod field_name_tests {
+    use super::*;
+    #[test]
+    fn invalid_schema_diagnostic_names_the_bounded_field() {
         let schema = ReturnSchema::Struct {
-            fields: BTreeMap::from([(name, ScalarSchema::Bool)]),
+            fields: BTreeMap::from([(
+                format!("invalid-field-{}", "x".repeat(256)),
+                ScalarSchema::Bool,
+            )]),
         };
+        let message = schema.validate_declaration().unwrap_err().to_string();
+        assert!(message.contains("invalid-field-"), "{message}");
+        assert!(message.len() < 256, "{message}");
+    }
+    #[test]
+    fn struct_field_names_and_diagnostics_are_bounded() {
+        for name in [String::new(), "x".repeat(MAX_STRING_LENGTH + 1)] {
+            let schema = ReturnSchema::Struct {
+                fields: BTreeMap::from([(name, ScalarSchema::Bool)]),
+            };
+            assert!(
+                schema.validate_declaration().is_err(),
+                "struct field names must be bounded and nonempty"
+            );
+        }
+        let schema = ReturnSchema::Struct {
+            fields: BTreeMap::new(),
+        };
+        let error = schema
+            .validate_value(serde_json::json!({"x".repeat(60_000):true}))
+            .unwrap_err();
         assert!(
-            schema.validate_declaration().is_err(),
-            "struct field names must be bounded and nonempty"
+            error.to_string().len() < 256,
+            "unexpected-field diagnostics must be bounded"
         );
     }
-    let schema = ReturnSchema::Struct {
-        fields: BTreeMap::new(),
-    };
-    let error = schema
-        .validate_value(serde_json::json!({"x".repeat(60_000):true}))
-        .unwrap_err();
-    assert!(
-        error.to_string().len() < 256,
-        "unexpected-field diagnostics must be bounded"
-    );
 }
 
 impl fmt::Display for ReturnValidationError {
@@ -322,3 +384,18 @@ impl fmt::Display for ReturnValidationError {
 }
 
 impl std::error::Error for ReturnValidationError {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unit_schema_kinds_reject_unknown_fields() {
+        for kind in ["bool", "number"] {
+            let valid = serde_json::json!({"kind": kind});
+            assert!(serde_json::from_value::<super::ReturnSchema>(valid.clone()).is_ok());
+            assert!(serde_json::from_value::<super::ScalarSchema>(valid).is_ok());
+            let invalid = serde_json::json!({"kind": kind, "max_len": 1});
+            assert!(serde_json::from_value::<super::ReturnSchema>(invalid.clone()).is_err());
+            assert!(serde_json::from_value::<super::ScalarSchema>(invalid).is_err());
+        }
+    }
+}

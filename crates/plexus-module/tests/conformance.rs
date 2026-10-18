@@ -2198,7 +2198,7 @@ async fn imported_github_grant_lists_and_revokes_through_direct_management() {
             agent_id: "agent-management".into(),
             app_id: 42,
             installation_id: None,
-            credential_id: "github_app:management".into(),
+            credential_id: "github_app:app-management".into(),
             status: "enabled".into(),
             grants: vec![AgentPermission {
                 action: "create_issue".into(),

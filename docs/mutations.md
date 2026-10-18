@@ -83,13 +83,16 @@ named assertion with the other tests accounted for.
 ### CI
 
 [CI](../.github/workflows/ci.yml) validates the catalogue in the Linux Test job
-and replays it in four mutation shards. Train pushes select changed rows with
-`--diff origin/main`; main pushes select all rows. The nightly schedule at
-03:23 UTC and manual runs select all rows with `--broad`. Only CAUGHT and HUB are
-accepted, and JSON reports are uploaded even when a shard fails.
+and replays selected controls in one to four nonempty mutation shards. Train
+pushes select changed rows with `--diff origin/main`; main pushes deliberately
+verify the full catalogue independently of a train run. Later main pushes do
+not cancel a running main audit. The nightly schedule at 03:23 UTC and manual
+runs select all rows with `--broad`. Only CAUGHT and HUB are accepted, and JSON
+reports are uploaded even when a shard fails.
 
-Selection occurs inside the shell because
-`scripts/check-train-preconditions.sh` refuses job or step `if:` conditions that
-depend on the ref or event. Train and main must execute the same CI steps.
-Concurrency groups include the event name so a main push cannot cancel the
-nightly broad replay on the same ref.
+The planner computes selection before shard allocation, and the replay step
+passes it to the mutation runner. `scripts/check-train-preconditions.sh` refuses
+ref- or event-dependent job and step conditions except the explicit PR exclusion
+on the mutation job. Train and main execute the same CI steps; fork PRs allocate
+no mutation runners. Concurrency groups include the event name so main pushes
+cannot cancel the nightly broad replay on the same ref.

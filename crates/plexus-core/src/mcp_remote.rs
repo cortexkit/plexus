@@ -1,10 +1,12 @@
 //! MCP streamable-HTTP transport and the small client surface used by catalog
-//! discovery. Credential material is copied into a request header only while a
-//! request is being constructed; this type never stores it.
+//! discovery. Credentials are not retained in pooled connection state; the HTTP
+//! stack owns header copies for the lifetime of a request.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::io::{BufRead, BufReader, Read};
+#[cfg(test)]
+use std::io::BufRead;
+use std::io::{BufReader, Read};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -21,15 +23,17 @@ use crate::credentials::ResolvedCredential;
 use crate::http_support::{
     build_headers, classify_reqwest_error, credentialed_redirect_policy, duration_ms,
     read_body_bounded, redact_value, redacted_endpoint, redirect_location_for_log,
-    reqwest_error_cause, retry_after_from_headers, throttle_deadline, throttle_gate,
-    throttle_refusal, BodyReadFailure, HttpAttemptFailure, ThrottleGate, DEFAULT_CONNECT_TIMEOUT,
-    DEFAULT_IDLE_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, MAX_RESPONSE_BODY_BYTES,
-    POOLED_CONNECTION_IDLE_LIMIT,
+    reqwest_error_cause, response_throttle, throttle_deadline, throttle_gate, throttle_refusal,
+    with_request_deadline, BodyReadFailure, HttpAttemptFailure, ThrottleGate,
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_REQUEST_TIMEOUT,
+    MAX_RESPONSE_BODY_BYTES, POOLED_CONNECTION_IDLE_LIMIT,
 };
 use crate::manifest::CredentialBinding;
+#[cfg(test)]
+use crate::mcp_payload::tools_from_response;
 use crate::mcp_payload::{
     decode_tool_result, json_rpc_request, tool_result_from_response, tools_call_params,
-    tools_from_response, tools_list_params,
+    tools_list_params,
 };
 use crate::transport::{
     Retryability, TransmissionState, Transport, TransportRequest, TransportResponse,
@@ -38,6 +42,7 @@ use crate::transport::{
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const MCP_PROTOCOL_VERSION_JUNE: &str = "2025-06-18";
 pub(crate) const MAX_TOOL_PAGES: usize = 100;
+pub(crate) const MAX_DISCOVERED_TOOLS: usize = 10_000;
 
 pub(crate) fn next_tool_cursor(
     response: &Value,
@@ -51,7 +56,8 @@ pub(crate) fn next_tool_cursor(
         _ => Err(McpRemoteError::Protocol),
     }
 }
-const POISONED_LOCK_MESSAGE: &str = "MCP transport lock is poisoned; restart the module to recover";
+const POISONED_LOCK_MESSAGE: &str =
+    "MCP transport lock is poisoned; retry after pool recovery or restart if it persists";
 const GREP_APP_APP_KEY: &str = crate::code_search::BACKEND;
 const GREP_APP_SEARCH_ACTION: &str = crate::code_search::ACTION;
 const GREP_APP_NO_RESULTS: &str = "No results found for your query.";
@@ -67,7 +73,7 @@ pub enum McpRemoteError {
     OutcomeUnknown,
     Protocol,
     UnsupportedProtocol,
-    AuthRejected(u16),
+    AuthRejected,
     Throttled(Duration),
     /// An earlier response's throttle has longer to run than a request may
     /// wait for it, so this request was not sent.
@@ -83,11 +89,9 @@ impl fmt::Display for McpRemoteError {
     /// carry the vendor's retry delay. Render known observations so operators
     /// can distinguish the cause without repeating a vendor request.
     ///
-    /// `AuthRejected(0)` is a legacy sentinel, not an HTTP status. Production
-    /// authentication classification now uses only HTTP 401. A zero duration
-    /// in `Throttled` means the HTTP 429 omitted Retry-After, not that the
-    /// vendor invited an immediate retry. Neither sentinel is printed as a
-    /// measurement, and no credential or vendor response body is rendered here.
+    /// Authentication classification uses only HTTP 401. Zero delays remain
+    /// displayable for compatibility but are not emitted by HTTP classification,
+    /// which uses a positive fallback when Retry-After is missing.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Configuration => formatter.write_str("MCP transport configuration is invalid"),
@@ -99,12 +103,7 @@ impl fmt::Display for McpRemoteError {
             Self::UnsupportedProtocol => {
                 formatter.write_str("MCP negotiated an unsupported protocol version")
             }
-            Self::AuthRejected(0) => {
-                formatter.write_str("MCP authentication was rejected (no HTTP status)")
-            }
-            Self::AuthRejected(status) => {
-                write!(formatter, "MCP authentication was rejected (HTTP {status})")
-            }
+            Self::AuthRejected => formatter.write_str("MCP authentication was rejected (HTTP 401)"),
             Self::Throttled(retry_after) if retry_after.is_zero() => {
                 formatter.write_str("MCP vendor throttled the request (no retry-after given)")
             }
@@ -362,7 +361,7 @@ impl std::ops::Deref for Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.entry.lock() {
+        if let Ok(mut state) = self.entry.try_lock() {
             state.last_used = Instant::now();
         }
         self.entry.leases.fetch_sub(1, Ordering::Relaxed);
@@ -386,7 +385,14 @@ pub struct McpRemoteTransport {
 }
 
 impl McpRemoteTransport {
+    /// Explicit default endpoints are a fixture seam. Production callers must
+    /// register each connection instead of routing unknown ids to a fallback.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(default_config: McpRemoteConfig) -> Self {
+        Self::build(default_config)
+    }
+
+    fn build(default_config: McpRemoteConfig) -> Self {
         Self {
             default_config,
             configs: Arc::new(Mutex::new(HashMap::new())),
@@ -551,33 +557,68 @@ impl McpRemoteTransport {
             Arc::as_ptr(&entry.entry) as usize,
         );
         let mut state = entry.lock().map_err(|_| poisoned_lock_error())?;
-        state.ensure_current(&config)?;
-        let mut actions = Vec::new();
-        let mut params = tools_list_params();
-        let mut cursors = HashSet::new();
-        for _ in 0..MAX_TOOL_PAGES {
-            let body = json_rpc_request(
-                self.next_request_id.fetch_add(1, Ordering::Relaxed),
-                "tools/list",
-                params,
-            );
-            let response = self
-                .rpc_with_reconnect(&mut state, &config, body, credential)
-                .map_err(McpCallError::into_remote)?;
-            for tool in tools_from_response(&response).map_err(|_| McpRemoteError::Protocol)? {
-                actions.push(DiscoveredAction::from_value(&tool)?);
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            state.ensure_current(&config)?;
+            let mut actions = Vec::new();
+            let mut params = tools_list_params();
+            let mut cursors = HashSet::new();
+            let mut names = HashSet::new();
+            let mut bytes = 0usize;
+            for _ in 0..MAX_TOOL_PAGES {
+                let body = json_rpc_request(
+                    self.next_request_id.fetch_add(1, Ordering::Relaxed),
+                    "tools/list",
+                    params,
+                );
+                let response = self
+                    .rpc_with_reconnect(&mut state, &config, body, credential)
+                    .map_err(McpCallError::into_remote)?;
+                bytes = bytes.saturating_add(
+                    serde_json::to_vec(&response)
+                        .map_err(|_| McpRemoteError::Protocol)?
+                        .len(),
+                );
+                if bytes > MAX_RESPONSE_BODY_BYTES {
+                    return Err(McpRemoteError::ResponseTooLarge);
+                }
+                let tools = response
+                    .pointer("/result/tools")
+                    .and_then(Value::as_array)
+                    .ok_or(McpRemoteError::Protocol)?;
+                for tool in tools {
+                    let action = DiscoveredAction::from_value(tool)?;
+                    if !names.insert(action.name.clone()) {
+                        return Err(McpRemoteError::Protocol);
+                    }
+                    if actions.len() >= MAX_DISCOVERED_TOOLS {
+                        return Err(McpRemoteError::ResponseTooLarge);
+                    }
+                    actions.push(action);
+                }
+                match next_tool_cursor(&response, &mut cursors)? {
+                    None => return Ok(actions),
+                    Some(cursor) => params = json!({"cursor": cursor}),
+                }
             }
-            match next_tool_cursor(&response, &mut cursors)? {
-                None => return Ok(actions),
-                Some(cursor) => params = json!({"cursor": cursor}),
+            Err(McpRemoteError::Protocol)
+        }));
+        match outcome {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!(error transport: "MCP discovery panicked; the session was discarded");
+                self.panic_recoveries.fetch_add(1, Ordering::Relaxed);
+                if state.rebuild(&config).is_err() {
+                    reset_session(&mut state);
+                }
+                Err(McpRemoteError::OutcomeUnknown)
             }
         }
-        Err(McpRemoteError::Protocol)
     }
 
     /// Mark a live connection as needing a new MCP initialize handshake. The
     /// next operation reconnects and retries only the operation that triggered
     /// the stale-session response.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn reconnect(&self, connection_id: &str) {
         // The reset must wait for this connection's RPC, but that wait must
         // not hold the map needed by unrelated connections to find their clients.
@@ -594,19 +635,11 @@ impl McpRemoteTransport {
         }
     }
 
-    fn config_for(
-        &self,
-        connection_id: &str,
-        supplied: Option<&McpRemoteConfig>,
-    ) -> McpRemoteConfig {
-        supplied
-            .cloned()
-            .or_else(|| {
-                self.configs
-                    .lock()
-                    .ok()
-                    .and_then(|configs| configs.get(connection_id).cloned())
-            })
+    fn config_for(&self, connection_id: &str) -> McpRemoteConfig {
+        self.configs
+            .lock()
+            .ok()
+            .and_then(|configs| configs.get(connection_id).cloned())
             .unwrap_or_else(|| self.default_config.clone())
     }
 
@@ -666,6 +699,7 @@ impl McpRemoteTransport {
         if state.initialized {
             return Ok(None);
         }
+        reset_session(state);
         let initialize = json!({
             "jsonrpc": "2.0",
             "id": self.next_request_id.fetch_add(1, Ordering::Relaxed),
@@ -706,8 +740,16 @@ impl McpRemoteTransport {
         // notification. A refusal (an expired session, a throttle, a 401) is
         // handed back like a failed initialize, so the caller classifies it
         // instead of marking a session ready that the server never confirmed.
-        if let Some(refusal) = self.post_notification(state, config, &notification, credential)? {
-            return Ok(Some(refusal));
+        match self.post_notification(state, config, &notification, credential) {
+            Ok(None) => {}
+            Ok(Some(refusal)) => {
+                reset_session(state);
+                return Ok(Some(refusal));
+            }
+            Err(error) => {
+                reset_session(state);
+                return Err(error);
+            }
         }
         state.initialized = true;
         Ok(None)
@@ -744,7 +786,7 @@ impl McpRemoteTransport {
                 reset_session(state);
                 continue;
             }
-            return classify_reply(&reply, state).map_err(|error| {
+            return classify_reply(reply, state).map_err(|error| {
                 let error = McpCallError::Remote(error);
                 if before_call {
                     McpCallError::BeforeCall(Box::new(error))
@@ -779,14 +821,24 @@ impl McpRemoteTransport {
             "mcp-protocol-version",
             HeaderValue::from_static(state.protocol_version),
         );
-        let response = state
+        let deadline = Instant::now()
+            .checked_add(config.request_timeout)
+            .unwrap_or_else(Instant::now);
+        let responder = SseResponder {
+            client: &state.client,
+            endpoint: &config.endpoint,
+            headers: headers.clone(),
+            deadline,
+        };
+        let builder = state
             .client
             .post(&config.endpoint)
             .headers(headers)
-            .json(body)
+            .json(body);
+        let response = with_request_deadline(builder, deadline)
             .send()
             .map_err(AttemptError::Request)?;
-        let mut reply = decode_response(response, body.get("id"))?;
+        let mut reply = decode_response(response, body.get("id"), Some(responder))?;
         reply.sent_session = state.session_id.is_some();
         Ok(reply)
     }
@@ -809,39 +861,42 @@ impl McpRemoteTransport {
             "mcp-protocol-version",
             HeaderValue::from_static(state.protocol_version),
         );
-        let response = state
+        let deadline = Instant::now()
+            .checked_add(config.request_timeout)
+            .unwrap_or_else(Instant::now);
+        let notification_builder = state
             .client
             .post(&config.endpoint)
             .headers(headers)
-            .json(body)
+            .json(body);
+        let response = with_request_deadline(notification_builder, deadline)
             .send()
             .map_err(AttemptError::Request)?;
         let status = response.status().as_u16();
         if (200..300).contains(&status) {
             return Ok(None);
         }
-        let mut reply = decode_response(response, None)?;
+        let mut reply = decode_response(response, None, None)?;
         reply.sent_session = state.session_id.is_some();
         Ok(Some(reply))
     }
 }
 
 /// The headers every MCP POST carries: the credential, the accepted response
-/// types, the protocol version, and the session once the server assigned one.
+/// types and the session once the server assigned one. The caller adds the
+/// negotiated protocol version from its connection state.
 fn request_headers(
     config: &McpRemoteConfig,
     credential: &ResolvedCredential,
     session_id: Option<&str>,
 ) -> Result<HeaderMap, AttemptError> {
-    let mut headers = build_headers(&config.credential_bindings, credential)
-        .map_err(|_| AttemptError::Local(McpRemoteError::Configuration))?;
+    let mut headers = build_headers(&config.credential_bindings, credential).map_err(|_| {
+        eprintln!(warn transport: "MCP credential could not be rendered as a header");
+        AttemptError::Local(McpRemoteError::Configuration)
+    })?;
     headers.insert(
         ACCEPT,
         HeaderValue::from_static("application/json, text/event-stream"),
-    );
-    headers.insert(
-        HeaderName::from_static("mcp-protocol-version"),
-        HeaderValue::from_static(MCP_PROTOCOL_VERSION),
     );
     insert_session_header(&mut headers, session_id);
     Ok(headers)
@@ -849,7 +904,7 @@ fn request_headers(
 
 impl Default for McpRemoteTransport {
     fn default() -> Self {
-        Self::new(McpRemoteConfig::default())
+        Self::build(McpRemoteConfig::default())
     }
 }
 
@@ -870,7 +925,7 @@ impl Transport for McpRemoteTransport {
         request: TransportRequest,
         credential: &ResolvedCredential,
     ) -> TransportResponse {
-        let config = self.config_for(&request.connection_id, None);
+        let config = self.config_for(&request.connection_id);
         let entry = match self.entry_for(&request.connection_id, &config) {
             Ok(entry) => entry,
             Err(error) => return local_error_response(error),
@@ -922,11 +977,20 @@ impl Transport for McpRemoteTransport {
             Ok(response) => {
                 let Ok(result) = tool_result_from_response(response) else {
                     eprintln!(warn transport: "MCP vendor response was invalid");
-                    return TransportResponse::vendor_error(
+                    return TransportResponse::unknown_with_error(
                         "mcp_protocol_error",
                         "MCP response was invalid",
                     );
                 };
+                if result
+                    .get("isError")
+                    .is_some_and(|value| !value.is_boolean())
+                {
+                    return TransportResponse::unknown_with_error(
+                        "mcp_protocol_error",
+                        "MCP isError must be boolean",
+                    );
+                }
                 if result
                     .get("isError")
                     .and_then(Value::as_bool)
@@ -1010,29 +1074,33 @@ fn call_error_response(error: McpCallError) -> TransportResponse {
                 "MCP connection failed before the request was sent",
             ),
             McpRemoteError::PoisonedLock => poisoned_lock_response(),
-            McpRemoteError::Protocol => {
-                TransportResponse::vendor_error("mcp_protocol_error", "MCP response was invalid")
-            }
+            McpRemoteError::Protocol => TransportResponse::unknown_with_error(
+                "mcp_protocol_error",
+                "MCP response was invalid",
+            ),
             McpRemoteError::OutcomeUnknown => TransportResponse::unknown(),
-            McpRemoteError::AuthRejected(status) => TransportResponse {
+            McpRemoteError::AuthRejected => TransportResponse {
                 transmission: TransmissionState::Sent,
                 retryability: Retryability::Terminal,
                 response: None,
-                error_code: Some(if matches!(status, 401 | 403) {
-                    format!("http_{status}")
-                } else {
-                    "vendor_auth_rejected".to_string()
-                }),
+                error_code: Some("http_401".to_string()),
                 error_message: Some("MCP authentication was rejected".to_string()),
                 vendor_request_id: None,
                 served_from: None,
                 observed_at_ms: None,
                 retry_after_ms: None,
             },
+            McpRemoteError::VendorStatus(status) if status >= 500 => {
+                TransportResponse::unknown_with_error(
+                    &format!("http_{status}"),
+                    "MCP gateway response was not definitive",
+                )
+            }
             McpRemoteError::VendorStatus(status) => TransportResponse::vendor_error(
                 &format!("http_{status}"),
                 "MCP vendor request failed",
             ),
+            McpRemoteError::Configuration => local_error_response(McpRemoteError::Configuration),
             McpRemoteError::UnsupportedProtocol => TransportResponse::vendor_error(
                 "mcp_unsupported_protocol_version",
                 "MCP negotiated an unsupported protocol version",
@@ -1156,8 +1224,8 @@ impl McpCallError {
 /// clearing `session_id` would make a reconnect replay a session the server has
 /// already discarded, which is worse than having no session at all: the retry
 /// that exists to recover from a stale session would carry the stale session
-/// with it. Three call sites reset this, and one of them forgetting the second
-/// field is exactly the bug this function makes unwritable.
+/// with it. Keeping the reset in one place prevents the readiness flag and
+/// session header from drifting apart.
 fn reset_session(state: &mut ConnectionEntry) {
     state.protocol_version = MCP_PROTOCOL_VERSION;
     state.initialized = false;
@@ -1184,10 +1252,11 @@ fn insert_session_header(headers: &mut HeaderMap, session_id: Option<&str>) {
 fn decode_response(
     response: Response,
     expected_id: Option<&Value>,
+    responder: Option<SseResponder<'_>>,
 ) -> Result<HttpReply, AttemptError> {
     let status = response.status().as_u16();
     let path = response.url().path().to_owned();
-    let retry_after = retry_after_from_headers(response.headers());
+    let retry_after = response_throttle(status, response.headers());
     let session_id = response
         .headers()
         .get("mcp-session-id")
@@ -1199,6 +1268,16 @@ fn decode_response(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if let Some(delay) = retry_after {
+        eprintln!(warn transport: "MCP vendor throttle: status={status} path={path} retry_after_ms={}", duration_ms(delay));
+        return Ok(HttpReply {
+            status,
+            retry_after,
+            body: Value::Null,
+            session_id,
+            sent_session: false,
+        });
+    }
     if (300..400).contains(&status) {
         // A redirect the policy declined: another origin, a status that would
         // turn this POST into a GET, or too many hops. The agent sees only the
@@ -1207,7 +1286,9 @@ fn decode_response(
         eprintln!(warn transport: "MCP redirect not followed: status={status} path={path} location={location}");
     }
     if (200..300).contains(&status) && content_type.contains("text/event-stream") {
-        let body = read_matching_sse_response(response, expected_id)?;
+        let body = read_matching_sse_response(response, expected_id, responder).inspect_err(|_| {
+            eprintln!(warn transport: "MCP SSE response failed or exceeded its limit: status={status} path={path}");
+        })?;
         return Ok(HttpReply {
             status,
             retry_after,
@@ -1216,13 +1297,18 @@ fn decode_response(
             sent_session: false,
         });
     }
-    let body = read_body_bounded(response, MAX_RESPONSE_BODY_BYTES).map_err(
+    let success = (200..300).contains(&status);
+    let limit = if success {
+        MAX_RESPONSE_BODY_BYTES
+    } else {
+        4096
+    };
+    let body = read_body_bounded(response, limit).map_err(
         |BodyReadFailure { failure, cause }| {
             eprintln!(warn transport: "MCP response body failed: status={status} path={path}: {failure:?}: {cause}");
             AttemptError::Http(failure)
         },
     )?;
-    let success = (200..300).contains(&status);
     if body.truncated && success {
         eprintln!(warn transport: "MCP response exceeded {MAX_RESPONSE_BODY_BYTES} bytes: status={status} path={path}");
         return Err(AttemptError::Local(McpRemoteError::ResponseTooLarge));
@@ -1237,6 +1323,13 @@ fn decode_response(
             &text,
             None,
         );
+        return Ok(HttpReply {
+            status,
+            retry_after,
+            body: Value::Null,
+            session_id,
+            sent_session: false,
+        });
     }
     let parsed = if content_type.contains("text/event-stream") {
         parse_sse_reply(&text, expected_id)
@@ -1273,7 +1366,8 @@ fn decode_response(
 /// first, and the answer is the first message that is a response (it has
 /// `result` or `error`) carrying the request's id, not merely the first
 /// parseable JSON.
-fn parse_sse_reply(text: &str, expected_id: Option<&Value>) -> Result<Value, McpRemoteError> {
+fn sse_messages(text: &str) -> Vec<Value> {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut events = Vec::new();
     let mut data: Option<String> = None;
     for line in text.lines().chain(std::iter::once("")) {
@@ -1305,6 +1399,12 @@ fn parse_sse_reply(text: &str, expected_id: Option<&Value>) -> Result<Value, Mcp
             Value::Array(messages) => messages,
             message => vec![message],
         })
+        .collect()
+}
+
+fn parse_sse_reply(text: &str, expected_id: Option<&Value>) -> Result<Value, McpRemoteError> {
+    sse_messages(text)
+        .into_iter()
         .find(|message| {
             (message.get("result").is_some() || message.get("error").is_some())
                 && expected_id.is_none_or(|id| message.get("id") == Some(id))
@@ -1312,30 +1412,94 @@ fn parse_sse_reply(text: &str, expected_id: Option<&Value>) -> Result<Value, Mcp
         .ok_or(McpRemoteError::Protocol)
 }
 
+struct SseResponder<'a> {
+    client: &'a Client,
+    endpoint: &'a str,
+    headers: HeaderMap,
+    deadline: Instant,
+}
+
+impl SseResponder<'_> {
+    fn answer_request(&self, method: &Value, id: &Value) -> Result<(), AttemptError> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(AttemptError::Http(HttpAttemptFailure::Timeout));
+        }
+        // Ping needs no negotiated capability. Sampling and elicitation are not
+        // advertised, so explicitly refuse those instead of leaving a server waiting.
+        let body = if method.as_str() == Some("ping") {
+            json!({"jsonrpc":"2.0","id":id,"result":{}})
+        } else {
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Client method not supported"}})
+        };
+        let response = self
+            .client
+            .post(self.endpoint)
+            .headers(self.headers.clone())
+            .timeout(remaining)
+            .json(&body)
+            .send()
+            .map_err(AttemptError::Request)?;
+        if !response.status().is_success() {
+            return Err(AttemptError::Local(McpRemoteError::Protocol));
+        }
+        Ok(())
+    }
+}
+
 fn read_matching_sse_response(
     response: Response,
     expected_id: Option<&Value>,
+    responder: Option<SseResponder<'_>>,
 ) -> Result<Value, AttemptError> {
     let mut reader = BufReader::new(response.take((MAX_RESPONSE_BODY_BYTES + 1) as u64));
     let mut total = 0;
     let mut event = Vec::new();
+    let mut line_start = 0usize;
+    let mut after_cr = false;
     loop {
-        let before = event.len();
-        let read = reader.read_until(b'\n', &mut event).map_err(|error| {
-            AttemptError::Http(crate::http_support::classify_body_io_error(&error))
+        let mut byte = [0u8; 1];
+        let read = reader.read(&mut byte).map_err(|error| {
+            let failure = crate::http_support::classify_body_io_error(&error);
+            let cause = crate::http_support::body_io_error_cause(error);
+            eprintln!(warn transport: "MCP SSE body read failed: {failure:?}: {cause}");
+            AttemptError::Http(failure)
         })?;
         total += read;
         if total > MAX_RESPONSE_BODY_BYTES {
             return Err(AttemptError::Local(McpRemoteError::ResponseTooLarge));
         }
-        let boundary = matches!(&event[before..], b"\n" | b"\r\n") || read == 0;
+        if read != 0 && after_cr && byte[0] == b'\n' {
+            after_cr = false;
+            continue;
+        }
+        after_cr = read != 0 && byte[0] == b'\r';
+        let line_end = read != 0 && matches!(byte[0], b'\r' | b'\n');
+        let boundary = (line_end && event.len() == line_start) || read == 0;
+        if read != 0 {
+            event.push(if line_end { b'\n' } else { byte[0] });
+        }
+        if line_end {
+            line_start = event.len();
+        }
         if boundary {
             if let Ok(text) = std::str::from_utf8(&event) {
-                if let Ok(reply) = parse_sse_reply(text, expected_id) {
-                    return Ok(reply);
+                for message in sse_messages(text) {
+                    if message.get("method").is_some() {
+                        if let Some(id) = message.get("id") {
+                            if let Some(responder) = &responder {
+                                responder.answer_request(&message["method"], id)?;
+                            }
+                        }
+                    } else if (message.get("result").is_some() || message.get("error").is_some())
+                        && expected_id.is_none_or(|id| message.get("id") == Some(id))
+                    {
+                        return Ok(message);
+                    }
                 }
             }
             event.clear();
+            line_start = 0;
         }
         if read == 0 {
             return Err(AttemptError::Local(McpRemoteError::Protocol));
@@ -1343,20 +1507,19 @@ fn read_matching_sse_response(
     }
 }
 
-fn classify_reply(reply: &HttpReply, state: &mut ConnectionEntry) -> Result<Value, McpRemoteError> {
-    if reply.status == 429 {
-        let delay = reply.retry_after.unwrap_or_default();
+fn classify_reply(reply: HttpReply, state: &mut ConnectionEntry) -> Result<Value, McpRemoteError> {
+    if let Some(delay) = reply.retry_after {
         state.throttle_until = throttle_deadline(Instant::now(), delay);
         return Err(McpRemoteError::Throttled(delay));
     }
     if !(200..300).contains(&reply.status) {
         if reply.status == 401 {
-            return Err(McpRemoteError::AuthRejected(401));
+            return Err(McpRemoteError::AuthRejected);
         }
         if reply.status == 403 || (300..400).contains(&reply.status) {
             return Err(McpRemoteError::VendorStatus(reply.status));
         }
-        return Err(McpRemoteError::Vendor);
+        return Err(McpRemoteError::VendorStatus(reply.status));
     }
     let object = reply.body.as_object().ok_or(McpRemoteError::Protocol)?;
     if let Some(error) = object.get("error") {
@@ -1381,7 +1544,7 @@ fn classify_reply(reply: &HttpReply, state: &mut ConnectionEntry) -> Result<Valu
         );
         return Err(McpRemoteError::Vendor);
     }
-    Ok(reply.body.clone())
+    Ok(reply.body)
 }
 
 /// The vendor's own explanation for a failed tool call.
@@ -1445,24 +1608,7 @@ fn grep_app_tool_error_response(
 }
 
 fn throttled_response(delay: Duration) -> TransportResponse {
-    TransportResponse {
-        transmission: TransmissionState::Sent,
-        retryability: Retryability::Throttle,
-        response: None,
-        error_code: Some("throttled".to_string()),
-        error_message: Some(if delay.is_zero() {
-            "MCP vendor throttled the request".to_string()
-        } else {
-            format!(
-                "MCP vendor throttled the request; retry after {}ms",
-                duration_ms(delay)
-            )
-        }),
-        vendor_request_id: None,
-        served_from: None,
-        observed_at_ms: None,
-        retry_after_ms: (!delay.is_zero()).then(|| duration_ms(delay)),
-    }
+    crate::http_support::throttled_response("MCP", delay)
 }
 
 fn is_successful_rpc(reply: &HttpReply) -> bool {
@@ -1526,22 +1672,8 @@ pub(crate) fn poisoned_lock_response() -> TransportResponse {
 
 fn local_error_response(error: McpRemoteError) -> TransportResponse {
     match error {
-        McpRemoteError::Timeout => TransportResponse {
-            transmission: TransmissionState::OutcomeUnknown,
-            retryability: Retryability::Terminal,
-            response: None,
-            error_code: Some("timeout".to_string()),
-            error_message: Some("MCP request timed out".to_string()),
-            vendor_request_id: None,
-            served_from: None,
-            observed_at_ms: None,
-            retry_after_ms: None,
-        },
-        McpRemoteError::Connection => TransportResponse::transient_not_sent(
-            "MCP connection failed before the request was sent",
-        ),
         McpRemoteError::PoisonedLock => poisoned_lock_response(),
-        McpRemoteError::OutcomeUnknown => TransportResponse::unknown(),
+
         _ => TransportResponse {
             transmission: TransmissionState::NotSent,
             retryability: Retryability::Terminal,
@@ -1820,7 +1952,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_request_diagnostic_stays_outcome_unknown_through_mcp() {
+    fn invalid_request_diagnostic_is_not_sent_through_mcp() {
         let cfg = config("not a valid URL".to_string());
         let transport = McpRemoteTransport::new(cfg.clone());
         // Exercise the tool-post path, not a failed initialize. Initialization
@@ -1836,10 +1968,7 @@ mod tests {
 
         assert_eq!(
             (result.transmission, result.error_code.as_deref()),
-            (
-                TransmissionState::OutcomeUnknown,
-                Some("http_request_invalid")
-            )
+            (TransmissionState::NotSent, Some("http_request_invalid"))
         );
     }
 
@@ -2256,7 +2385,7 @@ mod transport_integration_tests {
                 );
                 assert_eq!(
                     result.retryability,
-                    if status == 429 {
+                    if matches!(status, 403 | 429) {
                         Retryability::Throttle
                     } else {
                         Retryability::Terminal
@@ -2762,7 +2891,7 @@ mod transport_integration_tests {
             "transport": {"kind": "mcp_remote", "url": "https://unused.invalid/mcp"},
             "auth": {"mode": "api_key"},
             "credential_bindings": [{
-                "ref_role": "credential", "placement": "header", "key": "Authorization",
+                "ref_role": "primary", "placement": "header", "key": "Authorization",
                 "prefix": "Bearer ", "required": true
             }],
             "resource_filters": {"required": [], "optional": [], "write_enabling": []},
@@ -3040,7 +3169,7 @@ mod transport_integration_tests {
                 request("canary", "read_tool"),
                 &ResolvedCredential::new(b"credential".to_vec(), None, 1),
             );
-            assert_eq!(result.error_code.as_deref(), Some("mcp_request_failed"));
+            assert_eq!(result.error_code.as_deref(), Some("http_503"));
             task.join().expect("server exits");
             return;
         }
@@ -3926,8 +4055,8 @@ mod error_message_tests {
     #[test]
     fn distinct_transport_failures_render_distinctly() {
         let refused = McpRemoteError::Connection.to_string();
-        let unauthorized = McpRemoteError::AuthRejected(401).to_string();
-        let forbidden = McpRemoteError::AuthRejected(403).to_string();
+        let unauthorized = McpRemoteError::AuthRejected.to_string();
+        let forbidden = McpRemoteError::VendorStatus(403).to_string();
         let throttled = McpRemoteError::Throttled(Duration::from_secs(90)).to_string();
 
         // A connect-classified failure and an auth rejection: these two rendered
@@ -3958,14 +4087,6 @@ mod error_message_tests {
             "throttle delays of different magnitudes must be distinguishable"
         );
 
-        // The two sentinel zeros must NOT be printed as measurements. Both are
-        // reachable: AuthRejected(0) on retry exhaustion or a body-level auth
-        // error, and a zero delay from a 429 carrying no Retry-After header.
-        let no_status = McpRemoteError::AuthRejected(0).to_string();
-        assert!(
-            !no_status.contains("HTTP 0"),
-            "a sentinel must not be rendered as a status the wire never sent: {no_status}"
-        );
         let no_delay = McpRemoteError::Throttled(Duration::ZERO).to_string();
         assert!(
             !no_delay.contains("0s"),
@@ -3984,8 +4105,7 @@ mod error_message_tests {
     #[test]
     fn the_catalog_error_carries_the_transport_cause() {
         let refused = crate::catalog::CatalogError::Transport(McpRemoteError::Connection);
-        let unauthorized =
-            crate::catalog::CatalogError::Transport(McpRemoteError::AuthRejected(401));
+        let unauthorized = crate::catalog::CatalogError::Transport(McpRemoteError::AuthRejected);
 
         assert_ne!(
             refused.to_string(),
@@ -4033,3 +4153,7 @@ mod annotation_observation_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_remote_safety_tests.rs"]
+mod safety_tests;

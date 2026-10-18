@@ -139,6 +139,86 @@ fn imported_from(label: &str, inventory: &Inventory) -> Imported {
     imported_with(label, inventory, &Repositories)
 }
 
+#[test]
+fn poll_regrant_survives_restart_while_restored_issuance_stays_revoked() {
+    let label = "poll-grant-replay";
+    let fixture = imported(label, &["add_reaction"]);
+    let grant = plexus_core::storage::github_store::GithubHandlePollGrant {
+        app_handle_id: "app-fixture".into(),
+        actions: vec!["github.issue.get".into()],
+        dry_run: false,
+    };
+    let mint = |store: &PlexusStore| store.grant_github_handle_poll(&grant).unwrap().unwrap();
+    let first = mint(&fixture.store);
+    let old = first["grants"][0]["grant_id"].as_str().unwrap().to_owned();
+    assert_eq!(mint(&fixture.store)["grants"][0]["op"], "unchanged");
+    let backup = fixture._scratch.path().with_file_name("before-revoke.db");
+    rusqlite::Connection::open(fixture._scratch.path())
+        .unwrap()
+        .execute("VACUUM INTO ?1", [backup.to_str().unwrap()])
+        .unwrap();
+    assert!(fixture.store.revoke_grant("direct", &old).unwrap());
+    let second = mint(&fixture.store);
+    let new = second["grants"][0]["grant_id"].as_str().unwrap().to_owned();
+    let Imported {
+        _scratch: scratch,
+        store,
+        engine,
+        ..
+    } = fixture;
+    drop(engine);
+    drop(store);
+    let descriptor = StorageDescriptor {
+        module_id: "plexus".into(),
+        storage_namespace: label.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: scratch.path().to_string_lossy().into_owned(),
+        },
+    };
+    let store = PlexusStore::open(&descriptor).unwrap();
+    assert!(store
+        .list_grants("direct", "github-handle-app-fixture")
+        .unwrap()
+        .iter()
+        .any(|row| row.grant_id == new && row.revoked_at_ms.is_none()));
+    assert_ne!(old, new, "a regrant must not reuse a journaled issuance id");
+    drop(store);
+    std::fs::copy(&backup, scratch.path()).unwrap();
+    let restored = PlexusStore::open(&descriptor).unwrap();
+    assert!(restored
+        .list_grants("direct", "github-handle-app-fixture")
+        .unwrap()
+        .iter()
+        .all(|row| row.grant_id != old || row.revoked_at_ms.is_some()));
+}
+
+#[test]
+fn a_second_single_use_import_refuses_without_duplicate_grants() {
+    let fixture = imported("single-use-import", &["add_reaction"]);
+    let before = fixture
+        .store
+        .list_grants("direct", "github-handle-app-fixture")
+        .unwrap();
+    assert!(control::import(
+        &fixture.store,
+        "direct",
+        &inventory(&["add_reaction"]),
+        &Token,
+        &Repositories,
+        0,
+        false
+    )
+    .is_err());
+    assert_eq!(
+        fixture
+            .store
+            .list_grants("direct", "github-handle-app-fixture")
+            .unwrap(),
+        before
+    );
+}
+
 /// As [`imported_from`], with the import's installation listing supplied by
 /// `reader`, for inventories that bind more than the one fixture repository.
 fn imported_with(label: &str, inventory: &Inventory, reader: &dyn InstallationReader) -> Imported {
@@ -348,14 +428,11 @@ fn imported_agent_completes_own_issue_edit_with_title_labels_and_assignees() {
 #[test]
 fn imported_agent_completes_close_with_comment() {
     let calls = drive("closure-close-comment", wire("v12-issue-close"));
-    assert_eq!(
-        actions(&calls),
-        ["github.issue.get", "add_issue_comment", "close_issue"]
-    );
-    assert_eq!(calls[1].1["body"], "Closing as not planned.");
-    assert_eq!(calls[2].1["state"], "closed");
-    assert_eq!(calls[2].1["state_reason"], "not_planned");
-    assert!(calls[2].1.get("comment").is_none());
+    assert_eq!(actions(&calls), ["add_issue_comment", "close_issue"]);
+    assert_eq!(calls[0].1["body"], "Closing as not planned.");
+    assert_eq!(calls[1].1["state"], "closed");
+    assert_eq!(calls[1].1["state_reason"], "not_planned");
+    assert!(calls[1].1.get("comment").is_none());
 }
 
 #[test]
@@ -363,8 +440,8 @@ fn imported_agent_completes_close_without_comment() {
     let mut request = wire("v12-issue-close");
     request.as_object_mut().unwrap().remove("comment");
     let calls = drive("closure-close", request);
-    assert_eq!(actions(&calls), ["github.issue.get", "close_issue"]);
-    assert_eq!(calls[1].1["state"], "closed");
+    assert_eq!(actions(&calls), ["close_issue"]);
+    assert_eq!(calls[0].1["state"], "closed");
 }
 
 #[test]
@@ -372,21 +449,18 @@ fn imported_agent_completes_reopen() {
     let mut request = wire("v12-issue-reopen");
     request.as_object_mut().unwrap().remove("comment");
     let calls = drive("closure-reopen", request);
-    assert_eq!(actions(&calls), ["github.issue.get", "reopen_issue"]);
-    assert_eq!(calls[1].1["state"], "open");
+    assert_eq!(actions(&calls), ["reopen_issue"]);
+    assert_eq!(calls[0].1["state"], "open");
 }
 
 #[test]
 fn imported_agent_completes_reopen_with_comment() {
     let calls = drive("closure-reopen-comment", wire("v12-issue-reopen"));
-    assert_eq!(
-        actions(&calls),
-        ["github.issue.get", "add_issue_comment", "reopen_issue"]
-    );
-    assert_eq!(calls[1].1["issue_number"], 42);
-    assert_eq!(calls[1].1["body"], "Reopening for another pass.");
-    assert_eq!(calls[2].1["state"], "open");
-    assert!(calls[2].1.get("comment").is_none());
+    assert_eq!(actions(&calls), ["add_issue_comment", "reopen_issue"]);
+    assert_eq!(calls[0].1["issue_number"], 42);
+    assert_eq!(calls[0].1["body"], "Reopening for another pass.");
+    assert_eq!(calls[1].1["state"], "open");
+    assert!(calls[1].1.get("comment").is_none());
 }
 
 #[test]
@@ -496,9 +570,8 @@ fn implied_rows_are_named_after_the_write_that_implies_them() {
             .map(|(_, id)| id.clone())
             .unwrap()
     };
-    // github.issue.get is implied by close, edit and reopen; the row is named
-    // after the first in name order and granted once.
-    assert!(id("github.issue.get").ends_with(":implied-by-close_issue"));
+    // Only issue edits need the issue ownership read.
+    assert!(id("github.issue.get").ends_with(":implied-by-edit_issue"));
     assert!(id("add_issue_labels").ends_with(":implied-by-edit_issue"));
     assert!(id("github.issue_comments.list").ends_with(":implied-by-update_issue_comment"));
     assert!(id("edit_issue").ends_with(":inventory-edit_issue"));
@@ -611,12 +684,12 @@ fn imported_block_on_close_refuses_instead_of_parking() {
         "{reply}"
     );
     assert!(calls.is_empty());
-    // Reopen implies the same issue read, so the block leaves it working.
+    // Blocking close does not block the independent reopen action.
     let mut reopen = wire("v12-issue-reopen");
     reopen.as_object_mut().unwrap().remove("comment");
     let (reply, calls) = send(&fixture, "closure-block-reopen", reopen);
     assert_eq!(reply["result"]["status"], "completed", "{reply}");
-    assert_eq!(actions(&calls), ["github.issue.get", "reopen_issue"]);
+    assert_eq!(actions(&calls), ["reopen_issue"]);
 }
 
 #[test]
@@ -663,7 +736,7 @@ fn reopen_comment_needs_the_agents_comment_grant() {
         wire("v12-issue-reopen"),
     );
     assert_eq!(reply["result"]["status"], "refused", "{reply}");
-    assert_eq!(actions(&calls), ["github.issue.get"]);
+    assert!(calls.is_empty());
 }
 
 /// Runs `github.handle.grant` as the operator on the fixture handle.

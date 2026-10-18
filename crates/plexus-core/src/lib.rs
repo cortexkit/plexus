@@ -243,14 +243,12 @@ pub use event_key::{derive_event_key, EventKeyError};
 pub use fingerprint::fingerprint;
 #[cfg(any(test, feature = "test-support"))]
 pub use github_identity::{
-    resolve_github_identity_reply, GithubIdentity, GithubIdentityRefusal, GithubIdentityResolver,
-    ResolvedGithubIdentity, StubGithubIdentityResponse, StubGithubIdentitySource,
+    resolve_github_identity_reply, FailClosedGithubIdentitySource, GithubIdentity,
+    GithubIdentityRefusal, GithubIdentityResolver, GithubIdentitySource, GithubIdentitySourceError,
+    PrefrontalGithubIdentitySource, ResolvedGithubIdentity, StubGithubIdentityResponse,
+    StubGithubIdentitySource, AGENT_GITHUB_IDENTITY_OPERATION,
 };
-pub use github_identity::{
-    FailClosedGithubIdentitySource, GithubIdentitySource, GithubIdentitySourceError,
-    PrefrontalGithubIdentitySource, PrefrontalRouteError, PrefrontalRoutePeer,
-    SubcPrefrontalRoutePeer, AGENT_GITHUB_IDENTITY_OPERATION,
-};
+pub use github_identity::{PrefrontalRouteError, PrefrontalRoutePeer, SubcPrefrontalRoutePeer};
 pub use governance::{
     AuthorizationRequest, CatalogDenial, ConnectionDenial, CredentialDenial, DecisionPlaneEnvelope,
     Denial, DispatchOutcome, GovernanceEngine, GrantDenial, PolicyDenial, PollAuthorizationRefusal,

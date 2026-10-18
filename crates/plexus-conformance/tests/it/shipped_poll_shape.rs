@@ -26,22 +26,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use plexus_core::{
-    ingest_value, jcs_sha256, CatalogActionInput, GovernanceEngine, GrantInput, MockResponse,
-    MockTransport, PollCycle, Poller, StubCredentialSource, AUTHORITY_POLL, CATALOG_PRINCIPAL,
+    jcs_sha256, CatalogActionInput, GovernanceEngine, GrantInput, MockResponse, MockTransport,
+    PollCycle, Poller, StubCredentialSource, AUTHORITY_POLL, CATALOG_PRINCIPAL,
 };
 use serde_json::{json, Value};
 
 const PRINCIPAL: &str = "direct";
 const CONNECTION: &str = "conn-github";
 const ACTION: &str = "list_issues";
-
-fn shipped_github_manifest() -> Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/github.jsonc");
-    let source = std::fs::read_to_string(path).expect("shipped github manifest must exist");
-    let normalized =
-        subc_jsonc::jsonc_to_json(&source).expect("shipped github manifest must be valid jsonc");
-    serde_json::from_str(&normalized).expect("shipped github manifest must parse")
-}
 
 fn captured_github_response() -> Value {
     let path =
@@ -50,28 +42,17 @@ fn captured_github_response() -> Value {
     serde_json::from_str(&source).expect("captured github response must be valid json")
 }
 
-/// A poll driven entirely by shipped catalog data must read a real payload.
-///
-/// What this fences, none of which an inline fixture can:
-///
-/// - `items_field: issues` against the REAL envelope, which also carries
-///   `totalCount` and `pageInfo`. A wrong name yields zero events, which is
-///   indistinguishable from a quiet period — the failure never surfaces.
-/// - `tiebreaker_id_field: number`, which GitHub returns as an INTEGER while
-///   the event log keys on strings. The strategy refuses a malformed item
-///   whole rather than skipping it, so a type mismatch fails the entire cycle
-///   on first contact.
-/// - `request_constants` reaching the WIRE. That is the whole reason the
-///   manifest field exists: without `orderBy`/`direction` GitHub returns a page
-///   ordered by neither, and the watermark — which takes the maximum timestamp
-///   across items — advances past rows that were never delivered.
-/// - `fixed_args` composing with the constants: the subscription says WHICH
-///   repository, the manifest says HOW to order it.
-#[test]
-fn the_shipped_github_poll_shape_reads_a_real_vendor_response() {
+fn seeded_engine(
+    action: &str,
+    schema: Value,
+    fixed_args: Value,
+) -> (
+    GovernanceEngine<StubCredentialSource, MockTransport>,
+    String,
+) {
     let descriptor = cortexkit_store_types::StorageDescriptor {
         module_id: "plexus".to_string(),
-        storage_namespace: format!("shipped-poll-{}", std::process::id()),
+        storage_namespace: format!("shipped-poll-{action}-{}", std::process::id()),
         isolation: cortexkit_store_types::Isolation::Module,
         backend: cortexkit_store_types::StorageBackend::Sqlite {
             path: ":memory:".to_string(),
@@ -79,7 +60,10 @@ fn the_shipped_github_poll_shape_reads_a_real_vendor_response() {
     };
     let store = plexus_core::PlexusStore::open(&descriptor).expect("test store");
 
-    let ingested = ingest_value(shipped_github_manifest()).expect("shipped manifest ingests");
+    let ingested = plexus_conformance::drift::ingest_manifest(include_str!(
+        "../../../../catalog/github.jsonc"
+    ))
+    .expect("shipped manifest ingests");
     let app_key = ingested.manifest.key.clone();
     store
         .insert_connection(
@@ -110,34 +94,15 @@ fn the_shipped_github_poll_shape_reads_a_real_vendor_response() {
         Arc::new(MockTransport::default()),
     );
 
-    let schema_hash = jcs_sha256(&json!({"type": "object"})).expect("test JSON is JCS-compatible");
+    let schema_hash = jcs_sha256(&schema).expect("test JSON is JCS-compatible");
     engine
         .store()
         .upsert_catalog_action(&CatalogActionInput {
             connection_id: CONNECTION.to_string(),
             principal: PRINCIPAL.to_string(),
-            name: ACTION.to_string(),
-            title: Some(ACTION.to_string()),
-            // The argument names GitHub's MCP server declares for
-            // list_issues. Governance refuses an argument the pinned schema
-            // does not declare, so the schema must list the request constants
-            // and cursor fields the shipped poll shape sends.
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "owner": {"type": "string"},
-                    "repo": {"type": "string"},
-                    "after": {"type": "string"},
-                    "direction": {"type": "string"},
-                    "field_filters": {},
-                    "fields": {},
-                    "labels": {},
-                    "orderBy": {"type": "string"},
-                    "perPage": {"type": "number"},
-                    "since": {"type": "string"},
-                    "state": {"type": "string"}
-                }
-            }),
+            name: action.to_string(),
+            title: Some(action.to_string()),
+            schema,
             schema_hash: schema_hash.clone(),
             risk: "read".to_string(),
             severity: "S1".to_string(),
@@ -155,12 +120,12 @@ fn the_shipped_github_poll_shape_reads_a_real_vendor_response() {
     engine
         .store()
         .insert_grant(&GrantInput {
-            grant_id: "grant-poll-github".to_string(),
+            grant_id: format!("grant-poll-{action}"),
             principal: PRINCIPAL.to_string(),
             connection_id: CONNECTION.to_string(),
             grantee_principal: PRINCIPAL.to_string(),
             risk_ceiling: "read".to_string(),
-            action_selectors: vec![ACTION.to_string()],
+            action_selectors: vec![action.to_string()],
             authority_kind: AUTHORITY_POLL.to_string(),
             expires_at: Some(expiry),
         })
@@ -168,16 +133,47 @@ fn the_shipped_github_poll_shape_reads_a_real_vendor_response() {
 
     let created = engine
         .store()
-        .subscribe_with_cursor_state(
-            PRINCIPAL,
-            CONNECTION,
-            ACTION,
-            30,
-            &json!({}),
-            &json!({"owner": "rust-lang", "repo": "rust"}),
-        )
+        .subscribe_with_cursor_state(PRINCIPAL, CONNECTION, action, 30, &json!({}), &fixed_args)
         .expect("subscribe store")
         .expect("the shipped manifest must be subscribable");
+    let stored = engine
+        .store()
+        .list_catalog_actions(PRINCIPAL, CONNECTION)
+        .unwrap();
+    assert_eq!(
+        stored[0].schema_hash,
+        jcs_sha256(&stored[0].schema).unwrap(),
+        "catalog pin must hash the actual seeded schema"
+    );
+    (engine, created.subscription_id)
+}
+
+/// Replay a captured GitHub response through the shipped issue poll shape.
+/// The assertions cover the response's items envelope, numeric event identifiers,
+/// manifest-owned ordering/page-size arguments, and subscription repository args.
+/// An inline poll declaration would not catch drift in the shipped catalog.
+#[test]
+fn the_shipped_github_poll_shape_reads_a_real_vendor_response() {
+    let (engine, subscription_id) = seeded_engine(
+        ACTION,
+        json!({
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string"},
+                "repo": {"type": "string"},
+                "after": {"type": "string"},
+                "direction": {"type": "string"},
+                "field_filters": {},
+                "fields": {},
+                "labels": {},
+                "orderBy": {"type": "string"},
+                "perPage": {"type": "number"},
+                "since": {"type": "string"},
+                "state": {"type": "string"}
+            }
+        }),
+        json!({"owner":"rust-lang","repo":"rust"}),
+    );
 
     engine
         .transport()
@@ -185,7 +181,7 @@ fn the_shipped_github_poll_shape_reads_a_real_vendor_response() {
     let poller = Poller::new(engine.clone());
 
     assert_eq!(
-        poller.poll_once(PRINCIPAL, &created.subscription_id),
+        poller.poll_once(PRINCIPAL, &subscription_id),
         PollCycle::Completed {
             inserted: 4,
             duplicates: 0,
@@ -198,6 +194,7 @@ fn the_shipped_github_poll_shape_reads_a_real_vendor_response() {
     let requests = engine.transport().requests();
     assert_eq!(requests.len(), 1, "exactly one poll must have dispatched");
     let args = requests[0].args.as_object().expect("request args object");
+    assert_eq!(args.get("perPage"), Some(&json!(30)));
     assert_eq!(args.get("orderBy"), Some(&json!("UPDATED_AT")));
     assert_eq!(args.get("direction"), Some(&json!("ASC")));
     assert_eq!(args.get("owner"), Some(&json!("rust-lang")));
@@ -209,7 +206,7 @@ fn the_shipped_github_poll_shape_reads_a_real_vendor_response() {
     // canonicalisation into a string event id.
     let stored = engine
         .store()
-        .subscription(PRINCIPAL, &created.subscription_id)
+        .subscription(PRINCIPAL, &subscription_id)
         .expect("read subscription")
         .expect("subscription row");
     assert_eq!(
@@ -256,114 +253,26 @@ fn captured_pull_request_response() -> Value {
 fn the_shipped_pull_request_poll_shape_reads_a_real_vendor_response() {
     const PR_ACTION: &str = "list_pull_requests";
 
-    let descriptor = cortexkit_store_types::StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("shipped-pr-poll-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = plexus_core::PlexusStore::open(&descriptor).expect("test store");
-
-    let ingested = ingest_value(shipped_github_manifest()).expect("shipped manifest ingests");
-    let app_key = ingested.manifest.key.clone();
-    store
-        .insert_connection(
-            PRINCIPAL,
-            CONNECTION,
-            &app_key,
-            "pending",
-            &json!({"required": [], "optional": [], "write_enabling": []}),
-        )
-        .expect("insert connection");
-    let handle = b"test:github-binding-handle";
-    let ticket = store
-        .create_binding_ticket(PRINCIPAL, CONNECTION, handle)
-        .expect("issue binding ticket");
-    store
-        .connect_with_ticket(PRINCIPAL, &ticket.ticket_id)
-        .expect("consume binding ticket")
-        .expect("connection activates");
-    store
-        .upsert_manifest(CATALOG_PRINCIPAL, &ingested)
-        .expect("store shipped manifest");
-
-    let credentials = StubCredentialSource::default();
-    credentials.set_success(handle, b"vendor-token".to_vec(), None, 1);
-    let engine = GovernanceEngine::new(
-        Arc::new(store),
-        Arc::new(credentials),
-        Arc::new(MockTransport::default()),
+    let (engine, subscription_id) = seeded_engine(
+        PR_ACTION,
+        json!({
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string"},
+                "repo": {"type": "string"},
+                "base": {"type": "string"},
+                "direction": {"type": "string"},
+                "fields": {},
+                "head": {"type": "string"},
+                "page": {"type": "number"},
+                "perPage": {"type": "number"},
+                "sort": {"type": "string"},
+                "state": {"type": "string"}
+            },
+            "required": ["owner", "repo"]
+        }),
+        json!({"owner":"cortexkit","repo":"magic-context"}),
     );
-
-    let schema_hash = jcs_sha256(&json!({"type": "object"})).expect("test JSON is JCS-compatible");
-    engine
-        .store()
-        .upsert_catalog_action(&CatalogActionInput {
-            connection_id: CONNECTION.to_string(),
-            principal: PRINCIPAL.to_string(),
-            name: PR_ACTION.to_string(),
-            title: Some(PR_ACTION.to_string()),
-            // The argument names GitHub's MCP server declares for
-            // list_pull_requests, which include the shipped poll shape's
-            // request constants.
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "owner": {"type": "string"},
-                    "repo": {"type": "string"},
-                    "base": {"type": "string"},
-                    "direction": {"type": "string"},
-                    "fields": {},
-                    "head": {"type": "string"},
-                    "page": {"type": "number"},
-                    "perPage": {"type": "number"},
-                    "sort": {"type": "string"},
-                    "state": {"type": "string"}
-                },
-                "required": ["owner", "repo"]
-            }),
-            schema_hash: schema_hash.clone(),
-            risk: "read".to_string(),
-            severity: "S1".to_string(),
-            ask_first: false,
-            status: "active".to_string(),
-            quarantine_reason: None,
-            reconciliation: None,
-        })
-        .expect("seed catalog action");
-    let expiry = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_millis() as i64
-        + 3_600_000;
-    engine
-        .store()
-        .insert_grant(&GrantInput {
-            grant_id: "grant-poll-github-pr".to_string(),
-            principal: PRINCIPAL.to_string(),
-            connection_id: CONNECTION.to_string(),
-            grantee_principal: PRINCIPAL.to_string(),
-            risk_ceiling: "read".to_string(),
-            action_selectors: vec![PR_ACTION.to_string()],
-            authority_kind: AUTHORITY_POLL.to_string(),
-            expires_at: Some(expiry),
-        })
-        .expect("insert poll grant");
-
-    let created = engine
-        .store()
-        .subscribe_with_cursor_state(
-            PRINCIPAL,
-            CONNECTION,
-            PR_ACTION,
-            30,
-            &json!({}),
-            &json!({"owner": "cortexkit", "repo": "magic-context"}),
-        )
-        .expect("subscribe store")
-        .expect("the shipped pull request shape must be subscribable");
 
     engine
         .transport()
@@ -371,7 +280,7 @@ fn the_shipped_pull_request_poll_shape_reads_a_real_vendor_response() {
     let poller = Poller::new(engine.clone());
 
     assert_eq!(
-        poller.poll_once(PRINCIPAL, &created.subscription_id),
+        poller.poll_once(PRINCIPAL, &subscription_id),
         PollCycle::Completed {
             inserted: 4,
             duplicates: 0,
@@ -385,6 +294,7 @@ fn the_shipped_pull_request_poll_shape_reads_a_real_vendor_response() {
     let requests = engine.transport().requests();
     assert_eq!(requests.len(), 1, "exactly one poll must have dispatched");
     let args = requests[0].args.as_object().expect("request args object");
+    assert_eq!(args.get("perPage"), Some(&json!(100)));
     assert_eq!(args.get("sort"), Some(&json!("updated")));
     assert_eq!(
         args.get("direction"),
@@ -405,7 +315,7 @@ fn the_shipped_pull_request_poll_shape_reads_a_real_vendor_response() {
     // rather than the last row being assumed newest.
     let stored = engine
         .store()
-        .subscription(PRINCIPAL, &created.subscription_id)
+        .subscription(PRINCIPAL, &subscription_id)
         .expect("read subscription")
         .expect("subscription row");
     assert_eq!(

@@ -101,17 +101,25 @@ fn cold_cache_scoped_read_once_and_expiry_margin() {
         )]
     );
     now.store(3_540_000, Ordering::SeqCst);
-    // The vault served a token inside the refresh margin; retrying the same
-    // read cannot fix that, so the refusal is permanent.
+    // A refresh can serve a new token on the next read, so the nonce stays usable.
     assert_eq!(
         preparer.prepare("handle", 1, "github_app:one"),
-        Err("handle_credential_unresolvable{class: permanent}")
+        Err("handle_credential_unresolvable{class: transient}")
     );
     assert_eq!(peer.calls.lock().unwrap().len(), 2);
     assert_eq!(
         preparer.prepare("handle", 1, "not-a-github-app-reference"),
         Err("handle_credential_unresolvable{class: permanent}")
     );
+    assert_eq!(peer.calls.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn old_generation_reads_do_not_evict_current_cached_token() {
+    let (peer, preparer, _) = setup();
+    preparer.prepare("handle", 3, "github_app:one").unwrap();
+    preparer.prepare("handle", 0, "github_app:one").unwrap();
+    preparer.prepare("handle", 3, "github_app:one").unwrap();
     assert_eq!(peer.calls.lock().unwrap().len(), 2);
 }
 

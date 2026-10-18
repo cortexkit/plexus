@@ -63,19 +63,13 @@ where
         }
     }
     if search {
-        for field in ["repo", "owner", "org", "user", "visibility"] {
+        for field in ["repo", "owner", "org", "user", "visibility", "q", "query"] {
             if fields.contains_key(field) {
                 return Err(forbidden(field));
             }
         }
         let terms = fields.get("terms").and_then(Value::as_str).unwrap_or("");
-        if terms.split_whitespace().any(|word| {
-            ["repo:", "org:", "user:", "visibility:"]
-                .iter()
-                .any(|prefix| word.to_ascii_lowercase().starts_with(prefix))
-        }) {
-            return Err(forbidden("query_qualifier"));
-        }
+        validate_search_terms(terms)?;
     } else {
         let (owner, repo) = split_repository(&repositories[0])?;
         // GitHub names compare without regard to case, so owner and repo
@@ -252,13 +246,7 @@ pub fn search_query(
     resolved: &ResolvedRepositories,
     terms: &str,
 ) -> Result<String, ResolverDenial> {
-    if terms.split_whitespace().any(|word| {
-        ["repo:", "org:", "user:", "visibility:"]
-            .iter()
-            .any(|prefix| word.to_ascii_lowercase().starts_with(prefix))
-    }) {
-        return Err(forbidden("query_qualifier"));
-    }
+    validate_search_terms(terms)?;
     Ok(format!(
         "{} {}",
         terms,
@@ -271,6 +259,21 @@ pub fn search_query(
     )
     .trim()
     .to_owned())
+}
+
+fn validate_search_terms(terms: &str) -> Result<(), ResolverDenial> {
+    if terms.contains(['(', ')'])
+        || terms.split_whitespace().any(|word| {
+            let word = word.trim_start_matches('-').to_ascii_lowercase();
+            matches!(word.as_str(), "or" | "not")
+                || ["repo:", "org:", "user:", "owner:", "visibility:"]
+                    .iter()
+                    .any(|prefix| word.starts_with(prefix))
+        })
+    {
+        return Err(forbidden("query_qualifier"));
+    }
+    Ok(())
 }
 
 pub fn filter_search_results(resolved: &ResolvedRepositories, items: &mut Vec<Value>) {

@@ -6,25 +6,12 @@
 //! with a decorator that implements [`CkcredRoutePeer`] around the real peer and
 //! records each call to a trace sink, REDACTING secret bytes at write time.
 //!
-//! Each call becomes one JSON line: `{timestamp_ms, operation, request,
-//! response, latency_ms}`. Redaction rules:
-//! - the bearer `handle` in request params is replaced by its fingerprint;
-//! - every non-null `payload` in the response, at any depth, is replaced by
-//!   `{"__redacted": true, "json_type": "u8_array", "len": N,
-//!   "fingerprint": "sha256:…"}` — enough to verify the byte-array contract
-//!   shape without the bytes. A payload of any OTHER shape (a base64 string,
-//!   an object) is redacted the same way with its own `json_type`: the live
-//!   wire has drifted to a string payload before, and a redactor that only
-//!   recognises the expected shape writes the drifted secret in clear;
-//! - everything else (error objects, `record_version`, `expires_at_ms`,
-//!   metadata) is recorded verbatim.
-//!
-//! Because redaction happens BEFORE any byte is written, the trace file is a
-//! separate artifact from the evidence JSON and the evidence leak-scan does NOT
-//! cover it: once redaction has run there is no raw secret left to scan for.
-//! The file is created owner-only (0600) as a second, structural guard.
+//! Each call becomes one JSON line with timing and a redacted request/response.
+//! Only known metadata fields are retained verbatim. Unknown fields are replaced
+//! by shape and fingerprint markers so a renamed secret cannot escape redaction.
+//! Trace snapshots are published atomically with owner-only permissions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -40,16 +27,18 @@ use crate::evidence::now_ms;
 /// leaves a readable trace. Write failures are swallowed: the trace is
 /// diagnostic material and must never abort the credential operation it shadows.
 pub struct WireTraceSink {
-    writer: Mutex<std::fs::File>,
+    writer: Mutex<Vec<u8>>,
+    path: PathBuf,
 }
 
 impl WireTraceSink {
     /// Create (or truncate) the trace file at `path` with owner-only (0600)
     /// permissions.
     pub fn open(path: &Path) -> std::io::Result<Self> {
-        let file = open_owner_only(path)?;
+        crate::write_owner_only(path, b"")?;
         Ok(Self {
-            writer: Mutex::new(file),
+            writer: Mutex::new(Vec::new()),
+            path: path.to_path_buf(),
         })
     }
 
@@ -62,33 +51,9 @@ impl WireTraceSink {
             return;
         };
         line.push('\n');
-        use std::io::Write;
-        let _ = file.write_all(line.as_bytes());
-        let _ = file.flush();
+        file.extend_from_slice(line.as_bytes());
+        let _ = crate::write_owner_only(&self.path, &file);
     }
-}
-
-/// Open `path` for writing (create or truncate) restricted to the owning user
-/// (0600). `OpenOptions::mode` only applies when the file is CREATED — a
-/// pre-existing file keeps its old mode — so permissions are also enforced
-/// explicitly after open. Evidence and trace artifacts carry credential
-/// fingerprints and audit topology, which are sensitive even when redacted;
-/// callers must not depend on the host umask.
-pub fn open_owner_only(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(file)
 }
 
 /// Decorator implementing [`CkcredRoutePeer`] that records each call to a
@@ -110,12 +75,13 @@ impl<P: CkcredRoutePeer> CkcredRoutePeer for TracingRoutePeer<P> {
     fn call(&self, operation: &str, params: Value) -> Result<Value, CkcredRouteError> {
         let started = Instant::now();
         let timestamp_ms = now_ms();
-        let result = self.inner.call(operation, params.clone());
+        let request = redact_request(&params);
+        let result = self.inner.call(operation, params);
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.sink.write_event(json!({
             "timestamp_ms": timestamp_ms,
             "operation": operation,
-            "request": redact_request(&params),
+            "request": request,
             "response": redact_response(&result),
             "latency_ms": latency_ms,
         }));
@@ -137,78 +103,55 @@ pub fn record_route_connect(sink: &WireTraceSink, params: Value, status: &str, l
     }));
 }
 
-/// Redact bearer handles and payloads at every depth before a request is recorded.
+/// Project only known metadata; never clone a secret subtree before redacting it.
 fn redact_request(params: &Value) -> Value {
-    let mut redacted = params.clone();
-    redact_request_children(&mut redacted);
-    redacted
+    redact_fields(params)
 }
 
-fn redact_request_children(value: &mut Value) {
+fn redact_fields(value: &Value) -> Value {
     match value {
-        Value::Object(map) => {
-            for (key, entry) in map {
-                if matches!(key.as_str(), "handle" | "payload") && !entry.is_null() {
-                    *entry = if key == "handle" {
-                        match entry {
-                            Value::String(text) => {
-                                json!({"fingerprint": fingerprint(text.as_bytes())})
-                            }
-                            Value::Array(items) => {
-                                json!({"fingerprint": fingerprint(&u8_array_bytes(items))})
-                            }
-                            _ => payload_marker(entry),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, entry)| {
+                    let safe = match key.as_str() {
+                        "result" | "error" => redact_fields(entry),
+                        "record_version" | "expires_at_ms" | "provider_status"
+                            if entry.is_number() || entry.is_null() =>
+                        {
+                            entry.clone()
                         }
-                    } else {
-                        payload_marker(entry)
+                        "credential_id" | "code" | "class"
+                            if entry.is_string() || entry.is_null() =>
+                        {
+                            entry.clone()
+                        }
+                        "handle" => {
+                            let bytes = match entry {
+                                Value::String(text) => {
+                                    zeroize::Zeroizing::new(text.as_bytes().to_vec())
+                                }
+                                Value::Array(items) => {
+                                    zeroize::Zeroizing::new(u8_array_bytes(items))
+                                }
+                                _ => zeroize::Zeroizing::new(Vec::new()),
+                            };
+                            json!({"fingerprint": fingerprint(&bytes)})
+                        }
+                        _ if entry.is_null() => Value::Null,
+                        _ => payload_marker(entry),
                     };
-                } else {
-                    redact_request_children(entry);
-                }
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(redact_request_children),
-        _ => {}
+                    (key.clone(), safe)
+                })
+                .collect(),
+        ),
+        _ => payload_marker(value),
     }
 }
 
-/// Redact a response's secret bytes. The `credential.get` result carries the
-/// live payload under `result.payload`; every `payload` key anywhere in the
-/// response is replaced with a shape-preserving redaction marker (type, length
-/// and fingerprint, no bytes), whatever JSON type it holds. Matching on the key
-/// rather than on the expected array shape is deliberate: a payload that has
-/// drifted to a base64 string or moved to another level is exactly the case
-/// where the bytes would otherwise be written in clear. Error objects and all
-/// other fields are verbatim. A route-level error (no response body) is
-/// recorded by its variant name, which is never secret.
 fn redact_response(result: &Result<Value, CkcredRouteError>) -> Value {
-    let Ok(value) = result else {
-        let error = result.as_ref().unwrap_err();
-        return json!({ "route_error": format!("{error:?}") });
-    };
-    let mut redacted = value.clone();
-    redact_payloads(&mut redacted);
-    redacted
-}
-
-/// Replace every non-null `payload` value under `value` with its redaction
-/// marker. A null payload carries no secret and stays as it is, so a reader
-/// can still tell "no payload" from "payload redacted".
-fn redact_payloads(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            for (key, entry) in map.iter_mut() {
-                if key == "payload" {
-                    if !entry.is_null() {
-                        *entry = payload_marker(entry);
-                    }
-                } else {
-                    redact_payloads(entry);
-                }
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(redact_payloads),
-        _ => {}
+    match result {
+        Ok(value) => redact_fields(value),
+        Err(error) => json!({"route_error": format!("{error:?}")}),
     }
 }
 
@@ -232,6 +175,7 @@ fn payload_marker(payload: &Value) -> Value {
             serde_json::to_vec(other).unwrap_or_default(),
         ),
     };
+    let bytes = zeroize::Zeroizing::new(bytes);
     json!({
         "__redacted": true,
         "json_type": json_type,
@@ -263,6 +207,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unknown_secret_fields_are_redacted_without_changing_the_peer_response() {
+        let original = json!({"result":{"token":"secret-token","value":[255,0,128],"access_token":{"nested":"secret-token"},"record_version":7}});
+        let safe = redact_response(&Ok(original.clone()));
+        assert!(
+            !safe.to_string().contains("secret-token"),
+            "renamed secrets must not enter a trace"
+        );
+        assert_eq!(safe["result"]["value"]["__redacted"], true);
+        assert_eq!(safe["result"]["record_version"], 7);
+        assert_eq!(original["result"]["token"], "secret-token");
+    }
+
+    #[test]
     fn nested_request_secrets_are_redacted() {
         let value = json!({"nested":[{"handle":"nested-secret", "payload":"write-secret"}], "safe":"visible"});
         let redacted = redact_request(&value);
@@ -271,7 +228,7 @@ mod tests {
             !text.contains("nested-secret") && !text.contains("write-secret"),
             "nested request secrets must be redacted"
         );
-        assert_eq!(redacted["safe"], "visible");
+        assert_eq!(redacted["safe"]["__redacted"], true);
     }
     use plexus_core::test_scratch::Scratch;
     use std::collections::VecDeque;
@@ -286,7 +243,7 @@ mod tests {
         // exists with permissive umask-derived mode before the sink opens it.
         std::fs::write(&path, b"stale").expect("precreate");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        let _file = open_owner_only(&path).expect("open");
+        crate::write_owner_only(&path, b"new").expect("write");
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
         std::fs::remove_file(&path).ok();
         assert_eq!(

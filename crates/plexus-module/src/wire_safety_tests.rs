@@ -42,7 +42,17 @@ fn frame(kind: FrameType, channel: u16, corr: u64, value: Value) -> Frame {
 async fn request_capacity_includes_waiting_and_held_calls_but_not_controls() {
     let state = state();
     let routes = Arc::new(RouteBindings::new());
-    routes.insert(1, 1, Principal::Direct).unwrap();
+    for channel in 1..=4 {
+        routes
+            .insert(
+                channel,
+                1,
+                Principal::Reserved {
+                    module_id: format!("caller-{channel}"),
+                },
+            )
+            .unwrap();
+    }
     let blocked = routes
         .blocking
         .clone()
@@ -54,7 +64,7 @@ async fn request_capacity_includes_waiting_and_held_calls_but_not_controls() {
         handle_frame(
             frame(
                 FrameType::Request,
-                1,
+                (corr / 64 + 1) as u16,
                 corr,
                 json!({"name":"connections","arguments":{"op":"list"}}),
             ),
@@ -161,7 +171,6 @@ async fn thirty_third_blocking_job_waits_without_refusal() {
 async fn route_goodbye_removes_only_its_epoch() {
     let routes = Arc::new(RouteBindings::new());
     routes.insert(3, 1, Principal::Direct).unwrap();
-    routes.insert(3, 2, Principal::Direct).unwrap();
     let (writer, _) = mpsc::channel(1);
     handle_frame(
         frame(FrameType::Goodbye, 3, 0, Value::Null),
@@ -175,6 +184,16 @@ async fn route_goodbye_removes_only_its_epoch() {
         routes.binding(3, 1).unwrap().is_none(),
         "closed route must lose its authority"
     );
+    routes.insert(3, 2, Principal::Direct).unwrap();
+    // The daemon may resend an old pair's close after the channel has been reused.
+    handle_frame(
+        frame(FrameType::Goodbye, 3, 0, Value::Null),
+        &writer,
+        &state(),
+        &routes,
+    )
+    .await
+    .unwrap();
     assert!(routes.binding(3, 2).unwrap().is_some());
 }
 
@@ -549,4 +568,654 @@ fn quota_configuration_records_a_write_not_a_read() {
         risk, "write",
         "quota configuration must be audited as a mutation"
     );
+}
+
+async fn reply_to(value: Value) -> Value {
+    let routes = Arc::new(RouteBindings::new());
+    routes.insert(1, 1, Principal::Direct).unwrap();
+    let (writer, mut rx) = mpsc::channel(1);
+    handle_tool_request(
+        frame(FrameType::Request, 1, 900, value),
+        &writer,
+        &state(),
+        &routes,
+    )
+    .await
+    .unwrap();
+    serde_json::from_slice(
+        &recv_within(rx.recv(), Duration::from_secs(5), "tool reply")
+            .await
+            .body,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn oversized_body_is_refused_before_json_decoding() {
+    let reply = reply_to(
+        json!({"name":"connections", "arguments":{"op":"list"}, "padding":"x".repeat(1024 * 1024)}),
+    )
+    .await;
+    assert_eq!(reply["error"]["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn large_ack_batch_remains_compatible_with_unpaged_consumers() {
+    let ids: Vec<String> = (0..1001).map(|id| format!("unknown-{id}")).collect();
+    let reply = reply_to(json!({"name":"events", "arguments":{"op":"ack", "event_ids":ids}})).await;
+    assert_eq!(reply["result"]["acked"], 0);
+    assert_eq!(reply["result"]["unacked"].as_array().unwrap().len(), 1001);
+}
+
+#[tokio::test]
+async fn oversized_probe_script_is_refused_before_registration() {
+    let reply = reply_to(json!({"name":"events", "arguments":{"op":"register_probe", "connection":"missing", "name":"probe", "cadence_s":30,"actions":[],"script_source":"x".repeat(64 * 1024 + 1),"rearm":"once","return_schema":{}}})).await;
+    assert_eq!(reply["error"]["code"], "invalid_request");
+}
+
+#[test]
+fn oversized_would_ask_batch_is_refused_before_evaluation() {
+    let request = json!({"method":"grants.would_ask","params":{"agent_id":"agent","flow_id":"flow","items":vec![json!({"tool":"invoke","connection":"missing","action":"read"});101]}});
+    let reply = grants_would_ask::run(
+        &state(),
+        "reserved:prefrontal-core",
+        None,
+        request.as_object().unwrap(),
+    );
+    assert_eq!(reply["error"]["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn management_refuses_non_classic_direct_routes() {
+    let routes = Arc::new(RouteBindings::new());
+    routes
+        .insert_mode(1, 1, Principal::Direct, None, CallMode::Codemode)
+        .unwrap();
+    let (writer, mut rx) = mpsc::channel(1);
+    handle_tool_request(
+        frame(
+            FrameType::Request,
+            1,
+            900,
+            json!({"method":"plexus.admin.list_grants","params":{}}),
+        ),
+        &writer,
+        &state(),
+        &routes,
+    )
+    .await
+    .unwrap();
+    let reply: Value = serde_json::from_slice(
+        &recv_within(rx.recv(), Duration::from_secs(5), "management refusal")
+            .await
+            .body,
+    )
+    .unwrap();
+    assert_eq!(reply["error"]["code"], "operator_authority_required");
+}
+
+#[tokio::test]
+async fn management_refuses_retired_identity_fields() {
+    let reply =
+        reply_to(json!({"method":"plexus.admin.list_grants","params":{"assertion":null}})).await;
+    assert_eq!(reply["error"]["code"], "argument_undeclared");
+}
+
+#[test]
+fn audit_failure_warning_does_not_expose_backend_errors() {
+    let mut response = json!({"result":{"ok":true}});
+    warn_audit_failed(&mut response, "bindings read", &"private_constraint canary");
+    assert_eq!(response["warning"]["code"], "audit_append_failed");
+    assert!(!response.to_string().contains("private_constraint"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn hello_ack_wait_is_bounded() {
+    let (_writer, mut reader) = tokio::io::duplex(64);
+    let reply = tokio::time::timeout(Duration::from_secs(6), expect_hello_ack(&mut reader)).await;
+    assert!(reply.is_ok(), "HELLO must fail before the outer deadline");
+    assert!(reply
+        .unwrap()
+        .unwrap_err()
+        .to_string()
+        .contains("HELLO_ACK timeout"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_request_expires_before_work_capacity_returns() {
+    let state = state();
+    let routes = Arc::new(RouteBindings::new());
+    routes.insert(1, 1, Principal::Direct).unwrap();
+    let _blocked = routes
+        .blocking
+        .clone()
+        .acquire_many_owned(MAX_BLOCKING_REQUESTS as u32)
+        .await
+        .unwrap();
+    let (writer, mut rx) = mpsc::channel(1);
+    handle_frame(
+        frame(
+            FrameType::Request,
+            1,
+            777,
+            json!({"name":"connections","arguments":{"op":"list"}}),
+        ),
+        &writer,
+        &state,
+        &routes,
+    )
+    .await
+    .unwrap();
+    let reply = recv_within(rx.recv(), Duration::from_secs(111), "queue timeout reply").await;
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["error"]["code"], "resource_exhausted");
+    assert_eq!(reply.header.corr, 777);
+}
+
+#[test]
+fn large_bot_reply_text_remains_a_full_envelope() {
+    let envelope = json!({"result":{"status":"completed", "payload":"x".repeat(256 * 1024)}});
+    for tool in [manifest::GITHUB_TOOL, manifest::GITHUB_REACT_TOOL] {
+        let reply = with_call_tool_result(Some(tool), envelope.clone());
+        let decoded: Value =
+            serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(decoded, envelope);
+    }
+}
+
+#[test]
+fn decision_plane_refusal_explains_inactive_execution() {
+    let reply = denial_response(&plexus_core::Denial::NeedsDecisionPlane(Box::new(
+        plexus_core::governance::DecisionPlaneEnvelope {
+            request_id: "r".into(),
+            connection_id: "c".into(),
+            action: "a".into(),
+            args_hash: "h".into(),
+            schema_hash: "s".into(),
+            severity: plexus_core::Severity::S3,
+            expires_at_ms: 1,
+        },
+    )));
+    assert_eq!(reply["error"]["code"], "needs_decision_plane");
+    assert_eq!(
+        reply["error"]["message"],
+        "S3/S4 execution is not active: no production decision plane is configured."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_principal_cannot_exhaust_global_admission() {
+    let state = state();
+    let routes = Arc::new(RouteBindings::new());
+    routes.insert(1, 1, Principal::Direct).unwrap();
+    routes
+        .insert(
+            2,
+            1,
+            Principal::Reserved {
+                module_id: "cingulate".into(),
+            },
+        )
+        .unwrap();
+    let blocked = routes
+        .blocking
+        .clone()
+        .acquire_many_owned(MAX_BLOCKING_REQUESTS as u32)
+        .await
+        .unwrap();
+    let (writer, mut rx) = mpsc::channel(512);
+    for corr in 0..65 {
+        handle_frame(
+            frame(
+                FrameType::Request,
+                1,
+                corr,
+                json!({"name":"connections","arguments":{"op":"list"}}),
+            ),
+            &writer,
+            &state,
+            &routes,
+        )
+        .await
+        .unwrap();
+    }
+    let refusal = recv_within(rx.recv(), Duration::from_secs(5), "per-principal refusal").await;
+    assert_eq!(refusal.header.corr, 64);
+    assert!(routes.in_flight.available_permits() >= 192);
+    handle_frame(
+        frame(
+            FrameType::Request,
+            2,
+            100,
+            json!({"name":"connections","arguments":{"op":"list"}}),
+        ),
+        &writer,
+        &state,
+        &routes,
+    )
+    .await
+    .unwrap();
+    drop(blocked);
+    let mut other_replied = false;
+    for _ in 0..65 {
+        let reply = recv_within(rx.recv(), Duration::from_secs(10), "admitted work reply").await;
+        if reply.header.channel == 2 {
+            other_replied = true;
+        }
+    }
+    assert!(other_replied);
+}
+
+#[test]
+fn route_bindings_are_bounded_without_evicting_open_routes() {
+    let routes = RouteBindings::new();
+    for channel in 1..=MAX_ROUTE_BINDINGS as u16 {
+        routes.insert(channel, 1, Principal::Direct).unwrap();
+    }
+    assert!(matches!(
+        routes.insert(9000, 1, Principal::Direct),
+        Err(ModuleError::RouteCapacity)
+    ));
+    for channel in 1..=MAX_ROUTE_BINDINGS as u16 {
+        assert!(
+            routes.binding(channel, 1).unwrap().is_some(),
+            "a full cache must preserve open route authority"
+        );
+    }
+}
+
+#[test]
+fn closing_a_route_does_not_reset_its_principals_capacity() {
+    let routes = RouteBindings::new();
+    routes.insert(1, 1, Principal::Direct).unwrap();
+    let semaphore = routes.binding(1, 1).unwrap().unwrap().admission;
+    let permit = semaphore
+        .clone()
+        .try_acquire_many_owned(MAX_PRINCIPAL_REQUESTS as u32)
+        .unwrap();
+    routes.remove(1, 1).unwrap();
+    routes.insert(2, 1, Principal::Direct).unwrap();
+    assert_eq!(
+        routes
+            .binding(2, 1)
+            .unwrap()
+            .unwrap()
+            .admission
+            .available_permits(),
+        0
+    );
+    drop(permit);
+}
+
+#[test]
+fn request_identifiers_do_not_repeat_across_calls() {
+    let ids: std::collections::HashSet<_> = (0..1000).map(|_| fresh_request_id()).collect();
+    assert_eq!(ids.len(), 1000);
+}
+
+#[test]
+fn large_listings_avoid_duplicate_payloads_but_preserve_the_result() {
+    for (tool, key) in [
+        (manifest::EVENTS_TOOL, "events"),
+        (manifest::CATALOG_TOOL, "actions"),
+    ] {
+        let mut envelope = json!({"result":{}});
+        envelope["result"][key] = json!(["x".repeat(128 * 1024)]);
+        let rendered = with_call_tool_result(Some(tool), envelope.clone());
+        assert_eq!(rendered["result"], envelope["result"]);
+        assert!(rendered.get("structuredContent").is_none());
+        assert!(rendered["content"][0]["text"].as_str().unwrap().len() < 1024);
+    }
+}
+
+#[test]
+fn github_read_failures_are_structured_and_do_not_leak_debug_messages() {
+    let reply = github_read_failure(TransportOutcome::VendorFailed {
+        code: "vendor_failure".into(),
+        message: "private transport debug".into(),
+    });
+    assert_eq!(reply["error"]["code"], "read_dispatch_failed");
+    assert_eq!(reply["error"]["outcome"]["transmission"], "failed");
+    assert_eq!(reply["error"]["outcome"]["code"], "vendor_failure");
+    assert!(!reply.to_string().contains("private transport debug"));
+}
+
+#[tokio::test]
+async fn inspect_requires_a_target_and_legacy_event_get_is_closed() {
+    for request in [
+        json!({"name":"requests","arguments":{"op":"inspect"}}),
+        json!({"name":"catalog","arguments":{"op":"inspect","connection":"missing"}}),
+        json!({"name":"events","arguments":{"op":"get","event_key":"x","event_name":"y","extra":1}}),
+    ] {
+        assert_eq!(reply_to(request).await["error"]["code"], "invalid_request");
+    }
+}
+
+#[tokio::test]
+async fn panicking_request_worker_is_answered_with_its_coordinates() {
+    let worker = tokio::task::spawn_blocking(|| panic!("test request worker panic"));
+    let (writer, mut rx) = mpsc::channel(1);
+    answer_worker_failure(worker.await, (PROTOCOL_VERSION, 17, 3, 99), &writer).await;
+    let reply = recv_within(rx.recv(), Duration::from_secs(5), "panic reply").await;
+    assert_eq!(
+        (reply.header.channel, reply.header.epoch, reply.header.corr),
+        (17, 3, 99)
+    );
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["error"]["code"], "internal_error");
+}
+
+#[test]
+fn gate_transitions_include_the_reported_holder_name() {
+    let before = json!({"state":"held","epoch":1,"holder_name":"before"});
+    let after = json!({"state":"held","epoch":1,"holder_name":"after"});
+    assert_ne!(
+        connector_gate_transition(&before),
+        connector_gate_transition(&after)
+    );
+}
+
+#[tokio::test]
+async fn admission_limits_accept_the_documented_boundary() {
+    let request = json!({"name":"connections","arguments":{"op":"list"},"padding":""});
+    let size = serde_json::to_vec(&request).unwrap().len();
+    let mut request = request;
+    request["padding"] = json!("x".repeat(MAX_REQUEST_BYTES - size));
+    assert_eq!(
+        serde_json::to_vec(&request).unwrap().len(),
+        MAX_REQUEST_BYTES
+    );
+    assert!(reply_to(request).await.get("result").is_some());
+    let reply = reply_to(json!({"name":"events", "arguments":{"op":"register_probe", "connection":"missing", "name":"probe", "cadence_s":30,"actions":[],"script_source":"x".repeat(MAX_PROBE_SCRIPT_BYTES),"rearm":"once","return_schema":{}}})).await;
+    assert_eq!(reply["error"]["code"], "probe_actions_required");
+}
+
+#[test]
+fn would_ask_accepts_one_hundred_items() {
+    let request = json!({"method":"grants.would_ask","params":{"agent_id":"agent","flow_id":"flow","items":vec![json!({"tool":"invoke","connection":"missing","action":"read"});100]}});
+    let reply = grants_would_ask::run(
+        &state(),
+        "reserved:prefrontal-core",
+        None,
+        request.as_object().unwrap(),
+    );
+    assert_eq!(reply["result"]["items"].as_array().unwrap().len(), 100);
+}
+
+#[test]
+fn poisoned_health_snapshot_is_replaced_instead_of_frozen() {
+    let state = state();
+    let health = state.health.clone();
+    let _ = std::thread::spawn(move || {
+        *health.store_metrics.lock().unwrap() = json!({"stale":true});
+        let _lock = health.store_metrics.lock().unwrap();
+        panic!("poison snapshot");
+    })
+    .join();
+    refresh_store_health(&state, &["direct".into()]);
+    let snapshot = state
+        .health
+        .store_metrics
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert!(snapshot.get("stale").is_none());
+    assert!(snapshot["effectiveCiCadenceS"].is_number());
+}
+
+#[test]
+fn failed_ci_cadence_read_is_null_not_an_infinite_cadence() {
+    let scratch = Scratch::database("failed-ci-cadence");
+    let store = Arc::new(
+        PlexusStore::open(&StorageDescriptor {
+            module_id: DEFAULT_MODULE_ID.into(),
+            storage_namespace: "failed-ci-cadence".into(),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: cortexkit_store_types::StorageBackend::Sqlite {
+                path: scratch.to_string_lossy().into_owned(),
+            },
+        })
+        .unwrap(),
+    );
+    let db = rusqlite::Connection::open(scratch.path()).unwrap();
+    db.execute_batch("DROP TABLE trigger_subscriptions")
+        .unwrap();
+    let state = ModuleState {
+        health: Arc::new(health::HealthState::new()),
+        runtime: runtime_for_test(store),
+    };
+    refresh_store_health(&state, &["direct".into()]);
+    let snapshot = state.health.store_metrics.lock().unwrap();
+    assert_eq!(snapshot.get("effectiveCiCadenceS"), Some(&Value::Null));
+}
+
+#[tokio::test]
+async fn oversized_frames_do_not_take_admission() {
+    let state = state();
+    let routes = Arc::new(RouteBindings::new());
+    routes.insert(1, 1, Principal::Direct).unwrap();
+    let _blocked = routes
+        .blocking
+        .clone()
+        .acquire_many_owned(MAX_BLOCKING_REQUESTS as u32)
+        .await
+        .unwrap();
+    let (writer, mut rx) = mpsc::channel(1);
+    handle_frame(
+        frame(
+            FrameType::Request,
+            1,
+            990,
+            json!({"padding":"x".repeat(MAX_REQUEST_BYTES)}),
+        ),
+        &writer,
+        &state,
+        &routes,
+    )
+    .await
+    .unwrap();
+    assert_eq!(routes.in_flight.available_permits(), MAX_IN_FLIGHT_REQUESTS);
+    let reply = recv_within(rx.recv(), Duration::from_secs(5), "oversize refusal").await;
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn management_refuses_classic_agent_scopes() {
+    let routes = Arc::new(RouteBindings::new());
+    let scope = CallScope::from_stamp(&crate::consent_test_support::worker_stamp("worker", 1));
+    routes
+        .insert_mode(1, 1, Principal::Direct, Some(scope), CallMode::Classic)
+        .unwrap();
+    let (writer, mut rx) = mpsc::channel(1);
+    handle_tool_request(
+        frame(
+            FrameType::Request,
+            1,
+            991,
+            json!({"method":"plexus.admin.list_grants","params":{}}),
+        ),
+        &writer,
+        &state(),
+        &routes,
+    )
+    .await
+    .unwrap();
+    let reply = recv_within(
+        rx.recv(),
+        Duration::from_secs(5),
+        "scoped management refusal",
+    )
+    .await;
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["error"]["code"], "operator_authority_required");
+}
+
+#[tokio::test]
+async fn inspect_returns_only_the_named_request_and_action() {
+    let fixture = crate::withdraw_tests::Fixture::new("targeted-inspect");
+    let state = Arc::new(ModuleState {
+        health: Arc::new(health::HealthState::new()),
+        runtime: fixture.runtime(),
+    });
+    let routes = Arc::new(RouteBindings::new());
+    routes
+        .insert_scoped(
+            1,
+            1,
+            Principal::Reserved {
+                module_id: "aft".into(),
+            },
+            Some(CallScope::from_stamp(
+                &crate::consent_test_support::worker_stamp("worker-7", 4),
+            )),
+        )
+        .unwrap();
+    routes.insert(2, 1, Principal::Direct).unwrap();
+    async fn call(
+        state: &Arc<ModuleState>,
+        routes: &Arc<RouteBindings>,
+        channel: u16,
+        body: Value,
+    ) -> Value {
+        let (writer, mut rx) = mpsc::channel(1);
+        handle_tool_request(
+            frame(FrameType::Request, channel, 1, body),
+            &writer,
+            state,
+            routes,
+        )
+        .await
+        .unwrap();
+        let reply = recv_within(rx.recv(), Duration::from_secs(5), "inspect fixture reply").await;
+        serde_json::from_slice(&reply.body).unwrap()
+    }
+    for index in 0..2 {
+        let reply=call(&state, &routes, 1, json!({"name":"invoke","arguments":{"op":"call","connection":"conn-held","action":"search","args":{"query":format!("query-{index}")}}})).await;
+        assert_eq!(
+            reply["structuredContent"]["code"], "access_pending",
+            "{reply}"
+        );
+    }
+    let requests = fixture.store.list_action_requests("direct").unwrap();
+    assert_eq!(requests.len(), 2);
+    let reply = call(
+        &state,
+        &routes,
+        2,
+        json!({"name":"requests","arguments":{"op":"inspect","request_id":requests[0].request_id}}),
+    )
+    .await;
+    assert_eq!(reply["result"]["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        reply["result"]["requests"][0]["request_id"],
+        requests[0].request_id
+    );
+    assert_eq!(reply["result"]["reconciliations"], json!([]));
+    let schema = json!({"type":"object"});
+    fixture
+        .store
+        .upsert_catalog_action(&plexus_core::CatalogActionInput {
+            connection_id: "conn-held".into(),
+            principal: "direct".into(),
+            name: "second".into(),
+            title: None,
+            schema: schema.clone(),
+            schema_hash: plexus_core::jcs_sha256(&schema).unwrap(),
+            risk: "read".into(),
+            severity: "S1".into(),
+            ask_first: false,
+            status: "active".into(),
+            quarantine_reason: None,
+            reconciliation: None,
+        })
+        .unwrap();
+    let reply=call(&state,&routes,2,json!({"name":"catalog","arguments":{"op":"inspect","connection":"conn-held","action":"search"}})).await;
+    assert_eq!(reply["result"]["actions"].as_array().unwrap().len(), 1);
+    assert_eq!(reply["result"]["actions"][0]["name"], "search");
+}
+
+#[test]
+fn route_capacity_warning_is_rate_limited_by_monotonic_time() {
+    let routes = RouteBindings::new();
+    let now = std::time::Instant::now();
+    assert!(routes.should_log_route_capacity(now));
+    assert!(!routes.should_log_route_capacity(now));
+    assert!(!routes.should_log_route_capacity(now + Duration::from_secs(59)));
+    assert!(routes.should_log_route_capacity(now + Duration::from_secs(60)));
+}
+
+#[tokio::test]
+async fn connection_end_and_read_failure_clear_all_route_bindings() {
+    for (bytes, expect_error) in [(Vec::new(), false), (vec![0u8; 128], true)] {
+        let routes = Arc::new(RouteBindings::new());
+        routes.insert(1, 1, Principal::Direct).unwrap();
+        routes.insert(2, 7, Principal::Direct).unwrap();
+        let (writer, _rx) = mpsc::channel(1);
+        let mut reader = bytes.as_slice();
+        let result = dispatch_loop(
+            &mut reader,
+            writer,
+            state(),
+            routes.clone(),
+            Arc::new(PendingControlReplies::default()),
+        )
+        .await;
+        assert_eq!(result.is_err(), expect_error);
+        assert!(routes.binding(1, 1).unwrap().is_none());
+        assert!(routes.binding(2, 7).unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn daemon_goodbye_clears_bindings_but_request_error_and_cancel_do_not() {
+    let routes = Arc::new(RouteBindings::new());
+    routes.insert(1, 1, Principal::Direct).unwrap();
+    let (writer, _rx) = mpsc::channel(1);
+    let state = state();
+    for kind in [FrameType::Error, FrameType::Cancel] {
+        handle_frame(frame(kind, 1, 42, Value::Null), &writer, &state, &routes)
+            .await
+            .unwrap();
+        assert!(routes.binding(1, 1).unwrap().is_some());
+    }
+    let goodbye = Frame::build_with_version(
+        PROTOCOL_VERSION,
+        FrameType::Goodbye,
+        wire::control_flags(),
+        0,
+        0,
+        0,
+        Vec::new(),
+    )
+    .unwrap();
+    let (mut daemon, mut reader) = tokio::io::duplex(256);
+    subc_transport::write_frame(&mut daemon, &goodbye)
+        .await
+        .unwrap();
+    dispatch_loop(
+        &mut reader,
+        writer,
+        state,
+        routes.clone(),
+        Arc::new(PendingControlReplies::default()),
+    )
+    .await
+    .unwrap();
+    assert!(routes.binding(1, 1).unwrap().is_none());
+}
+
+#[test]
+fn rebinding_a_channel_replaces_the_released_epoch() {
+    let routes = RouteBindings::new();
+    routes.insert(3, 1, Principal::Direct).unwrap();
+    routes.insert(4, 1, Principal::Direct).unwrap();
+    assert!(routes.binding(3, 1).unwrap().is_some());
+    let next = Principal::Reserved {
+        module_id: "aft".into(),
+    };
+    routes.insert(3, 2, next.clone()).unwrap();
+    assert!(routes.binding(3, 1).unwrap().is_none());
+    assert_eq!(routes.get(3, 2).unwrap(), Some(next));
+    assert!(routes.binding(4, 1).unwrap().is_some());
+    assert_eq!(routes.inner.read().unwrap().len(), 2);
 }
