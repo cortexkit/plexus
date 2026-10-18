@@ -6860,7 +6860,7 @@ fn malformed_response_can_resume_with_detailed_reason_and_cursor_intact() {
 #[test]
 #[ignore = "requires the sorted-head retention-window change from the store owner"]
 fn sorted_head_overlap_stays_quiet_after_retention_and_newest_disappears() {
-    let (poller, engine, _path, _) = fixture("sorted-retention");
+    let (poller, engine, path, _) = fixture("sorted-retention");
     let id = sorted_head_subscription(&engine);
     let older = json!({"id":1,"updated_at":"2024-01-15T10:00:05Z"});
     engine.transport().set_response(MockResponse::Success(
@@ -6870,8 +6870,18 @@ fn sorted_head_overlap_stays_quiet_after_retention_and_newest_disappears() {
         poller.poll_once(PRINCIPAL, &id),
         PollCycle::Completed { inserted: 2, .. }
     ));
-    let cursor = subscription(&engine, &id).cursor_state;
-    engine.store().prune(PRINCIPAL, &id, 0, 0).unwrap();
+    let state = subscription(&engine, &id);
+    assert_eq!(state.cursor_kind, "sorted_head");
+    let cursor = state.cursor_state;
+    assert_eq!(cursor["watermark_ms"], 1705312810000i64);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let old = plexus_core::now_ms() - 40 * 86_400_000;
+    assert_eq!(conn.execute("UPDATE trigger_events SET created_at_ms = ?1, acked_at_ms = ?1 WHERE principal = ?2 AND subscription_id = ?3 AND kind = 'event'", rusqlite::params![old, PRINCIPAL, id]).unwrap(), 2);
+    assert_eq!(
+        engine.store().prune(PRINCIPAL, &id, 0, 0).unwrap(),
+        0,
+        "retention must preserve payloads inside the replay window"
+    );
     engine
         .transport()
         .set_response(MockResponse::Success(json!({"items":[older]})));
