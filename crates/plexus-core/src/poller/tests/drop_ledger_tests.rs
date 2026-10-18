@@ -44,7 +44,7 @@ fn list_poll(strategy: &dyn CursorStrategy) -> CursorAdvance {
     let new = json!({"id": "2", "updated_at": "1970-01-01T00:00:03Z"});
     let mut advance = strategy.derive(
         &json!({"watermark_ms": 2000, "watermark_id": "1"}),
-        &json!({"items": [boundary, {"id": "0", "updated_at": "1970-01-01T00:00:01Z"}, new.clone(), new]}),
+        &json!({"items": [boundary, {"id": "0", "updated_at": "1969-12-31T23:58:59Z"}, new.clone(), new]}),
     ).unwrap();
     assert_eq!(advance.items_examined, 4);
     retain_changed_replay_candidates(&mut advance.events, &mut advance.dropped, |candidates| {

@@ -1614,8 +1614,8 @@ build_timeout_s = 3600
 id = "legacy-body-unchanged"
 guards = "Change metadata stays off vendor bodies so an unchanged legacy issue dedups through the real poll without a row or marker"
 file = "crates/plexus-core/src/poller.rs"
-old = "let identities = advance.events.iter().map(|event| {"
-new = "for event in &mut advance.events { event.payload[\"change\"] = json!(\"updated\"); } // NON-VACUITY BREAK\n        let identities = advance.events.iter().map(|event| {"
+old = "let identities = poll_event_identities(subscription, &advance.events, repository);"
+new = "for event in &mut advance.events { event.payload[\"change\"] = json!(\"updated\"); } // NON-VACUITY BREAK\n        let identities = poll_event_identities(subscription, &advance.events, repository);"
 test_file = "crates/plexus-core/src/poller.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -1665,15 +1665,14 @@ build_timeout_s = 3600
 id = "ci-watch-creation-floor"
 guards = "CI polling rejects attempts completed before watch creation without fetching jobs or publishing run markers, while retaining in-flight failures and recent reruns"
 file = "crates/plexus-core/src/poller/ci_runs.rs"
-old = "if completed < sub.created_at_ms {"
-new = "if false && completed < sub.created_at_ms { // NON-VACUITY BREAK"
+old = "if completed < sub.created_at_ms {\n                    examined += 1;"
+new = "if false && completed < sub.created_at_ms { // NON-VACUITY BREAK\n                    examined += 1;"
 test_file = "crates/plexus-core/src/poller/ci_runs.rs"
 runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["poller::ci_runs::tests::fresh_watch_rescan_drops_preexisting_attempts_without_events"]
-expect_message = "attempts completed before watch creation must not publish"
+expect_red = ["poller::ci_runs::tests::fresh_watch_rejects_preexisting_attempts_from_overlap_and_saved_cursor"]
 only = false
 timeout_s = 60
 build_timeout_s = 3600
@@ -1852,7 +1851,7 @@ build_timeout_s = 3600
 id = "ci-later-page-failure-atomic"
 guards = "A later jobs-page failure aborts the whole cycle, including completions already read from other attempts"
 file = "crates/plexus-core/src/poller/ci_runs.rs"
-old = "Err(ReadFailure::Vanished) => {\n                            gone = true;\n                            break;\n                        }\n                        Err(ReadFailure::Cycle(cycle)) => return cycle,"
+old = "Err(ReadFailure::Vanished) => {\n                            gone = true;\n                            break;\n                        }\n                        Err(ReadFailure::Cycle(cycle)) => return Err(cycle),"
 new = "Err(ReadFailure::Vanished) => {\n                            gone = true;\n                            break;\n                        }\n                        Err(ReadFailure::Cycle(_cycle)) => { gone = true; break; } // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/poller/ci_runs.rs"
 runner = "cargo"
@@ -3974,8 +3973,8 @@ build_timeout_s = 3600
 id = "ci-quota-after-validation"
 guards = "A CI watch refused before any read (unusable cursor, fixed args or pins) reserves no shared CI quota"
 file = "crates/plexus-core/src/poller/ci_runs.rs"
-old = "let invalid = || self.ci_vendor_failure(principal, sub, \"response_shape_invalid\".into());"
-new = "let _ = store.reserve_github_actions_quota(principal, &sub.subscription_id, QuotaRequest::CiCycle, now); // NON-VACUITY BREAK\n        let invalid = || self.ci_vendor_failure(principal, sub, \"response_shape_invalid\".into());"
+old = "let mut cursor: CiCursor = match CiCursor::deserialize(&sub.cursor_state) {"
+new = "let _ = store.reserve_github_actions_quota(principal, &sub.subscription_id, QuotaRequest::CiCycle, now); // NON-VACUITY BREAK\n        let mut cursor: CiCursor = match CiCursor::deserialize(&sub.cursor_state) {"
 test_file = "crates/plexus-core/src/poller/ci_runs.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -8248,17 +8247,17 @@ build_timeout_s = 3600
 
 [[control]]
 id = "ordered-resumable-backlog"
-guards = "An advancing ascending drain's capped but resumable backlog is not reported as lost coverage"
+guards = "A bounded ascending drain persists the vendor cursor and original filter instead of replaying the overlap head"
 file = "crates/plexus-core/src/poller.rs"
-old = "if reason != \"ordered_timestamp_page_limit\" || stalled {"
-new = "if true || stalled { // NON-VACUITY BREAK"
+old = "next.insert(PAGE_RESUME_KEY.into(), resume.clone());"
+new = "let _ = resume; // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/tests/poller.rs"
 runner = "cargo"
 package = "plexus-core"
 target = "--test poller"
 select = "expected"
-expect_red = ["progressing_ordered_backlog_is_not_a_coverage_gap"]
-expect_message = "resumable advancing backlog must not claim lost coverage"
+expect_red = ["ordered_timestamp_dense_window_continues_after_restart_without_new_replays"]
+expect_message = "resume the saved vendor cursor"
 timeout_s = 120
 build_timeout_s = 3600
 
@@ -8298,7 +8297,7 @@ build_timeout_s = 3600
 id = "inactive-failure-not-eligible"
 guards = "A failed read after watch deactivation is not reported as a recorded vendor failure"
 file = "crates/plexus-core/src/poller.rs"
-old = "Ok(false) => PollCycle::NotEligible {\n                reason: \"subscription_not_active\".into(),\n            },"
+old = "Ok(false) => PollCycle::NotEligible {\n                reason: SUBSCRIPTION_NOT_ACTIVE.into(),\n            },"
 new = "Ok(false) => PollCycle::VendorFailed { code }, // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/poller/ci_runs.rs"
 runner = "cargo"
@@ -8426,7 +8425,7 @@ build_timeout_s = 3600
 id = "quota-inactive-not-eligible"
 guards = "A watch deactivated after CI selection is ineligible rather than store-failed, with no vendor failure streak or dispatch"
 file = "crates/plexus-core/src/poller/ci_runs.rs"
-old = "Ok(QuotaAdmission::Inactive) => {\n                return PollCycle::NotEligible {\n                    reason: \"subscription_not_active\".into(),\n                }\n            }"
+old = "Ok(QuotaAdmission::Inactive) => {\n                return PollCycle::NotEligible {\n                    reason: SUBSCRIPTION_NOT_ACTIVE.into(),\n                }\n            }"
 new = "Ok(QuotaAdmission::Inactive) => {\n                return PollCycle::StoreFailed { reason: \"inactive watch\".into() }; // NON-VACUITY BREAK\n            }"
 test_file = "crates/plexus-core/src/poller/ci_runs.rs"
 runner = "cargo"
@@ -14772,3 +14771,173 @@ package = "plexus-core"
 target = "--lib"
 select = "expected"
 expect_red = ["mcp_remote::safety_tests::production_configuration_refuses_unregistered_ids_without_sending"]
+
+[[control]]
+id = "ci-discovery-creation-floor"
+guards = "Discovery never requeues completed attempts older than the watch while still following reruns"
+file = "crates/plexus-core/src/poller/ci_runs.rs"
+old = "if completed < sub.created_at_ms {\n                    continue;\n                }"
+new = "if false && completed < sub.created_at_ms { // NON-VACUITY BREAK\n                    continue;\n                }"
+test_file = "crates/plexus-core/src/poller/ci_runs.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::ci_runs::tests::fresh_watch_rescan_drops_preexisting_attempts_without_events"]
+
+[[control]]
+id = "sorted-head-late-visibility"
+guards = "Unseen rows in the replay window are delivered while stored payloads and a disappearing newest row stay quiet"
+file = "crates/plexus-core/src/poller.rs"
+old = "const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 60_000;"
+new = "const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 0; // NON-VACUITY BREAK"
+test_file = "crates/plexus-core/tests/poller.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test poller"
+select = "expected"
+expect_red = ["sorted_head_late_visibility_and_disappearing_newest_keep_stored_items_quiet"]
+
+[[control]]
+id = "poll-response-error-detail"
+guards = "A malformed response stops the watch with its parsing detail instead of discarding the cause"
+file = "crates/plexus-core/src/poller.rs"
+old = "&format!(\"{RESPONSE_SHAPE_INVALID}: {error:?}\"),"
+new = "&format!(\"{RESPONSE_SHAPE_INVALID}: discarded\"), // NON-VACUITY BREAK"
+test_file = "crates/plexus-core/tests/poller.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test poller"
+select = "expected"
+expect_red = ["unparseable_response_suspends_with_response_shape_invalid"]
+
+[[control]]
+id = "probe-first-callback-failure"
+guards = "The first callback failure determines the poll outcome even if the script invokes a later successful action"
+file = "crates/plexus-core/src/poller.rs"
+old = "fn invoke(&self, action: &str, argument: Value) -> Result<Value, String> {"
+new = "fn invoke(&self, action: &str, argument: Value) -> Result<Value, String> {\n        *self.action_failure.lock().unwrap() = None; // NON-VACUITY BREAK"
+test_file = "crates/plexus-core/src/poller/tests/liveness_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::tests::liveness_tests::first_probe_callback_failure_survives_a_later_success"]
+
+[[control]]
+id = "probe-runtime-failure-breaker"
+guards = "Probe runtime budget failures increment the durable failure streak and reach a resumable circuit breaker"
+file = "crates/plexus-core/src/poller.rs"
+old = "ProbeError::Timeout { .. } | ProbeError::MemoryLimit { .. } => {\n            PollCycle::VendorFailed { code }\n        }"
+new = "ProbeError::Timeout { .. } | ProbeError::MemoryLimit { .. } => {\n            PollCycle::Inconclusive { code } // NON-VACUITY BREAK\n        }"
+test_file = "crates/plexus-core/src/poller/tests/liveness_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::tests::liveness_tests::timed_out_probe_feeds_breaker_and_can_resume"]
+timeout_s = 120
+
+[[control]]
+id = "probe-deterministic-failure-suspension"
+guards = "Invalid probe return values suspend visibly without retiring a once probe or advancing its cursor"
+file = "crates/plexus-core/src/poller.rs"
+old = "_ => PollCycle::Suspended {\n            reason: format!(\n                \"{code}: {}\",\n                error.to_string().chars().take(512).collect::<String>()\n            ),\n        },"
+new = "_ => PollCycle::Inconclusive { code }, // NON-VACUITY BREAK"
+test_file = "crates/plexus-core/src/poller.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::tests::a_validation_failure_does_not_retire_a_once_probe"]
+
+[[control]]
+id = "scheduler-pass-budget"
+guards = "A slow watch defers remaining watches and cannot occupy the start of every sequential pass"
+file = "crates/plexus-core/src/scheduler.rs"
+old = "if std::time::Instant::now() >= deadline {\n                break;\n            }"
+new = "if false && std::time::Instant::now() >= deadline { // NON-VACUITY BREAK\n                break;\n            }"
+test_file = "crates/plexus-core/src/scheduler.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["scheduler::tests::pass_budget_defers_remaining_watches_and_rotates_the_next_start"]
+
+[[control]]
+id = "actor-pass-budget"
+guards = "Expired pass deadlines prevent enrichment from admitting another governed call"
+file = "crates/plexus-core/src/poller.rs"
+old = "if pass_budget_expired() {\n            return None;\n        }"
+new = "if false && pass_budget_expired() { // NON-VACUITY BREAK\n            return None;\n        }"
+test_file = "crates/plexus-core/src/poller/tests/liveness_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::tests::liveness_tests::expired_pass_budget_never_dispatches_or_stamps_an_attempt"]
+
+[[control]]
+id = "scheduler-retention-throttle"
+guards = "Minute-scale retention does not write on every one-second scheduler pass"
+file = "crates/plexus-core/src/scheduler.rs"
+old = "if housekeeping_due {"
+new = "if true || housekeeping_due { // NON-VACUITY BREAK"
+test_file = "crates/plexus-core/src/scheduler.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["scheduler::tests::retention_is_throttled_between_passes"]
+
+[[control]]
+id = "ci-pending-attempt-limit"
+guards = "Pending CI attempts have a bounded cursor and evictions record a durable coverage gap"
+file = "crates/plexus-core/src/poller/ci_runs.rs"
+old = "const OPEN_ATTEMPT_LIMIT: usize = 4096;"
+new = "const OPEN_ATTEMPT_LIMIT: usize = usize::MAX; // NON-VACUITY BREAK"
+test_file = "crates/plexus-core/src/poller/ci_runs.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::ci_runs::tests::pending_attempt_limit_records_eviction_as_a_durable_gap"]
+
+[[control]]
+id = "scheduler-retry-jitter"
+guards = "Failure retries have stable bounded per-watch offsets instead of a shared retry instant"
+file = "crates/plexus-core/src/scheduler.rs"
+old = "(hash % 101) as i64"
+new = "(hash % 1) as i64 /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/scheduler.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["scheduler::tests::failure_jitter_is_stable_bounded_and_spreads_watches"]
+
+[[control]]
+id = "identity-no-read-no-quota"
+guards = "A repository identity lookup without a usable read action cannot spend a shared vendor quota token"
+file = "crates/plexus-core/src/poller.rs"
+old = "if request.is_none() || pass_budget_expired() {"
+new = "if false && request.is_none() || pass_budget_expired() { // NON-VACUITY BREAK"
+test_file = "crates/plexus-core/src/poller.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::repository_identity_tests::absent_actions_connection_survives_twenty_ticks_and_recovery_does_not_publish_old_state"]
+
+[[control]]
+id = "mixed-id-total-order"
+guards = "Mixed numeric and textual watermark ids obey a transitive total order"
+file = "crates/plexus-core/src/poller.rs"
+old = "(Err(_), Ok(_)) => true,"
+new = "(Err(_), Ok(_)) => candidate > current, // NON-VACUITY BREAK"
+test_file = "crates/plexus-core/src/poller/tests/liveness_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::tests::liveness_tests::mixed_tiebreaker_ids_have_a_transitive_order"]

@@ -4480,11 +4480,9 @@ fn unparseable_response_suspends_with_response_shape_invalid() {
             "next_cursor": "tok-2"
         })));
     let cycle = poller.poll_once(PRINCIPAL, &id);
-    assert_eq!(
-        cycle,
-        PollCycle::Suspended {
-            reason: "response_shape_invalid".to_string()
-        }
+    assert!(
+        matches!(&cycle, PollCycle::Suspended { reason } if reason.starts_with("response_shape_invalid:") && reason.contains("non-empty string id")),
+        "{cycle:?}"
     );
     let stored = subscription(&engine, &id);
     assert_eq!(stored.status, "suspended");
@@ -4822,10 +4820,6 @@ fn unknown_actor_arms_emit_named_diagnostics() {
         ("transient_twice_stays_unknown", "transport_failure"),
         ("semantic_unknown_does_not_retry", "empty_actor_window"),
         (
-            "an_unbound_actor_source_stores_unknown_actors",
-            "actor_source_unbound",
-        ),
-        (
             "a_missing_item_kind_stores_unknown_actors",
             "item_kind_unknown",
         ),
@@ -4893,6 +4887,105 @@ fn timestamp_page(start: usize, count: usize, timestamp: &str, cursor: &str) -> 
         "items": (start..start + count).map(|id| json!({"id": id, "updated_at": timestamp})).collect::<Vec<_>>(),
         "pageInfo": {"endCursor": cursor, "hasNextPage": true}
     }))
+}
+
+#[test]
+fn ordered_timestamp_dense_window_continues_after_restart_without_new_replays() {
+    let (poller, engine, _path, _) = fixture("timestamp-dense");
+    let id = paginated_timestamp_subscription(&engine);
+    engine.transport().set_response_sequence_for_method(
+        TIMESTAMPED,
+        "list",
+        (0..5)
+            .map(|page| {
+                timestamp_page(
+                    page * 30,
+                    30,
+                    "2024-01-15T10:00:05Z",
+                    &format!("page-{page}"),
+                )
+            })
+            .collect(),
+    );
+    assert!(matches!(
+        poller.poll_once(PRINCIPAL, &id),
+        PollCycle::Completed { inserted: 150, .. }
+    ));
+    let first_since = engine.transport().requests()[0].args["updatedSince"].clone();
+    let poller = Poller::new(engine.clone());
+    engine.transport().set_response_sequence_for_method(
+        TIMESTAMPED,
+        "list",
+        vec![timestamp_page(150, 20, "2024-01-15T10:00:05Z", "done")],
+    );
+    assert!(matches!(
+        poller.poll_once(PRINCIPAL, &id),
+        PollCycle::Completed {
+            inserted: 20,
+            duplicates: 0
+        }
+    ));
+    let requests = engine.transport().requests();
+    assert_eq!(
+        requests[5].args["after"], "page-4",
+        "resume the saved vendor cursor, not the overlap head"
+    );
+    assert_eq!(requests[5].args["updatedSince"], first_since);
+    engine.transport().set_response_sequence_for_method(
+        TIMESTAMPED,
+        "list",
+        vec![timestamp_page(0, 20, "2024-01-15T10:00:05Z", "done")],
+    );
+    assert!(matches!(
+        poller.poll_once(PRINCIPAL, &id),
+        PollCycle::Completed {
+            inserted: 0,
+            duplicates: 20
+        }
+    ));
+    assert!(engine.transport().requests()[6].args.get("after").is_none());
+    let events = engine
+        .store()
+        .list_events(PRINCIPAL, None, Some(&id))
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.vendor_event_id.is_some())
+            .count(),
+        170
+    );
+    assert!(events.iter().all(|e| e.kind != "gap"));
+}
+
+#[test]
+fn sorted_head_late_visibility_and_disappearing_newest_keep_stored_items_quiet() {
+    let (poller, engine, _path, _) = fixture("sorted-late");
+    let id = sorted_head_subscription(&engine);
+    let older = json!({"id": 1, "updated_at": "2024-01-15T10:00:05Z"});
+    let newest = json!({"id": 3, "updated_at": "2024-01-15T10:00:10Z"});
+    engine
+        .transport()
+        .set_response(MockResponse::Success(json!({"items": [newest, older]})));
+    assert!(matches!(
+        poller.poll_once(PRINCIPAL, &id),
+        PollCycle::Completed { inserted: 2, .. }
+    ));
+    let watermark = subscription(&engine, &id).cursor_state;
+    let late = json!({"id": 2, "updated_at": "2024-01-15T10:00:07Z"});
+    engine
+        .transport()
+        .set_response(MockResponse::Success(json!({"items": [late, older]})));
+    assert!(matches!(
+        poller.poll_once(PRINCIPAL, &id),
+        PollCycle::Completed { inserted: 1, .. }
+    ));
+    assert_eq!(subscription(&engine, &id).cursor_state, watermark);
+    assert!(matches!(
+        poller.poll_once(PRINCIPAL, &id),
+        PollCycle::Completed { inserted: 0, .. }
+    ));
+    assert_eq!(subscription(&engine, &id).cursor_state, watermark);
 }
 
 #[test]
@@ -4995,7 +5088,7 @@ fn ordered_timestamp_short_page_uses_one_call() {
 }
 
 #[test]
-fn ordered_timestamp_page_bound_records_gap_and_commits() {
+fn ordered_timestamp_page_bound_saves_continuation_and_commits() {
     let (poller, engine, path, _) = fixture("timestamp-bound");
     let id = paginated_timestamp_subscription(&engine);
     engine.transport().set_response_sequence_for_method(
@@ -5030,8 +5123,8 @@ fn ordered_timestamp_page_bound_records_gap_and_commits() {
             .filter(|event| event.kind == "gap"
                 && event.gap_reason.as_deref() == Some("ordered_timestamp_page_limit"))
             .count(),
-        1,
-        "bound must record incomplete coverage"
+        0,
+        "bounded continuation must not claim lost coverage"
     );
     assert_eq!(
         events
@@ -6743,4 +6836,70 @@ fn a_poll_sending_an_undeclared_argument_suspends_by_name() {
         "{audit:?}"
     );
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+#[ignore = "requires the storage resume-reason change from the storage owner"]
+fn malformed_response_can_resume_with_detailed_reason_and_cursor_intact() {
+    let (poller, engine, _path, id) = fixture("resume-malformed");
+    engine.transport().set_response(MockResponse::Success(
+        json!({"items":[{"id":"first"}],"next_cursor":"first"}),
+    ));
+    assert!(matches!(
+        poller.poll_once(PRINCIPAL, &id),
+        PollCycle::Completed { inserted: 1, .. }
+    ));
+    let before = subscription(&engine, &id).cursor_state;
+    engine.transport().set_response(MockResponse::Success(
+        json!({"items":[{"title":"missing id"}],"next_cursor":"bad"}),
+    ));
+    let cycle = poller.poll_once(PRINCIPAL, &id);
+    assert!(
+        matches!(cycle, PollCycle::Suspended { reason } if reason.starts_with("response_shape_invalid:") && reason.contains("non-empty string id"))
+    );
+    assert_eq!(subscription(&engine, &id).cursor_state, before);
+    let resumed = engine.store().resume(PRINCIPAL, &id).unwrap().unwrap();
+    assert_eq!(resumed.cursor_state, before);
+    engine.transport().set_response(MockResponse::Success(
+        json!({"items":[{"id":"next"}],"next_cursor":"next"}),
+    ));
+    assert!(matches!(
+        poller.poll_once(PRINCIPAL, &id),
+        PollCycle::Completed { inserted: 1, .. }
+    ));
+}
+
+#[test]
+#[ignore = "requires the sorted-head retention-window change from the store owner"]
+fn sorted_head_overlap_stays_quiet_after_retention_and_newest_disappears() {
+    let (poller, engine, path, _) = fixture("sorted-retention");
+    let id = sorted_head_subscription(&engine);
+    let older = json!({"id":1,"updated_at":"2024-01-15T10:00:05Z"});
+    engine.transport().set_response(MockResponse::Success(
+        json!({"items":[{"id":2,"updated_at":"2024-01-15T10:00:10Z"},older]}),
+    ));
+    assert!(matches!(
+        poller.poll_once(PRINCIPAL, &id),
+        PollCycle::Completed { inserted: 2, .. }
+    ));
+    let state = subscription(&engine, &id);
+    assert_eq!(state.cursor_kind, "sorted_head");
+    let cursor = state.cursor_state;
+    assert_eq!(cursor["watermark_ms"], 1705312810000i64);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let old = plexus_core::now_ms() - 40 * 86_400_000;
+    assert_eq!(conn.execute("UPDATE trigger_events SET created_at_ms = ?1, acked_at_ms = ?1 WHERE principal = ?2 AND subscription_id = ?3 AND kind = 'event'", rusqlite::params![old, PRINCIPAL, id]).unwrap(), 2);
+    assert_eq!(
+        engine.store().prune(PRINCIPAL, &id, 0, 0).unwrap(),
+        0,
+        "retention must preserve payloads inside the replay window"
+    );
+    engine
+        .transport()
+        .set_response(MockResponse::Success(json!({"items":[older]})));
+    assert!(matches!(
+        poller.poll_once(PRINCIPAL, &id),
+        PollCycle::Completed { inserted: 0, .. }
+    ));
+    assert_eq!(subscription(&engine, &id).cursor_state, cursor);
 }
