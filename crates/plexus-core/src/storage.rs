@@ -20,7 +20,7 @@ use serde_json::Value;
 use sha2::Digest;
 
 use crate::actor_attribution::{served_actor_fields, ActorAttribution, ActorUnknown};
-use crate::manifest::{asks_first, AppManifest, CursorKind, PollShape, Risk};
+use crate::manifest::{AppManifest, CursorKind, PollShape, Risk};
 use crate::scope::CallScope;
 use crate::withdraw::{
     WithdrawAnswer, WITHDRAW_OUTCOME_UNKNOWN, WITHDRAW_REFUSED_DENIED, WITHDRAW_REFUSED_EXPIRED,
@@ -9065,13 +9065,14 @@ pub(crate) enum SeedMode {
     /// Write every declared action, replacing an existing row (a new
     /// connection's first seed).
     UpsertAll,
-    /// Insert only actions the connection has no row for; never touch the
-    /// status, schema pin, or anything else of a row that exists.
+    /// Insert missing actions and refresh reviewed policy metadata, preserving
+    /// existing operator status and schema-pin decisions.
     AddMissing,
 }
 
 /// Seed reviewed manifest declarations in the caller's transaction. UpsertAll
-/// is reserved for new connections; repeat public seeds only add missing actions.
+/// is reserved for new connections; repeat seeds preserve pins and operator state
+/// while updating the reviewed policy metadata of existing rows.
 pub(crate) fn seed_catalog_from_manifest_on_conn(
     conn: &rusqlite::Connection,
     principal: &str,
@@ -9105,19 +9106,6 @@ pub(crate) fn seed_catalog_from_manifest_on_conn(
             skipped.insert("<unnamed>".to_string(), "action_name_missing");
             continue;
         };
-        if mode == SeedMode::AddMissing {
-            let exists: Option<i64> = conn
-                .query_row(
-                    "SELECT 1 FROM catalog_actions
-                     WHERE principal = ?1 AND connection_id = ?2 AND name = ?3",
-                    (principal, connection_id, name),
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if exists.is_some() {
-                continue;
-            }
-        }
         // An unclassified risk must not be seeded as a permissive read.
         let Some(parsed_risk) = action
             .get("risk")
@@ -9134,8 +9122,53 @@ pub(crate) fn seed_catalog_from_manifest_on_conn(
             continue;
         };
         let risk = parsed_risk.to_string();
-        let ask_first =
-            asks_first(parsed_risk, &declared_ask_first) || action.get("recipients").is_some();
+        let ask_first = crate::manifest::action_asks_first(
+            parsed_risk,
+            &declared_ask_first,
+            action
+                .get("ask_first")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            action.get("recipients").is_some(),
+        );
+        if mode == SeedMode::AddMissing {
+            let reconciliation = action
+                .get("reconciliation")
+                .filter(|value| !value.is_null())
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+            // A reviewed policy change must reach handle connections even when
+            // they never perform discovery. Do not repin or reactivate a row:
+            // those are separate operator decisions, not catalog policy.
+            let updated = conn.execute(
+                "UPDATE catalog_actions SET risk=?4, severity=?5, ask_first=?6,
+                 reconciliation_json=?7, generation=generation + CASE
+                   WHEN risk IS NOT ?4 OR severity IS NOT ?5 OR ask_first IS NOT ?6
+                     OR reconciliation_json IS NOT ?7 THEN 1 ELSE 0 END
+                 WHERE principal=?1 AND connection_id=?2 AND name=?3",
+                rusqlite::params![
+                    principal,
+                    connection_id,
+                    name,
+                    risk,
+                    tier,
+                    ask_first,
+                    reconciliation
+                ],
+            )?;
+            if updated != 0 {
+                suspend_subscriptions_for_action(
+                    conn,
+                    principal,
+                    connection_id,
+                    name,
+                    (parsed_risk != Risk::Read).then_some("risk_drift"),
+                    now_ms(),
+                )?;
+                continue;
+            }
+        }
         // Pin a reviewed http.args_schema or input_schema when declared. An
         // action with neither starts open until discovery supplies its schema.
         let schema = action
@@ -10209,7 +10242,7 @@ impl PlexusStore {
         now: i64,
     ) -> Result<Vec<crate::reconciliation::PendingWriteReconciliation>, StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            let mut stmt = conn.prepare("SELECT principal,request_id,record_json,expires_at_ms FROM pending_write_reconciliations WHERE next_attempt_at_ms<=?1 OR expires_at_ms<=?1 ORDER BY expires_at_ms,principal,request_id LIMIT 1000")?;
+            let mut stmt = conn.prepare("SELECT principal,request_id,record_json,expires_at_ms FROM pending_write_reconciliations WHERE next_attempt_at_ms<=?1 ORDER BY expires_at_ms,principal,request_id LIMIT 1000")?;
             let rows = stmt
                 .query_map([now], |row| {
                     Ok((
@@ -11910,15 +11943,7 @@ mod tests {
                 },
                 {
                     "name": "write_action",
-                    "risk": "write",
-                    "poll": {
-                        "item_kind": "issue",
-                        "cursor_kind": "ordered_timestamp",
-                        "item_kind": "issue",
-                        "timestamp_field": "updated_at",
-                        "tiebreaker_id_field": "id",
-                        "request_constants": {}
-                    }
+                    "risk": "write"
                 }
             ],
             "defaults": {"ask_first_risk": ["write"], "rate_limit": {"calls_per_min": 60}},
@@ -13082,35 +13107,17 @@ mod tests {
         );
     }
 
-    /// EVERY declared cursor kind can back a stored subscription.
-    ///
-    /// The store gates `cursor_kind` with a SQL CHECK constraint, which is an
-    /// allowlist of enum values written in a language with no compiler
-    /// relationship to the enum it mirrors. So adding a `CursorKind` variant
-    /// cannot fail at build time: the manifest model accepts it, ingest accepts
-    /// it, the poller builds a strategy for it, and the INSERT that stores the
-    /// subscription is refused at runtime.
-    ///
-    /// That is exactly how `scalar_diff` shipped, and this test was written to
-    /// stop it recurring. IT DID NOT: its first version iterated a hand-written
-    /// array of shapes, so a fifth variant was simply absent from the array and
-    /// the test passed while the constraint rejected it. A list that must be
-    /// remembered has the same blind spot as the SQL it is checking.
-    ///
-    /// The fence is now `poll_shape_for`, whose match is EXHAUSTIVE: adding a
-    /// variant fails to compile there, which lands the author in this test with
-    /// the reason in front of them. `ALL` is iterated for the runtime half, and
-    /// its length is asserted against the match so a variant added to one and
-    /// not the other cannot pass quietly.
+    /// Implemented cursor strategies must also be accepted by the SQL CHECK
+    /// constraint. The exhaustive shape helper forces a review when the enum
+    /// grows; the runtime list covers the strategies that ingest currently
+    /// admits. SnapshotDiff remains decodable for legacy rows, but new manifests
+    /// cannot declare it because no polling strategy implements it.
     #[test]
-    fn every_cursor_kind_can_back_a_stored_subscription() {
-        /// Every cursor kind. Kept beside the exhaustive match below, which is
-        /// what makes an omission here a compile error rather than a silent
-        /// gap.
-        const ALL: [CursorKind; 6] = [
+    fn every_implemented_cursor_kind_can_back_a_stored_subscription() {
+        /// Keep this list aligned with the strategies accepted at ingest.
+        const ALL: [CursorKind; 5] = [
             CursorKind::SyncToken,
             CursorKind::OrderedTimestamp,
-            CursorKind::SnapshotDiff,
             CursorKind::ScalarDiff,
             CursorKind::SortedHead,
             CursorKind::CiRuns,
