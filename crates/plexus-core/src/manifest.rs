@@ -172,6 +172,10 @@ pub struct HttpOperation {
     pub method: HttpMethod,
     pub path: String,
     pub args_schema: Value,
+    /// Where non-path arguments travel. Omission preserves method defaults:
+    /// GET and DELETE use the query; POST, PUT and PATCH use a JSON body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<RestParameterLocation>,
     /// Reviewed arguments supplied by the transport on every request. Callers
     /// and cursors cannot supply these keys, even with the same value: changing
     /// a page size would invalidate a poller's coverage and request budget.
@@ -183,11 +187,28 @@ pub struct HttpOperation {
     pub credentialless_tail: Option<CredentiallessTail>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RestParameterLocation {
+    Body,
+    Query,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CredentiallessTail {
+    #[serde(default)]
+    pub kind: CredentiallessTailKind,
     /// Exact hosts or a single-label wildcard such as *.blob.core.windows.net.
     pub allowed_hosts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentiallessTailKind {
+    #[default]
+    JobLog,
+    ArtifactFile,
 }
 
 /// The cursor shapes a polling action may expose.

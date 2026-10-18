@@ -27,11 +27,14 @@ use crate::credentials::ResolvedCredential;
 use crate::http_support::{
     build_headers, classify_reqwest_error, credentialed_redirect_policy, duration_ms,
     read_body_bounded, redacted_endpoint, redirect_location_for_log, reqwest_error_cause,
-    retry_after_from_headers, throttle_deadline, throttle_gate, throttle_refusal, BodyReadFailure,
-    HttpAttemptFailure, ThrottleGate, DEFAULT_CONNECT_TIMEOUT, DEFAULT_IDLE_TIMEOUT,
-    DEFAULT_REQUEST_TIMEOUT, MAX_RESPONSE_BODY_BYTES, POOLED_CONNECTION_IDLE_LIMIT,
+    response_throttle, throttle_deadline, throttle_gate, throttle_refusal, with_request_deadline,
+    BodyReadFailure, HttpAttemptFailure, ThrottleGate, DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_IDLE_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, MAX_RESPONSE_BODY_BYTES,
+    POOLED_CONNECTION_IDLE_LIMIT,
 };
-use crate::manifest::{AppManifest, CredentialBinding, HttpMethod, HttpOperation};
+use crate::manifest::{
+    AppManifest, CredentialBinding, HttpMethod, HttpOperation, RestParameterLocation,
+};
 use crate::transport::{
     Retryability, TransmissionState, Transport, TransportRequest, TransportResponse,
 };
@@ -48,8 +51,8 @@ enum RestError {
     PoisonedLock,
     Configuration,
     ConstantArgument(String),
-    /// The rendered path has a `.` or `..` segment, which the URL parser would
-    /// resolve into a different endpoint from the one the manifest declares.
+    /// The path contains a separator or dot segment whose routing interpretation
+    /// can change when a vendor or proxy decodes it.
     DotSegment,
 }
 
@@ -208,7 +211,7 @@ impl RestClientSettings {
 }
 
 struct RestConnectionEntry {
-    download_client: Client,
+    download_client: Option<Client>,
     /// Sends GET, the only method that may follow a method-changing redirect
     /// (see `credentialed_redirect_policy`).
     client: Client,
@@ -236,6 +239,23 @@ impl RestConnectionEntry {
                 .build()
                 .map_err(|_| RestError::Configuration)
         };
+        Ok(Self {
+            download_client: None,
+            client: client(true)?,
+            write_client: client(false)?,
+            last_used: Instant::now(),
+            throttle_until: None,
+            idle_timeout: config.idle_timeout,
+            settings: RestClientSettings::of(config),
+            #[cfg(test)]
+            panic_after_send: false,
+        })
+    }
+
+    fn download_client(&mut self, config: &RestConfig) -> Result<Client, RestError> {
+        if let Some(client) = &self.download_client {
+            return Ok(client.clone());
+        }
         let download_client = Client::builder()
             .user_agent(crate::http_support::USER_AGENT)
             .connect_timeout(config.connect_timeout)
@@ -252,19 +272,11 @@ impl RestConnectionEntry {
         } else {
             download_client
         };
-        Ok(Self {
-            download_client: download_client
-                .build()
-                .map_err(|_| RestError::Configuration)?,
-            client: client(true)?,
-            write_client: client(false)?,
-            last_used: Instant::now(),
-            throttle_until: None,
-            idle_timeout: config.idle_timeout,
-            settings: RestClientSettings::of(config),
-            #[cfg(test)]
-            panic_after_send: false,
-        })
+        let client = download_client
+            .build()
+            .map_err(|_| RestError::Configuration)?;
+        self.download_client = Some(client.clone());
+        Ok(client)
     }
 }
 
@@ -273,8 +285,8 @@ impl RestConnectionEntry {
 /// pool holds only the HTTP client and throttle state per connection.
 #[derive(Clone)]
 pub struct RestTransport {
-    default_config: RestConfig,
-    configs: Arc<Mutex<HashMap<String, RestConfig>>>,
+    default_config: Arc<RestConfig>,
+    configs: Arc<Mutex<HashMap<String, Arc<RestConfig>>>>,
     entries: Arc<Mutex<HashMap<String, Arc<Mutex<RestConnectionEntry>>>>>,
     /// How many times a panic was recovered from: a dispatch that panicked
     /// while holding its connection, or a poisoned entry the sweep evicted.
@@ -284,7 +296,7 @@ pub struct RestTransport {
 impl RestTransport {
     pub fn new(default_config: RestConfig) -> Self {
         Self {
-            default_config,
+            default_config: Arc::new(default_config),
             configs: Arc::new(Mutex::new(HashMap::new())),
             entries: Arc::new(Mutex::new(HashMap::new())),
             panic_recoveries: Arc::new(AtomicU64::new(0)),
@@ -293,7 +305,7 @@ impl RestTransport {
 
     pub fn register_connection(&self, connection: RestConnection) {
         if let Ok(mut configs) = self.configs.lock() {
-            configs.insert(connection.connection_id, connection.config);
+            configs.insert(connection.connection_id, Arc::new(connection.config));
         }
     }
 
@@ -309,7 +321,7 @@ impl RestTransport {
     #[cfg(any(test, feature = "test-support"))]
     pub fn register_config(&self, connection_id: impl Into<String>, config: RestConfig) {
         if let Ok(mut configs) = self.configs.lock() {
-            configs.insert(connection_id.into(), config);
+            configs.insert(connection_id.into(), Arc::new(config));
         }
     }
 
@@ -322,6 +334,7 @@ impl RestTransport {
             .unwrap_or(false)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn connection_count(&self) -> usize {
         self.entries
             .lock()
@@ -396,7 +409,7 @@ impl RestTransport {
         removed
     }
 
-    fn config_for(&self, connection_id: &str) -> RestConfig {
+    fn config_for(&self, connection_id: &str) -> Arc<RestConfig> {
         self.configs
             .lock()
             .ok()
@@ -474,12 +487,13 @@ impl RestTransport {
         // An action with no declared HTTP shape cannot be routed. Ingest
         // validation rejects such manifests, so this is defence in depth: fail
         // closed locally rather than improvising a URL at invoke time.
-        let Some(operation) = config.actions.get(&request.action).cloned() else {
+        let Some(operation) = config.actions.get(&request.action) else {
+            eprintln!(warn transport: "REST request has no reviewed HTTP operation");
             return local_not_sent();
         };
         let entry = match self.entry_for(&request.connection_id, &config) {
             Ok(entry) => entry,
-            Err(RestError::PoisonedLock) => return crate::mcp_remote::poisoned_lock_response(),
+            Err(RestError::PoisonedLock) => return rest_poisoned_lock_response(),
             Err(_) => return local_not_sent(),
         };
         // Keep sends ordered within a connection so the next request observes
@@ -488,7 +502,7 @@ impl RestTransport {
         // the shared entry map.
         let mut state = match entry.lock() {
             Ok(state) => state,
-            Err(_) => return crate::mcp_remote::poisoned_lock_response(),
+            Err(_) => return rest_poisoned_lock_response(),
         };
         // A panic below would otherwise unwind through this guard, poisoning
         // the entry so every later call on the connection refuses until a
@@ -499,7 +513,7 @@ impl RestTransport {
             Self::send_locked(
                 &mut state,
                 &config,
-                &operation,
+                operation,
                 &request,
                 credential,
                 github_facade,
@@ -554,9 +568,14 @@ impl RestTransport {
             ThrottleGate::Clear => {}
         }
         if let Some(tail) = &operation.credentialless_tail {
-            if request.action == "github.actions.artifact_file" {
+            let client = match state.download_client(config) {
+                Ok(client) => client,
+                Err(_) => return local_not_sent(),
+            };
+            if tail.kind == crate::manifest::CredentiallessTailKind::ArtifactFile {
                 return artifact_file::download(
-                    &state.download_client,
+                    &client,
+                    &mut state.throttle_until,
                     config,
                     operation,
                     tail,
@@ -565,7 +584,8 @@ impl RestTransport {
                 );
             }
             return job_log::download(
-                &state.download_client,
+                &client,
+                &mut state.throttle_until,
                 config,
                 operation,
                 tail,
@@ -575,34 +595,28 @@ impl RestTransport {
         }
         let prepared = match prepare_request(&config.base_url, operation, &request.args) {
             Ok(prepared) => prepared,
-            Err(RestError::ConstantArgument(key)) => {
-                let mut response = local_not_sent();
-                response.error_code = Some("request_constant_conflict".to_string());
-                response.error_message = Some(format!(
-                    "REST argument '{key}' is a reviewed request constant and must not be supplied"
-                ));
-                return response;
-            }
-            Err(RestError::DotSegment) => {
-                let mut response = local_not_sent();
-                response.error_code = Some("path_argument_invalid".to_string());
-                response.error_message = Some(
-                    "REST path arguments must not form a '.' or '..' path segment".to_string(),
-                );
-                return response;
-            }
-            Err(_) => return local_not_sent(),
+            Err(error) => return preparation_failure(error),
         };
         let prepared_method = &prepared.method;
         let prepared_path = &prepared.path;
         let mut headers = match build_headers(&config.credential_bindings, credential) {
             Ok(headers) => headers,
-            Err(_) => return local_not_sent(),
+            Err(_) => {
+                eprintln!(warn transport: "REST credential header binding is invalid");
+                return local_not_sent();
+            }
         };
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         // Only GET may follow a redirect that rewrites the method; every other
         // method goes through the client that follows only 307 and 308.
-        let client = if prepared.method == reqwest::Method::GET {
+        let facade_client;
+        let client = if github_facade {
+            facade_client = match state.download_client(config) {
+                Ok(client) => client,
+                Err(_) => return local_not_sent(),
+            };
+            &facade_client
+        } else if prepared.method == reqwest::Method::GET {
             &state.client
         } else {
             &state.write_client
@@ -613,26 +627,13 @@ impl RestTransport {
         if let Some(body) = &prepared.body {
             builder = builder.json(body);
         }
-        let response = match builder.send() {
+        let deadline = Instant::now()
+            .checked_add(config.request_timeout)
+            .unwrap_or_else(Instant::now);
+        let response = match with_request_deadline(builder, deadline).send() {
             Ok(response) => response,
             Err(error) => {
-                let failure = classify_reqwest_error(&error);
-                let cause = reqwest_error_cause(error);
-                eprintln!(warn transport: "REST transport failed on {} {}: {:?}: {cause}", prepared_method, prepared_path.split('?').next().unwrap_or(prepared_path), failure);
-                return match failure {
-                    // The request was written before the timeout fired, so the
-                    // vendor may have acted on it: outcome unknown, never
-                    // not-sent.
-                    HttpAttemptFailure::Timeout => timeout_response(),
-                    // The connection failed before any request was written:
-                    // definitively not sent.
-                    HttpAttemptFailure::Connect => TransportResponse::transient_not_sent(
-                        "REST connection failed before the request was sent",
-                    ),
-                    failure => failure
-                        .outcome_unknown_response()
-                        .unwrap_or_else(TransportResponse::unknown),
-                };
+                return request_failure_response(error, prepared_method, prepared_path);
             }
         };
         #[cfg(test)]
@@ -641,7 +642,7 @@ impl RestTransport {
         }
         classify_response(
             response,
-            state,
+            &mut state.throttle_until,
             prepared_method,
             prepared_path,
             github_facade,
@@ -653,6 +654,25 @@ fn timeout_response() -> TransportResponse {
     TransportResponse::timeout("REST")
 }
 
+fn request_failure_response(
+    error: reqwest::Error,
+    method: &reqwest::Method,
+    path: &str,
+) -> TransportResponse {
+    let failure = classify_reqwest_error(&error);
+    let cause = reqwest_error_cause(error);
+    eprintln!(warn transport: "REST transport failed on {method} {}: {failure:?}: {cause}", path.split('?').next().unwrap_or(path));
+    match failure {
+        HttpAttemptFailure::Timeout => timeout_response(),
+        HttpAttemptFailure::Connect => TransportResponse::transient_not_sent(
+            "REST connection failed before the request was sent",
+        ),
+        failure => failure
+            .outcome_unknown_response()
+            .unwrap_or_else(TransportResponse::unknown),
+    }
+}
+
 struct PreparedRequest {
     method: reqwest::Method,
     url: String,
@@ -661,8 +681,8 @@ struct PreparedRequest {
 }
 
 /// Render the action's path template against the invocation args and decide
-/// where the remaining args travel: the query string for GET/DELETE, a JSON
-/// body for POST/PUT/PATCH.
+/// where the remaining args travel using the reviewed parameter placement,
+/// falling back to the method's default for older manifests.
 fn prepare_request(
     base_url: &str,
     operation: &HttpOperation,
@@ -713,12 +733,16 @@ fn prepare_request(
         url.push(if url.contains('?') { '&' } else { '?' });
         url.push_str(query);
     }
-    let body = match operation.method {
-        HttpMethod::Get | HttpMethod::Delete => {
+    let parameters = operation.parameters.unwrap_or(match operation.method {
+        HttpMethod::Get | HttpMethod::Delete => RestParameterLocation::Query,
+        _ => RestParameterLocation::Body,
+    });
+    let body = match parameters {
+        RestParameterLocation::Query => {
             append_query(&mut url, &remaining);
             None
         }
-        HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch => Some(if remaining.is_empty() {
+        RestParameterLocation::Body => Some(if remaining.is_empty() {
             Value::Object(Map::new())
         } else {
             Value::Object(remaining)
@@ -761,6 +785,28 @@ fn render_path(template: &str, args: &Value) -> Result<(String, Map<String, Valu
         if text.is_empty() {
             return Err(RestError::Configuration);
         }
+        // Some vendors decode escapes before routing. Reject separators and
+        // nested escape spellings instead of trusting a proxy's decode order.
+        let mut decoded = text.to_ascii_lowercase();
+        let mut depth = 0;
+        loop {
+            if decoded.contains(['/', '\\']) || has_dot_segment(&decoded) {
+                return Err(RestError::DotSegment);
+            }
+            let next = decoded
+                .replace("%25", "%")
+                .replace("%2f", "/")
+                .replace("%5c", "\\")
+                .replace("%2e", ".");
+            if next == decoded {
+                break;
+            }
+            if depth == 8 {
+                return Err(RestError::DotSegment);
+            }
+            depth += 1;
+            decoded = next;
+        }
         rendered.push_str(&percent_encode_component(&text));
         consumed.insert(name.to_string());
         rest = &after[close + 1..];
@@ -781,9 +827,7 @@ fn render_path(template: &str, args: &Value) -> Result<(String, Map<String, Valu
 ///
 /// Percent-encoding cannot neutralise these: the parser also reads `%2e` as a
 /// dot, so `/repos/{repo}/issues` with `repo = ".."` would be resolved to
-/// `/issues`, an endpoint nobody reviewed. An argument value cannot produce a
-/// `%` escape of its own (`%` is encoded), so the encoded spellings are
-/// checked only for completeness.
+/// `/issues`, an endpoint nobody reviewed.
 fn has_dot_segment(path: &str) -> bool {
     let path = path.split(['?', '#']).next().unwrap_or(path);
     path.split('/').any(|segment| {
@@ -947,18 +991,28 @@ fn log_rest_error(
 /// a mid-body read failure is outcome-unknown.
 fn classify_response(
     response: Response,
-    state: &mut RestConnectionEntry,
+    throttle_until: &mut Option<Instant>,
     method: &reqwest::Method,
     path: &str,
     github_facade: bool,
 ) -> TransportResponse {
     let status = response.status().as_u16();
-    let retry_after = retry_after_from_headers(response.headers());
+    let retry_after = response_throttle(status, response.headers());
+    if let Some(delay) = retry_after {
+        *throttle_until = throttle_deadline(Instant::now(), delay);
+        eprintln!(warn transport: "REST vendor throttle: status={status} retry_after_ms={}", duration_ms(delay));
+        return crate::http_support::throttled_response("REST", delay);
+    }
     let permissions = accepted_github_permissions(response.headers());
     let location = (300..400)
         .contains(&status)
         .then(|| redirect_location_for_log(response.headers()));
-    let body = match read_body_bounded(response, MAX_RESPONSE_BODY_BYTES) {
+    let body_limit = if (200..300).contains(&status) {
+        MAX_RESPONSE_BODY_BYTES
+    } else {
+        REST_ERROR_BODY_CAP
+    };
+    let body = match read_body_bounded(response, body_limit) {
         Ok(body) => body,
         // Headers arrived but the body never completed: the request was sent,
         // so the outcome is unknown. Only a real timeout is reported as one;
@@ -993,28 +1047,6 @@ fn classify_response(
         // status; where it pointed is for the operator.
         eprintln!(warn transport: "REST redirect not followed on {} {}: status={status} location={location}", method, path.split('?').next().unwrap_or(path));
     }
-    if status == 429 {
-        let delay = retry_after.unwrap_or_default();
-        state.throttle_until = throttle_deadline(Instant::now(), delay);
-        return TransportResponse {
-            transmission: TransmissionState::Sent,
-            retryability: Retryability::Throttle,
-            response: None,
-            error_code: Some("throttled".to_string()),
-            error_message: Some(if delay.is_zero() {
-                "REST vendor throttled the request".to_string()
-            } else {
-                format!(
-                    "REST vendor throttled the request; retry after {}ms",
-                    duration_ms(delay)
-                )
-            }),
-            vendor_request_id: None,
-            served_from: None,
-            observed_at_ms: None,
-            retry_after_ms: (!delay.is_zero()).then(|| duration_ms(delay)),
-        };
-    }
     if status == 401 {
         // `http_401` is what `provider_auth_status` recognizes, allowing the
         // credential source to record an actual authentication rejection.
@@ -1031,6 +1063,18 @@ fn classify_response(
         };
     }
     if !(200..300).contains(&status) {
+        if github_facade && (300..400).contains(&status) {
+            return TransportResponse::vendor_error(
+                "repository_redirected",
+                "Repository moved or redirected; update its binding before retrying",
+            );
+        }
+        if status >= 500 {
+            return TransportResponse::unknown_with_error(
+                &format!("http_{status}"),
+                "REST gateway response was not definitive",
+            );
+        }
         // A 403 proves the credential authenticated but cannot use this resource,
         // so it is a terminal vendor failure rather than a credential failure.
         // Some vendors use 403 for revoked credentials, but such a credential
@@ -1040,7 +1084,10 @@ fn classify_response(
         // a dead credential active costs only one more failed call before a 401.
         // Do not infer revocation from response text: that vendor-specific guess
         // would make this credential-health boundary unreliable.
-        let mut result = TransportResponse::vendor_error(&format!("http_{status}"), &text);
+        let mut result = TransportResponse::vendor_error(
+            &format!("http_{status}"),
+            "REST vendor request failed",
+        );
         if github_facade && status == 422 {
             let errors = crate::github::facade::validation::errors(&text);
             if !errors.is_empty() {
@@ -1057,40 +1104,13 @@ fn classify_response(
         // it as text rather than failing a call that may have succeeded.
         serde_json::from_str(&text).unwrap_or(Value::String(text))
     };
-    // Success shape mirrors the MCP transport: `Completed` is derived downstream
-    // from the response being present.
-    //
-    // The body is delivered VERBATIM. It previously passed through
-    // `redact_value`, which fingerprints any field whose NAME contains "token",
-    // "payload", "secret" and similar. On arguments we author that list is a
-    // reasonable guess; on a vendor response it is a substring match against
-    // field names we do not control, and it silently destroyed ordinary data.
-    // A caller received a fingerprint where the value should be, with nothing
-    // marking it as redacted, so a redaction was indistinguishable from a
-    // vendor returning an opaque string.
-    //
-    // Concretely: GitHub's event `payload` — the entire event body — was
-    // replaced wholesale, and any vendor field named `*token*` went with it.
-    // A poller storing such items persists the mutilated copy and computes its
-    // dedupe hash over it, so the damage outlived the response.
-    //
-    // It was not protecting anything in exchange. The credential travels in a
-    // header and is never echoed by a well-behaved vendor, while a vendor that
-    // DOES return credential material names that field whatever it likes —
-    // Supabase's `get_publishable_keys` and a Browserbase session `connectUrl`
-    // both carry sensitive values under names this list never matched.
-    // Unreliable protection paired with reliable damage is the worst
-    // combination available.
-    //
-    // What this does NOT claim: that the redaction blocked cursor advance for
-    // the shipped poller. The implemented sync-token strategy reads
-    // `next_cursor`, which the list never matched. The hazard is real for a
-    // vendor whose response names the cursor `nextSyncToken`, and reaching
-    // such a vendor needs a field-mapping layer that does not exist yet.
+    // Vendor payloads stay verbatim. Guessing secrets from vendor field names
+    // destroys ordinary result data; credentials travel separately in headers.
     TransportResponse::success(body)
 }
 
 fn local_not_sent() -> TransportResponse {
+    eprintln!(warn transport: "REST request refused during local preparation");
     TransportResponse {
         transmission: TransmissionState::NotSent,
         retryability: Retryability::Terminal,
@@ -1102,6 +1122,36 @@ fn local_not_sent() -> TransportResponse {
         observed_at_ms: None,
         retry_after_ms: None,
     }
+}
+
+fn preparation_failure(error: RestError) -> TransportResponse {
+    eprintln!(warn transport: "REST request preparation failed: {error:?}");
+    let mut response = local_not_sent();
+    match error {
+        RestError::ConstantArgument(key) => {
+            response.error_code = Some("request_constant_conflict".into());
+            response.error_message = Some(format!(
+                "REST argument '{key}' is a reviewed request constant and must not be supplied"
+            ));
+        }
+        RestError::DotSegment => {
+            response.error_code = Some("path_argument_invalid".into());
+            response.error_message =
+                Some("REST path arguments must not contain path separators or dot segments".into());
+        }
+        _ => {}
+    }
+    response
+}
+
+fn rest_poisoned_lock_response() -> TransportResponse {
+    let mut response = local_not_sent();
+    response.error_code = Some("transport_restart_required".into());
+    response.error_message = Some(
+        "REST transport lock is poisoned; retry after pool recovery or restart if it persists"
+            .into(),
+    );
+    response
 }
 
 #[cfg(test)]
@@ -1189,6 +1239,14 @@ mod tests {
             );
             assert_eq!(result.transmission, TransmissionState::NotSent);
             assert_eq!(result.retryability, Retryability::Terminal);
+            assert!(
+                result
+                    .error_message
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("REST transport lock is poisoned"),
+                "REST lock failures must name the REST transport"
+            );
             assert_eq!(
                 result.error_code.as_deref(),
                 Some("transport_restart_required")
@@ -1360,12 +1418,13 @@ mod tests {
         );
         task.join().expect("API received one request");
         assert_never_contacted(&elsewhere);
-        assert_eq!(result.error_code.as_deref(), Some("http_307"));
+        assert_eq!(result.error_code.as_deref(), Some("repository_redirected"));
     }
 
     pub(super) fn http_op(method: HttpMethod, path: &str) -> HttpOperation {
         HttpOperation {
             method,
+            parameters: None,
             path: path.to_string(),
             args_schema: json!({"type": "object"}),
             request_constants: None,
@@ -1596,12 +1655,8 @@ mod tests {
     #[test]
     fn path_parameter_value_is_percent_encoded() {
         let (endpoint, task) = start_server(1, |_index, request| {
-            // `/`, `?`, and `#` in the value must stay inside the path segment:
-            // encoded, not reinterpreted as path or query structure.
-            assert_eq!(
-                request_line(request),
-                "GET /v1/issues/a%2Fb%3Fc%23d HTTP/1.1"
-            );
+            // Query and fragment delimiters remain data inside the segment.
+            assert_eq!(request_line(request), "GET /v1/issues/ab%3Fc%23d HTTP/1.1");
             http_response(200, r#"{"ok":true}"#)
         });
         let transport = RestTransport::new(config(
@@ -1613,7 +1668,7 @@ mod tests {
         ));
         let credential = ResolvedCredential::new(b"token".to_vec(), None, 1);
         let result = transport.dispatch(
-            request("rest", "get_issue", json!({"issue_id": "a/b?c#d"})),
+            request("rest", "get_issue", json!({"issue_id": "ab?c#d"})),
             &credential,
         );
         assert!(result.response.is_some());
@@ -1673,7 +1728,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_request_diagnostic_stays_outcome_unknown_through_rest() {
+    fn invalid_request_diagnostic_is_not_sent_through_rest() {
         let transport = RestTransport::new(config(
             "not a valid URL".to_string(),
             vec![("get_issue", http_op(HttpMethod::Get, "/v1/issues"))],
@@ -1683,10 +1738,7 @@ mod tests {
 
         assert_eq!(
             (result.transmission, result.error_code.as_deref()),
-            (
-                TransmissionState::OutcomeUnknown,
-                Some("http_request_invalid")
-            )
+            (TransmissionState::NotSent, Some("http_request_invalid"))
         );
     }
 
@@ -2704,5 +2756,74 @@ mod tests {
         );
         assert_eq!(transport.connection_count(), 0);
         assert_eq!(transport.panic_recoveries(), 1);
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_calls_share_config_and_do_not_build_the_download_client() {
+        let cfg = tests::config(
+            "http://127.0.0.1:1".into(),
+            vec![("read", tests::http_op(HttpMethod::Get, "/"))],
+        );
+        let transport = RestTransport::new(cfg.clone());
+        let first = transport.config_for("test");
+        let second = transport.config_for("test");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "dispatch must share the operation schema instead of cloning the manifest"
+        );
+        let entry = RestConnectionEntry::build(&cfg).unwrap();
+        assert!(
+            entry.download_client.is_none(),
+            "ordinary REST connections must not allocate a download runtime"
+        );
+    }
+}
+
+#[cfg(test)]
+mod local_diagnostic_tests {
+    use super::*;
+    #[test]
+    fn local_preparation_errors_are_logged_without_argument_values() {
+        const TEST: &str = "rest_api::local_diagnostic_tests::local_preparation_errors_are_logged_without_argument_values";
+        if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
+            tests::logging::init_child();
+            let transport = RestTransport::new(tests::config(
+                "http://127.0.0.1:1".into(),
+                vec![("read", tests::http_op(HttpMethod::Get, "/repos/{repo}"))],
+            ));
+            let reply = transport.dispatch(
+                tests::request(
+                    "local",
+                    "read",
+                    serde_json::json!({"unrelated":"PRIVATE-ARGUMENT"}),
+                ),
+                &ResolvedCredential::anonymous(),
+            );
+            assert_eq!(reply.transmission, TransmissionState::NotSent);
+            return;
+        }
+        let output = crate::test_http::bounded::child_output(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+            Duration::from_secs(10),
+            "local REST diagnostic",
+        )
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(
+            stderr.contains("REST request preparation failed: Configuration"),
+            "local refusal must name the safe cause: {stderr}"
+        );
+        assert!(
+            !stderr.contains("PRIVATE-ARGUMENT"),
+            "argument values must not reach the operator diagnostic: {stderr}"
+        );
     }
 }

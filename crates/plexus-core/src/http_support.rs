@@ -82,8 +82,8 @@ pub(crate) enum CredentialHeaderError {
 /// Build the credential headers declared by the reviewed manifest bindings.
 ///
 /// Shared verbatim by both HTTP transports so a credential is placed on the
-/// wire by exactly one code path. Credential material is copied into the header
-/// value only while this runs; the zeroizing buffer is wiped before return.
+/// wire by exactly one code path. The intermediate assembly buffer is wiped;
+/// the returned header and the HTTP stack still own unwiped copies until drop.
 pub(crate) fn build_headers(
     bindings: &[CredentialBinding],
     credential: &ResolvedCredential,
@@ -97,7 +97,7 @@ pub(crate) fn build_headers(
     }
     for binding in bindings {
         if !binding.placement.eq_ignore_ascii_case("header") {
-            continue;
+            return Err(CredentialHeaderError::InvalidBinding);
         }
         let name = HeaderName::from_bytes(binding.key.as_bytes())
             .map_err(|_| CredentialHeaderError::InvalidBinding)?;
@@ -188,7 +188,12 @@ impl HttpAttemptFailure {
 
     pub(crate) fn outcome_unknown_response(self) -> Option<TransportResponse> {
         self.outcome_unknown_diagnostic().map(|diagnostic| {
-            TransportResponse::unknown_with_error(diagnostic.code, diagnostic.message)
+            let mut response =
+                TransportResponse::unknown_with_error(diagnostic.code, diagnostic.message);
+            if self == Self::Build {
+                response.transmission = TransmissionState::NotSent;
+            }
+            response
         })
     }
 }
@@ -373,6 +378,55 @@ pub(crate) fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> 
         .and_then(parse_retry_after)
 }
 
+/// A quota reply without a usable delay must still back off rather than spin.
+pub(crate) const DEFAULT_THROTTLE_DELAY: Duration = Duration::from_secs(60);
+
+pub(crate) fn response_throttle(status: u16, headers: &HeaderMap) -> Option<Duration> {
+    let retry_after = retry_after_from_headers(headers);
+    let github_quota = status == 403
+        && (retry_after.is_some()
+            || headers
+                .get("x-ratelimit-remaining")
+                .is_some_and(|value| value == "0"));
+    if status == 429 || github_quota || (status == 503 && retry_after.is_some()) {
+        Some(
+            retry_after
+                .filter(|delay| !delay.is_zero())
+                .unwrap_or(DEFAULT_THROTTLE_DELAY),
+        )
+    } else {
+        None
+    }
+}
+
+pub(crate) fn throttled_response(transport: &str, delay: Duration) -> TransportResponse {
+    TransportResponse {
+        transmission: TransmissionState::Sent,
+        retryability: Retryability::Throttle,
+        response: None,
+        error_code: Some("throttled".into()),
+        error_message: Some(format!(
+            "{transport} vendor throttled the request; retry after {}ms",
+            duration_ms(delay)
+        )),
+        vendor_request_id: None,
+        served_from: None,
+        observed_at_ms: None,
+        retry_after_ms: Some(duration_ms(delay)),
+    }
+}
+
+/// Unlike the blocking client's per-read timeout, a request-level timeout is
+/// carried into reqwest's async request and bounds headers and the entire body.
+/// Keep both: an idle read can fail sooner, but progress cannot extend the total
+/// deadline. No extra worker thread or connection lock outlives the request.
+pub(crate) fn with_request_deadline(
+    builder: reqwest::blocking::RequestBuilder,
+    deadline: Instant,
+) -> reqwest::blocking::RequestBuilder {
+    builder.timeout(deadline.saturating_duration_since(Instant::now()))
+}
+
 /// Redact userinfo and any query string off an endpoint URL for Debug
 /// projections and logs: the host and path are manifest-reviewed and not
 /// secret, but a URL can carry a username and password before its host, and
@@ -455,7 +509,8 @@ pub(crate) fn read_body_bounded(
     let truncated = bytes.len() > limit;
     bytes.truncate(limit);
     Ok(BoundedBody {
-        text: String::from_utf8_lossy(&bytes).into_owned(),
+        text: String::from_utf8(bytes)
+            .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned()),
         truncated,
     })
 }
@@ -479,7 +534,7 @@ pub(crate) fn classify_body_io_error(error: &std::io::Error) -> HttpAttemptFailu
 
 /// The operator-log rendering of a failed body read. An inner client error is
 /// stripped of its URL first, for the same reason as `reqwest_error_cause`.
-fn body_io_error_cause(error: std::io::Error) -> String {
+pub(crate) fn body_io_error_cause(error: std::io::Error) -> String {
     let kind = error.kind();
     match error.into_inner() {
         Some(inner) => match inner.downcast::<reqwest::Error>() {
@@ -736,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn reachable_reqwest_failures_have_distinct_codes_and_stay_outcome_unknown() {
+    fn reachable_reqwest_failures_have_distinct_codes_and_safe_transmission() {
         let build_error = reqwest::blocking::Client::new()
             .get("not a valid URL")
             .send()
@@ -790,7 +845,14 @@ mod tests {
                 .expect("reachable non-connect failures have diagnostics");
             assert_eq!(
                 (response.transmission, response.error_code.as_deref(),),
-                (TransmissionState::OutcomeUnknown, Some(expected_code)),
+                (
+                    if expected_failure == HttpAttemptFailure::Build {
+                        TransmissionState::NotSent
+                    } else {
+                        TransmissionState::OutcomeUnknown
+                    },
+                    Some(expected_code)
+                ),
                 "{case} must retain the safe transmission state and its distinct code"
             );
         }
@@ -948,5 +1010,34 @@ mod tests {
         let credential = ResolvedCredential::new(b"CANARY".to_vec(), None, 1);
         let headers = build_headers(&bindings, &credential).expect("credential headers");
         assert_eq!(headers["authorization"], "Bearer CANARY");
+    }
+}
+
+#[cfg(test)]
+#[path = "transport_bounds_tests.rs"]
+mod transport_bounds_tests;
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    #[test]
+    fn unsupported_credential_placement_is_not_silently_omitted() {
+        let binding = CredentialBinding {
+            ref_role: "credential".into(),
+            placement: "query".into(),
+            key: "key".into(),
+            prefix: String::new(),
+            required: true,
+        };
+        assert!(
+            matches!(
+                build_headers(
+                    &[binding],
+                    &ResolvedCredential::new(b"secret".to_vec(), None, 1)
+                ),
+                Err(CredentialHeaderError::InvalidBinding)
+            ),
+            "unsupported placement must fail closed"
+        );
     }
 }

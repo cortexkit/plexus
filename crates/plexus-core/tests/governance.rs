@@ -53,11 +53,7 @@ struct AuthorityChangeDuringCredentialResolution {
 }
 
 impl CredentialSource for AuthorityChangeDuringCredentialResolution {
-    fn get_by_id(&self, id: &str) -> Result<ResolvedCredential, CredentialError> {
-        self.get(id.as_bytes())
-    }
-
-    fn get(&self, _handle: &[u8]) -> Result<ResolvedCredential, CredentialError> {
+    fn get_by_id(&self, _id: &str) -> Result<ResolvedCredential, CredentialError> {
         if self.status == "revoked" {
             self.store
                 .revoke_connection("direct", "conn-1")
