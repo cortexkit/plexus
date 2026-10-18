@@ -2376,7 +2376,12 @@ fn facade_tool_reply_inner(
             "transmission": "not_sent",
         }}));
     }
-    if (mode == CallMode::Flow || ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str()))
+    // role.describe and tool.catalog only describe plexus's tools and carry no
+    // authority. Basal reads them on an unscoped route when it installs a flow,
+    // before any flow scope exists, so they are exempt from the flow-scope
+    // requirement; every real tool still needs a flow scope from Basal.
+    if !tool_provider::is_metadata_op(name)
+        && (mode == CallMode::Flow || ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str()))
         && !route_scope
             .as_ref()
             .is_some_and(|scope| scope.flow_id.is_some())
@@ -13394,6 +13399,53 @@ mod github_read_frame_tests {
             "delegation cannot replace module grants: {denied}"
         );
         assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unscoped_basal_can_read_tool_metadata_but_no_real_tool() {
+        let (runtime, _store, transport, _scratch) = imported_runtime();
+        let described = send_facade_frame(
+            runtime.clone(),
+            cortexkit_role_tool_provider::ops::ROLE_DESCRIBE,
+            json!({}),
+            "basal",
+            None,
+        )
+        .await;
+        // Role metadata replies are the bare answer, and a refusal is a bare
+        // error body, so check for the answer's own fields, not an "error" key.
+        assert!(
+            described.get("code").is_none() && described.get("tool_capabilities").is_some(),
+            "basal installs read role.describe before any flow scope exists: {described}"
+        );
+        let catalog = send_facade_frame(
+            runtime.clone(),
+            cortexkit_role_tool_provider::ops::TOOL_CATALOG,
+            json!({"params": {"capabilities": ["plexus:github.react/v1"]}}),
+            "basal",
+            None,
+        )
+        .await;
+        assert!(
+            catalog.get("code").is_none()
+                && catalog["tools"]
+                    .as_array()
+                    .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "github_react")),
+            "basal installs read tool.catalog before any flow scope exists: {catalog}"
+        );
+        let refused = send_facade_frame(
+            runtime,
+            manifest::GITHUB_READ_TOOL,
+            json!({"action":"github.issue.get","repository":"o/x","args":{"issue_number":42}}),
+            "basal",
+            None,
+        )
+        .await;
+        assert_eq!(
+            refused["error"]["code"], "flow_scope_required",
+            "the metadata exemption must not reach real tools: {refused}"
+        );
+        assert!(transport.requests().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
