@@ -28,20 +28,23 @@ pub(crate) fn tools_call_params(name: String, arguments: Value) -> Value {
     json!({"name": name, "arguments": arguments})
 }
 
-pub(crate) fn tools_from_response(response: &Value) -> Result<Vec<Value>, McpPayloadError> {
+pub(crate) fn tools_from_response(response: &Value) -> Result<&[Value], McpPayloadError> {
     response
         .get("result")
         .and_then(Value::as_object)
         .and_then(|result| result.get("tools"))
         .and_then(Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .ok_or(McpPayloadError::InvalidResponse)
 }
 
-pub(crate) fn tool_result_from_response(response: Value) -> Result<Value, McpPayloadError> {
+pub(crate) fn tool_result_from_response(mut response: Value) -> Result<Value, McpPayloadError> {
+    if !response.get("result").is_some_and(Value::is_object) {
+        return Err(McpPayloadError::InvalidResponse);
+    }
     response
-        .get("result")
-        .cloned()
+        .get_mut("result")
+        .map(Value::take)
         .ok_or(McpPayloadError::InvalidResponse)
 }
 
@@ -51,10 +54,10 @@ pub(crate) fn tool_result_from_response(response: Value) -> Result<Value, McpPay
 /// of content blocks, and a vendor returning JSON puts it in a text block as a
 /// serialized string. Centralizing this keeps the route-plane transport aligned
 /// with the remote transport when a server uses that common response shape.
-pub(crate) fn decode_tool_result(result: Value) -> Value {
-    if let Some(structured) = result.get("structuredContent") {
+pub(crate) fn decode_tool_result(mut result: Value) -> Value {
+    if let Some(structured) = result.get_mut("structuredContent") {
         if !structured.is_null() {
-            return structured.clone();
+            return structured.take();
         }
     }
     let Some(blocks) = result.get("content").and_then(Value::as_array) else {

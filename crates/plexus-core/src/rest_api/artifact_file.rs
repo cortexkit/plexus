@@ -6,6 +6,21 @@ pub(crate) const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 10_000;
 const MAX_RATIO: u64 = 200;
 
+fn artifact_response(mut response: TransportResponse) -> TransportResponse {
+    if let Some(suffix) = response
+        .error_code
+        .as_deref()
+        .and_then(|code| code.strip_prefix("job_log_"))
+    {
+        response.error_code = Some(format!("artifact_{suffix}"));
+    }
+    response
+}
+
+fn refused(code: &str) -> TransportResponse {
+    artifact_response(job_log::refused(code))
+}
+
 pub(crate) fn safe_path(path: &[u8]) -> bool {
     !path.starts_with(b"/")
         && !path.contains(&b'\\')
@@ -15,6 +30,7 @@ pub(crate) fn safe_path(path: &[u8]) -> bool {
 
 pub(super) fn download(
     client: &Client,
+    throttle_until: &mut Option<Instant>,
     config: &RestConfig,
     operation: &HttpOperation,
     tail: &crate::manifest::CredentiallessTail,
@@ -43,42 +59,50 @@ pub(super) fn download(
         args.remove("path");
         args.remove("max_bytes");
     }
-    let url =
-        match job_log::api_redirect(client, config, operation, tail, &args, credential, deadline) {
-            Ok(url) => url,
-            Err(response) => return *response,
-        };
+    let url = match job_log::api_redirect(
+        client,
+        throttle_until,
+        config,
+        operation,
+        tail,
+        &args,
+        credential,
+        deadline,
+    ) {
+        Ok(url) => url,
+        Err(response) => return artifact_response(*response),
+    };
     let Some(time) = deadline
         .checked_sub(started.elapsed())
         .filter(|time| !time.is_zero())
     else {
-        return job_log::refused("job_log_read_limit");
+        return refused("job_log_read_limit");
     };
     // Fresh request: the API's Authorization and custom credential headers stay behind.
     let storage = client.get(url.clone()).timeout(time);
     let response = match storage.send() {
         Ok(response) => response,
-        Err(_) => return job_log::refused("job_log_download_failed"),
+        Err(_) => return refused("job_log_download_failed"),
     };
     if response.status().is_redirection() {
-        return job_log::refused("job_log_redirect_refused");
+        return refused("job_log_redirect_refused");
     }
     if job_log::missing_log(response.status().as_u16()) {
-        return job_log::refused("job_log_unavailable");
+        return refused("job_log_unavailable");
     }
     if response.status().as_u16() != 200 {
-        return job_log::storage_failure(response.status().as_u16(), &url);
+        return artifact_response(job_log::storage_failure(response.status().as_u16(), &url));
     }
     if job_log::content_length(&response).is_some_and(|bytes| bytes > MAX_ARTIFACT_BYTES) {
-        return job_log::refused("artifact_too_large");
+        return refused("artifact_too_large");
     }
     let archive = match read_archive(response, started, deadline, MAX_ARTIFACT_BYTES) {
         Ok(bytes) => bytes,
-        Err(code) => return job_log::refused(code),
+        Err(code) => return refused(code),
     };
     let (bytes, total) = match extract_tail(archive, path, max_bytes, started, deadline) {
         Ok(result) => result,
-        Err(code) => return job_log::refused(code),
+        Err(code) => return refused(code),
     };
     let text = job_log::redact(&bytes, &url, credential);
     TransportResponse::success(
@@ -96,11 +120,11 @@ fn read_archive(
     let mut buffer = [0u8; 8192];
     loop {
         if started.elapsed() >= deadline {
-            return Err("job_log_read_limit");
+            return Err("artifact_read_limit");
         }
         let count = response
             .read(&mut buffer)
-            .map_err(|_| "job_log_download_failed")?;
+            .map_err(|_| "artifact_download_failed")?;
         if count == 0 {
             return Ok(bytes);
         }
@@ -133,12 +157,13 @@ fn preflight(bytes: &[u8]) -> Result<(), &'static str> {
     };
     let end = (bytes.len().saturating_sub(65_557)..bytes.len().saturating_sub(21))
         .rev()
-        .find(|offset| {
-            bytes.get(*offset..*offset + 4) == Some(b"PK\x05\x06")
-                && u16_at(*offset + 20)
-                    .is_some_and(|length| *offset + 22 + length as usize == bytes.len())
-        })
+        .find(|offset| bytes.get(*offset..*offset + 4) == Some(b"PK\x05\x06"))
         .ok_or(invalid)?;
+    // The ZIP reader chooses the last signature, not the last record whose
+    // comment length reaches EOF. Refuse ambiguity before it allocates metadata.
+    if !u16_at(end + 20).is_some_and(|length| end + 22 + length as usize == bytes.len()) {
+        return Err(invalid);
+    }
     if u16_at(end + 4) != Some(0) || u16_at(end + 6) != Some(0) {
         return Err(invalid);
     }

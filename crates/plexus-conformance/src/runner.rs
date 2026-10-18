@@ -1483,15 +1483,6 @@ impl RecordingCredentialSource {
 }
 
 impl CredentialSource for RecordingCredentialSource {
-    fn get(
-        &self,
-        handle: &[u8],
-    ) -> Result<ResolvedCredential, plexus_core::credentials::CredentialError> {
-        let resolved = self.inner.get(handle)?;
-        self.record(&resolved);
-        Ok(resolved)
-    }
-
     fn get_by_id(
         &self,
         credential_id: &str,
@@ -1504,11 +1495,6 @@ impl CredentialSource for RecordingCredentialSource {
     fn report_id_auth_failure(&self, credential_id: &str, provider_status: u16) {
         self.inner
             .report_id_auth_failure(credential_id, provider_status);
-    }
-
-    fn report_auth_failure(&self, handle: &[u8], provider_status: u16, record_version: u64) {
-        self.inner
-            .report_auth_failure(handle, provider_status, record_version);
     }
 }
 
@@ -1686,16 +1672,17 @@ mod tests {
     /// for strings that never flowed through the run.
     #[test]
     fn the_secret_scan_looks_for_the_payload_actually_served() {
+        const CREDENTIAL_ID: &str = "test:served-payload";
         let fixture = ConnectorFixture::stub();
         let served = stub_payload(&fixture);
         assert!(!served.is_empty());
         let recording = RecordingCredentialSource::new({
             let stub = Arc::new(StubCredentialSource::default());
-            stub.set_success(&fixture.canary_handle, served.clone(), None, 1);
+            stub.set_success(CREDENTIAL_ID.as_bytes(), served.clone(), None, 1);
             stub
         });
         recording
-            .get(&fixture.canary_handle)
+            .get_by_id(CREDENTIAL_ID)
             .expect("the stub serves its payload");
         let needles = secret_needles(&fixture, None, &recording.served_payloads());
         let served_text = String::from_utf8(served).expect("utf-8 stub payload");

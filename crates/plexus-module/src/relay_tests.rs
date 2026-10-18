@@ -1739,12 +1739,6 @@ struct ObservedCredentials {
     reads: tokio::sync::mpsc::UnboundedSender<()>,
 }
 impl CredentialSource for ObservedCredentials {
-    fn get(
-        &self,
-        handle: &[u8],
-    ) -> Result<plexus_core::ResolvedCredential, plexus_core::CredentialError> {
-        self.source.get(handle)
-    }
     fn get_by_id(
         &self,
         id: &str,

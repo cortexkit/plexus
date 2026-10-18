@@ -126,7 +126,10 @@ fn run(url: &str, allowed_hosts: Vec<String>, max_bytes: usize) -> TransportResp
         HttpMethod::Get,
         "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
     );
-    op.credentialless_tail = Some(CredentiallessTail { allowed_hosts });
+    op.credentialless_tail = Some(CredentiallessTail {
+        allowed_hosts,
+        kind: crate::manifest::CredentiallessTailKind::JobLog,
+    });
     let mut config = super::super::tests::config(api, vec![("github.actions.job_log", op)]);
     config.credential_bindings.push(CredentialBinding {
         ref_role: "credential".into(),
@@ -411,7 +414,7 @@ fn body_response(body: String) -> (Response, crate::test_http::FixedRequestServe
 fn stream_cap_refuses_unknown_length_logs() {
     let (response, server) = body_response("x".repeat(16_384));
     assert_eq!(
-        read_tail(response, 10, Instant::now(), 8192),
+        read_tail(response, 10, Instant::now(), LOG_DEADLINE, 8192),
         Err("job_log_read_limit")
     );
     server.join().unwrap();
@@ -425,6 +428,7 @@ fn expired_download_deadline_refuses_before_body_read() {
             response,
             10,
             Instant::now() - LOG_DEADLINE,
+            LOG_DEADLINE,
             MAX_LOG_READ_BYTES
         ),
         Err("job_log_read_limit")
@@ -435,8 +439,115 @@ fn expired_download_deadline_refuses_before_body_read() {
 #[test]
 fn unknown_length_tail_reports_read_bytes_and_lossy_utf8() {
     let (response, server) = body_response("ignored\nrégression FAILED".into());
-    let (tail, read) = read_tail(response, 16, Instant::now(), MAX_LOG_READ_BYTES).unwrap();
+    let (tail, read) = read_tail(
+        response,
+        16,
+        Instant::now(),
+        LOG_DEADLINE,
+        MAX_LOG_READ_BYTES,
+    )
+    .unwrap();
     assert_eq!(read, 26);
     assert_eq!(strip_ansi(&tail), "�gression FAILED");
     server.join().unwrap();
+}
+
+#[test]
+fn credentialed_download_leg_preserves_auth_throttle_and_gateway_failures() {
+    for (status, headers, expected_code, expected_retry) in [
+        (401, "", "http_401", Retryability::Terminal),
+        (403, "", "http_403", Retryability::Terminal),
+        (
+            403,
+            "X-RateLimit-Remaining: 0\r\n",
+            "throttled",
+            Retryability::Throttle,
+        ),
+        (429, "", "throttled", Retryability::Throttle),
+        (
+            503,
+            "Retry-After: 60\r\n",
+            "throttled",
+            Retryability::Throttle,
+        ),
+        (502, "", "http_502", Retryability::Terminal),
+    ] {
+        let (endpoint, server) =
+            super::super::tests::start_server(1, move |_, _| response(status, headers, "{}"));
+        let cfg = super::super::tests::config(endpoint, vec![]);
+        let operation = super::super::tests::http_op(crate::manifest::HttpMethod::Get, "/logs");
+        let tail = CredentiallessTail {
+            allowed_hosts: vec!["storage.example".into()],
+            kind: crate::manifest::CredentiallessTailKind::JobLog,
+        };
+        let mut throttle = None;
+        let result = api_redirect(
+            &Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            &mut throttle,
+            &cfg,
+            &operation,
+            &tail,
+            &json!({}),
+            &ResolvedCredential::anonymous(),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(expected_code),
+            "credentialed API status must retain its class: {status}"
+        );
+        assert_eq!(result.retryability, expected_retry);
+        if expected_retry == Retryability::Throttle {
+            assert!(throttle.is_some());
+        }
+        if status == 502 {
+            assert_eq!(result.transmission, TransmissionState::OutcomeUnknown);
+        }
+    }
+}
+
+#[test]
+fn storage_requires_the_standard_https_port_and_redacts_leading_token_suffixes() {
+    assert!(!destination_allowed(
+        &reqwest::Url::parse("https://storage.example:444/log").unwrap(),
+        &["storage.example".into()]
+    ));
+    assert!(destination_allowed(
+        &reqwest::Url::parse("https://storage.example:443/log").unwrap(),
+        &["storage.example".into()]
+    ));
+    let token = ResolvedCredential::new(b"prefix-SECRET-SUFFIX".to_vec(), None, 1);
+    let text = redact(
+        b"SECRET-SUFFIX\nrest of log",
+        &reqwest::Url::parse("https://storage.example/log").unwrap(),
+        &token,
+    );
+    assert!(
+        !text.contains("SECRET-SUFFIX"),
+        "a tail beginning inside the credential must redact the known suffix"
+    );
+}
+
+#[test]
+fn tail_reader_uses_the_configured_deadline() {
+    let (endpoint, server) = super::super::tests::start_server(1, |_, _| response(200, "", "body"));
+    let response = Client::new().get(endpoint).send().unwrap();
+    let result = read_tail(
+        response,
+        16,
+        Instant::now() - Duration::from_millis(20),
+        Duration::from_millis(10),
+        MAX_LOG_READ_BYTES,
+    );
+    server.join().unwrap();
+    assert_eq!(
+        result,
+        Err("job_log_read_limit"),
+        "tail reader must use the caller's shortened deadline"
+    );
 }

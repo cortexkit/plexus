@@ -51,7 +51,10 @@ fn run_with_api_status(
         HttpMethod::Get,
         "/repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip",
     );
-    op.credentialless_tail = Some(CredentiallessTail { allowed_hosts });
+    op.credentialless_tail = Some(CredentiallessTail {
+        allowed_hosts,
+        kind: crate::manifest::CredentiallessTailKind::ArtifactFile,
+    });
     let mut config = super::super::tests::config(api, vec![("github.actions.artifact_file", op)]);
     config.credential_bindings.push(CredentialBinding {
         ref_role: "credential".into(),
@@ -234,7 +237,7 @@ fn unlisted_artifact_storage_host_is_refused() {
     );
     assert_eq!(
         result.error_code.as_deref(),
-        Some("job_log_redirect_refused")
+        Some("artifact_redirect_refused")
     );
     assert!(storage.requests.lock().unwrap().is_empty());
 }
@@ -249,7 +252,7 @@ fn plaintext_artifact_storage_is_refused() {
     );
     assert_eq!(
         result.error_code.as_deref(),
-        Some("job_log_redirect_refused")
+        Some("artifact_redirect_refused")
     );
 }
 
@@ -265,7 +268,7 @@ fn second_artifact_storage_redirect_is_refused() {
     let result = run(&storage.url, vec!["localhost".into()], "log", 20);
     assert_eq!(
         result.error_code.as_deref(),
-        Some("job_log_redirect_refused")
+        Some("artifact_redirect_refused")
     );
     assert_eq!(storage.requests.lock().unwrap().len(), 1);
 }
@@ -277,7 +280,7 @@ fn artifact_download_failure_has_a_named_refusal() {
         run(&storage.url, vec!["localhost".into()], "log", 20)
             .error_code
             .as_deref(),
-        Some("job_log_download_failed")
+        Some("artifact_download_failed")
     );
 }
 
@@ -483,7 +486,7 @@ fn artifact_signed_url_never_appears_in_operator_diagnostics() {
         let result = run(&storage.url, vec!["localhost".into()], "log", 20);
         assert_eq!(
             result.error_code.as_deref(),
-            Some("job_log_download_failed")
+            Some("artifact_download_failed")
         );
         assert!(!format!("{result:?}").contains("SIGNED-URL-SECRET"));
         return;
@@ -568,7 +571,7 @@ fn expired_artifact_body_deadline_is_refused() {
             Duration::from_secs(30),
             MAX_ARTIFACT_BYTES
         ),
-        Err("job_log_read_limit")
+        Err("artifact_read_limit")
     );
     server.join().unwrap();
 }
@@ -653,7 +656,7 @@ fn artifact_api_must_return_exactly_one_302_redirect() {
         run_with_api_status(&storage.url, vec!["localhost".into()], "log", 20, 200)
             .error_code
             .as_deref(),
-        Some("job_log_redirect_refused")
+        Some("artifact_redirect_refused")
     );
     assert!(storage.requests.lock().unwrap().is_empty());
 }
@@ -665,6 +668,24 @@ fn missing_storage_artifact_has_a_named_refusal() {
         run(&storage.url, vec!["localhost".into()], "log", 20)
             .error_code
             .as_deref(),
-        Some("job_log_unavailable")
+        Some("artifact_unavailable")
+    );
+}
+
+#[test]
+fn conflicting_end_records_are_rejected_before_zip_metadata_allocation() {
+    let mut bytes = archive(&[("out.txt", b"safe")], zip::CompressionMethod::Stored);
+    let end = bytes.len() - 22;
+    bytes[end + 20..end + 22].copy_from_slice(&22u16.to_le_bytes());
+    let mut fake = [0u8; 22];
+    fake[..4].copy_from_slice(b"PK\x05\x06");
+    fake[8..10].copy_from_slice(&10_001u16.to_le_bytes());
+    fake[10..12].copy_from_slice(&10_001u16.to_le_bytes());
+    fake[20..22].copy_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&fake);
+    assert_eq!(
+        preflight(&bytes),
+        Err("artifact_invalid_zip"),
+        "the preflight must validate the same last EOCD signature that the ZIP reader selects"
     );
 }

@@ -134,6 +134,7 @@ fn scheduler_polls_again_while_the_rest_sweep_skips_a_busy_entry() {
             "read".into(),
             plexus_core::manifest::HttpOperation {
                 method: plexus_core::manifest::HttpMethod::Get,
+                parameters: None,
                 path: "/read".into(),
                 args_schema: json!({"type": "object"}),
                 request_constants: None,

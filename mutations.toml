@@ -3725,8 +3725,10 @@ timeout_s = 120
 id = "mcp-sse-matches-request-id"
 guards = "An SSE reply is the JSON-RPC response whose id matches the request, not the first parseable message"
 file = "crates/plexus-core/src/mcp_remote.rs"
-old = '&& expected_id.is_none_or(|id| message.get("id") == Some(id))'
-new = "&& expected_id.is_none_or(|_id| true) /* NON-VACUITY BREAK */"
+old = '''} else if (message.get("result").is_some() || message.get("error").is_some())
+                        && expected_id.is_none_or(|id| message.get("id") == Some(id))'''
+new = '''} else if (message.get("result").is_some() || message.get("error").is_some())
+                        && expected_id.is_none_or(|_id| true) /* NON-VACUITY BREAK */'''
 test_file = "crates/plexus-core/src/mcp_remote.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -3909,8 +3911,8 @@ timeout_s = 120
 [[control]]
 id = "rest-throttle-retry-after-ms"
 guards = "A REST 429's Retry-After reaches the caller as retry_after_ms, not only in prose"
-file = "crates/plexus-core/src/rest_api.rs"
-old = "retry_after_ms: (!delay.is_zero()).then(|| duration_ms(delay)),"
+file = "crates/plexus-core/src/http_support.rs"
+old = "retry_after_ms: Some(duration_ms(delay)),"
 new = "retry_after_ms: None, // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/rest_api.rs"
 runner = "cargo"
@@ -8289,7 +8291,7 @@ build_timeout_s = 3600
 id = "failclosed-id"
 guards = "A missing vault route remains transient for reference-bound credentials"
 file = "crates/plexus-core/src/credentials.rs"
-old = "self.get(&[])"
+old = "Err(CredentialError::Transient(\n            TransientCredentialError::VaultLocked,\n        ))"
 new = "Err(CredentialError::Permanent(PermanentCredentialError::NotFound)) /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/credentials.rs"
 runner = "cargo"
@@ -8359,7 +8361,7 @@ build_timeout_s = 3600
 id = "rest-poisoned-entry"
 guards = "A poisoned REST entry reports restart-required instead of hiding the cause as construction failure"
 file = "crates/plexus-core/src/rest_api.rs"
-old = "Err(_) => return crate::mcp_remote::poisoned_lock_response(),"
+old = "Err(_) => return rest_poisoned_lock_response(),"
 new = "Err(_) => return local_not_sent(), /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/rest_api.rs"
 runner = "cargo"
@@ -8373,7 +8375,7 @@ build_timeout_s = 3600
 id = "rest-poisoned-pool"
 guards = "A poisoned REST pool reports restart-required instead of hiding the cause as construction failure"
 file = "crates/plexus-core/src/rest_api.rs"
-old = "Err(RestError::PoisonedLock) => return crate::mcp_remote::poisoned_lock_response(),"
+old = "Err(RestError::PoisonedLock) => return rest_poisoned_lock_response(),"
 new = "Err(RestError::PoisonedLock) => return local_not_sent(), /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/rest_api.rs"
 runner = "cargo"
@@ -9987,10 +9989,10 @@ timeout_s = 120
 
 [[control]]
 id = "github-job-log-tail-ring"
-guards = "A range-ignoring store is streamed into a bounded suffix ring, not a prefix buffer"
+guards = "A range-ignoring store is streamed into a bounded suffix buffer, not a prefix buffer"
 file = "crates/plexus-core/src/rest_api/job_log.rs"
-old = "tail.pop_front();"
-new = "continue; /* NON-VACUITY BREAK */"
+old = "let chunk = &buffer[count.saturating_sub(max_bytes)..count];"
+new = "let chunk = &buffer[..count.min(max_bytes)]; /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/rest_api/job_log/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -10034,8 +10036,8 @@ timeout_s = 120
 id = "github-job-log-storage-allowlist"
 guards = "Only action-reviewed storage hosts can receive a signed download"
 file = "crates/plexus-core/src/rest_api/job_log.rs"
-old = "url.filter(|url| destination_allowed(url, &tail.allowed_hosts))"
-new = "url.filter(|_url| true) /* NON-VACUITY BREAK */"
+old = "hosts.iter().any(|allowed| {"
+new = "true || hosts.iter().any(|allowed| { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/rest_api/job_log/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -10672,8 +10674,8 @@ timeout_s = 120
 id = '''github-artifact-storage-allowlist'''
 guards = '''Allow only reviewed storage hosts'''
 file = '''crates/plexus-core/src/rest_api/job_log.rs'''
-old = '''url.filter(|url| destination_allowed(url, &tail.allowed_hosts))'''
-new = '''url.filter(|_url| true) /* NON-VACUITY BREAK */'''
+old = '''hosts.iter().any(|allowed| {'''
+new = '''true || hosts.iter().any(|allowed| { /* NON-VACUITY BREAK */'''
 test_file = '''crates/plexus-core/src/rest_api/artifact_file/tests.rs'''
 runner = '''cargo'''
 package = '''plexus-core'''
@@ -10747,8 +10749,8 @@ timeout_s = 120
 id = '''github-artifact-tail-ring'''
 guards = '''Retain the tail rather than a prefix'''
 file = '''crates/plexus-core/src/rest_api/job_log.rs'''
-old = '''tail.pop_front();'''
-new = '''continue; /* NON-VACUITY BREAK */'''
+old = '''let chunk = &buffer[count.saturating_sub(max_bytes)..count];'''
+new = '''let chunk = &buffer[..count.min(max_bytes)]; /* NON-VACUITY BREAK */'''
 test_file = '''crates/plexus-core/src/rest_api/artifact_file/tests.rs'''
 runner = '''cargo'''
 package = '''plexus-core'''
@@ -11871,3 +11873,393 @@ select = "expected"
 expect_red = ["event_envelope::tests::ci_job_runner_name_is_null_when_missing_or_empty"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "transport-rest-total-deadline"
+guards = "A trickling REST body ends by the total request deadline and releases the connection"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "with_request_deadline(builder, deadline)"
+new = "with_request_deadline(builder, deadline + Duration::from_secs(5)) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/transport_bounds_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["http_support::transport_bounds_tests::rest_total_deadline_bounds_trickling_body_and_releases_connection"]
+
+[[control]]
+id = "transport-mcp-total-deadline"
+guards = "Endless SSE pings cannot extend the MCP request deadline or keep its connection locked"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "with_request_deadline(builder, deadline)"
+new = "with_request_deadline(builder, deadline + Duration::from_secs(5)) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/transport_bounds_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["http_support::transport_bounds_tests::mcp_total_deadline_bounds_pings_and_releases_connection"]
+
+[[control]]
+id = "transport-delete-body"
+guards = "Reviewed parameter placement controls the DELETE body on the wire"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "let parameters = operation.parameters.unwrap_or(match operation.method {"
+new = "let parameters = None::<RestParameterLocation>.unwrap_or(match operation.method { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/transport_bounds_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["http_support::transport_bounds_tests::delete_assignees_uses_reviewed_body_without_changing_input_schema"]
+
+[[control]]
+id = "transport-facade-redirect-binding"
+guards = "A facade request cannot follow a redirect outside its repository binding"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "let client = if github_facade {"
+new = "let client = if false && github_facade { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/transport_bounds_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["http_support::transport_bounds_tests::facade_redirect_is_not_followed_outside_the_repository_binding"]
+
+[[control]]
+id = "transport-path-separators"
+guards = "Ambiguous scalar path arguments are refused before any HTTP send"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "if decoded.contains(['/', '\\\\']) || has_dot_segment(&decoded) {"
+new = "if false && (decoded.contains(['/', '\\\\']) || has_dot_segment(&decoded)) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/transport_bounds_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["http_support::transport_bounds_tests::ambiguous_path_arguments_are_refused_before_send"]
+
+[[control]]
+id = "transport-quota-statuses"
+guards = "GitHub quota 403 and Retry-After 503 receive the same backoff as 429"
+file = "crates/plexus-core/src/http_support.rs"
+old = "if status == 429 || github_quota || (status == 503 && retry_after.is_some()) {"
+new = "if status == 429 { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/transport_bounds_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["http_support::transport_bounds_tests::throttle_statuses_without_auth_poisoning"]
+
+[[control]]
+id = "transport-build-not-sent"
+guards = "A locally invalid request cannot be reported as possibly transmitted"
+file = "crates/plexus-core/src/http_support.rs"
+old = "if self == Self::Build {"
+new = "if false && self == Self::Build { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::tests::invalid_request_diagnostic_is_not_sent_through_rest"]
+
+[[control]]
+id = "transport-session-reset"
+guards = "A fresh initialize cannot carry a session whose initialized notification was refused"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "state.session_id = None;"
+new = "/* NON-VACUITY BREAK: retain stale session */"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::rejected_initialized_notification_discards_the_provisional_session"]
+
+[[control]]
+id = "transport-discovery-budget"
+guards = "Discovery has a cumulative body budget across all tool pages"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "if bytes > MAX_RESPONSE_BODY_BYTES {"
+new = "if false && bytes > MAX_RESPONSE_BODY_BYTES { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::discovery_has_an_aggregate_response_budget"]
+
+[[control]]
+id = "transport-discovery-duplicates"
+guards = "Repeated tool names cannot mask a schema change during discovery"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "if !names.insert(action.name.clone()) {"
+new = "if false && !names.insert(action.name.clone()) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::discovery_rejects_duplicate_names"]
+
+[[control]]
+id = "transport-lease-nonblocking-drop"
+guards = "Dropping a completed lease cannot wait behind another RPC"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "if let Ok(mut state) = self.entry.try_lock() {"
+new = "if let Ok(mut state) = self.entry.lock() { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::dropping_a_finished_lease_never_waits_for_another_rpc"]
+
+[[control]]
+id = "transport-live-header-failure"
+guards = "A local credential rendering failure stays not sent on initialized sessions"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "McpRemoteError::Configuration => local_error_response(McpRemoteError::Configuration),"
+new = "McpRemoteError::Configuration => TransportResponse::vendor_error(\"mcp_request_failed\", \"invalid credential\"), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::unrenderable_credentials_on_a_live_session_are_not_sent"]
+
+[[control]]
+id = "transport-sse-server-request"
+guards = "Unsupported server requests receive an explicit JSON-RPC error instead of hanging the RPC"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "responder.answer_request(&message[\"method\"], id)?;"
+new = "let _ = (responder, id); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::cr_only_sse_requests_receive_an_error_before_the_tool_result"]
+
+[[control]]
+id = "transport-zip-end-record"
+guards = "ZIP preflight validates the same final EOCD signature as the ZIP library"
+file = "crates/plexus-core/src/rest_api/artifact_file.rs"
+old = ".find(|offset| bytes.get(*offset..*offset + 4) == Some(b\"PK\\x05\\x06\"))"
+new = ".find(|offset| bytes.get(*offset..*offset + 4) == Some(b\"PK\\x05\\x06\") && u16_at(*offset + 20).is_some_and(|length| *offset + 22 + length as usize == bytes.len())) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api/artifact_file/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::artifact_file::tests::conflicting_end_records_are_rejected_before_zip_metadata_allocation"]
+
+[[control]]
+id = "transport-tail-deadline"
+guards = "The log tail reader uses the caller's total deadline, including a shortened budget"
+file = "crates/plexus-core/src/rest_api/job_log.rs"
+old = "started,\n        deadline,\n        read_limit,"
+new = "started,\n        LOG_DEADLINE, /* NON-VACUITY BREAK */\n        read_limit,"
+test_file = "crates/plexus-core/src/rest_api/job_log/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::job_log::tests::tail_reader_uses_the_configured_deadline"]
+
+[[control]]
+id = "transport-credential-binding-placement"
+guards = "Unsupported credential binding placement fails closed rather than dropping authentication"
+file = "crates/plexus-core/src/http_support.rs"
+old = "if !binding.placement.eq_ignore_ascii_case(\"header\") {\n            return Err(CredentialHeaderError::InvalidBinding);"
+new = "if !binding.placement.eq_ignore_ascii_case(\"header\") {\n            continue; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/http_support.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["http_support::binding_tests::unsupported_credential_placement_is_not_silently_omitted"]
+
+[[control]]
+id = "transport-mcp-malformed-outcome"
+guards = "An accepted call with a malformed reply is not a definite vendor failure"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "McpRemoteError::Protocol => TransportResponse::unknown_with_error("
+new = "McpRemoteError::Protocol => TransportResponse::vendor_error( /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::accepted_but_invalid_tool_replies_remain_outcome_unknown"]
+
+[[control]]
+id = "transport-mcp-error-flag-type"
+guards = "A nonboolean MCP isError cannot be silently delivered as success"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = ".is_some_and(|value| !value.is_boolean())"
+new = ".is_some_and(|_value| false) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::accepted_but_invalid_tool_replies_remain_outcome_unknown"]
+
+[[control]]
+id = "transport-mcp-gateway-outcome"
+guards = "A gateway failure may follow execution and must retain unknown outcome and HTTP status"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "McpRemoteError::VendorStatus(status) if status >= 500 => {"
+new = "McpRemoteError::VendorStatus(status) if false && status >= 500 => { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::mcp_throttles_and_gateway_statuses_keep_their_safe_posture"]
+
+[[control]]
+id = "transport-download-api-status"
+guards = "The credentialed download lookup preserves authentication and retry classification"
+file = "crates/plexus-core/src/rest_api/job_log.rs"
+old = "if response.status().as_u16() != 302 {"
+new = "if response.status().as_u16() != 302 { return Err(Box::new(refused(\"job_log_redirect_refused\"))); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api/job_log/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::job_log::tests::credentialed_download_leg_preserves_auth_throttle_and_gateway_failures"]
+
+[[control]]
+id = "transport-artifact-kind"
+guards = "The reviewed tail kind selects artifact extraction rather than a log download"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "if tail.kind == crate::manifest::CredentiallessTailKind::ArtifactFile {"
+new = "if false && tail.kind == crate::manifest::CredentiallessTailKind::ArtifactFile { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api/artifact_file/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::artifact_file::tests::named_entry_returns_only_its_tail_without_storage_credentials"]
+
+[[control]]
+id = "transport-storage-port"
+guards = "A storage-host allowance does not authorize a nonstandard HTTPS port"
+file = "crates/plexus-core/src/rest_api/job_log.rs"
+old = "|| url.port_or_known_default() != Some(443)"
+new = "|| false /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api/job_log/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::job_log::tests::storage_requires_the_standard_https_port_and_redacts_leading_token_suffixes"]
+
+[[control]]
+id = "transport-storage-token-suffix"
+guards = "A bounded log tail cannot expose a long leading suffix of the known credential"
+file = "crates/plexus-core/src/rest_api/job_log.rs"
+old = "if suffix.len() >= 8 && text.starts_with(suffix) {"
+new = "if false && suffix.len() >= 8 && text.starts_with(suffix) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api/job_log/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::job_log::tests::storage_requires_the_standard_https_port_and_redacts_leading_token_suffixes"]
+
+[[control]]
+id = "transport-placement-schema-pin"
+guards = "Changing parameter placement cannot change an active action's input schema pin or generation"
+file = "crates/plexus-core/src/catalog.rs"
+old = ".map(|http| http.args_schema.clone())"
+new = ".map(|http| serde_json::to_value(http).unwrap()) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/transport_bounds_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["http_support::transport_bounds_tests::parameter_placement_does_not_quarantine_an_active_catalog_action"]
+
+[[control]]
+id = "transport-vault-report-diagnostic"
+guards = "A failed best-effort vault auth report remains observable without credential material"
+file = "crates/plexus-core/src/credentials.rs"
+old = "eprintln!(warn transport: \"credential auth-failure report failed: {error:?}\");"
+new = "let _ = error; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/credentials.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["credentials::report_diagnostic_tests::vault_report_failures_are_logged_without_credential_material"]
+
+[[control]]
+id = "transport-route-unknown-outcome"
+guards = "An unknown adapter refusal code cannot establish that an executed write failed"
+file = "crates/plexus-core/src/mcp_route.rs"
+old = "return TransportResponse::unknown_with_error(\n                \"mcp_route_protocol_error\","
+new = "return TransportResponse::vendor_error( /* NON-VACUITY BREAK */\n                \"mcp_route_protocol_error\","
+test_file = "crates/plexus-core/src/mcp_route.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_route::tests::unknown_error_frame_code_is_a_protocol_failure"]
+
+[[control]]
+id = "transport-sse-read-diagnostic"
+guards = "SSE read failures log an operator cause in addition to status and endpoint path"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "eprintln!(warn transport: \"MCP SSE body read failed: {failure:?}: {cause}\");"
+new = "let _ = cause; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::sse_body_failures_have_an_operator_cause_and_path"]
+
+[[control]]
+id = "transport-discovery-panic-recovery"
+guards = "A discovery panic is contained and does not unwind through the connection guard"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "Err(McpRemoteError::OutcomeUnknown)\n            }"
+new = "panic!(\"NON-VACUITY BREAK: resume discovery panic\")\n            }"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::discovery_panic_is_contained_without_poisoning_the_connection"]
+
+[[control]]
+id = "transport-local-preparation-diagnostic"
+guards = "Local REST construction failures name a safe cause without logging argument values"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "eprintln!(warn transport: \"REST request preparation failed: {error:?}\");"
+new = "/* NON-VACUITY BREAK: omit the safe local cause */"
+test_file = "crates/plexus-core/src/rest_api.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::local_diagnostic_tests::local_preparation_errors_are_logged_without_argument_values"]
+
+[[control]]
+id = "transport-unregistered-connection"
+guards = "Production configuration refuses an unregistered id rather than using another connection's endpoint"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = ".and_then(|configs| configs.get(connection_id).cloned())"
+new = ".and_then(|configs| configs.values().next().cloned()) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::safety_tests::production_configuration_refuses_unregistered_ids_without_sending"]

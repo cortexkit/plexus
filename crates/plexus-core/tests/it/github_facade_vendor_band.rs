@@ -2863,6 +2863,7 @@ fn validation_rest_engine(
     );
     let operation = HttpOperation {
         method: HttpMethod::Post,
+        parameters: None,
         path: "/fixture".into(),
         args_schema: json!({"type":"object"}),
         request_constants: None,

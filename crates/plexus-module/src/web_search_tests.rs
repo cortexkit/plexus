@@ -427,6 +427,7 @@ fn different_connection_facade_calls_progress_during_a_rest_pool_sweep() {
         let mut config = RestConfig::new(url).with_actions(HashMap::from([(
             "search".into(), plexus_core::manifest::HttpOperation {
                 method: plexus_core::manifest::HttpMethod::Post,
+                parameters: None,
                 path: "/search".into(),
                 args_schema: json!({"type": "object"}),
                 request_constants: None,
