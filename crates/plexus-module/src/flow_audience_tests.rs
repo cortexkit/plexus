@@ -1149,3 +1149,43 @@ async fn opaque_project_ids_require_exact_watch_membership() {
         "flow_audience_excludes_repository",
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cache_capacity_evicts_one_entry_instead_of_all_audiences() {
+    let mut core = Core::new(workspace()).await;
+    let audiences = core.audiences();
+    let now = Instant::now();
+    let answer = parse("flow-a", workspace()).unwrap();
+    {
+        let mut cache = audiences.cache.lock().unwrap();
+        for index in 0..1024 {
+            cache.insert(format!("cached-{index}"), (now, answer.clone(), now));
+        }
+        cache.get_mut("cached-0").unwrap().2 = now - Duration::from_secs(1);
+    }
+    assert_eq!(audiences.lookup("flow-a").unwrap().revision, "r1");
+    let cache = audiences.cache.lock().unwrap();
+    assert_eq!(cache.len(), 1024);
+    assert!(!cache.contains_key("cached-0"));
+    assert!(cache.contains_key("cached-1"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_audience_misses_share_one_lookup() {
+    let mut core = Core::new(workspace()).await;
+    let audiences = Arc::new(core.audiences());
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let audiences = audiences.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::task::spawn_blocking(move || {
+            barrier.wait();
+            audiences.lookup("flow-a").unwrap()
+        }));
+    }
+    for task in tasks {
+        assert_eq!(task.await.unwrap().revision, "r1");
+    }
+    assert_eq!(core.calls().len(), 1);
+}

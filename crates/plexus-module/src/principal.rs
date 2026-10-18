@@ -77,13 +77,8 @@ fn is_first_party_module_id(module_id: &str) -> bool {
     )
 }
 
-pub fn principal_key(principal: &Principal) -> String {
-    match principal {
-        Principal::Direct => "direct".to_string(),
-        Principal::Reserved { module_id } => format!("reserved:{module_id}"),
-        Principal::Unverified => "unverified".to_string(),
-    }
-}
+pub use plexus_core::scope::principal_label as principal_key;
+pub const BASAL_PRINCIPAL: &str = "reserved:basal";
 
 #[cfg(test)]
 mod tests {

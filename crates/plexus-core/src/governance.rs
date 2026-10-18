@@ -3601,7 +3601,12 @@ where
         let reservation = match self.authorize(authorization) {
             Ok(reservation) => reservation,
             Err(denial) => {
-                if denial.clears_by_waiting() {
+                // A caller's deadline cannot recover in the scheduler. Preserve
+                // the approval for an explicit recall instead of queuing a send
+                // after the caller has moved on.
+                let recall_only = matches!(&denial, Denial::ConnectorHomeNotHeld { state }
+                    if state.pointer("/error/code").and_then(Value::as_str) == Some("request_deadline_exceeded"));
+                if denial.clears_by_waiting() && !recall_only {
                     self.hold_approval_for_retry(&request.principal, &request_id);
                 }
                 return Err(denial);
