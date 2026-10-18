@@ -116,14 +116,13 @@ def cargo_metadata(manifest: Path) -> tuple[dict[str, Any] | None, str | None]:
     return metadata, None
 
 
-def check_root(root: Path) -> tuple[list[str], list[str], list[str], int, int, int]:
+def check_root(root: Path) -> tuple[list[str], list[str], int, int, int]:
     root = root.resolve(strict=True)
     manifests = repository_manifests(root)
     violations: list[str] = []
-    unchecked: list[str] = []
     errors: list[str] = []
     checked_references = 0
-    cargo_roots: dict[Path, Path] = {}
+    cargo_roots: set[Path] = set()
 
     def check_reference(manifest: Path, table: str, dependency: str, raw_path: str) -> None:
         nonlocal checked_references
@@ -177,7 +176,7 @@ def check_root(root: Path) -> tuple[list[str], list[str], list[str], int, int, i
                 errors.append(f"{relative}: cargo locate-project failed: {error}")
                 continue
             assert workspace_manifest is not None
-            cargo_roots.setdefault(workspace_manifest, workspace_manifest)
+            cargo_roots.add(workspace_manifest)
             continue
 
         try:
@@ -210,7 +209,7 @@ def check_root(root: Path) -> tuple[list[str], list[str], list[str], int, int, i
 
     checked_workspaces = 0
     checked_package_manifests: set[Path] = set()
-    for workspace_manifest, discovered_from in sorted(cargo_roots.items()):
+    for workspace_manifest in sorted(cargo_roots):
         metadata, error = cargo_metadata(workspace_manifest)
         if error is not None:
             relative = workspace_manifest.relative_to(root).as_posix()
@@ -227,7 +226,7 @@ def check_root(root: Path) -> tuple[list[str], list[str], list[str], int, int, i
             try:
                 manifest_path = Path(package["manifest_path"]).resolve(strict=False)
             except (KeyError, OSError, RuntimeError, TypeError) as error:
-                errors.append(f"{discovered_from.relative_to(root)}: invalid package manifest path: {error}")
+                errors.append(f"{workspace_manifest.relative_to(root)}: invalid package manifest path: {error}")
                 continue
             if manifest_path in checked_package_manifests:
                 continue
@@ -236,11 +235,11 @@ def check_root(root: Path) -> tuple[list[str], list[str], list[str], int, int, i
             if not inside_repository(manifest_path, root):
                 package_name = str(package.get("name", "<unnamed>"))
                 violations.append(
-                    f"Cargo workspace {discovered_from.relative_to(root)}: package={package_name} "
+                    f"Cargo workspace {workspace_manifest.relative_to(root)}: package={package_name} "
                     f"manifest={manifest_path} resolved={manifest_path}"
                 )
 
-    return violations, unchecked, errors, len(manifests), checked_references, checked_workspaces
+    return violations, errors, len(manifests), checked_references, checked_workspaces
 
 
 def _write(root: Path, relative: str, content: str) -> None:
@@ -290,7 +289,6 @@ def self_test(selected_case: str | None = None) -> int:
         setup: Any,
         expected_violations: tuple[tuple[str, ...], ...] = (),
         expected_errors: tuple[tuple[str, ...], ...] = (),
-        expected_unchecked: tuple[tuple[str, ...], ...] = (),
     ) -> None:
         nonlocal failures, cases_run
         if selected_case is not None and name != selected_case:
@@ -308,7 +306,7 @@ def self_test(selected_case: str | None = None) -> int:
                 failures += 1
                 print(f"check-path-deps self-test: FAIL — {name}: fixture setup failed: {error}", file=sys.stderr)
                 return
-            violations, unchecked, errors, _, _, _ = check_root(root)
+            violations, errors, _, _, _ = check_root(root)
 
             def matches(actual: list[str], expected: tuple[tuple[str, ...], ...]) -> bool:
                 return len(actual) == len(expected) and all(
@@ -319,7 +317,6 @@ def self_test(selected_case: str | None = None) -> int:
             passed = (
                 matches(violations, expected_violations)
                 and matches(errors, expected_errors)
-                and matches(unchecked, expected_unchecked)
             )
             if passed:
                 print(f"check-path-deps self-test: PASS — {name}")
@@ -327,8 +324,8 @@ def self_test(selected_case: str | None = None) -> int:
                 failures += 1
                 print(
                     f"check-path-deps self-test: FAIL — {name}: expected violations={expected_violations}, "
-                    f"errors={expected_errors}, unchecked={expected_unchecked}; got violations={violations}, "
-                    f"errors={errors}, unchecked={unchecked}",
+                    f"errors={expected_errors}; got violations={violations}, "
+                    f"errors={errors}",
                     file=sys.stderr,
                 )
 
@@ -482,7 +479,7 @@ def main() -> int:
 
     root = args.root if args.root is not None else Path(__file__).resolve().parent.parent
     try:
-        violations, unchecked, errors, manifest_count, reference_count, workspace_count = check_root(root)
+        violations, errors, manifest_count, reference_count, workspace_count = check_root(root)
     except (OSError, RuntimeError) as error:
         print(f"check-path-deps: cannot inspect repository {root}: {error}", file=sys.stderr)
         return 2
@@ -490,8 +487,6 @@ def main() -> int:
         print(f"check-path-deps: OUTSIDE {violation}", file=sys.stderr)
     for error in errors:
         print(f"check-path-deps: ERROR {error}", file=sys.stderr)
-    for item in unchecked:
-        print(f"check-path-deps: UNCHECKED {item}", file=sys.stderr)
     if violations or errors:
         return 1
 
@@ -499,8 +494,6 @@ def main() -> int:
         f"checked {manifest_count} manifests and {workspace_count} Cargo workspaces, "
         f"{reference_count} resolved path references inside the repository"
     )
-    if unchecked:
-        summary += f"; unchecked Cargo manifests: {', '.join(item.split(':', 1)[0] for item in unchecked)}"
     print(summary)
     return 0
 

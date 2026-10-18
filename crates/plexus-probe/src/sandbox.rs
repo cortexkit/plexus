@@ -19,7 +19,7 @@ use wasmtime::{
 use wasmtime_wasi::{
     p1::{self, WasiP1Ctx},
     p2::pipe::{MemoryInputPipe, MemoryOutputPipe},
-    WasiCtxBuilder,
+    Deterministic, HostMonotonicClock, HostWallClock, WasiCtxBuilder,
 };
 
 use crate::{ProbeValue, ReturnSchema, ReturnSchemaError, ReturnValidationError};
@@ -37,6 +37,10 @@ pub const WALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// entry after the ceiling.
 pub const RUN_CEILING: Duration = Duration::from_secs(15);
 pub const MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum UTF-8 source size accepted before serializing a guest request.
+pub const MAX_SOURCE_BYTES: usize = 64 * 1024;
+const MAX_ACTION_BYTES: usize = 256;
+const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 
 /// The most the guest may write as its response. The guest enforces the same
 /// figure (`RESPONSE_LIMIT` in guest/src/main.rs) and answers an oversize
@@ -56,7 +60,8 @@ const GUEST_WASM: &[u8] = include_bytes!("../assets/plexus-probe-guest.wasm");
 /// sequential work. Budget enforcement does not depend on it, because each run
 /// checks its own clock at every epoch tick.
 static EXECUTION_LOCK: Mutex<()> = Mutex::new(());
-static RUNTIME_ARTIFACTS: OnceLock<Result<RuntimeArtifacts, String>> = OnceLock::new();
+static RUNTIME_ARTIFACTS: OnceLock<RuntimeArtifacts> = OnceLock::new();
+static RUNTIME_INITIALIZATION: Mutex<()> = Mutex::new(());
 
 /// Caller-provided dispatch for the sandbox's only JavaScript host capability.
 ///
@@ -88,9 +93,13 @@ where
 }
 
 /// A cached QuickJS/WASM module. Every call still receives a fresh store and guest context.
+#[derive(Clone)]
 pub struct ProbeSandbox {
     engine: Engine,
     pre: InstancePre<StoreState>,
+    ticker: mpsc::Sender<bool>,
+    executor: mpsc::SyncSender<ExecutionRequest>,
+    #[cfg(test)]
     module_imports: Vec<String>,
     allowed_actions: Arc<BTreeSet<String>>,
     wasi_policy: WasiPolicy,
@@ -128,7 +137,19 @@ pub enum ProbeError {
 struct RuntimeArtifacts {
     engine: Engine,
     pre: InstancePre<StoreState>,
+    ticker: mpsc::Sender<bool>,
+    executor: mpsc::SyncSender<ExecutionRequest>,
+    #[cfg(test)]
     module_imports: Vec<String>,
+}
+
+struct ExecutionRequest {
+    sandbox: ProbeSandbox,
+    source: String,
+    argument: Value,
+    schema: ReturnSchema,
+    invoker: Box<dyn ActionInvoker>,
+    reply: mpsc::SyncSender<Result<ProbeValue, ProbeError>>,
 }
 
 struct StoreState {
@@ -218,6 +239,12 @@ enum GuestOutcome {
 }
 
 impl ProbeSandbox {
+    /// Compile the embedded interpreter before admitting scheduled work.
+    /// Failures are retryable; only successfully initialized artifacts are cached.
+    pub fn warm_up() -> Result<(), ProbeError> {
+        runtime_artifacts().map(|_| ())
+    }
+
     pub fn new<I, S>(allowed_actions: I) -> Result<Self, ProbeError>
     where
         I: IntoIterator<Item = S>,
@@ -235,6 +262,9 @@ impl ProbeSandbox {
         Ok(Self {
             engine: artifacts.engine.clone(),
             pre: artifacts.pre.clone(),
+            ticker: artifacts.ticker.clone(),
+            executor: artifacts.executor.clone(),
+            #[cfg(test)]
             module_imports: artifacts.module_imports.clone(),
             allowed_actions: Arc::new(allowed_actions.into_iter().map(Into::into).collect()),
             wasi_policy,
@@ -256,11 +286,31 @@ impl ProbeSandbox {
     where
         F: ActionInvoker + 'static,
     {
+        if source.len() > MAX_SOURCE_BYTES {
+            return Err(ProbeError::Execution {
+                message: format!("probe source exceeds {MAX_SOURCE_BYTES} bytes"),
+            });
+        }
         schema
             .validate_declaration()
             .map_err(ProbeError::InvalidSchema)?;
-        let _guard = execution_guard(&EXECUTION_LOCK);
-        self.run_serialized(source, argument, schema, Box::new(invoker))
+        // Synchronous WASI internally enters a Tokio runtime. A reusable worker
+        // keeps it off the caller's runtime and serializes all guest execution.
+        // The rendezvous channel never accumulates queued work.
+        let (reply, result) = mpsc::sync_channel(1);
+        self.executor
+            .send(ExecutionRequest {
+                sandbox: self.clone(),
+                source: source.to_owned(),
+                argument,
+                schema: schema.clone(),
+                invoker: Box::new(invoker),
+                reply,
+            })
+            .map_err(|_| ProbeError::Sandbox {
+                message: "probe execution worker is unavailable".to_owned(),
+            })?;
+        result.recv().map_err(sandbox_error)?
     }
 
     fn run_serialized(
@@ -303,19 +353,10 @@ impl ProbeSandbox {
         let start = instance
             .get_typed_func::<(), ()>(&mut store, "_start")
             .map_err(sandbox_error)?;
-        let ticker_engine = self.engine.clone();
-        let (stop_ticker, ticker_stopped) = mpsc::channel::<()>();
-        let ticker = thread::spawn(move || {
-            while let Err(RecvTimeoutError::Timeout) = ticker_stopped.recv_timeout(EPOCH_TICK) {
-                ticker_engine.increment_epoch();
-            }
-        });
+        self.ticker.send(true).map_err(sandbox_error)?;
+        let _ticker_run = TickerRun(&self.ticker);
         store.data_mut().clock = RunClock::start();
         let call_result = start.call(&mut store, ());
-        let _ = stop_ticker.send(());
-        ticker.join().map_err(|_| ProbeError::Sandbox {
-            message: "probe epoch ticker thread panicked".to_owned(),
-        })?;
 
         if let Some(failure) = store.data().action_failure.clone() {
             return Err(match failure {
@@ -323,11 +364,6 @@ impl ProbeSandbox {
                 ActionFailure::Failed { action, message } => {
                     ProbeError::ActionFailed { action, message }
                 }
-            });
-        }
-        if store.data().limits.memory_denied {
-            return Err(ProbeError::MemoryLimit {
-                limit_bytes: MEMORY_LIMIT_BYTES,
             });
         }
         // Only a run that a budget actually INTERRUPTED is a timeout. A guest
@@ -339,6 +375,11 @@ impl ProbeSandbox {
             });
         }
         if let Err(error) = call_result {
+            if store.data().limits.memory_denied {
+                return Err(ProbeError::MemoryLimit {
+                    limit_bytes: MEMORY_LIMIT_BYTES,
+                });
+            }
             // The probe's own recursion, not a host fault: say so in terms the
             // probe author can act on.
             if error.downcast_ref::<Trap>() == Some(&Trap::StackOverflow) {
@@ -376,6 +417,7 @@ impl ProbeSandbox {
     }
 
     /// Returns the imports requested by the guest so its host-facing interface can be verified.
+    #[cfg(test)]
     pub fn module_imports(&self) -> &[String] {
         &self.module_imports
     }
@@ -407,38 +449,120 @@ const PULLEY_TARGET: &str = match (
 };
 
 fn runtime_artifacts() -> Result<&'static RuntimeArtifacts, ProbeError> {
-    RUNTIME_ARTIFACTS
-        .get_or_init(|| {
-            let mut config = Config::new();
-            config.epoch_interruption(true);
-            config
-                .target(PULLEY_TARGET)
-                .map_err(|error| error.to_string())?;
-            let engine = Engine::new(&config).map_err(|error| error.to_string())?;
-            let module = Module::new(&engine, GUEST_WASM).map_err(|error| error.to_string())?;
-            let module_imports = module
-                .imports()
-                .map(|import| format!("{}::{}", import.module(), import.name()))
-                .collect();
-            let mut linker = Linker::new(&engine);
-            p1::add_to_linker_sync(&mut linker, |state: &mut StoreState| &mut state.wasi)
-                .map_err(|error| error.to_string())?;
-            linker
-                .func_wrap("plexus", "invoke_declared_action", invoke_declared_action)
-                .map_err(|error| error.to_string())?;
-            let pre = linker
-                .instantiate_pre(&module)
-                .map_err(|error| error.to_string())?;
-            Ok(RuntimeArtifacts {
-                engine,
-                pre,
-                module_imports,
+    if let Some(artifacts) = RUNTIME_ARTIFACTS.get() {
+        return Ok(artifacts);
+    }
+    let _initializing = execution_guard(&RUNTIME_INITIALIZATION);
+    if let Some(artifacts) = RUNTIME_ARTIFACTS.get() {
+        return Ok(artifacts);
+    }
+    let build = || -> Result<RuntimeArtifacts, String> {
+        let mut config = Config::new();
+        config.epoch_interruption(true);
+        config
+            .target(PULLEY_TARGET)
+            .map_err(|error| error.to_string())?;
+        let engine = Engine::new(&config).map_err(|error| error.to_string())?;
+        let module = Module::new(&engine, GUEST_WASM).map_err(|error| error.to_string())?;
+        #[cfg(test)]
+        let module_imports = module
+            .imports()
+            .map(|import| format!("{}::{}", import.module(), import.name()))
+            .collect();
+        let mut linker = Linker::new(&engine);
+        p1::add_to_linker_sync(&mut linker, |state: &mut StoreState| &mut state.wasi)
+            .map_err(|error| error.to_string())?;
+        linker
+            .func_wrap("plexus", "invoke_declared_action", invoke_declared_action)
+            .map_err(|error| error.to_string())?;
+        let pre = linker
+            .instantiate_pre(&module)
+            .map_err(|error| error.to_string())?;
+        let (executor, requests) = mpsc::sync_channel::<ExecutionRequest>(0);
+        thread::Builder::new()
+            .name("plexus-probe-execution".to_owned())
+            .spawn(move || {
+                while let Ok(request) = requests.recv() {
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        let _guard = execution_guard(&EXECUTION_LOCK);
+                        request.sandbox.run_serialized(
+                            &request.source,
+                            request.argument,
+                            &request.schema,
+                            request.invoker,
+                        )
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(ProbeError::Sandbox {
+                            message: "probe execution worker panicked".to_owned(),
+                        })
+                    });
+                    let _ = request.reply.send(result);
+                }
             })
+            .map_err(|error| error.to_string())?;
+        let (ticker, commands) = mpsc::channel();
+        let ticker_engine = engine.clone();
+        thread::Builder::new()
+            .name("plexus-probe-epoch".to_owned())
+            .spawn(move || {
+                let mut active = false;
+                loop {
+                    let command = if active {
+                        commands.recv_timeout(EPOCH_TICK)
+                    } else {
+                        commands.recv().map_err(|_| RecvTimeoutError::Disconnected)
+                    };
+                    match command {
+                        Ok(value) => active = value,
+                        Err(RecvTimeoutError::Timeout) => ticker_engine.increment_epoch(),
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(RuntimeArtifacts {
+            engine,
+            pre,
+            ticker,
+            executor,
+            #[cfg(test)]
+            module_imports,
         })
-        .as_ref()
-        .map_err(|message| ProbeError::Sandbox {
-            message: message.clone(),
-        })
+    };
+    let artifacts = build().map_err(|message| ProbeError::Sandbox { message })?;
+    let _ = RUNTIME_ARTIFACTS.set(artifacts);
+    Ok(RUNTIME_ARTIFACTS
+        .get()
+        .expect("runtime initialized under lock"))
+}
+
+struct TickerRun<'a>(&'a mpsc::Sender<bool>);
+
+impl Drop for TickerRun<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.send(false);
+    }
+}
+
+struct FixedClock;
+
+impl HostWallClock for FixedClock {
+    fn resolution(&self) -> Duration {
+        Duration::from_nanos(1)
+    }
+    fn now(&self) -> Duration {
+        Duration::from_secs(1)
+    }
+}
+
+impl HostMonotonicClock for FixedClock {
+    fn resolution(&self) -> u64 {
+        1
+    }
+    fn now(&self) -> u64 {
+        1
+    }
 }
 
 fn build_wasi_context(
@@ -450,7 +574,12 @@ fn build_wasi_context(
     builder
         .stdin(MemoryInputPipe::new(request))
         .stdout(output)
-        .arg("plexus-probe-guest");
+        .arg("plexus-probe-guest")
+        .wall_clock(FixedClock)
+        .monotonic_clock(FixedClock)
+        .secure_random(Deterministic::new(vec![7]))
+        .insecure_random(Deterministic::new(vec![7]))
+        .insecure_random_seed(0);
     match policy {
         WasiPolicy::Isolated => {}
         #[cfg(test)]
@@ -500,7 +629,9 @@ fn invoke_declared_action(
             if caller.data().action_failure.is_none() {
                 caller.data_mut().action_failure = Some(failure);
             }
-            -1
+            // A failed run cannot recover; trapping also prevents JavaScript
+            // from catching the bridge error and spending more vendor reads.
+            return Err(wasmtime::Error::msg("probe action failed"));
         }
     };
     if caller.data().clock.over_budget() {
@@ -523,7 +654,14 @@ fn invoke_declared_action_inner(
     if !caller.data().allowed_actions.contains(&action) {
         return Err(ActionFailure::Refused { action });
     }
-    let argument_text = read_guest_string(caller, argument_pointer, argument_length, "argument")?;
+    let argument_text = read_guest_string(caller, argument_pointer, argument_length, "argument")
+        .map_err(|failure| match failure {
+            ActionFailure::Failed { message, .. } => ActionFailure::Failed {
+                action: action.clone(),
+                message,
+            },
+            other => other,
+        })?;
     let argument = serde_json::from_str(&argument_text).map_err(|error| ActionFailure::Failed {
         action: action.clone(),
         message: format!("invalid action argument JSON: {error}"),
@@ -585,6 +723,17 @@ fn read_guest_string(
         action: action.clone(),
         message: format!("guest supplied a negative {label} length"),
     })?;
+    let limit = if label == "action name" {
+        MAX_ACTION_BYTES
+    } else {
+        MAX_ARGUMENT_BYTES
+    };
+    if length > limit {
+        return Err(ActionFailure::Failed {
+            action,
+            message: format!("guest {label} exceeds {limit} bytes"),
+        });
+    }
     // The pointer and length are guest-supplied, so check them against the
     // guest's linear memory BEFORE allocating anything: allocating `length`
     // first would let the guest pick a host allocation of up to 2 GiB, far
@@ -683,7 +832,7 @@ impl ResourceLimiter for TrackingLimits {
 
 fn sandbox_error(error: impl fmt::Display) -> ProbeError {
     ProbeError::Sandbox {
-        message: error.to_string(),
+        message: format!("{error:#}"),
     }
 }
 
@@ -750,6 +899,163 @@ mod tests {
 
     fn bool_schema() -> ReturnSchema {
         ReturnSchema::Bool
+    }
+
+    #[test]
+    fn a_caught_action_failure_stops_further_vendor_reads() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let sandbox = ProbeSandbox::new(["test.call"]).unwrap();
+        let result = sandbox.run(
+            "() => { try { invoke('test.call', null); } catch (_) {} invoke('test.call', null); return true; }",
+            Value::Null, &bool_schema(), move |_: &str, _: Value| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Err("vendor unavailable".to_owned())
+            });
+        assert!(matches!(result, Err(ProbeError::ActionFailed { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_probe_can_run_inside_an_async_runtime() {
+        let sandbox = ProbeSandbox::new(Vec::<String>::new()).unwrap();
+        let result = wasmtime_wasi::runtime::in_tokio(async {
+            sandbox.run("() => true", Value::Null, &bool_schema(), empty_invoker)
+        });
+        assert_eq!(result.unwrap(), ProbeValue::Bool(true));
+    }
+
+    #[test]
+    fn sequential_runs_reuse_one_execution_worker() {
+        let sandbox = ProbeSandbox::new(["test.call"]).unwrap();
+        let threads = Arc::new(Mutex::new(Vec::new()));
+        for _ in 0..2 {
+            let threads = threads.clone();
+            sandbox
+                .run(
+                    "() => { invoke('test.call', null); return true; }",
+                    Value::Null,
+                    &bool_schema(),
+                    move |_: &str, _: Value| {
+                        threads.lock().unwrap().push(thread::current().id());
+                        Ok(Value::Null)
+                    },
+                )
+                .unwrap();
+        }
+        let threads = threads.lock().unwrap();
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0], threads[1]);
+    }
+
+    #[test]
+    fn guest_randomness_does_not_expose_the_host_clock() {
+        let sandbox = ProbeSandbox::new(Vec::<String>::new()).unwrap();
+        let first = sandbox
+            .run(
+                "() => Math.random()",
+                Value::Null,
+                &ReturnSchema::Number,
+                empty_invoker,
+            )
+            .unwrap();
+        let second = sandbox
+            .run(
+                "() => Math.random()",
+                Value::Null,
+                &ReturnSchema::Number,
+                empty_invoker,
+            )
+            .unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn wasi_clock_and_random_imports_are_deterministic() {
+        let artifacts = runtime_artifacts().unwrap();
+        let module = Module::new(&artifacts.engine, r#"(module
+            (import "wasi_snapshot_preview1" "clock_time_get" (func $clock (param i32 i64 i32) (result i32)))
+            (import "wasi_snapshot_preview1" "random_get" (func $random (param i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "sample") (result i32)
+                (drop (call $clock (i32.const 0) (i64.const 0) (i32.const 0)))
+                (drop (call $clock (i32.const 1) (i64.const 0) (i32.const 8)))
+                (call $random (i32.const 16) (i32.const 8))))"#).unwrap();
+        let mut linker = Linker::new(&artifacts.engine);
+        p1::add_to_linker_sync(&mut linker, |ctx: &mut WasiP1Ctx| ctx).unwrap();
+        let wasi = build_wasi_context(Vec::new(), MemoryOutputPipe::new(16), WasiPolicy::Isolated)
+            .unwrap();
+        let mut store = Store::new(&artifacts.engine, wasi);
+        store.set_epoch_deadline(u64::MAX / 2);
+        let instance = linker.instantiate(&mut store, &module).unwrap();
+        assert_eq!(
+            instance
+                .get_typed_func::<(), i32>(&mut store, "sample")
+                .unwrap()
+                .call(&mut store, ())
+                .unwrap(),
+            0
+        );
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
+        let bytes = memory.data(&store);
+        assert_eq!(
+            u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+            1_000_000_000
+        );
+        assert_eq!(u64::from_le_bytes(bytes[8..16].try_into().unwrap()), 1);
+        assert_eq!(&bytes[16..24], &[7; 8]);
+    }
+
+    #[test]
+    fn sandbox_diagnostics_preserve_the_trap_cause() {
+        let error = sandbox_error(wasmtime::Error::msg("underlying trap").context("guest call"));
+        let text = error.to_string();
+        assert!(
+            text.contains("guest call") && text.contains("underlying trap"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_recovered_allocation_failure_does_not_override_a_returned_value() {
+        let sandbox = ProbeSandbox::new(Vec::<String>::new()).unwrap();
+        let value = sandbox.run("() => { try { let a = 'x'.repeat(64*1024*1024); return false; } catch (_) { return true; } }", Value::Null, &bool_schema(), empty_invoker).unwrap();
+        assert_eq!(value, ProbeValue::Bool(true));
+    }
+
+    #[test]
+    fn oversized_source_is_refused_before_guest_execution() {
+        let sandbox = ProbeSandbox::new(Vec::<String>::new()).unwrap();
+        let source = format!("() => true /*{}*/", " ".repeat(64 * 1024));
+        let error = sandbox
+            .run(&source, Value::Null, &bool_schema(), empty_invoker)
+            .unwrap_err();
+        assert!(error.to_string().contains("source"), "{error}");
+    }
+
+    #[test]
+    fn oversized_invoke_inputs_never_reach_the_dispatcher() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let sandbox = ProbeSandbox::new(["test.call", &"x".repeat(257)]).unwrap();
+        for source in [
+            "() => { invoke('test.call', 'x'.repeat(65537)); return true; }",
+            "() => { invoke('x'.repeat(257), null); return true; }",
+        ] {
+            let observed = observed.clone();
+            assert!(sandbox
+                .run(
+                    source,
+                    Value::Null,
+                    &bool_schema(),
+                    move |_: &str, _: Value| {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        Ok(Value::Null)
+                    }
+                )
+                .is_err());
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1532,14 +1838,14 @@ mod tests {
             .unwrap();
 
         largest_allocation::reset();
-        let status = oversize.call(&mut store, ()).unwrap();
+        let status = oversize.call(&mut store, ());
         let largest = largest_allocation::largest();
 
-        assert_eq!(status, -1, "an out-of-bounds action name must be refused");
+        assert!(status.is_err(), "an oversized action name must trap");
         assert!(
             matches!(
                 store.data().action_failure,
-                Some(ActionFailure::Failed { ref message, .. }) if message.contains("outside")
+                Some(ActionFailure::Failed { ref message, .. }) if message.contains("exceeds") || message.contains("outside")
             ),
             "the refusal must name the bounds: {:?}",
             store.data().action_failure

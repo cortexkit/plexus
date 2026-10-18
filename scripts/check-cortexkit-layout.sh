@@ -14,7 +14,7 @@
 #
 # Exit 0 clean, 1 a disallowed file is tracked, 2 the ignore rules don't work.
 
-set -u
+set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 2
 
 if ! git check-ignore -q --no-index .cortexkit/internal-docs/designs/control.md; then
@@ -29,7 +29,7 @@ fi
 tracked="$(git ls-files -ci --exclude-standard -- .cortexkit)"
 if [ -n "$tracked" ]; then
   echo "tracked files under .cortexkit/ that the layout keeps out of git:" >&2
-  printf '  %s\n' $tracked >&2
+  printf '  %s\n' "$tracked" >&2
   echo "move them to .cortexkit/internal-docs/ (or remove them) and 'git rm --cached' them" >&2
   exit 1
 fi

@@ -49,8 +49,8 @@
 #
 # If main moves while CI runs, the train is re-queued automatically: rebase onto
 # the new origin/main, re-push the branch, watch a fresh run - up to 3 rounds.
-# The re-queue is for a moved branch ONLY. A red run is never retried: the same
-# tree on a new base is red for the same reason; fix the failing change instead.
+# Automatic re-queueing is only for a moved default branch. Re-running this
+# script on the same sha may explicitly rerun failed or cancelled CI jobs.
 #
 # THE INVARIANT THE RE-QUEUE KEEPS: only the sha a check actually ran against
 # may fast-forward main. A green run for the pre-rebase sha proves something
@@ -72,12 +72,12 @@
 #
 # Exit codes:
 #   0  landed on the default branch
-#   1  CI red (or a push that reported success without moving origin)
+#   1  CI red
 #   2  precondition refusal, bad usage, failed smoke, or no CI run resolved
 #   3  the default branch kept moving through 3 re-queue rounds, or the rebase
 #      conflicted
-#   4  CI is green, but landing failed; re-run with --land to finish without
-#      paying for another CI run
+#   4  CI is green, but landing or its outcome verification failed; re-run
+#      with --land to finish without paying for another CI run
 set -euo pipefail
 
 # Run from a private copy of this file. bash reads a script incrementally, so an
@@ -109,7 +109,7 @@ default_branch=""
 # the one override for both scripts (a lift with `ci.yml` sets it once); the
 # step-0 scan below reads the same variable, so the file it checks and the run
 # it waits for cannot name two different workflows.
-tests_workflow_name="${WATCH_CI_WORKFLOW:-tests.yml}"
+tests_workflow_name="${WATCH_CI_WORKFLOW:-ci.yml}"
 # CI and every push must resolve to the tracked repository identity, even when
 # REPO overrides the slug used to look up checks.
 repo_slug="$repo_slug_override"
@@ -235,12 +235,12 @@ train_lock_attempts=0
 # and an unrelated process reusing the recorded pid made a finished train's
 # leftover lock look live. The owner records its process start time too, and a
 # pid whose start time differs is a different process.
-train_lock_process_start() {
+process_start_time() {
   ps -p "$1" -o lstart= 2>/dev/null | awk '{$1=$1; print}' || true
 }
 # Computed before taking the lock so the owner write right after mkdir stays a
 # single write, keeping the window where the lock has no readable owner short.
-train_lock_my_start="$(train_lock_process_start "$$")"
+train_lock_my_start="$(process_start_time "$$")"
 while true; do
   if mkdir "$train_lock_held" 2>/dev/null; then
     printf '%s %s\n%s\n' "$$" "$train_name" "$train_lock_my_start" > "$train_lock_held/owner"
@@ -261,7 +261,7 @@ while true; do
   owner_live=0
   if kill -0 "$owner_pid" 2>/dev/null; then
     if [ -n "$owner_start" ]; then
-      [ "$(train_lock_process_start "$owner_pid")" = "$owner_start" ] && owner_live=1
+      [ "$(process_start_time "$owner_pid")" = "$owner_start" ] && owner_live=1
     else
       # A lock written before start times were recorded: live only if the pid
       # is still running this script.
@@ -297,7 +297,7 @@ while true; do
     reaper_pid="$(awk 'NR==1' "$train_lock_reap/owner" 2>/dev/null || true)"
     reaper_start="$(awk 'NR==2' "$train_lock_reap/owner" 2>/dev/null || true)"
     if [ -z "$reaper_pid" ] || ! kill -0 "$reaper_pid" 2>/dev/null ||
-      [ "$(train_lock_process_start "$reaper_pid")" != "$reaper_start" ]; then
+      [ "$(process_start_time "$reaper_pid")" != "$reaper_start" ]; then
       # A reaper holds `reap` for a few milliseconds. One that is gone left
       # it behind; removing it here would reopen the race, so fail closed.
       printf 'train-push: a stale-lock recovery was interrupted.\n' >&2
@@ -349,8 +349,8 @@ resolve_default_branch() {
 resolve_ci_run() {
   local sha="$1"
   "$OPERATOR_GH" run list --repo "$repo_slug" --workflow "$tests_workflow_name" \
-    --event "${WATCH_CI_EVENT:-push}" --limit 40 --json databaseId,headSha,headBranch \
-    --jq ".[] | select(.headSha==\"$sha\" and .headBranch==\"$train_ref\") | .databaseId" 2>/dev/null | head -1
+    --event "${WATCH_CI_EVENT:-push}" --branch "$train_ref" --limit 40 --json databaseId,headSha,headBranch \
+    --jq ".[] | select(.headSha==\"$sha\") | .databaseId" 2>/dev/null | head -1
 }
 
 ci_run_attempt() {
@@ -483,9 +483,6 @@ require_repo_after_green() {
   fi
 }
 
-process_start_time() {
-  ps -p "$1" -o lstart= 2>/dev/null | awk '{$1=$1; print}' || true
-}
 
 read_watcher_heartbeat() {
   heartbeat_pid=""
@@ -601,7 +598,7 @@ if [ "$recover_existing" -eq 1 ]; then
     if ! [[ "$old_attempt" =~ ^[0-9]+$ ]]; then
       refuse "could not read the current attempt for completed run $run_id"
     fi
-    rerun_attempt="$(rerun_existing_run "$run_id" "$old_attempt")" || exit 1
+    rerun_attempt="$(rerun_existing_run "$run_id" "$old_attempt")" || exit 2
     say "sha already ran in ${run_url:-run $run_id} ($run_conclusion); rerunning its failed and cancelled jobs (attempt $rerun_attempt)"
   fi
 
@@ -613,7 +610,7 @@ if [ "$recover_existing" -eq 1 ]; then
     set +e
     (cd "$REPO" && REPO="$repo_slug" WATCH_CI_BRANCH="$train_ref" WATCH_CI_HEARTBEAT="$watch_heartbeat" \
       WATCH_CI_ATTEMPT="$rerun_attempt" \
-      "$script_dir/watch-ci.sh" "$watch_target") 2>&1 | tee "$watch_log"
+      WATCH_CI_WORKFLOW="$tests_workflow_name" "$script_dir/watch-ci.sh" "$watch_target") 2>&1 | tee "$watch_log"
     watch_rc="${PIPESTATUS[0]}"
     set -e
     run_url="$(grep -m1 '^CI_RUN_URL ' "$watch_log" 2>/dev/null | sed 's/^CI_RUN_URL //' || true)"
@@ -866,7 +863,7 @@ run_trigger_probe() {
   for _attempt in $(seq 1 "$probe_attempts"); do
     rid="$("$OPERATOR_GH" run list --repo "$repo_slug" \
       --branch "$probe_ref" --limit 20 --json databaseId,headSha,workflowName \
-      --jq ".[] | select(.headSha==\"$probe_sha\" and .workflowName==\"$want_name\") | .databaseId" 2>/dev/null | head -1)"
+      --jq ".[] | select(.headSha==\"$probe_sha\" and .workflowName==$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$want_name")) | .databaseId" 2>/dev/null | head -1)"
     [ -n "$rid" ] && break
     sleep "$probe_sleep"
   done
@@ -1029,7 +1026,7 @@ while true; do
   say "watching CI for $head_sha on $train_ref in $repo_slug (round $round of $max_rounds)"
   set +e
   (cd "$REPO" && REPO="$repo_slug" WATCH_CI_BRANCH="$train_ref" WATCH_CI_HEARTBEAT="$watch_heartbeat" \
-    "$script_dir/watch-ci.sh" "$head_sha") 2>&1 | tee "$watch_log"
+    WATCH_CI_WORKFLOW="$tests_workflow_name" "$script_dir/watch-ci.sh" "$head_sha") 2>&1 | tee "$watch_log"
   watch_rc="${PIPESTATUS[0]}"
   set -e
 
@@ -1114,35 +1111,4 @@ if [ "$verified_sha" != "$head_sha" ]; then
     "$head_sha" "$run_url"
 fi
 
-say "landing $head_sha on $remote/$default_branch"
-set +e
-push_to_origin "$remote" "$head_sha:refs/heads/$default_branch" 2>&1 | tee "$push_log"
-land_rc="${PIPESTATUS[0]}"
-set -e
-if [ "$land_rc" -ne 0 ]; then
-  # Branch protection rejecting the sha for want of a check is the one push
-  # failure with a specific remedy, so say what it is instead of leaving the
-  # operator to decode GH006.
-  land_reason="push of $head_sha to $remote/$default_branch failed; $remote/$train_ref still holds the tested sha"
-  if grep -qE 'GH006|equired status check|rotected branch update failed' "$push_log"; then
-    land_reason="refused: $head_sha has no status check on origin. Merge onto the train branch and push there; CI runs on the merge sha, then main fast-forwards."
-  fi
-  landing_failed "$land_reason" "$head_sha" "$run_url"
-fi
-
-# Outcome check, not just command check: a push can report success through a
-# wrapper (or fail on auth) while origin never moved.
-git -C "$REPO" fetch -q "$remote" "$default_branch" ||
-  landing_failed "could not verify $remote/$default_branch after push" "$head_sha" "$run_url"
-if ! git -C "$REPO" merge-base --is-ancestor "$head_sha" "$remote_default"; then
-  landing_failed "push reported success but $head_sha is not on $remote/$default_branch" "$head_sha" "$run_url"
-fi
-say "landed $head_sha on $remote/$default_branch"
-
-# The branch existed to carry the train through CI; once the sha is on main it
-# is noise. A failed delete does not un-land the commit, so it is a warning.
-if ! push_to_origin -q "$remote" --delete "$train_ref"; then
-  printf 'train-push: warning — could not delete %s/%s (delete it by hand)\n' "$remote" "$train_ref" >&2
-fi
-rm -f "$watch_heartbeat"
-say "done"
+land_verified_sha "$head_sha" "$run_url"

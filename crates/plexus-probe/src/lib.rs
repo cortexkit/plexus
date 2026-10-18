@@ -13,7 +13,8 @@ mod sandbox;
 mod schema;
 
 pub use sandbox::{
-    ActionInvoker, ProbeError, ProbeSandbox, MEMORY_LIMIT_BYTES, RUN_CEILING, WALL_TIMEOUT,
+    ActionInvoker, ProbeError, ProbeSandbox, MAX_SOURCE_BYTES, MEMORY_LIMIT_BYTES, RUN_CEILING,
+    WALL_TIMEOUT,
 };
 pub use schema::{
     ProbeValue, ReturnSchema, ReturnSchemaError, ReturnValidationError, ScalarSchema, ScalarValue,

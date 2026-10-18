@@ -7,10 +7,9 @@
 //! silently drops or duplicates rows is exactly the failure a migration reporting
 //! success would hide.
 //!
-//! TAKES A PATH, with no default, so it cannot be pointed at the live store by
-//! omission. Always run it against a `.backup` copy: the module holds an
-//! exclusive single-writer lease on the real file, and a copy is also what keeps
-//! the rehearsal from being the deploy.
+//! TAKES A PATH, with no default, and always creates a private SQLite backup
+//! before seeding or migrating anything. The source is opened read-only, so a
+//! rehearsal cannot become a deployment by accidentally naming the live store.
 //!
 //! Row counts alone are not sufficient and are not trusted here. A migration that
 //! never ran would also report every count unchanged, so newly required schema
@@ -25,12 +24,16 @@ fn main() {
     let path = args.next().expect(USAGE);
     if path == "--backup-live" {
         let live = args.next().expect("--backup-live requires the source path");
+        assert!(args.next().is_none(), "unexpected argument; {USAGE}");
         backup_live(&live);
         return;
     }
     match args.next().as_deref() {
-        None => run(&path),
-        Some("--seed-declared-changes") => run_with(&path, true),
+        None => backup_live(&path),
+        Some("--seed-declared-changes") => {
+            assert!(args.next().is_none(), "unexpected argument; {USAGE}");
+            backup_live_with_seed(&path, true);
+        }
         Some(other) => panic!("unknown argument {other:?}; {USAGE}"),
     }
 }
@@ -76,7 +79,7 @@ fn declared_expectations(
     version_before: i64,
     before: &BTreeMap<String, i64>,
 ) -> BTreeMap<&'static str, (i64, &'static DeclaredChange)> {
-    let conn = rusqlite::Connection::open(path).expect("open the copy for expectations");
+    let conn = open_existing(path).expect("open the copy for expectations");
     DECLARED_CHANGES
         .iter()
         .filter(|change| version_before < change.migration && before.contains_key(change.table))
@@ -138,7 +141,9 @@ fn seed_declared_variants(path: &str) {
         "seeding writes pre-48 recipient rows into the table migration 43 creates; this copy is at {}",
         version(path)
     );
-    let conn = rusqlite::Connection::open(path).expect("open the copy to seed");
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .expect("open existing private copy to seed");
     conn.execute_batch(
         r#"
 INSERT OR IGNORE INTO connections (connection_id, principal, app_key, status, resource_filters, created_at_ms, updated_at_ms)
@@ -181,10 +186,26 @@ fn prepare_backup(copy: &plexus_core::test_scratch::Scratch) {
 }
 
 fn backup_live(live: &str) {
+    backup_live_with_seed(live, false);
+}
+
+fn backup_live_with_seed(live: &str, seed: bool) {
+    let copy = private_source_copy(live);
+    println!(
+        "  rehearsing sqlite3 .backup copy: {}",
+        copy.path().display()
+    );
+    run_with(copy.path().to_str().expect("UTF-8 scratch copy"), seed);
+}
+
+fn private_source_copy(live: &str) -> plexus_core::test_scratch::Scratch {
+    let source = open_existing(live).expect("source must be an existing readable SQLite store");
+    drop(source);
     let copy = plexus_core::test_scratch::Scratch::database("migration45-live-backup");
     prepare_backup(&copy);
     let output = bounded_output(
         std::process::Command::new("sqlite3")
+            .arg("-readonly")
             .arg(live)
             .arg(format!(".backup '{}'", copy.path().display())),
     );
@@ -193,15 +214,16 @@ fn backup_live(live: &str) {
         "sqlite3 .backup: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    println!(
-        "  rehearsing sqlite3 .backup copy: {}",
-        copy.path().display()
-    );
-    run(copy.path().to_str().expect("UTF-8 scratch copy"));
+    copy
 }
 
+#[cfg(test)]
 fn run(path: &str) {
     run_with(path, false);
+}
+
+fn open_existing(path: &str) -> rusqlite::Result<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
 }
 
 fn run_with(path: &str, seed: bool) {
@@ -260,7 +282,7 @@ fn run_with(path: &str, seed: bool) {
         println!("  {table:<22} {b:>7} -> {a:<7} {verdict}");
     }
 
-    let conn = rusqlite::Connection::open(path).expect("reopen the copy");
+    let conn = open_existing(path).expect("reopen the copy");
     let null_keys: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM trigger_events WHERE event_key IS NULL",
@@ -486,7 +508,7 @@ fn row_snapshot(
     table: &str,
     columns: Option<&[String]>,
 ) -> (Vec<String>, Vec<Vec<rusqlite::types::Value>>) {
-    let conn = rusqlite::Connection::open(path).unwrap();
+    let conn = open_existing(path).unwrap();
     let columns = columns.map(|columns| columns.to_vec()).unwrap_or_else(|| {
         conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
             .unwrap()
@@ -528,7 +550,7 @@ fn bounded_output(command: &mut std::process::Command) -> std::process::Output {
 }
 
 fn version(path: &str) -> i64 {
-    rusqlite::Connection::open(path)
+    open_existing(path)
         .expect("open the copy")
         .query_row(
             "SELECT MAX(version) FROM cortexkit_schema_version",
@@ -539,7 +561,7 @@ fn version(path: &str) -> i64 {
 }
 
 fn counts(path: &str) -> BTreeMap<String, i64> {
-    let conn = rusqlite::Connection::open(path).expect("open the copy for counts");
+    let conn = open_existing(path).expect("open the copy for counts");
     // Enumerate every table, including SQLite and migration metadata: a new
     // table must appear in the report without anyone updating a manual list.
     let tables = conn
@@ -565,6 +587,38 @@ fn counts(path: &str) -> BTreeMap<String, i64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_mistyped_source_path_is_never_created() {
+        let missing = Scratch::file("missing-rehearsal-source", "absent.db");
+        assert!(open_existing(missing.path().to_str().unwrap()).is_err());
+        assert!(!missing.path().exists());
+    }
+
+    #[test]
+    fn rehearsal_mutations_cannot_modify_the_source() {
+        let source = Scratch::database("rehearsal-source");
+        let connection = rusqlite::Connection::open(source.path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sentinel (value TEXT); INSERT INTO sentinel VALUES ('original');",
+            )
+            .unwrap();
+        drop(connection);
+        let copy = private_source_copy(source.path().to_str().unwrap());
+        let writable = rusqlite::Connection::open(copy.path()).unwrap();
+        writable
+            .execute("UPDATE sentinel SET value='mutated'", [])
+            .unwrap();
+        drop(writable);
+        let original: String = open_existing(source.path().to_str().unwrap())
+            .unwrap()
+            .query_row("SELECT value FROM sentinel", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            original, "original",
+            "rehearsals must mutate only their private backup"
+        );
+    }
     #[cfg(unix)]
     #[test]
     fn backup_output_is_private() {

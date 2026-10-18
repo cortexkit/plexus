@@ -32,16 +32,11 @@ set -uo pipefail
 # accident, so a lifted copy watched THIS repository's runs for another repo's
 # trains. Both github.com URL forms are accepted; anything else refuses so the
 # watch never quietly targets the wrong repository.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/repository-identity.sh"
 repo_from_origin() {
   local url
   url="$(git config --get remote.origin.url 2>/dev/null)" || return 1
-  case "$url" in
-    git@github.com:*) url="${url#git@github.com:}" ;;
-    https://github.com/*) url="${url#https://github.com/}" ;;
-    ssh://git@github.com/*) url="${url#ssh://git@github.com/}" ;;
-    *) return 1 ;;
-  esac
-  printf '%s\n' "${url%.git}"
+  github_repository_slug "$url"
 }
 if [ -z "${REPO:-}" ]; then
   REPO="$(repo_from_origin)" || {
@@ -233,8 +228,9 @@ if [ -z "$RID" ]; then
   for _ in $(seq 1 "$RESOLVE_ATTEMPTS"); do
     if [ -n "$BRANCH" ]; then
       RID=$("$OPERATOR_GH" run list --repo "$REPO" --workflow "$WORKFLOW" --event "$EVENT" --limit 40 \
+        --branch "$BRANCH" \
         --json databaseId,headSha,headBranch \
-        --jq ".[] | select(.headSha==\"$WATCH_SHA\" and .headBranch==\"$BRANCH\") | .databaseId" | head -1)
+        --jq ".[] | select(.headSha==\"$WATCH_SHA\") | .databaseId" | head -1)
     else
       RID=$("$OPERATOR_GH" run list --repo "$REPO" --workflow "$WORKFLOW" --event "$EVENT" --limit 40 \
         --json databaseId,headSha \
@@ -309,7 +305,12 @@ while true; do
       undetermined "could not read job conclusions (conclusion=$CONC)"
     fi
     GATING_BAD="${GATING_BAD#bad=}"
-    if [ -z "$GATING_BAD" ]; then
+    if ! SUCCESS_COUNT=$(verdict_query "$RID" --json jobs \
+      --jq '[.jobs[] | select(.conclusion=="success")] | length') \
+      || ! [[ "$SUCCESS_COUNT" =~ ^[0-9]+$ ]]; then
+      undetermined "could not count successful jobs (conclusion=$CONC)"
+    fi
+    if [ -z "$GATING_BAD" ] && [ "$SUCCESS_COUNT" -gt 0 ]; then
       echo "CI_DONE run=$RID conclusion=$CONC jobs_all_passed=1${WATCH_ATTEMPT:+ attempt=$WATCH_ATTEMPT}"
       exit 0
     fi

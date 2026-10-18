@@ -29,7 +29,6 @@ computer and browser plane, for services with no structured interface.
 | `crates/plexus-conformance` | Conformance checklist, stub vendors and live drift checker. |
 | `catalog/` | Reviewed vendor manifests (`*.jsonc`), ingested at startup. |
 | `schemas/` | JSON schema for the GitHub App handle import inventory. |
-| `benches/js-interpreter-eval` | Standalone evaluation of JavaScript interpreters for the probe sandbox; not part of the workspace. |
 | `scripts/` | The test gate, guest and release builds, and maintainer tooling. |
 
 [STRUCTURE.md](STRUCTURE.md) says where new code goes, and

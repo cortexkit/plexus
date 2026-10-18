@@ -20,12 +20,7 @@
 
 use std::time::Duration;
 
-use subc_control::{ClientControlRequest, ClientControlResponse};
-use subc_protocol::{
-    BindIdentity, Flags, Frame, FrameType, Priority, RouteTarget, PROTOCOL_VERSION,
-};
-use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
-use tokio::net::TcpStream;
+use subc_protocol::{BindIdentity, RouteTarget};
 use tokio::time::timeout;
 
 const MODULE_ID: &str = "plexus";
@@ -59,89 +54,37 @@ async fn main() {
         }
     };
 
-    let connection =
-        connection_file::read(&connection_path).expect("read the daemon connection file");
-    let endpoint = connection
-        .endpoints
-        .first()
-        .expect("the daemon publishes at least one endpoint");
-    let mut stream = TcpStream::connect(format!("{}:{}", endpoint.host, endpoint.port))
-        .await
-        .expect("connect to the daemon");
-    authenticate_client(&mut stream, &connection, DEADLINE)
-        .await
-        .expect("authenticate to the daemon");
-
-    let (channel, epoch) = open_route(&mut stream).await;
-
-    let frame = Frame::build_with_version(
-        PROTOCOL_VERSION,
-        FrameType::Request,
-        Flags::new(false, Priority::Interactive, false),
-        channel,
-        epoch,
-        1,
-        serde_json::to_vec(&parsed).expect("serialize the tool call"),
+    let consumer = timeout(
+        DEADLINE,
+        subc_client_rs::SubcConsumer::connect(
+            std::path::Path::new(&connection_path),
+            subc_client_rs::ConsumerOptions::default(),
+        ),
     )
-    .expect("build the tool call");
-    write_frame(&mut stream, &frame)
-        .await
-        .expect("write the tool frame");
-
-    let reply = timeout(DEADLINE, read_frame(&mut stream))
-        .await
-        .expect("tool reply deadline")
-        .expect("read the tool reply")
-        .expect("daemon connection remains open");
+    .await
+    .expect("daemon connection deadline")
+    .expect("connect to the daemon");
+    // The consumer routes by channel, epoch and correlation, so notifications
+    // or unrelated frames cannot be mistaken for this operation's answer.
+    let reply = timeout(
+        DEADLINE,
+        consumer.call(
+            RouteTarget::ToolProvider {
+                module_id: MODULE_ID.to_owned(),
+            },
+            BindIdentity::new("/tmp", "facade-call", "operator"),
+            serde_json::to_vec(&parsed).expect("serialize the tool call"),
+            subc_client_rs::CallOptions::default(),
+        ),
+    )
+    .await
+    .expect("tool reply deadline")
+    .expect("tool call failed");
 
     // Pretty-print when the reply is JSON, raw otherwise — a module error that is
     // not JSON is exactly when you least want the output swallowed.
-    match serde_json::from_slice::<serde_json::Value>(&reply.body) {
+    match serde_json::from_slice::<serde_json::Value>(&reply) {
         Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
-        Err(_) => println!("{}", String::from_utf8_lossy(&reply.body)),
-    }
-}
-
-async fn open_route(stream: &mut TcpStream) -> (u16, u32) {
-    let request = ClientControlRequest::RouteOpen {
-        scope: None,
-        role_versions: None,
-        target: RouteTarget::ToolProvider {
-            module_id: MODULE_ID.to_string(),
-        },
-        identity: BindIdentity::new("/tmp", "facade-call".to_string(), "operator".to_string()),
-        consumer_identity: None,
-        consumer_capabilities: None,
-        admission_facts: None,
-    };
-    let frame = Frame::build_with_version(
-        PROTOCOL_VERSION,
-        FrameType::Request,
-        Flags::new(false, Priority::Interactive, false),
-        0,
-        0,
-        1,
-        serde_json::to_vec(&request).expect("serialize route open"),
-    )
-    .expect("build route open");
-    write_frame(stream, &frame).await.expect("write route open");
-    let reply = timeout(DEADLINE, read_frame(stream))
-        .await
-        .expect("route open deadline")
-        .expect("read route open reply")
-        .expect("daemon connection remains open");
-    match serde_json::from_slice::<ClientControlResponse>(&reply.body) {
-        Ok(ClientControlResponse::RouteOpen {
-            route_channel,
-            route_epoch,
-        }) => (route_channel, route_epoch),
-        other => {
-            eprintln!(
-                "route open refused: {}",
-                String::from_utf8_lossy(&reply.body)
-            );
-            eprintln!("parsed: {other:?}");
-            std::process::exit(1);
-        }
+        Err(_) => println!("{}", String::from_utf8_lossy(&reply)),
     }
 }

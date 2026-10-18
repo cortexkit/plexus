@@ -11,6 +11,7 @@
 //! module must be stopped before durable state can cross to a fresh store.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -22,6 +23,7 @@ const DEFAULT_MODULE_ID: &str = "plexus";
 /// this" from "the daemon was unreachable".
 const EXIT_REFUSED: u8 = 1;
 const EXIT_TRANSPORT: u8 = 2;
+const EXIT_UNKNOWN: u8 = 3;
 const EXIT_USAGE: u8 = 64;
 
 fn main() -> ExitCode {
@@ -78,6 +80,13 @@ impl Failure {
             message: message.into(),
         }
     }
+
+    fn unknown(message: impl fmt::Display) -> Self {
+        Self {
+            code: EXIT_UNKNOWN,
+            message: format!("outcome unknown: {message}; inspect daemon state before retrying"),
+        }
+    }
 }
 
 const USAGE: &str = "\
@@ -121,6 +130,12 @@ import-store --from <old.db> --to <new.db>
 common flags (online commands):
   --subc <path>      daemon connection file (required)
   --module <id>      plexus module id (default: plexus)
+  --version         print the client version without contacting the daemon
+
+Grant, set-policy and remove-policy apply immediately; they do not support a
+preview or --apply. Inspect list-grants/list-policies before changing authority.
+Transport exit 2 means no daemon connection was made; exit 3 means the outcome
+is unknown after submission. Inspect state before retrying an exit-3 operation.
 
 recipients-add|recipients-remove --connection <id> [--agent <id>] --recipient <id> [--apply]
 recipients-list --connection <id> [--agent <id>]
@@ -130,7 +145,7 @@ recipients-list --connection <id> [--agent <id>]
 
 issue-ticket --app <key> --actions a,b,c|'*' [--credential-id <id>]
              [--risk read|write|destructive] [--connection <id>]
-  Supply a vault credential id. Supply neither when the
+   Supply a vault credential id. Omit it when the
   reviewed manifest declares auth.mode=none. A reference must be readable by reserved:plexus.
   --risk and --actions set the connection's initial authority ceiling;
   every later grant must fit inside it. --actions is required; pass '*' to
@@ -154,7 +169,7 @@ grant --connection <id> --actions a,b,c|'*' [--grantee <principal>]
     watches simply stop collecting, with no error anywhere. Revoking is the
     normal way to end a grant; use revoke-grant, or the grants list in the app.
   --kind events_consume lets another principal read and ack the events this
-  connection already collected; name it with --grantee (e.g. a supervised
+   connection already collected; --grantee is required (e.g. a supervised
   module as reserved:<module-id>). It grants no polling and no invoking.
 
 revoke-grant --grant <id>
@@ -162,7 +177,7 @@ revoke-grant --grant <id>
 list-grants [--connection <id>] [--all]
     Every grant you hold, with the vendor named and its state derived
     (until_revoked | live | expired). Omit --connection for all of them.
-    Poll authority no longer expires, so revocation is how a watch ends --
+    Poll authority need not expire, so revocation is how a watch ends --
     which only works if you can see what to revoke.
     Expired grants are hidden by default and counted in the summary line;
     --all shows them. They stay until their connection is deleted
@@ -174,9 +189,10 @@ set-policy --connection <id> --action <selector> --effect allow|ask_first|block
     matching actions; use it only when that is the intended posture. `*` matches
     every action on the connection.
 
-list-policies [--connection <id>]
+list-policies [--connection <id>] [--all]
     Every policy you hold, with the vendor named and state derived
     (until_revoked | live | expired). Omit --connection for all of them.
+    Expired policies are hidden and counted by default; --all includes them.
 
 remove-policy --policy <id>
 
@@ -220,7 +236,8 @@ delete-connection --connection <id> [--apply]
     Deletes the connection and every row keyed by it: catalog actions, expired
     grants, policies, requests, reservations, tickets, subscriptions, events
     and reconciliations. Its audit entries and grant revocations are kept;
-    they age out with audit retention. Refused while any grant on it is live;
+    grant revocations remain durable, while audit rows age out with retention.
+    Refused while any grant on it is live;
     revoke those first (list-grants --connection <id>, then revoke-grant).
     Refused for a GitHub App handle's connection (github-handle-*), which
     ends with its handle. Any status may be deleted, a revoked one included.
@@ -250,42 +267,69 @@ set-web-search-allowance <name> --clear [--apply]
 
 fn run(arguments: &[String]) -> Result<(), Failure> {
     let Some(command) = arguments.first() else {
-        println!("{USAGE}");
+        eprintln!("{USAGE}");
         return Err(Failure::usage("a command is required"));
     };
     if command == "--help" || command == "-h" || command == "help" {
         println!("{USAGE}");
         return Ok(());
     }
-    let connector_command = if command == "connector-home" {
-        Some(
-            arguments
-                .get(1)
-                .ok_or_else(|| Failure::usage("connector-home requires status"))?
-                .as_str(),
-        )
+    if command == "--version" {
+        println!("ck-plexus-admin {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let connector_position = if command == "connector-home" {
+        let mut index = 1;
+        while let Some(argument) = arguments.get(index) {
+            if !argument.starts_with('-') {
+                break;
+            }
+            index += if matches!(argument.as_str(), "--help" | "-h" | "--all" | "--apply") {
+                1
+            } else {
+                2
+            };
+        }
+        Some(index)
     } else {
         None
     };
+    let connector_command = connector_position
+        .map(|index| {
+            arguments
+                .get(index)
+                .map(String::as_str)
+                .ok_or_else(|| Failure::usage("connector-home requires status"))
+        })
+        .transpose()?;
     if connector_command == Some("claim") {
         return Err(Failure::usage(
             "connector-home claim was removed; use ck roles take connector_home",
         ));
     }
-    let command_args = &arguments[if connector_command.is_some() { 2 } else { 1 }..];
+    let flag_arguments: Vec<String> = arguments
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(index, _)| Some(*index) != connector_position)
+        .map(|(_, value)| value.clone())
+        .collect();
     let flags = if matches!(
         command.as_str(),
         "set-web-search-order" | "set-web-search-allowance"
     ) {
-        Flags::parse_positionals(command_args, true)?
+        Flags::parse_positionals(&flag_arguments, true)?
     } else {
-        Flags::parse(command_args)?
+        Flags::parse(&flag_arguments)?
     };
     if flags.help {
         println!("{USAGE}");
         return Ok(());
     }
     if command == "import-store" {
+        if let Some(flag) = flags.bare.first() {
+            return Err(Failure::usage(format!("unknown import-store flag {flag}")));
+        }
         for (flag, _) in &flags.values {
             if !matches!(flag.as_str(), "--from" | "--to") {
                 return Err(Failure::usage(format!("unknown import-store flag {flag}")));
@@ -322,10 +366,11 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         );
         return Ok(());
     }
-    if let Some(accepted) = accepted_flags(command, connector_command) {
+    if let Some(accepted) = accepted_flags(command) {
         flags.refuse_unknown(accepted)?;
     }
     if command == "issue-ticket" {
+        validate_ticket_flags(&flags)?;
         let connection_file = flags.required("--subc")?;
         let module_id = flags.value("--module").unwrap_or(DEFAULT_MODULE_ID);
         let app = flags.required("--app")?;
@@ -358,7 +403,7 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
             recipients_request(command, &flags)?
         }
         other => {
-            println!("{USAGE}");
+            eprintln!("{USAGE}");
             return Err(Failure::usage(format!("unknown command '{other}'")));
         }
     };
@@ -395,22 +440,13 @@ fn connector_home_request(command: &str, _flags: &Flags) -> Result<(&'static str
 /// module to call.
 const COMMON_FLAGS: &[&str] = &["--subc", "--module"];
 
-/// The flags one command reads, beyond [`COMMON_FLAGS`]; `None` for a command
-/// this table does not know, which `run` then refuses as an unknown command.
-///
-/// Any other flag is refused by name. Without this list a mistyped flag was
-/// parsed, never read, and the command ran with that flag's default: `grant
-/// --action create_issue` (for `--actions`) granted every action up to the
-/// requested risk.
-fn accepted_flags(
-    command: &str,
-    connector_command: Option<&str>,
-) -> Option<&'static [&'static str]> {
-    Some(match (command, connector_command) {
-        ("connector-home", _) => &[],
-        // `--handle-file` is accepted only so the removed flag gets its own
-        // refusal pointing at `--credential-id`.
-        ("issue-ticket", _) => &[
+/// The command-specific flags, in addition to [`COMMON_FLAGS`]. Unknown flags
+/// are refused so a mistyped selector cannot silently use a wider default.
+fn accepted_flags(command: &str) -> Option<&'static [&'static str]> {
+    Some(match command {
+        "connector-home" => &[],
+        // Accept --handle-file only to explain that --credential-id replaced it.
+        "issue-ticket" => &[
             "--app",
             "--actions",
             "--credential-id",
@@ -418,7 +454,7 @@ fn accepted_flags(
             "--connection",
             "--handle-file",
         ],
-        ("grant", _) => &[
+        "grant" => &[
             "--connection",
             "--actions",
             "--grantee",
@@ -426,15 +462,15 @@ fn accepted_flags(
             "--risk",
             "--expires-ms",
         ],
-        ("revoke-grant", _) => &["--grant"],
-        ("widen-ceiling", _) => &["--connection", "--actions", "--apply"],
-        ("list-grants", _) => &["--connection", "--all"],
-        ("set-policy", _) => &["--connection", "--action", "--effect", "--expires-ms"],
-        ("list-policies", _) => &["--connection"],
-        ("remove-policy", _) => &["--policy"],
-        ("review-action", _) => &["--connection", "--action"],
-        ("repin-action", _) => &["--connection", "--action", "--expected-hash"],
-        ("handle-grant", _) => &[
+        "revoke-grant" => &["--grant"],
+        "widen-ceiling" => &["--connection", "--actions", "--apply"],
+        "list-grants" => &["--connection", "--all"],
+        "set-policy" => &["--connection", "--action", "--effect", "--expires-ms"],
+        "list-policies" => &["--connection", "--all"],
+        "remove-policy" => &["--policy"],
+        "review-action" => &["--connection", "--action"],
+        "repin-action" => &["--connection", "--action", "--expected-hash"],
+        "handle-grant" => &[
             "--handle",
             "--actions",
             "--kind",
@@ -442,16 +478,16 @@ fn accepted_flags(
             "--effect",
             "--apply",
         ],
-        ("handle-bind", _) => &["--handle", "--repositories", "--apply"],
-        ("handle-unbind", _) => &["--handle", "--repo", "--apply"],
-        ("delete-connection", _) => &["--connection", "--apply"],
-        ("rebind-credential", _) => &["--connection", "--credential-id", "--apply"],
-        ("set-web-search-limit", _) => &["--backend", "--per-caller", "--per-backend", "--apply"],
-        ("set-web-search-order" | "set-web-search-allowance", _) => &["--clear", "--apply"],
-        ("recipients-add" | "recipients-remove", _) => {
+        "handle-bind" => &["--handle", "--repositories", "--apply"],
+        "handle-unbind" => &["--handle", "--repo", "--apply"],
+        "delete-connection" => &["--connection", "--apply"],
+        "rebind-credential" => &["--connection", "--credential-id", "--apply"],
+        "set-web-search-limit" => &["--backend", "--per-caller", "--per-backend", "--apply"],
+        "set-web-search-order" | "set-web-search-allowance" => &["--clear", "--apply"],
+        "recipients-add" | "recipients-remove" => {
             &["--connection", "--agent", "--recipient", "--apply"]
         }
-        ("recipients-list", _) => &["--connection", "--agent"],
+        "recipients-list" => &["--connection", "--agent"],
         _ => return None,
     })
 }
@@ -676,6 +712,30 @@ fn issue_ticket_request(flags: &Flags, auth_mode: &str) -> Result<(&'static str,
     Ok((plexus_module::manifest::ADMIN_ISSUE_TICKET_OP, params))
 }
 
+fn validate_ticket_flags(flags: &Flags) -> Result<(), Failure> {
+    flags.required("--app")?;
+    flags.action_selectors()?;
+    if flags.value("--handle-file").is_some() {
+        return Err(Failure::usage(
+            "handle_bindings_removed: use --credential-id",
+        ));
+    }
+    if let Some(id) = flags.value("--credential-id") {
+        if !plexus_core::credentials::valid_credential_id(id) {
+            return Err(Failure::usage("invalid --credential-id"));
+        }
+    }
+    if !matches!(
+        flags.value("--risk").unwrap_or("read"),
+        "read" | "write" | "destructive"
+    ) {
+        return Err(Failure::usage(
+            "--risk must be one of: read, write, destructive",
+        ));
+    }
+    Ok(())
+}
+
 /// The grant kinds (`--kind`) this CLI will mint.
 ///
 /// This one list is used for the membership check and the refusal message,
@@ -702,6 +762,7 @@ fn issue_ticket_request(flags: &Flags, auth_mode: &str) -> Result<(&'static str,
 ///   polling, no invoking, no credential use), because the vendor call
 ///   already happened under someone else's authority.
 const GRANT_KINDS: [&str; 4] = ["invoke", "connection_admin", "poll", "events_consume"];
+const POLICY_EFFECTS: [&str; 3] = ["allow", "ask_first", "block"];
 
 fn grant_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
     let connection = flags.required("--connection")?;
@@ -714,6 +775,9 @@ fn grant_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
             GRANT_KINDS.join(", ")
         )));
     }
+    if kind == "events_consume" {
+        flags.required("--grantee")?;
+    }
     let mut params = json!({
         "connection_id": connection,
         "authority_kind": kind,
@@ -724,25 +788,15 @@ fn grant_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
         params["grantee_principal"] = json!(grantee);
     }
     if let Some(expires) = flags.value("--expires-ms") {
-        let expires: i64 = expires
-            .parse()
-            .map_err(|_| Failure::usage("--expires-ms must be an epoch milliseconds integer"))?;
+        let expires = future_expiry(expires)?;
         params["expires_at"] = json!(expires);
     }
     Ok((plexus_module::manifest::ADMIN_GRANT_OP, params))
 }
 
 /// Read every grant the operator holds, optionally narrowed to one connection.
-///
-/// This op has been served since the grants surface shipped and had no CLI
-/// command until now, which is the reachability gap this repo keeps producing:
-/// a capability exists on the wire, the operator's own tool cannot reach it, and
-/// nothing fails — it is simply never called.
-///
-/// It matters more than a convenience here. Poll authority no longer expires, so
-/// REVOCATION replaced deadlines as the way a watch ends. An operator who cannot
-/// LIST grants cannot revoke deliberately, which would leave the expiry reversal
-/// half-built: the deadline removed and the thing meant to replace it unreachable.
+/// Poll grants may have no deadline, so listing must make explicit revocation
+/// possible without hiding the identities of the live grants.
 fn list_grants_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
     let params = match flags.value("--connection") {
         Some(connection) => json!({ "connection_id": connection }),
@@ -763,7 +817,7 @@ fn set_policy_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
     let connection = flags.required("--connection")?;
     let action_selector = flags.required("--action")?;
     let effect = flags.required("--effect")?;
-    if !matches!(effect, "allow" | "ask_first" | "block") {
+    if !POLICY_EFFECTS.contains(&effect) {
         return Err(Failure::usage(
             "--effect must be one of: allow, ask_first, block",
         ));
@@ -774,12 +828,27 @@ fn set_policy_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
         "effect": effect,
     });
     if let Some(expires) = flags.value("--expires-ms") {
-        let expires: i64 = expires
-            .parse()
-            .map_err(|_| Failure::usage("--expires-ms must be an epoch milliseconds integer"))?;
+        let expires = future_expiry(expires)?;
         params["expires_at"] = json!(expires);
     }
     Ok((plexus_module::manifest::ADMIN_SET_POLICY_OP, params))
+}
+
+fn future_expiry(value: &str) -> Result<i64, Failure> {
+    let expires: i64 = value
+        .parse()
+        .map_err(|_| Failure::usage("--expires-ms must be a future epoch milliseconds integer"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| {
+            Failure::usage("cannot validate --expires-ms: system clock is before the epoch")
+        })?;
+    if i128::from(expires) <= now.as_millis() as i128 {
+        return Err(Failure::usage(
+            "--expires-ms must be in the future, in epoch milliseconds (not seconds)",
+        ));
+    }
+    Ok(expires)
 }
 
 fn list_policies_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
@@ -838,7 +907,7 @@ fn handle_grant_request(flags: &Flags) -> Result<(&'static str, Value), Failure>
                 }
             }
             return Ok((
-                "github.handle.grant",
+                plexus_module::manifest::GITHUB_GRANT_OP,
                 json!({
                     "kind": "poll",
                     "app_handle_id": handle,
@@ -854,13 +923,13 @@ fn handle_grant_request(flags: &Flags) -> Result<(&'static str, Value), Failure>
     // after the carrier principal.
     let module = flags.required("--carrier")?;
     let effect = flags.required("--effect")?;
-    if !matches!(effect, "allow" | "ask_first" | "block") {
+    if !POLICY_EFFECTS.contains(&effect) {
         return Err(Failure::usage(
             "--effect must be one of: allow, ask_first, block",
         ));
     }
     Ok((
-        "github.handle.grant",
+        plexus_module::manifest::GITHUB_GRANT_OP,
         json!({
             "app_handle_id": handle,
             "actions": actions,
@@ -900,7 +969,7 @@ fn handle_bind_request(flags: &Flags) -> Result<(&'static str, Value), Failure> 
         ));
     }
     Ok((
-        "github.handle.bind",
+        plexus_module::manifest::GITHUB_BIND_OP,
         json!({
             "app_handle_id": handle,
             "repositories": repositories,
@@ -1079,9 +1148,9 @@ fn call_module(
                 subc_client_rs::CallOptions::default(),
             )
             .await
-            .map_err(|error| Failure::transport(format!("{operation}: {error}")))?;
+            .map_err(|error| Failure::unknown(format!("{operation}: {error}")))?;
         serde_json::from_slice(&bytes)
-            .map_err(|error| Failure::transport(format!("decode response: {error}")))
+            .map_err(|error| Failure::unknown(format!("decode response: {error}")))
     })
 }
 
@@ -1129,7 +1198,12 @@ fn report(command: &str, response: &Value, flags: &Flags) -> Result<(), Failure>
         let message = error["message"].as_str().unwrap_or("no message");
         return Err(Failure::refused(format!("{code}: {message}")));
     }
-    let result = &response["result"];
+    let result = response
+        .get("result")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| {
+            Failure::unknown("malformed management response: expected result object or error")
+        })?;
     match command {
         "recipients-add" | "recipients-remove" | "recipients-list" => println!(
             "{}",
@@ -1184,7 +1258,7 @@ fn report(command: &str, response: &Value, flags: &Flags) -> Result<(), Failure>
                     text(&grant["app_key"]),
                     text(&grant["authority_kind"]),
                     text(&grant["state"]),
-                    text(&grant["action_selectors"]),
+                    list(&grant["action_selectors"]),
                 );
             }
             // A filter that says nothing is indistinguishable from an empty set, so
@@ -1207,7 +1281,8 @@ fn report(command: &str, response: &Value, flags: &Flags) -> Result<(), Failure>
                 println!("no policies");
                 return Ok(());
             }
-            for policy in &policies {
+            let (shown, hidden) = partition_grants(&policies, flags.has("--all"));
+            for policy in &shown {
                 println!(
                     "{}  {}  {}  {}  {}  {}",
                     text(&policy["policy_id"]),
@@ -1218,7 +1293,10 @@ fn report(command: &str, response: &Value, flags: &Flags) -> Result<(), Failure>
                     text(&policy["expires_at"]),
                 );
             }
-            println!("{} policy(s)", policies.len());
+            println!(
+                "{} policy(s), {hidden} expired hidden (use --all)",
+                shown.len()
+            );
         }
         "remove-policy" => {
             if result["removed"].as_bool().unwrap_or(false) {
@@ -1586,6 +1664,112 @@ fn schema_type(schema: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn version_does_not_contact_the_daemon() {
+        super::run(&["--version".to_owned()]).unwrap();
+    }
+    #[test]
+    fn post_submission_failures_warn_against_blind_retries() {
+        let error = super::Failure::unknown("connection closed before reply");
+        assert_eq!(error.code, 3);
+        assert!(error.message.contains("outcome unknown"));
+        assert!(error
+            .message
+            .contains("inspect daemon state before retrying"));
+        assert_eq!(super::Failure::transport("connect failed").code, 2);
+    }
+    #[test]
+    fn malformed_management_replies_are_not_success() {
+        for response in [serde_json::json!({}), serde_json::json!({"result": null})] {
+            let error = super::report("grant", &response, &flags(&[])).unwrap_err();
+            assert_eq!(error.code, super::EXIT_UNKNOWN);
+        }
+    }
+
+    #[test]
+    fn import_store_refuses_unconsumed_bare_flags_before_opening_a_store() {
+        for bare in ["--all", "--apply"] {
+            let args = [
+                "import-store",
+                "--from",
+                "/absent/from",
+                "--to",
+                "/absent/to",
+                bare,
+            ]
+            .map(str::to_owned);
+            let error = super::run(&args).unwrap_err();
+            assert_eq!(error.code, super::EXIT_USAGE);
+            assert!(error.message.contains(bare), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn consume_grants_require_an_explicit_grantee() {
+        let error = super::grant_request(&flags(&[
+            "--connection",
+            "c",
+            "--actions",
+            "*",
+            "--kind",
+            "events_consume",
+        ]))
+        .unwrap_err();
+        assert!(error.message.contains("--grantee"));
+    }
+
+    #[test]
+    fn expiry_must_be_a_future_epoch_millisecond_timestamp() {
+        for expiry in ["0", "-1", "1767225600", "1000000000000"] {
+            for command in ["grant", "set-policy"] {
+                let flags = flags(&[
+                    "--connection",
+                    "c",
+                    "--actions",
+                    "*",
+                    "--action",
+                    "a",
+                    "--effect",
+                    "allow",
+                    "--expires-ms",
+                    expiry,
+                ]);
+                let result = if command == "grant" {
+                    super::grant_request(&flags)
+                } else {
+                    super::set_policy_request(&flags)
+                };
+                assert!(result.is_err(), "{command} accepted {expiry}");
+            }
+        }
+    }
+
+    #[test]
+    fn ticket_flags_are_validated_before_catalog_contact() {
+        let args = [
+            "issue-ticket",
+            "--subc",
+            "/absent/daemon",
+            "--app",
+            "linear",
+        ]
+        .map(str::to_owned);
+        let error = super::run(&args).unwrap_err();
+        assert_eq!(error.code, super::EXIT_USAGE);
+        assert!(error.message.contains("--actions"));
+    }
+
+    #[test]
+    fn connector_home_accepts_common_flags_before_its_subcommand() {
+        let args = ["connector-home", "--subc", "/absent/daemon", "claim"].map(str::to_owned);
+        let error = super::run(&args).unwrap_err();
+        assert_eq!(error.code, super::EXIT_USAGE);
+        assert!(
+            error.message.contains("claim was removed"),
+            "{}",
+            error.message
+        );
+    }
     use super::*;
 
     #[test]
@@ -1603,7 +1787,6 @@ mod tests {
         assert_eq!(parsed.value("--reason"), Some("bootstrap"));
         assert!(parsed.has("--apply"));
     }
-    use plexus_core::test_scratch::Scratch;
 
     #[test]
     fn import_store_is_offline_and_requires_distinct_path_flags() {
@@ -1766,9 +1949,9 @@ mod tests {
         assert!(refused.message.contains("--action "), "{}", refused.message);
 
         // A bare flag is refused where the command does not read it.
-        let refused = run(&args(&["list-policies", "--subc", "x", "--all"]))
-            .expect_err("--all is not a list-policies flag");
-        assert!(refused.message.contains("--all"), "{}", refused.message);
+        let refused = run(&args(&["list-policies", "--subc", "x", "--apply"]))
+            .expect_err("--apply is not a list-policies flag");
+        assert!(refused.message.contains("--apply"), "{}", refused.message);
 
         let refused = run(&args(&[
             "grant",
@@ -1811,7 +1994,7 @@ mod tests {
                 continue;
             };
             for command in head.split('|') {
-                let Some(accepted) = accepted_flags(command, None) else {
+                let Some(accepted) = accepted_flags(command) else {
                     continue;
                 };
                 for word in block.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
@@ -1910,6 +2093,8 @@ mod tests {
                 "c1".to_string(),
                 "--kind".to_string(),
                 kind.to_string(),
+                "--grantee".to_string(),
+                "module:consumer".to_string(),
                 "--expires-ms".to_string(),
                 "1900000000000".to_string(),
                 "--actions".to_string(),
@@ -2047,16 +2232,14 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_handle_file_is_refused_rather_than_sent() {
-        let path = Scratch::file("admin-empty", "handle.txt");
-        std::fs::write(&path, "\n").expect("write handle");
+    fn the_removed_handle_file_flag_is_refused_without_reading_a_file() {
         let failure = issue_ticket_request(
-            &flags(&["--app", "linear", "--handle-file", &path.to_string_lossy()]),
+            &flags(&["--app", "linear", "--handle-file", "/not/read"]),
             "ApiKey",
         )
-        .expect_err("an empty handle must be refused");
-        std::fs::remove_file(&path).ok();
+        .expect_err("the removed flag must be refused");
         assert_eq!(failure.code, EXIT_USAGE);
+        assert!(failure.message.contains("handle_bindings_removed"));
     }
 
     #[test]
@@ -2254,7 +2437,7 @@ mod tests {
             "get_job, get_run",
         ]);
         preview
-            .refuse_unknown(accepted_flags("widen-ceiling", None).unwrap())
+            .refuse_unknown(accepted_flags("widen-ceiling").unwrap())
             .unwrap();
         let (method, params) = widen_ceiling_request(&preview).unwrap();
         assert_eq!(method, "plexus.admin.widen_ceiling");

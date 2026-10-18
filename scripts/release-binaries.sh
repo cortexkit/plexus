@@ -24,6 +24,10 @@
 set -eu
 
 cd "$(dirname "$0")/.."
+if [ "$(uname -s)" != Darwin ]; then
+  echo "release-binaries: this deployment lane requires macOS (codesign and LC_UUID)" >&2
+  exit 2
+fi
 
 echo "==> lock: $(shasum -a 256 Cargo.lock | cut -c1-16)  (committed set)"
 
@@ -52,12 +56,9 @@ cargo build --release --locked -p plexus-module --bin ck-plexus --bin ck-plexus-
 # script's environment, which is why its LC_UUID is unchanged across a rebuild
 # that moves the daemon's.
 head_sha=$(git rev-parse HEAD)
-# `grep -c` rather than `grep -q`: -q exits on the first match and closes the
-# pipe, so `strings` takes SIGPIPE and the pipeline returns 141 under pipefail --
-# a PRESENT sha would read as absent and refuse a correct binary. This file does
-# not set pipefail today, which is the only reason the -q form worked; a guard
-# that is correct because of a flag nobody chose inverts the day someone adds it.
-if [ "$(strings target/release/ck-plexus | grep -cF "$head_sha")" -eq 0 ]; then
+# A private executable copy reports the same build identity as health. Matching
+# that field exactly rejects dirty builds and incidental hashes in binary data.
+if ! bash scripts/lib/verify-build-commit.sh target/release/ck-plexus "$head_sha"; then
   echo "REFUSED: ck-plexus does not carry HEAD $head_sha" >&2
   echo "  The build script did not re-run, so its embedded commit is stale." >&2
   echo "  Remedy: touch .git/HEAD and the ref under .git/refs/heads/, then" >&2
