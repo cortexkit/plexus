@@ -7,7 +7,7 @@ pub(crate) mod validation;
 pub mod vendor_band;
 
 use crate::credentials::CredentialSource;
-use crate::github::config::claim_lease_seconds;
+use crate::github::config::CLAIM_LEASE_SECONDS;
 use crate::github::receipt::Claim;
 use crate::governance::GovernanceEngine;
 use crate::storage::PlexusStore;
@@ -30,23 +30,23 @@ pub fn bot_request_scoped<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     request: &Value,
     nonce: &str,
     request_id: &str,
-    owner: &str,
+    claim_owner: &str,
     now: i64,
 ) -> Value {
     let generation = match store.github_repo_binding_generation() {
         Ok(generation) => generation,
         Err(error) => {
             eprintln!(warn storage: "GitHub binding generation preflight failed for request {request_id}, nonce {nonce}: {error}");
-            let reply = gates::replay_scoped(
+            let mut reply = gates::replay_scoped(
                 store,
                 caller_principal,
                 scope,
                 request,
                 nonce,
                 request_id,
-                owner,
+                claim_owner,
                 now,
-                claim_lease_seconds(None),
+                CLAIM_LEASE_SECONDS,
             );
             let outcome = if matches!(
                 reply.claim,
@@ -54,8 +54,12 @@ pub fn bot_request_scoped<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             ) {
                 replay_or_refusal(&reply)
             } else {
+                reply.refusal_code = Some("store_failure".into());
                 json!({"status":"refused","refusal_code":"store_failure"})
             };
+            if let Err(error) = store.audit_github_facade(&reply) {
+                eprintln!(error storage: "GitHub facade audit failed for nonce {nonce}, request {}: {error}", reply.request_id);
+            }
             return json!({"result":outcome});
         }
     };
@@ -66,18 +70,20 @@ pub fn bot_request_scoped<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         request,
         nonce,
         request_id,
-        owner,
+        claim_owner,
         now,
-        claim_lease_seconds(None),
+        CLAIM_LEASE_SECONDS,
     );
     let outcome = match reply.claim.as_ref() {
         Some(Claim::PendingApproval(row)) => {
             json!({"status":"pending_approval", "action_request_id":row.action_request_id})
         }
-        Some(Claim::Owned(_)) => vendor_band::run(engine, store, &mut reply, nonce, owner, now),
+        Some(Claim::Owned(_)) => {
+            vendor_band::run(engine, store, &mut reply, nonce, claim_owner, now)
+        }
         _ => replay_or_refusal(&reply),
     };
-    if let Err(error) = store.audit_github_facade(&reply, nonce) {
+    if let Err(error) = store.audit_github_facade(&reply) {
         eprintln!(error storage: "GitHub facade audit failed for nonce {nonce}, request {}: {error}", reply.request_id);
     }
     json!({"result":outcome, "repo_binding_generation":generation})

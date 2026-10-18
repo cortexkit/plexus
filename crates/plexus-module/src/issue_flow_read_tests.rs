@@ -103,7 +103,10 @@ async fn agent_flow_issue_reads_allow_own_repository() {
             json!("O/X")
         };
         let reply = read(runtime, action, repository, args, Some("agent-x")).await;
-        assert_eq!(reply["result"], response, "{action}: {reply}");
+        let expected = if action == "github.issue.search" {
+            json!({"items":[],"total_count":0,"incomplete":true,"incomplete_results":true})
+        } else { response };
+        assert_eq!(reply["result"], expected, "{action}: {reply}");
         assert_eq!(transport.requests().len(), 1);
         assert_eq!(transport.requests()[0].connection_id, "github-handle-app-x");
     }
@@ -167,7 +170,10 @@ async fn global_flow_issue_reads_allow_any_bound_repository() {
             json!("o/y")
         };
         let reply = read(runtime, action, repository, args, None).await;
-        assert_eq!(reply["result"], response, "{action}: {reply}");
+        let expected = if action == "github.issue.search" {
+            json!({"items":[],"total_count":0,"incomplete":true,"incomplete_results":true})
+        } else { response };
+        assert_eq!(reply["result"], expected, "{action}: {reply}");
         assert_eq!(transport.requests().len(), 1);
         assert_eq!(transport.requests()[0].connection_id, "github-handle-app-y");
     }

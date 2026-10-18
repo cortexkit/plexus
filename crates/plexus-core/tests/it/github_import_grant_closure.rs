@@ -428,14 +428,11 @@ fn imported_agent_completes_own_issue_edit_with_title_labels_and_assignees() {
 #[test]
 fn imported_agent_completes_close_with_comment() {
     let calls = drive("closure-close-comment", wire("v12-issue-close"));
-    assert_eq!(
-        actions(&calls),
-        ["github.issue.get", "add_issue_comment", "close_issue"]
-    );
-    assert_eq!(calls[1].1["body"], "Closing as not planned.");
-    assert_eq!(calls[2].1["state"], "closed");
-    assert_eq!(calls[2].1["state_reason"], "not_planned");
-    assert!(calls[2].1.get("comment").is_none());
+    assert_eq!(actions(&calls), ["add_issue_comment", "close_issue"]);
+    assert_eq!(calls[0].1["body"], "Closing as not planned.");
+    assert_eq!(calls[1].1["state"], "closed");
+    assert_eq!(calls[1].1["state_reason"], "not_planned");
+    assert!(calls[1].1.get("comment").is_none());
 }
 
 #[test]
@@ -443,8 +440,8 @@ fn imported_agent_completes_close_without_comment() {
     let mut request = wire("v12-issue-close");
     request.as_object_mut().unwrap().remove("comment");
     let calls = drive("closure-close", request);
-    assert_eq!(actions(&calls), ["github.issue.get", "close_issue"]);
-    assert_eq!(calls[1].1["state"], "closed");
+    assert_eq!(actions(&calls), ["close_issue"]);
+    assert_eq!(calls[0].1["state"], "closed");
 }
 
 #[test]
@@ -452,21 +449,18 @@ fn imported_agent_completes_reopen() {
     let mut request = wire("v12-issue-reopen");
     request.as_object_mut().unwrap().remove("comment");
     let calls = drive("closure-reopen", request);
-    assert_eq!(actions(&calls), ["github.issue.get", "reopen_issue"]);
-    assert_eq!(calls[1].1["state"], "open");
+    assert_eq!(actions(&calls), ["reopen_issue"]);
+    assert_eq!(calls[0].1["state"], "open");
 }
 
 #[test]
 fn imported_agent_completes_reopen_with_comment() {
     let calls = drive("closure-reopen-comment", wire("v12-issue-reopen"));
-    assert_eq!(
-        actions(&calls),
-        ["github.issue.get", "add_issue_comment", "reopen_issue"]
-    );
-    assert_eq!(calls[1].1["issue_number"], 42);
-    assert_eq!(calls[1].1["body"], "Reopening for another pass.");
-    assert_eq!(calls[2].1["state"], "open");
-    assert!(calls[2].1.get("comment").is_none());
+    assert_eq!(actions(&calls), ["add_issue_comment", "reopen_issue"]);
+    assert_eq!(calls[0].1["issue_number"], 42);
+    assert_eq!(calls[0].1["body"], "Reopening for another pass.");
+    assert_eq!(calls[1].1["state"], "open");
+    assert!(calls[1].1.get("comment").is_none());
 }
 
 #[test]
@@ -576,9 +570,8 @@ fn implied_rows_are_named_after_the_write_that_implies_them() {
             .map(|(_, id)| id.clone())
             .unwrap()
     };
-    // github.issue.get is implied by close, edit and reopen; the row is named
-    // after the first in name order and granted once.
-    assert!(id("github.issue.get").ends_with(":implied-by-close_issue"));
+    // Only issue edits need the issue ownership read.
+    assert!(id("github.issue.get").ends_with(":implied-by-edit_issue"));
     assert!(id("add_issue_labels").ends_with(":implied-by-edit_issue"));
     assert!(id("github.issue_comments.list").ends_with(":implied-by-update_issue_comment"));
     assert!(id("edit_issue").ends_with(":inventory-edit_issue"));
@@ -691,12 +684,12 @@ fn imported_block_on_close_refuses_instead_of_parking() {
         "{reply}"
     );
     assert!(calls.is_empty());
-    // Reopen implies the same issue read, so the block leaves it working.
+    // Blocking close does not block the independent reopen action.
     let mut reopen = wire("v12-issue-reopen");
     reopen.as_object_mut().unwrap().remove("comment");
     let (reply, calls) = send(&fixture, "closure-block-reopen", reopen);
     assert_eq!(reply["result"]["status"], "completed", "{reply}");
-    assert_eq!(actions(&calls), ["github.issue.get", "reopen_issue"]);
+    assert_eq!(actions(&calls), ["reopen_issue"]);
 }
 
 #[test]
@@ -743,7 +736,7 @@ fn reopen_comment_needs_the_agents_comment_grant() {
         wire("v12-issue-reopen"),
     );
     assert_eq!(reply["result"]["status"], "refused", "{reply}");
-    assert_eq!(actions(&calls), ["github.issue.get"]);
+    assert!(calls.is_empty());
 }
 
 /// Runs `github.handle.grant` as the operator on the fixture handle.

@@ -34,8 +34,8 @@ timeout_s = 120
 id = "github-pr-ready-graphql-errors"
 guards = "GraphQL errors at HTTP 200 refuse even when partial data includes a pull request"
 file = "crates/plexus-core/src/github/facade/vendor_band.rs"
-old = "if value.get(\"errors\").is_some() {"
-new = "if false && value.get(\"errors\").is_some() { /* NON-VACUITY BREAK */"
+old = "if value.get(\"errors\").is_some() && value.get(\"data\").is_none_or(Value::is_null) {"
+new = "if false && value.get(\"errors\").is_some() && value.get(\"data\").is_none_or(Value::is_null) { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/pr_ready.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -874,9 +874,9 @@ build_timeout_s = 3600
 [[control]]
 id = "github-transient-credential-releases-claim"
 guards = "A transient vault failure releases the bot nonce so a recovered retry writes exactly once"
-file = "crates/plexus-core/src/github/facade/vendor_band.rs"
-old = "| crate::github::credential::UNRESOLVABLE_TRANSIENT"
-new = "| \"never_transient\" /* NON-VACUITY BREAK */"
+file = "crates/plexus-core/src/github/facade/taxonomy.rs"
+old = "dispatch(outcome).map_err(|code| Failure { code, retryable })"
+new = "dispatch(outcome).map_err(|code| Failure { retryable: retryable && code != crate::github::credential::UNRESOLVABLE_TRANSIENT, code }) /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/tests/github_acceptance/main.rs"
 package = "plexus-core"
 target = "--test github_acceptance"
@@ -3256,10 +3256,11 @@ timeout_s = 600
 
 [[control]]
 id = "github-transient-release-between-legs"
+select = "expected"
 guards = "A transient failure after an earlier leg completed releases the receipt claim, so a same-nonce retry resumes at once instead of meeting nonce_in_flight until the lease expires"
 file = "crates/plexus-core/src/github/facade/vendor_band.rs"
-old = "store.release_github_claim_between_legs(&agent, nonce, owner, now),"
-new = "store.release_github_claim(&agent, nonce, owner, now), /* NON-VACUITY BREAK */"
+old = "store.release_github_claim_between_legs(\n                &agent,"
+new = "store.release_github_claim( /* NON-VACUITY BREAK */\n                &agent,"
 test_file = "crates/plexus-core/tests/it/github_facade_vendor_band.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -6616,8 +6617,8 @@ timeout_s = 120
 id = "resolver-store-failure"
 guards = "Resolver storage failures are retryable store_failure"
 file = "crates/plexus-core/src/store/github/mod.rs"
-old = ".connection_for_invoke(&request.principal, &request.connection_id)\n            .map_err(|_| ResolverDenial::StoreFailure)?"
-new = ".connection_for_invoke(&request.principal, &request.connection_id)\n            .map_err(|_| ResolverDenial::RepositoryUnbound)? /* NON-VACUITY BREAK */"
+old = "let is_handle = match self\n            .store\n            .connection_for_invoke(&request.principal, &request.connection_id)\n            .map_err(|_| ResolverDenial::StoreFailure)?"
+new = "let is_handle = match self\n            .store\n            .connection_for_invoke(&request.principal, &request.connection_id)\n            .map_err(|_| ResolverDenial::RepositoryUnbound)? /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -7348,8 +7349,8 @@ timeout_s = 90
 id = "vault-handle-cache-concurrency"
 guards = "a slow vault handle must not block another handle"
 file = "crates/plexus-core/src/github/credential.rs"
-old = "        drop(cache);\n        // Vault I/O must not hold the cache lock: unrelated handles can prepare\n        // their credentials while this handle waits for its token.\n        // The caller sees only the failure class, so the reason goes to the\n        // operator log. Without it an unregistered vault record, a caller the\n        // vault does not recognise and an expired token are indistinguishable.\n        // CredentialError carries no secret material.\n        let scoped = self.source.get_scoped(reference).map_err(|error| {\n            eprintln!(\n                warn transport:\n                \"scoped credential read failed for handle {app_handle_id} ({reference}): {error}\"\n            );\n            unresolvable_for_vault_error(&error)\n        })?;\n        if scoped.credential_id != reference {\n            eprintln!(\n                warn transport:\n                \"scoped credential read for handle {app_handle_id} asked for {reference} but the vault resolved {}\",\n                scoped.credential_id\n            );\n            return Err(UNRESOLVABLE_PERMANENT);\n        }\n        if !scoped\n            .credential\n            .expires_at_ms\n            .is_some_and(|expiry| expiry.saturating_sub(EXPIRY_MARGIN_MS) > (self.now_ms)())\n        {\n            eprintln!(\n                warn transport:\n                \"scoped credential for handle {app_handle_id} ({reference}) has no expiry or expires within the refresh margin\"\n            );\n            return Err(UNRESOLVABLE_PERMANENT);\n        }\n        let mut cache = self.cache.lock().map_err(|_| UNRESOLVABLE_TRANSIENT)?;\n"
-new = "        let retained_cache = cache;\n        // Vault I/O must not hold the cache lock: unrelated handles can prepare\n        // their credentials while this handle waits for its token.\n        // The caller sees only the failure class, so the reason goes to the\n        // operator log. Without it an unregistered vault record, a caller the\n        // vault does not recognise and an expired token are indistinguishable.\n        // CredentialError carries no secret material.\n        let scoped = self.source.get_scoped(reference).map_err(|error| {\n            eprintln!(\n                warn transport:\n                \"scoped credential read failed for handle {app_handle_id} ({reference}): {error}\"\n            );\n            unresolvable_for_vault_error(&error)\n        })?;\n        if scoped.credential_id != reference {\n            eprintln!(\n                warn transport:\n                \"scoped credential read for handle {app_handle_id} asked for {reference} but the vault resolved {}\",\n                scoped.credential_id\n            );\n            return Err(UNRESOLVABLE_PERMANENT);\n        }\n        if !scoped\n            .credential\n            .expires_at_ms\n            .is_some_and(|expiry| expiry.saturating_sub(EXPIRY_MARGIN_MS) > (self.now_ms)())\n        {\n            eprintln!(\n                warn transport:\n                \"scoped credential for handle {app_handle_id} ({reference}) has no expiry or expires within the refresh margin\"\n            );\n            return Err(UNRESOLVABLE_PERMANENT);\n        }\n        let mut cache = retained_cache;\n /* NON-VACUITY BREAK */"
+old = "        drop(cache);\n        // Vault I/O must not hold the cache lock: unrelated handles can prepare\n        // their credentials while this handle waits for its token.\n        // The caller sees only the failure class, so the reason goes to the\n        // operator log. Without it an unregistered vault record, a caller the\n        // vault does not recognise and an expired token are indistinguishable.\n        // CredentialError carries no secret material.\n        let scoped = self.source.get_scoped(reference).map_err(|error| {\n            eprintln!(\n                warn transport:\n                \"scoped credential read failed for handle {app_handle_id} ({reference}): {error}\"\n            );\n            unresolvable_for_vault_error(&error)\n        })?;\n        if scoped.credential_id != reference {\n            eprintln!(\n                warn transport:\n                \"scoped credential read for handle {app_handle_id} asked for {reference} but the vault resolved {}\",\n                scoped.credential_id\n            );\n            return Err(UNRESOLVABLE_PERMANENT);\n        }\n        if !scoped\n            .credential\n            .expires_at_ms\n            .is_some_and(|expiry| expiry.saturating_sub(EXPIRY_MARGIN_MS) > (self.now_ms)())\n        {\n            eprintln!(\n                warn transport:\n                \"scoped credential for handle {app_handle_id} ({reference}) has no expiry or expires within the refresh margin\"\n            );\n            return Err(if scoped.credential.expires_at_ms.is_some() {\n                UNRESOLVABLE_TRANSIENT\n            } else {\n                UNRESOLVABLE_PERMANENT\n            });\n        }\n        let mut cache = self.cache.lock().map_err(|_| UNRESOLVABLE_TRANSIENT)?;\n"
+new = "        let retained_cache = cache;\n        // Vault I/O must not hold the cache lock: unrelated handles can prepare\n        // their credentials while this handle waits for its token.\n        // The caller sees only the failure class, so the reason goes to the\n        // operator log. Without it an unregistered vault record, a caller the\n        // vault does not recognise and an expired token are indistinguishable.\n        // CredentialError carries no secret material.\n        let scoped = self.source.get_scoped(reference).map_err(|error| {\n            eprintln!(\n                warn transport:\n                \"scoped credential read failed for handle {app_handle_id} ({reference}): {error}\"\n            );\n            unresolvable_for_vault_error(&error)\n        })?;\n        if scoped.credential_id != reference {\n            eprintln!(\n                warn transport:\n                \"scoped credential read for handle {app_handle_id} asked for {reference} but the vault resolved {}\",\n                scoped.credential_id\n            );\n            return Err(UNRESOLVABLE_PERMANENT);\n        }\n        if !scoped\n            .credential\n            .expires_at_ms\n            .is_some_and(|expiry| expiry.saturating_sub(EXPIRY_MARGIN_MS) > (self.now_ms)())\n        {\n            eprintln!(\n                warn transport:\n                \"scoped credential for handle {app_handle_id} ({reference}) has no expiry or expires within the refresh margin\"\n            );\n            return Err(if scoped.credential.expires_at_ms.is_some() {\n                UNRESOLVABLE_TRANSIENT\n            } else {\n                UNRESOLVABLE_PERMANENT\n            });\n        }\n        let mut cache = retained_cache;\n /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/tests/it/github_credential.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -7636,8 +7637,8 @@ timeout_s = 90
 id = "terminal-replay-store-failure"
 guards = "Terminal receipt database errors cannot erase an uncertain write by answering final repository_unbound"
 file = "crates/plexus-core/src/github/facade/gates.rs"
-old = "let Some(row) = store.receipt(agent, nonce)? else {"
-new = "let Some(row) = store.receipt(agent, nonce).unwrap_or(None) else { /* NON-VACUITY BREAK */"
+old = "let Some(mut row) = store.receipt(agent, nonce)? else {"
+new = "let Some(mut row) = store.receipt(agent, nonce).unwrap_or(None) else { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/tests/it/github_facade_gates.rs"
 expect_red = ["github_facade_gates::terminal_replay_store_failure_is_not_repository_unbound"]
 expect_message = "terminal receipt lookup errors must not become a definite unbound refusal"
@@ -10717,8 +10718,8 @@ timeout_s = 90
 id = "ci-flow-read-quota-before-dispatch"
 guards = "An exhausted request budget refuses before the next authenticated CI request is dispatched"
 file = "crates/plexus-core/src/github/reads/ci.rs"
-old = "    reserve(engine.store(), crate::storage::now_ms())?;"
-new = "    /* NON-VACUITY BREAK: skip the request reservation */"
+old = "visible().and_then(|()| reserve(engine.store(), crate::storage::now_ms()))"
+new = "visible().and_then(|()| Ok(())) /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/ci_read_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -10987,8 +10988,8 @@ build_timeout_s = 3600
 id = "ci-flow-read-later-request-quota"
 guards = "Quota exhaustion on a later CI request interrupts the read without dispatching that request or refunding earlier requests"
 file = "crates/plexus-core/src/github/reads/ci.rs"
-old = "    reserve(engine.store(), crate::storage::now_ms())?;"
-new = "    /* NON-VACUITY BREAK: skip the request reservation */"
+old = "visible().and_then(|()| reserve(engine.store(), crate::storage::now_ms()))"
+new = "visible().and_then(|()| Ok(())) /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/ci_read_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -11002,8 +11003,8 @@ build_timeout_s = 3600
 id = "ci-artifact-listing-quota-interruption"
 guards = "Artifact pagination stops at the first unreserved page while earlier page requests remain spent"
 file = "crates/plexus-core/src/github/reads/ci.rs"
-old = "    reserve(engine.store(), crate::storage::now_ms())?;"
-new = "    /* NON-VACUITY BREAK: skip the request reservation */"
+old = "visible().and_then(|()| reserve(engine.store(), crate::storage::now_ms()))"
+new = "visible().and_then(|()| Ok(())) /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/ci_read_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -13419,5 +13420,515 @@ package = "plexus-module"
 target = "--lib"
 select = "expected"
 expect_red = ["bus::tests::idle_without_a_bus_is_healthy_pending_failure_degrades_and_publish_recovers"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-transient-governance-retry"
+guards = "A temporary governance denial releases a multi-leg receipt without repeating its completed comment"
+file = "crates/plexus-core/src/github/facade/taxonomy.rs"
+old = "retryable: reason.clears_by_waiting(),"
+new = "retryable: false, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::transient_governance_denial_between_legs_keeps_nonce_retryable"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-transient-transport-retry"
+guards = "An unsent transient leg leaves the same nonce retryable and never reposts completed comments"
+file = "crates/plexus-core/src/github/facade/taxonomy.rs"
+old = "dispatch(outcome).map_err(|code| Failure { code, retryable })"
+new = "dispatch(outcome).map_err(|code| Failure { code, retryable: false }) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::transient_transport_between_legs_resumes_without_reposting_comment"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-refusal-durable-legs"
+guards = "A later refusal reports and replays the successful legs already sent"
+file = "crates/plexus-core/src/github/facade/vendor_band.rs"
+old = "value[\"legs_sent\"] = json!(legs_sent);"
+new = "let _ = &legs_sent; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::later_permanent_refusal_reports_durable_legs"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-search-raw-query-refused"
+guards = "Ordinary bound issue search refuses caller q and query instead of forwarding installation-wide queries"
+file = "crates/plexus-core/src/github/resolver.rs"
+old = "for field in [\"repo\", \"owner\", \"org\", \"user\", \"visibility\", \"q\", \"query\"] {"
+new = "for field in [\"repo\", \"owner\", \"org\", \"user\", \"visibility\"] { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::ordinary_search_refuses_raw_query_and_builds_bound_query"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-claim-error-sanitized"
+guards = "Receipt claim failures expose only the stable retryable store_failure code"
+file = "crates/plexus-core/src/store/github/mod.rs"
+old = "eprintln!(warn storage: \"GitHub receipt claim failed: {error}\");"
+new = "return format!(\"store_failure: {error}\"); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::claim_storage_error_has_stable_sanitized_code"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "recipient-pointer-whole-array"
+guards = "Recipient declarations cannot authorize only the first element of a sent array"
+file = "crates/plexus-core/src/recipients.rs"
+old = "if !pointer.starts_with('/') {"
+new = "if pointer.ends_with(\"/0\") { return true; } /* NON-VACUITY BREAK */ if !pointer.starts_with('/') {"
+test_file = "crates/plexus-core/src/recipients.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["recipients::tests::recipient_pointers_cannot_select_only_one_array_element"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-durable-completion-recovery"
+guards = "All durable effects replay completed before disabled-handle admission or a live claim lease"
+file = "crates/plexus-core/src/github/facade/vendor_band.rs"
+old = "pub(crate) fn recover_completed(row: &Receipt, kind: &str) -> Option<Value> {"
+new = "pub(crate) fn recover_completed(row: &Receipt, kind: &str) -> Option<Value> { return None; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::completed_effects_replay_before_disabled_handle_and_live_claim"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-search-terms-bound-scope"
+guards = "Grouping, boolean scope escapes and scoped qualifiers are refused before GitHub search"
+file = "crates/plexus-core/src/github/resolver.rs"
+old = "fn validate_search_terms(terms: &str) -> Result<(), ResolverDenial> {"
+new = "fn validate_search_terms(terms: &str) -> Result<(), ResolverDenial> { return Ok(()); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::search_boolean_scope_escape_is_refused_and_counts_are_filtered"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-search-count-projection"
+guards = "Search counts describe only the filtered page, never installation-wide totals"
+file = "crates/plexus-core/src/github/reads/mod.rs"
+old = "response[\"total_count\"] = json!(count);"
+new = "let _ = count; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::search_boolean_scope_escape_is_refused_and_counts_are_filtered"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-inventory-credential-binding"
+guards = "Import refuses a credential that names a different App than its handle"
+file = "crates/plexus-core/src/github/control/mod.rs"
+old = "|| row.credential_id != crate::github::credential::app_reference(&row.app_handle_id)"
+new = "|| false /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_control_surface.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_control_surface::inventory_handle_and_credential_must_name_the_same_app"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bindings-read-connection-scope"
+guards = "A module grant on one handle reveals only that connection's bindings"
+file = "crates/plexus-core/src/store/github/mod.rs"
+old = "WHERE h.connection_id=?1 AND EXISTS(SELECT 1 FROM grants g WHERE g.principal=h.connection_principal"
+new = "WHERE (h.connection_id=?1 OR 1=1) AND EXISTS(SELECT 1 FROM grants g WHERE g.principal=h.connection_principal /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_control_surface.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_control_surface::bindings_read_requires_a_module_grant_and_reports_rebinding_generation"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-probe-proof-generation-fence"
+guards = "A probe cannot prove bindings that changed while its installation listing was in flight"
+file = "crates/plexus-core/src/store/github/mod.rs"
+old = "AND (SELECT generation FROM github_repo_binding_generation WHERE singleton=1)=?4"
+new = "AND (?4=?4) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_control_surface.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_control_surface::probe_cannot_prove_a_rotated_credential_or_changed_binding"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-probe-failure-invalidates-proof"
+guards = "An unreachable bound repository clears a prior proof rather than leaving its handle proven"
+file = "crates/plexus-core/src/github/control/mod.rs"
+old = ".prove_github_handle(app_handle_id, generation, binding_generation, None)"
+new = ".prove_github_handle(app_handle_id, generation, binding_generation, Some(now)) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_control_surface.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_control_surface::failed_probe_clears_previous_proof"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-close-no-unused-read"
+guards = "Close does not dispatch or require an issue read whose response it never uses"
+file = "crates/plexus-core/src/github/facade/effects.rs"
+old = "\"issue_edit\" => &[\"github.issue.get\"],"
+new = "\"close\" | \"reopen\" | \"issue_edit\" => &[\"github.issue.get\"], /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::close_does_not_require_an_unused_issue_read"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-edit-last-bounded-retention"
+guards = "Edit-last retains only the latest bot comment rather than every comment body in the thread"
+file = "crates/plexus-core/src/github/pagination.rs"
+old = "items.clear();"
+new = "/* NON-VACUITY BREAK: retain earlier pages */"
+test_file = "crates/plexus-core/tests/it/github_pagination.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_pagination::edit_last_retains_only_newest_comment_and_matches_login_case_insensitively"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-mutation-field-types"
+guards = "Close rejects a null comment before claiming or dispatching any effect"
+file = "crates/plexus-core/src/github/facade/request_map.rs"
+old = ".is_some_and(|comment| !comment.is_string())"
+new = ".is_some_and(|comment| false && !comment.is_string()) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::malformed_mutation_fields_never_dispatch"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-transition-timestamp"
+guards = "Receipt settlement records transition time rather than the earlier admission timestamp"
+file = "crates/plexus-core/src/github/facade/vendor_band.rs"
+old = "            \"completed\",\n            &result,\n            None,\n            crate::storage::now_ms(),"
+new = "            \"completed\",\n            &result,\n            None,\n            now, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::receipt_updates_use_transition_time_instead_of_admission_time"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-credential-cache-monotone-generation"
+guards = "Reading an old credential generation cannot evict the currently cached token"
+file = "crates/plexus-core/src/github/credential.rs"
+old = "id != app_handle_id || *generation >= credential_generation"
+new = "id != app_handle_id || *generation == credential_generation /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_credential.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_credential::old_generation_reads_do_not_evict_current_cached_token"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-preflight-refusal-audit"
+guards = "Binding-generation preflight failures still produce a facade decision audit row"
+file = "crates/plexus-core/src/github/facade/mod.rs"
+old = "            if let Err(error) = store.audit_github_facade(&reply) {"
+new = "            if let Err(error) = Result::<(), cortexkit_store::StoreError>::Ok(()) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::generation_preflight_failure_is_audited"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-import-preview-conflicts"
+guards = "A single-use import preview detects existing handle and connection conflicts before apply"
+file = "crates/plexus-core/src/store/github/mod.rs"
+old = "if conflict {"
+new = "if false && conflict { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_control_surface.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_control_surface::import_preview_detects_existing_handle_before_apply"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-import-action-grant-deduplication"
+guards = "Uniform per-repository inventory rows mint only one action-scoped agent grant"
+file = "crates/plexus-core/src/github/control/mod.rs"
+old = "grants.retain(|grant| actions.insert(grant.action.clone()));"
+new = "grants.retain(|grant| { actions.insert(grant.action.clone()); true }); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_control_surface.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_control_surface::import_mints_one_agent_grant_per_action_not_per_repository"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-ambiguous-owner-clears-label"
+guards = "An ambiguous ownership answer clears only a formerly automatic project label"
+file = "crates/plexus-core/src/repository_ownership.rs"
+old = "RemoteResolution::None | RemoteResolution::Ambiguous\n                    if watch.source.as_deref() == Some(\"entorhinal\") =>"
+new = "RemoteResolution::None /* NON-VACUITY BREAK */\n                    if watch.source.as_deref() == Some(\"entorhinal\") =>"
+test_file = "crates/plexus-core/src/repository_ownership_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["repository_ownership::tests::ambiguous_owner_clears_only_automatically_sourced_project_labels"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-retirement-disables-handle"
+guards = "A retired agent loses the live bot handle while bindings remain available to the operator"
+file = "crates/plexus-core/src/store/github/mod.rs"
+old = "WHERE agent_id=?1 AND status<>'disabled'"
+new = "WHERE agent_id=?1 AND status<>'disabled' AND 0 /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/agent_retirement.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["agent_retirement::tests::a_retired_agent_loses_every_grant_through_the_journalled_revocation_path"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-registry-agent-echo"
+guards = "A registry reply echoing another agent cannot authorize or retire the requested agent"
+file = "crates/plexus-core/src/agent_registry.rs"
+old = ".is_some_and(|echo| echo.as_str() != Some(agent_id))"
+new = ".is_some_and(|echo| false && echo.as_str() != Some(agent_id)) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/agent_registry.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["agent_registry::tests::registry_rejects_reply_echoing_a_different_agent"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-ownership-pass-budget"
+guards = "A slow answering ownership service cannot hold the scheduler for every repository in one pass"
+file = "crates/plexus-core/src/repository_ownership.rs"
+old = "        if elapsed() >= std::time::Duration::from_secs(2) {\n            report.unanswered = true;"
+new = "        if false && elapsed() >= std::time::Duration::from_secs(2) { /* NON-VACUITY BREAK */\n            report.unanswered = true;"
+test_file = "crates/plexus-core/src/repository_ownership_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["repository_ownership::tests::ownership_pass_budget_resumes_after_the_last_processed_remote"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-graphql-ambiguous-success-unknown"
+guards = "Ambiguous GraphQL HTTP-200 writes are outcome_unknown and never retried as definite refusals"
+file = "crates/plexus-core/src/github/facade/vendor_band.rs"
+old = "return Err(\"outcome_unknown\".into());"
+new = "return Err(\"vendor_rejected{status: 422}\".into()); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/pr_ready.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::pr_ready::pr_ready_ambiguous_graphql_success_is_unknown_and_never_retried"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-near-expiry-token-retry"
+guards = "A vault token inside the refresh margin is transient rather than permanently poisoning a nonce"
+file = "crates/plexus-core/src/github/credential.rs"
+old = "return Err(if scoped.credential.expires_at_ms.is_some() {\n                UNRESOLVABLE_TRANSIENT"
+new = "return Err(if scoped.credential.expires_at_ms.is_some() {\n                UNRESOLVABLE_PERMANENT /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_credential.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_credential::cold_cache_scoped_read_once_and_expiry_margin"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-ci-quota-abandons-reservation"
+guards = "Quota deferral invalidates its unused authorization reservation without dispatching"
+file = "crates/plexus-core/src/github/reads/ci.rs"
+old = ".abandon_reservation(&reservation.principal, &reservation.reservation_id)"
+new = ".abandon_reservation(&reservation.principal, \"missing-reservation\") /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/github/reads/ci.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["github::reads::ci::tests::quota_deferral_invalidates_the_unused_authorization_reservation"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-unsettled-retention-lease-horizon"
+guards = "Unsettled receipt retention starts after the later update or claim lease, independent of audit retention"
+file = "crates/plexus-core/src/store/github/mod.rs"
+old = "AND updated_at<=?1 AND COALESCE(claim_lease_expires_at,updated_at)<=?1 LIMIT ?2)"
+new = "AND updated_at<=?1 LIMIT ?2) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_receipt.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_receipt::unsettled_receipt_survives_audit_prune_until_its_own_lease_based_horizon"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-probe-credential-generation-fence"
+guards = "A probe cannot stamp a credential generation rotated during its installation listing"
+file = "crates/plexus-core/src/store/github/mod.rs"
+old = "WHERE app_handle_id=?1 AND credential_generation=?3"
+new = "WHERE app_handle_id=?1 AND (?3=?3) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_control_surface.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_control_surface::probe_cannot_prove_a_rotated_credential_or_changed_binding"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-mutation-array-field-types"
+guards = "Issue edit rejects malformed label and assignee arrays instead of silently dropping a requested mutation"
+file = "crates/plexus-core/src/github/facade/request_map.rs"
+old = "if body.get(field).is_some_and(|value| {"
+new = "if false && body.get(field).is_some_and(|value| { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::malformed_mutation_fields_never_dispatch"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-author-login-case"
+guards = "GitHub's case-insensitive bot login identifies ownership without accepting a User account"
+file = "crates/plexus-core/src/github/facade/vendor_band.rs"
+old = ".is_some_and(|actual| actual.eq_ignore_ascii_case(login))"
+new = ".is_some_and(|actual| actual == login) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/regressions.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::regressions::own_issue_author_login_is_case_insensitive"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-retirement-pass-budget"
+guards = "Retirement registry calls share a total pass budget and resume at the next agent"
+file = "crates/plexus-core/src/agent_retirement.rs"
+old = "if index + 1 < agents.len() && elapsed() >= std::time::Duration::from_secs(2) {"
+new = "if false && index + 1 < agents.len() && elapsed() >= std::time::Duration::from_secs(2) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/agent_retirement.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["agent_retirement::tests::retirement_pass_budget_resumes_without_waiting_on_every_agent"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-receipts-independent-audit-retention"
+guards = "Audit pruning cannot delete retry evidence before the receipt's own lease-aware horizon"
+file = "crates/plexus-core/src/storage.rs"
+old = "let cutoff = now.saturating_sub(retention);"
+new = "let cutoff = now.saturating_sub(retention);\n    conn.execute(\"DELETE FROM github_bot_receipt WHERE state IN ('outcome_unknown','pending','pending_approval') AND updated_at<?1\", [cutoff])?; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/github_receipt.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_receipt::unsettled_receipt_survives_audit_prune_until_its_own_lease_based_horizon"]
 build_timeout_s = 3600
 timeout_s = 120

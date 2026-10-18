@@ -3,8 +3,7 @@
 //! Agent grants are keyed on prefrontal's agent id, and nothing else in plexus
 //! learns when prefrontal retires an agent. A bot write needs an authorized
 //! delegating session stamp, but unreachable grants are still authority on
-//! record: a reused id or a stamping bug could exercise them again. This sweep
-//! removes them.
+//! record. This sweep removes them and closes retired agents' live bot paths.
 //!
 //! The sweep only ever narrows authority, and only on a definite answer. A
 //! retired verdict revokes; a live agent, an unknown id, an unreachable
@@ -12,10 +11,8 @@
 //! is prefrontal saying the id never existed, which is not the same claim as a
 //! retirement, and an error is no claim at all.
 //!
-//! GitHub handles and their repository bindings are left alone. A handle owned
-//! by a retired agent is reported so an operator can rebind its repositories to
-//! a new agent; disabling it automatically would take repositories offline on
-//! the strength of a registry reply.
+//! Handles are disabled and outstanding approvals denied after a definite
+//! retirement. Bindings and policies remain for operator inspection and repair.
 
 use crate::agent_registry::{AgentLookup, AgentRegistry};
 use crate::storage::{AuditRecord, PlexusStore};
@@ -38,7 +35,7 @@ pub struct RetirementSweep {
     pub grants_revoked: usize,
     /// Agents left untouched because the registry could not give an answer.
     pub agents_unresolved: usize,
-    /// The agent whose lookup went unanswered, if the sweep stopped at one.
+    /// The last agent processed before an unanswered call or the pass budget.
     /// The next sweep starts just after it.
     pub stopped_at: Option<String>,
     /// Grants of retired agents whose revocation failed in the store; they are
@@ -78,9 +75,21 @@ pub fn sweep_retired_agents_from(
     registry: &dyn AgentRegistry,
     resume_after: Option<&str>,
 ) -> Result<RetirementSweep, StoreError> {
+    let started = std::time::Instant::now();
+    sweep_retired_agents_with_budget(store, registry, resume_after, || started.elapsed())
+}
+
+fn sweep_retired_agents_with_budget(
+    store: &PlexusStore,
+    registry: &dyn AgentRegistry,
+    resume_after: Option<&str>,
+    elapsed: impl Fn() -> std::time::Duration,
+) -> Result<RetirementSweep, StoreError> {
     let mut sweep = RetirementSweep::default();
     let mut agents = store.agents_holding_grants()?;
+    agents.extend(store.github_handle_agents()?);
     agents.sort();
+    agents.dedup();
     if let Some(after) = resume_after {
         let start = agents.partition_point(|agent| agent.as_str() <= after);
         agents.rotate_left(start);
@@ -88,7 +97,13 @@ pub fn sweep_retired_agents_from(
     for (index, agent_id) in agents.iter().enumerate() {
         match registry.lookup(agent_id) {
             AgentLookup::Retired => {
-                revoke_agent(store, agent_id, &mut sweep)?;
+                if let Err(error) = store
+                    .retire_github_agent(agent_id)
+                    .and_then(|()| revoke_agent(store, agent_id, &mut sweep))
+                {
+                    sweep.revocation_failures += 1;
+                    eprintln!(warn governance: "retired agent {agent_id:?}: cleanup failed: {error}");
+                }
                 sweep.agents_gone.push(agent_id.clone());
             }
             AgentLookup::Known | AgentLookup::Unknown => {}
@@ -102,6 +117,11 @@ pub fn sweep_retired_agents_from(
                 sweep.stopped_at = Some(agent_id.clone());
                 break;
             }
+        }
+        if index + 1 < agents.len() && elapsed() >= std::time::Duration::from_secs(2) {
+            sweep.agents_unresolved += agents.len() - index - 1;
+            sweep.stopped_at = Some(agent_id.clone());
+            break;
         }
     }
     Ok(sweep)
@@ -154,7 +174,7 @@ pub fn run_and_report(store: &PlexusStore, registry: &dyn AgentRegistry, resume:
     *resume_after = sweep.stopped_at.clone();
     drop(resume_after);
     if sweep.agents_unresolved > 0 {
-        eprintln!(warn governance: "agent retirement sweep skipped {} agent(s): registry gave no answer", sweep.agents_unresolved);
+        eprintln!(warn governance: "agent retirement sweep deferred {} agent(s): registry unavailable or pass budget exhausted", sweep.agents_unresolved);
     }
     if sweep.grants_revoked > 0 {
         eprintln!(info governance: "agent retirement sweep: {} agent(s) gone, {} grant(s) revoked", sweep.agents_gone.len(), sweep.grants_revoked);
@@ -298,6 +318,52 @@ mod tests {
             .expect("insert agent grant");
     }
 
+    #[test]
+    fn retirement_pass_budget_resumes_without_waiting_on_every_agent() {
+        let (_, store) = file_store("retirement-budget");
+        grant(&store, "direct", "connection", "grant-a", "agent-a");
+        grant(&store, "direct", "connection", "grant-z", "agent-z");
+        let registry = StubAgentRegistry::with_default_response(AgentLookup::Known);
+        let first = sweep_retired_agents_with_budget(&store, &registry, None, || {
+            std::time::Duration::from_secs(2)
+        })
+        .unwrap();
+        assert_eq!(first.stopped_at.as_deref(), Some("agent-a"));
+        assert_eq!(registry.requests(), ["agent-a"]);
+        sweep_retired_agents_with_budget(&store, &registry, first.stopped_at.as_deref(), || {
+            std::time::Duration::from_secs(2)
+        })
+        .unwrap();
+        assert_eq!(registry.requests(), ["agent-a", "agent-z"]);
+    }
+
+    #[test]
+    fn one_retirement_cleanup_failure_does_not_block_later_agents() {
+        let (scratch, store) = file_store("retirement-failure");
+        grant(&store, "direct", "connection", "grant-a", "agent-a");
+        grant(&store, "direct", "connection", "grant-z", "agent-z");
+        store
+            .put_github_handle(&GithubHandle {
+                app_handle_id: "app-a".into(),
+                agent_id: "agent-a".into(),
+                app_id: 1,
+                installation_id: None,
+                credential_reference: "github_app:app-a".into(),
+                credential_generation: 0,
+                status: "enabled".into(),
+                proven_at: None,
+                connection_principal: "direct".into(),
+                connection_id: "connection".into(),
+            })
+            .unwrap();
+        rusqlite::Connection::open(scratch.path()).unwrap().execute_batch("CREATE TRIGGER fail_retirement BEFORE UPDATE ON github_app_handle WHEN OLD.agent_id='agent-a' BEGIN SELECT RAISE(FAIL,'unavailable'); END;").unwrap();
+        let registry = StubAgentRegistry::with_default_response(AgentLookup::Retired);
+        let sweep = sweep_retired_agents(&store, &registry).unwrap();
+        assert_eq!(sweep.revocation_failures, 1);
+        assert_eq!(sweep.grants_revoked, 1);
+        assert!(store.grants_held_by_agent("agent-z").unwrap().is_empty());
+    }
+
     fn retirement_audit_rows(
         store: &PlexusStore,
         principal: &str,
@@ -405,6 +471,10 @@ mod tests {
                 connection_id: "github-handle-a".into(),
             })
             .expect("handle");
+        let db = rusqlite::Connection::open(scratch.path()).unwrap();
+        for status in ["pending", "approved"] {
+            db.execute("INSERT INTO action_requests(request_id,principal,connection_id,action,args_snapshot,schema_hash,requester,status,expires_at,created_at_ms,agent_id) VALUES (?1,'direct','github-handle-a','write','{}','schema','direct',?1,9999999999999,1,'agent-gone')",[status]).unwrap();
+        }
         let registry = StubAgentRegistry::with_default_response(AgentLookup::Known);
         registry.set_response("agent-gone", AgentLookup::Retired);
 
@@ -463,10 +533,16 @@ mod tests {
         assert!(direct
             .iter()
             .all(|row| row.agent_id.as_deref() == Some("agent-gone")));
-        // The handle stays exactly as it was.
+        // A definite retirement closes its live bot path but retains the binding.
         let handles = store.github_handles_for_agent("agent-gone").unwrap();
         assert_eq!(handles.len(), 1);
-        assert_eq!(handles[0].status, "enabled");
+        assert_eq!(handles[0].status, "disabled");
+        let denied: i64 = db.query_row("SELECT COUNT(*) FROM action_requests WHERE agent_id='agent-gone' AND status='denied'",[],|row|row.get(0)).unwrap();
+        assert_eq!(denied, 2);
+        assert_eq!(
+            sweep_retired_agents(&store, &registry).unwrap().agents_gone,
+            ["agent-gone"]
+        );
     }
 
     #[test]

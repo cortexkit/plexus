@@ -145,6 +145,7 @@ pub struct AuthorizationRequest {
     /// to the vendor, which does not declare it. No caller argument or wire
     /// field can set it.
     resolved_repository: Option<String>,
+    resolved_github_search_repositories: Option<Vec<String>>,
     diagnostic_tool: String,
 }
 
@@ -251,10 +252,6 @@ pub const AUTHORITY_POLL: &str = "poll";
 pub const AUTHORITY_EVENTS_CONSUME: &str = "events_consume";
 
 impl AuthorizationRequest {
-    pub(crate) fn resolved_github_search_repositories(&self) -> Option<&[String]> {
-        None
-    }
-
     fn routing_context(&self) -> Value {
         serde_json::json!({"repository": self.resolved_repository, "tool": self.diagnostic_tool, "supports_per_call_approval": self.supports_per_call_approval})
     }
@@ -288,6 +285,7 @@ impl AuthorizationRequest {
             receipt: None,
             ownership_proof: None,
             resolved_repository: None,
+            resolved_github_search_repositories: None,
             diagnostic_tool: "invoke".into(),
         }
     }
@@ -421,6 +419,19 @@ impl AuthorizationRequest {
 
     pub(crate) fn resolved_repository(&self) -> Option<&str> {
         self.resolved_repository.as_deref()
+    }
+
+    pub(crate) fn with_resolved_github_search(mut self, repositories: Vec<String>) -> Self {
+        self.resolved_github_search_repositories = Some(repositories);
+        self
+    }
+
+    pub(crate) fn resolved_github_search(&self) -> bool {
+        self.resolved_github_search_repositories().is_some()
+    }
+
+    pub(crate) fn resolved_github_search_repositories(&self) -> Option<&[String]> {
+        self.resolved_github_search_repositories.as_deref()
     }
 }
 
@@ -1223,6 +1234,10 @@ pub struct ReceiptApprovalRow {
 /// Resolve repository bindings and handle catalog authority before loading a
 /// connection. Reject repository fields that could select a different wire path.
 pub trait GovernanceSeams: Send + Sync {
+    /// Build vendor arguments from checked internal routing, never caller queries.
+    fn prepare_invoke(&self, _request: &mut AuthorizationRequest) -> Result<(), ResolverDenial> {
+        Ok(())
+    }
     fn resolve_invoke(&self, request: &AuthorizationRequest) -> Result<(), ResolverDenial>;
     fn facade_only(&self, action: &CatalogAction) -> bool;
 
@@ -1811,12 +1826,11 @@ where
         })
     }
 
-    pub fn authorize(&self, request: AuthorizationRequest) -> Result<Reservation, Denial> {
+    pub fn authorize(&self, mut request: AuthorizationRequest) -> Result<Reservation, Denial> {
         if let Some(denial) = self.connector_home_denial() {
             return Err(denial);
         }
-        let args_hash = jcs::jcs_sha256(&request.args).map_err(|_| Denial::StoreFailure)?;
-        let args_snapshot_hash = args_hash.clone();
+        let mut args_hash = jcs::jcs_sha256(&request.args).map_err(|_| Denial::StoreFailure)?;
         if crate::secret_input::contains_secret_input(&request.args) {
             let denial = Denial::CredentialMaterialForbidden;
             self.audit_denial(&request, &args_hash, None, None, None, &denial);
@@ -1824,7 +1838,11 @@ where
         }
         if request.authority_kind == AUTHORITY_INVOKE {
             if let Some(seams) = &self.seams {
-                if let Err(reason) = seams.resolve_invoke(&request) {
+                let original_args = request.args.clone();
+                if let Err(reason) = seams
+                    .prepare_invoke(&mut request)
+                    .and_then(|()| seams.resolve_invoke(&request))
+                {
                     let denial = Denial::Resolver(reason);
                     let mut unattributed = request.clone();
                     unattributed.attributed_agent_id = None;
@@ -1832,8 +1850,12 @@ where
                     self.audit_denial(&unattributed, &args_hash, None, None, None, &denial);
                     return Err(denial);
                 }
+                if request.args != original_args {
+                    args_hash = jcs::jcs_sha256(&request.args).map_err(|_| Denial::StoreFailure)?;
+                }
             }
         }
+        let args_snapshot_hash = args_hash.clone();
         let connection = match if request.authority_kind == AUTHORITY_INVOKE {
             self.store
                 .connection_for_invoke(&request.principal, &request.connection_id)
@@ -6162,7 +6184,7 @@ mod tests {
                     claim_owner: owner.into(),
                     effect_index: 0,
                 },
-                crate::github::facade::effects::OwnershipProof::new("reaction", vec![], true),
+                crate::github::facade::effects::OwnershipProof::new("reaction", vec![]),
             ))
             .expect("facade receipt reservation")
     }
@@ -6318,7 +6340,7 @@ mod tests {
                 claim_owner: "worker".into(),
                 effect_index: 0,
             },
-            crate::github::facade::effects::OwnershipProof::new("reaction", vec![], true),
+            crate::github::facade::effects::OwnershipProof::new("reaction", vec![]),
         );
         let reservation = engine.authorize(request).expect("facade reservation");
         assert_eq!(reservation.receipt.as_ref().unwrap().claim_owner, "worker");

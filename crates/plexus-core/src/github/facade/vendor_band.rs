@@ -111,9 +111,18 @@ fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     row: &Receipt,
     action: &str,
     args: Value,
-) -> Result<Value, String> {
-    let handle = reply.handle.as_ref().ok_or("store_failure")?;
+) -> Result<Value, taxonomy::Failure> {
+    let handle = reply
+        .handle
+        .as_ref()
+        .ok_or_else(|| taxonomy::Failure::from("store_failure".to_string()))?;
     let args = leg_args(engine, handle, action, &args, "G8")?;
+    if action == "github.issue_comments.list"
+        && (args.get("per_page").and_then(Value::as_u64) != Some(pagination::PER_PAGE as u64)
+            || args.get("page").and_then(Value::as_u64).is_none())
+    {
+        return Err("pre_dispatch_read_incomplete{reason: invalid_response}".into());
+    }
     let request =
         AuthorizationRequest::new(&reply.caller_principal, &handle.connection_id, action, args)
             .with_bound_agent(&row.agent_id, &handle.app_handle_id);
@@ -121,8 +130,8 @@ fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     let request = facade_origin::request(request, approval(row));
     let reservation = engine
         .authorize(request)
-        .map_err(|denial| taxonomy::denial(&denial, "G8"))?;
-    taxonomy::dispatch(engine.revalidate_and_dispatch(&reservation).outcome)
+        .map_err(|denial| taxonomy::denied(&denial, "G8"))?;
+    taxonomy::dispatched(engine.revalidate_and_dispatch(&reservation))
 }
 
 /// Carry the caller's daemon scope onto a governed leg for its audit rows. The
@@ -172,11 +181,38 @@ const ISSUE_RETURNING_LEGS: &[&str] = &[
     "remove_issue_assignees",
 ];
 
+/// Recover a completed result using only durable write responses. Admission and
+/// ownership reads must not override a result whose writes already completed.
+pub(crate) fn recover_completed(row: &Receipt, kind: &str) -> Option<Value> {
+    if row.state != "pending"
+        || row.effects.is_empty()
+        || row.effects.iter().any(|effect| effect.outcome.is_none())
+    {
+        return None;
+    }
+    let mut issue_read = None;
+    let responses: Vec<_> = row
+        .effects
+        .iter()
+        .map(|effect| {
+            let outcome = effect.outcome.as_ref().expect("settled effect");
+            if let Some(read) = outcome.get("__plexus_issue_read") {
+                issue_read = Some(read);
+            }
+            (
+                effect.effect.as_str(),
+                outcome.get("__plexus_response").unwrap_or(outcome).clone(),
+            )
+        })
+        .collect();
+    Some(json!({"status":"completed","result":projection(kind, &responses, issue_read)}))
+}
+
 /// The caller-facing result of a completed request, taken from the response of
 /// the leg that defines the request's outcome. `legs` pairs each planned write
 /// with its GitHub response, in dispatch order; `issue_read` is the issue as
 /// read before an issue edit, used when no leg returned the issue.
-fn projection(kind: &str, legs: &[(&str, Value)], issue_read: Option<&Value>) -> Value {
+pub(crate) fn projection(kind: &str, legs: &[(&str, Value)], issue_read: Option<&Value>) -> Value {
     let last = legs.last().map(|(_, body)| body).unwrap_or(&Value::Null);
     match kind {
         "reaction" => pick(last, &[("id", "id"), ("content", "content")]),
@@ -250,8 +286,8 @@ fn stop_for_scope(
     reply: &mut gates::GateReply,
     agent: &str,
     nonce: &str,
-    owner: &str,
-    now: i64,
+    claim_owner: &str,
+    _now: i64,
     code: &str,
     sent: &[(&str, Value)],
 ) -> Value {
@@ -269,14 +305,27 @@ fn stop_for_scope(
         crate::scope::SCOPE_UNVERIFIABLE | crate::scope::SCOPE_NOT_SYNCED
     ) {
         receipt_update(
-            store.release_github_claim_between_legs(agent, nonce, owner, now),
+            store.release_github_claim_between_legs(
+                agent,
+                nonce,
+                claim_owner,
+                crate::storage::now_ms(),
+            ),
             "release",
             agent,
             nonce,
         );
     } else {
         receipt_update(
-            store.finish_github_facade(agent, nonce, owner, "refused", &value, Some(code), now),
+            store.finish_github_facade(
+                agent,
+                nonce,
+                claim_owner,
+                "refused",
+                &value,
+                Some(code),
+                crate::storage::now_ms(),
+            ),
             "finish refusal",
             agent,
             nonce,
@@ -286,7 +335,10 @@ fn stop_for_scope(
 }
 
 fn owned(value: &Value, login: &str) -> bool {
-    value.pointer("/user/login").and_then(Value::as_str) == Some(login)
+    value
+        .pointer("/user/login")
+        .and_then(Value::as_str)
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(login))
         && value.pointer("/user/type").and_then(Value::as_str) == Some("Bot")
 }
 
@@ -302,7 +354,7 @@ fn pr_state_response(kind: &str, value: Value) -> Result<Value, String> {
     } else {
         "convertPullRequestToDraft"
     };
-    if value.get("errors").is_some() {
+    if value.get("errors").is_some() && value.get("data").is_none_or(Value::is_null) {
         let errors = super::validation::errors(&value.to_string());
         return Err(if errors.is_empty() {
             "vendor_rejected{status: 422}".into()
@@ -314,10 +366,98 @@ fn pr_state_response(kind: &str, value: Value) -> Result<Value, String> {
         });
     }
     let pr = &value["data"][mutation]["pullRequest"];
-    if !pr["isDraft"].is_boolean() || !pr["number"].is_u64() || !pr["url"].is_string() {
-        return Err("vendor_rejected{status: 422}".into());
+    if value.get("errors").is_some()
+        || !pr["isDraft"].is_boolean()
+        || !pr["number"].is_u64()
+        || !pr["url"].is_string()
+    {
+        return Err("outcome_unknown".into());
     }
     Ok(pr.clone())
+}
+
+/// Persist only definitive refusals. Temporary failures release the claim while
+/// retaining durable progress, so retries cannot repeat successful write legs.
+#[allow(clippy::too_many_arguments)]
+fn refuse(
+    store: &PlexusStore,
+    row: &Receipt,
+    reply: &mut gates::GateReply,
+    nonce: &str,
+    claim_owner: &str,
+    gate: &'static str,
+    failure: taxonomy::Failure,
+) -> Value {
+    let agent = row.agent_id.clone();
+    let code = failure.code;
+    reply.gate = gate;
+    let typed = serde_json::from_str::<Value>(&code)
+        .ok()
+        .filter(|value| value.get("detail").is_some());
+    let code = typed
+        .as_ref()
+        .and_then(|value| value["code"].as_str())
+        .unwrap_or(&code)
+        .to_owned();
+    reply.refusal_code = Some(code.clone());
+    let durable = store
+        .github_receipt(&agent, nonce)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| row.clone());
+    let legs_sent: Vec<_> = durable
+        .effects
+        .iter()
+        .filter(|effect| effect.outcome.is_some())
+        .map(|effect| &effect.effect)
+        .collect();
+    let mut value = json!({"status":"refused", "refusal_code":code});
+    if !legs_sent.is_empty() {
+        value["legs_sent"] = json!(legs_sent);
+    }
+    if let Some(typed) = typed {
+        value["code"] = typed["code"].clone();
+        value["detail"] = typed["detail"].clone();
+    }
+    if code == "nonce_in_flight" {
+        // Another worker may still complete the write for this nonce.
+        // Keep the receipt pending for a later owner to resume unfinished effects.
+    } else if failure.retryable {
+        // These refusals happen before a write is sent or after its
+        // outcome is recorded, so no write is in doubt and the claim is
+        // released for a same-nonce retry. Writes an earlier leg already
+        // completed keep their recorded outcome and are not sent again;
+        // the retry resumes at the first unsent leg. If a write may have
+        // been sent without a recorded outcome, the release is refused and
+        // the claim stays until lease expiry settles it as outcome_unknown.
+        receipt_update(
+            store.release_github_claim_between_legs(
+                &agent,
+                nonce,
+                claim_owner,
+                crate::storage::now_ms(),
+            ),
+            "release",
+            &agent,
+            nonce,
+        );
+    } else {
+        receipt_update(
+            store.finish_github_facade(
+                &agent,
+                nonce,
+                claim_owner,
+                "refused",
+                &value,
+                Some(&code),
+                crate::storage::now_ms(),
+            ),
+            "finish refusal",
+            &agent,
+            nonce,
+        );
+    }
+    value
 }
 
 /// A claimed receipt is required to enter this code. Pre-dispatch reads lack
@@ -327,7 +467,7 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     store: &PlexusStore,
     reply: &mut gates::GateReply,
     nonce: &str,
-    owner: &str,
+    claim_owner: &str,
     now: i64,
 ) -> Value {
     let Some(Claim::Owned(row)) = reply.claim.as_ref() else {
@@ -335,69 +475,11 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     };
     let row = row.clone();
     let agent = row.agent_id.clone();
-    let fail = |reply: &mut gates::GateReply, gate, code: String| {
-        reply.gate = gate;
-        let typed = serde_json::from_str::<Value>(&code)
-            .ok()
-            .filter(|value| value.get("detail").is_some());
-        let code = typed
-            .as_ref()
-            .and_then(|value| value["code"].as_str())
-            .unwrap_or(&code)
-            .to_owned();
-        reply.refusal_code = Some(code.clone());
-        let mut value = json!({"status":"refused", "refusal_code":code});
-        if let Some(typed) = typed {
-            value["code"] = typed["code"].clone();
-            value["detail"] = typed["detail"].clone();
-        }
-        if code == "nonce_in_flight" {
-            // Another worker may still complete the write for this nonce.
-            // Keep the receipt pending for a later owner to resume unfinished effects.
-        } else if code.contains("StoreFailure")
-            || code == "store_failure"
-            || matches!(
-                code.as_str(),
-                "pre_dispatch_read_incomplete{reason: lease_expired}"
-                    | "pre_dispatch_read_incomplete{reason: invalid_response}"
-                    // Nothing was sent and the vault may answer on a retry,
-                    // so the same nonce must be able to run again.
-                    | crate::github::credential::UNRESOLVABLE_TRANSIENT
-            )
-        {
-            // These refusals happen before a write is sent or after its
-            // outcome is recorded, so no write is in doubt and the claim is
-            // released for a same-nonce retry. Writes an earlier leg already
-            // completed keep their recorded outcome and are not sent again;
-            // the retry resumes at the first unsent leg. If a write may have
-            // been sent without a recorded outcome, the release is refused and
-            // the claim stays until lease expiry settles it as outcome_unknown.
-            receipt_update(
-                store.release_github_claim_between_legs(&agent, nonce, owner, now),
-                "release",
-                &agent,
-                nonce,
-            );
-        } else {
-            receipt_update(
-                store.finish_github_facade(
-                    &agent,
-                    nonce,
-                    owner,
-                    "refused",
-                    &value,
-                    Some(&code),
-                    now,
-                ),
-                "finish refusal",
-                &agent,
-                nonce,
-            );
-        }
-        value
+    let fail = |reply: &mut gates::GateReply, gate, failure| {
+        refuse(store, &row, reply, nonce, claim_owner, gate, failure)
     };
     if let Err(code) = stale(store, reply, &row) {
-        return fail(reply, "G8", code);
+        return fail(reply, "G8", code.into());
     }
     let Some(mapped) = reply.mapped.as_ref() else {
         return fail(reply, "G8", "store_failure".into());
@@ -411,17 +493,15 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         .credential_reference
         .strip_prefix("github_app:")
         .unwrap_or("");
-    let login = format!("{slug}[bot]");
+    let login =
+        crate::github::credential::bot_login(&handle.credential_reference).unwrap_or_default();
     let mut args = mapped.args.clone();
     let mut completed = Vec::new();
     if mapped.request_kind == "comment_edit_last" {
         let start = now;
         let mut read_error = None;
-        let walk = pagination::walk(
-            effects::list_read(),
-            start,
-            crate::storage::now_ms,
-            |page| {
+        let walk =
+            pagination::walk_newest_bot_comment(slug, start, crate::storage::now_ms, |page| {
                 let mut page_args = args.clone();
                 page_args["page"] = json!(page.page);
                 page_args["per_page"] = json!(page.per_page);
@@ -432,8 +512,7 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                         Err(WalkError::ReadFailed)
                     }
                 }
-            },
-        );
+            });
         let walk = match walk {
             Ok(walk) => walk,
             Err(error) => {
@@ -454,21 +533,11 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 )
             }
         };
-        if !pagination::may_dispatch(
-            &[pagination::ListRead::IssueComments],
-            std::slice::from_ref(&walk),
-        ) {
-            return fail(
-                reply,
-                "G8",
-                "pre_dispatch_read_incomplete{reason: page_bound}".into(),
-            );
-        }
-        let Some(comment) = effects::comment_from_walk(&walk, slug) else {
-            return fail(reply, "G8", "not_present".into());
+        let Some(comment) = walk.newest_bot_comment(slug) else {
+            return fail(reply, "G8", "not_present".to_string().into());
         };
         let Some(id) = comment["id"].as_u64() else {
-            return fail(reply, "G8", "not_present".into());
+            return fail(reply, "G8", "not_present".to_string().into());
         };
         args["comment_id"] = json!(id);
         completed.push("github.issue_comments.list");
@@ -482,7 +551,7 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             Ok(value) => value,
             Err(code)
                 if mapped.request_kind == "issue_edit"
-                    && code == "vendor_rejected{status: 404}" =>
+                    && code.code == "vendor_rejected{status: 404}" =>
             {
                 return fail(reply, "G8", "not_present".into());
             }
@@ -514,13 +583,13 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                         .unwrap_or("")
                 )
             };
-            return fail(reply, "G8", code);
+            return fail(reply, "G8", code.into());
         }
     }
     if let Err(code) = stale(store, reply, &row) {
-        return fail(reply, "G9", code);
+        return fail(reply, "G9", code.into());
     }
-    let proof = effects::OwnershipProof::new(&mapped.request_kind, completed, true);
+    let proof = effects::OwnershipProof::new(&mapped.request_kind, completed);
     let mut legs = effects::plan(&mapped);
     if pr_state_kind(&mapped.request_kind) {
         let pr = issue_read.as_ref().unwrap_or(&Value::Null);
@@ -572,12 +641,15 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             .get(index)
             .and_then(|effect| effect.outcome.as_ref())
         {
-            responses.push((action, outcome.clone()));
+            responses.push((
+                action,
+                outcome.get("__plexus_response").unwrap_or(outcome).clone(),
+            ));
             continue;
         }
         let args = match leg_args(engine, &handle, action, &args, "G10") {
             Ok(args) => args,
-            Err(code) => return fail(reply, "G10", code),
+            Err(code) => return fail(reply, "G10", code.into()),
         };
         // A request sent under a scope re-reads that scope, uncached, before
         // every write it has not sent yet, so a session revoked mid-request
@@ -591,7 +663,16 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                         reply.request_id, error.0
                     );
                 }
-                return stop_for_scope(store, reply, &agent, nonce, owner, now, code, &responses);
+                return stop_for_scope(
+                    store,
+                    reply,
+                    &agent,
+                    nonce,
+                    claim_owner,
+                    now,
+                    code,
+                    &responses,
+                );
             }
         }
         let request =
@@ -604,33 +685,83 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             ReceiptClaim {
                 agent_id: row.agent_id.clone(),
                 request_nonce: nonce.into(),
-                claim_owner: owner.into(),
+                claim_owner: claim_owner.into(),
                 effect_index: index,
             },
             proof.clone(),
         );
         let reservation = match engine.authorize(request) {
             Ok(reservation) => reservation,
-            Err(denial) => return fail(reply, "G10", taxonomy::denial(&denial, "G10")),
+            Err(denial) => return fail(reply, "G10", taxonomy::denied(&denial, "G10")),
         };
-        match taxonomy::dispatch(engine.revalidate_and_dispatch(&reservation).outcome) {
+        let dispatch = engine.revalidate_and_dispatch(&reservation);
+        if matches!(
+            dispatch.outcome,
+            crate::governance::TransportOutcome::NotSent { .. }
+                | crate::governance::TransportOutcome::VendorFailed { .. }
+        ) {
+            receipt_update(
+                store.clear_github_dispatch(
+                    &agent,
+                    nonce,
+                    claim_owner,
+                    index,
+                    &reservation.request_id,
+                    crate::storage::now_ms(),
+                ),
+                "clear unsent dispatch",
+                &agent,
+                nonce,
+            );
+        }
+        match taxonomy::dispatched(dispatch) {
             Ok(value) => {
                 let value = if pr_state_kind(&mapped.request_kind) {
                     match pr_state_response(&mapped.request_kind, value) {
                         Ok(value) => value,
-                        Err(code) => return fail(reply, "G10", code),
+                        Err(code) if code == "outcome_unknown" => {
+                            receipt_update(
+                                store.mark_github_outcome_unknown(
+                                    &agent,
+                                    nonce,
+                                    claim_owner,
+                                    crate::storage::now_ms(),
+                                ),
+                                "mark outcome_unknown",
+                                &agent,
+                                nonce,
+                            );
+                            return json!({"status":"outcome_unknown"});
+                        }
+                        Err(code) => return fail(reply, "G10", code.into()),
                     }
                 } else {
                     value
                 };
+                let durable_value = if mapped.request_kind == "issue_edit" {
+                    json!({"__plexus_response":value,"__plexus_issue_read":issue_read})
+                } else {
+                    value.clone()
+                };
                 if store
-                    .finish_github_effect(&agent, nonce, owner, index, &value, now)
+                    .finish_github_effect(
+                        &agent,
+                        nonce,
+                        claim_owner,
+                        index,
+                        &durable_value,
+                        crate::storage::now_ms(),
+                    )
                     .ok()
                     != Some(true)
                 {
                     eprintln!(error storage: "GitHub effect persistence failed for receipt {agent}/{nonce}, effect {index}");
-                    if let Err(error) = store.mark_github_outcome_unknown(&agent, nonce, owner, now)
-                    {
+                    if let Err(error) = store.mark_github_outcome_unknown(
+                        &agent,
+                        nonce,
+                        claim_owner,
+                        crate::storage::now_ms(),
+                    ) {
                         eprintln!(error storage: "mark GitHub receipt {agent}/{nonce} outcome_unknown failed: {error}");
                     }
                     reply.gate = "G10";
@@ -638,9 +769,14 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 }
                 responses.push((action, value));
             }
-            Err(code) if code == "outcome_unknown" => {
+            Err(code) if code.code == "outcome_unknown" => {
                 receipt_update(
-                    store.mark_github_outcome_unknown(&agent, nonce, owner, now),
+                    store.mark_github_outcome_unknown(
+                        &agent,
+                        nonce,
+                        claim_owner,
+                        crate::storage::now_ms(),
+                    ),
                     "mark outcome_unknown",
                     &agent,
                     nonce,
@@ -657,7 +793,15 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         "result": projection(&mapped.request_kind, &responses, issue_read.as_ref()),
     });
     if store
-        .finish_github_facade(&agent, nonce, owner, "completed", &result, None, now)
+        .finish_github_facade(
+            &agent,
+            nonce,
+            claim_owner,
+            "completed",
+            &result,
+            None,
+            crate::storage::now_ms(),
+        )
         .ok()
         != Some(true)
     {

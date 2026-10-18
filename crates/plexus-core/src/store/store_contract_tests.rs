@@ -808,7 +808,13 @@ fn retention_uses_settlement_boundaries_and_keeps_live_requests() {
     );
     assert_eq!(
         ids("github_bot_receipt", "request_nonce"),
-        vec!["receipt-boundary", "unknown-young"]
+        vec![
+            "receipt-boundary",
+            "receipt-pending",
+            "unknown-old",
+            "unknown-young"
+        ],
+        "GitHub receipt retention belongs to its lease-aware sweeper, not audit pruning"
     );
 }
 #[test]

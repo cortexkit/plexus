@@ -64,18 +64,10 @@ impl PlexusStore {
                             action_selectors: parse_string_list(&selectors)?,
                             expires_at: row.get(5)?,
                             created_at_ms: row.get(6)?,
-                            // The App slug from the credential reference, plus
-                            // `[bot]`. `github::facade::vendor_band::run`
-                            // builds the same login and passes it to `owned`,
-                            // and `CompletedWalk::newest_bot_comment` in
-                            // `github::pagination` builds it from the same
-                            // slug; both use it to check that a comment's
-                            // author is this bot.
+                            // Display the same bot login used for ownership checks.
                             bot_login: credential
                                 .as_deref()
-                                .and_then(|reference| reference.strip_prefix("github_app:"))
-                                .filter(|slug| !slug.is_empty())
-                                .map(|slug| format!("{slug}[bot]")),
+                                .and_then(crate::github::credential::bot_login),
                             repositories: Vec::new(),
                         },
                         handle,

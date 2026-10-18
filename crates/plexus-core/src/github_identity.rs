@@ -1,8 +1,6 @@
-//! Resolution of the per-call GitHub identity asserted for an agent.
-//!
-//! Plexus treats prefrontal as the authority for an agent's configured GitHub
-//! identity, but keeps the route and reply interpretation separate so the
-//! resolver remains testable without a live supervised peer.
+//! Shared client for calls to prefrontal over subc, plus test-support for the
+//! retired identity flow. Production bot identity is selected from Plexus's
+//! stored agent-to-GitHub-App bindings, not from remote identity replies.
 
 #[cfg(any(test, feature = "test-support"))]
 use std::collections::HashMap;
@@ -17,6 +15,7 @@ use crate::{AuditRecord, PlexusStore};
 
 /// The read-only prefrontal management operation used to resolve an agent's
 /// configured GitHub identity.
+#[cfg(any(test, feature = "test-support"))]
 pub const AGENT_GITHUB_IDENTITY_OPERATION: &str = "agent.github_identity";
 
 /// The kind-specific, non-secret portion of an agent's GitHub identity.
@@ -121,6 +120,7 @@ impl std::error::Error for GithubIdentityRefusal {}
 /// Failure to obtain a reply from the identity authority. This is deliberately
 /// distinct from a valid reply declaring that an agent has no identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "test-support"))]
 pub enum GithubIdentitySourceError {
     Unavailable,
 }
@@ -129,6 +129,7 @@ pub enum GithubIdentitySourceError {
 ///
 /// The resolver parses the raw value itself so malformed replies fail closed
 /// alongside source failures instead of becoming a fallback identity.
+#[cfg(any(test, feature = "test-support"))]
 pub trait GithubIdentitySource: Send + Sync {
     fn github_identity(&self, agent_id: &str) -> Result<Value, GithubIdentitySourceError>;
 }
@@ -221,9 +222,11 @@ impl GithubIdentitySource for StubGithubIdentitySource {
     }
 }
 
-/// Production fail-closed source used when no prefrontal route is configured.
+/// Fail-closed source for tests of the retired identity flow.
+#[cfg(any(test, feature = "test-support"))]
 pub struct FailClosedGithubIdentitySource;
 
+#[cfg(any(test, feature = "test-support"))]
 impl GithubIdentitySource for FailClosedGithubIdentitySource {
     fn github_identity(&self, _agent_id: &str) -> Result<Value, GithubIdentitySourceError> {
         Err(GithubIdentitySourceError::Unavailable)
@@ -246,10 +249,12 @@ pub trait PrefrontalRoutePeer: Send + Sync {
 }
 
 /// [`GithubIdentitySource`] adapter for prefrontal's management surface.
+#[cfg(any(test, feature = "test-support"))]
 pub struct PrefrontalGithubIdentitySource<P> {
     peer: Arc<P>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl<P> Clone for PrefrontalGithubIdentitySource<P> {
     fn clone(&self) -> Self {
         Self {
@@ -258,12 +263,14 @@ impl<P> Clone for PrefrontalGithubIdentitySource<P> {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl<P> PrefrontalGithubIdentitySource<P> {
     pub fn new(peer: Arc<P>) -> Self {
         Self { peer }
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl<P: PrefrontalRoutePeer + 'static> GithubIdentitySource for PrefrontalGithubIdentitySource<P> {
     fn github_identity(&self, agent_id: &str) -> Result<Value, GithubIdentitySourceError> {
         self.peer

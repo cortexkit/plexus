@@ -8,6 +8,23 @@ use plexus_core::github::pagination::{
 use plexus_core::transport::{Transport, TransportRequest, TransportResponse};
 use serde_json::{json, Value};
 
+#[test]
+fn edit_last_retains_only_newest_comment_and_matches_login_case_insensitively() {
+    let result = plexus_core::github::pagination::walk_newest_bot_comment(
+        "APP",
+        0,
+        || 0,
+        |page| {
+            Ok(json!((0..if page.page == 1 { PER_PAGE } else { 1 })
+                .map(|id| json!({"id":page.page*100+id,"user":{"login":"app[bot]","type":"Bot"}}))
+                .collect::<Vec<_>>()))
+        },
+    )
+    .unwrap();
+    assert_eq!(result.items().len(), 1);
+    assert_eq!(result.newest_bot_comment("APP").unwrap()["id"], 200);
+}
+
 #[derive(Default)]
 struct RecordingTransport {
     requests: Mutex<Vec<TransportRequest>>,

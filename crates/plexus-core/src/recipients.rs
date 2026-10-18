@@ -19,6 +19,14 @@ pub fn normalize_recipient(recipient: &str) -> String {
 pub fn collect_recipients(pointers: &[String], args: &Value) -> Result<Vec<String>, String> {
     let mut recipients = Vec::new();
     for pointer in pointers {
+        // Selecting a single array element would leave other destinations unchecked.
+        if pointer
+            .split('/')
+            .skip(1)
+            .any(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return Err(pointer.clone());
+        }
         let values = match args.pointer(pointer) {
             Some(Value::String(value)) => vec![value.as_str()],
             Some(Value::Array(values)) => values
@@ -48,7 +56,7 @@ pub fn collect_recipients(pointers: &[String], args: &Value) -> Result<Vec<Strin
 
 /// Resolve an RFC 6901 pointer against an explicit reviewed schema. Ambiguous
 /// schemas ($ref, unions, unspecified types) are not evidence of a recipient
-/// shape and fail closed. Numeric array indexes use the declared item schema.
+/// shape and fail closed. A declaration must cover the whole recipient array.
 pub fn recipient_pointer_valid(schema: &Value, pointer: &str) -> bool {
     if !pointer.starts_with('/') {
         return false;
@@ -73,17 +81,6 @@ pub fn recipient_pointer_valid(schema: &Value, pointer: &str) -> bool {
                 Some(node) => node,
                 None => return false,
             },
-            Some("array")
-                if decoded == "0"
-                    || (!decoded.starts_with('0')
-                        && decoded.bytes().all(|b| b.is_ascii_digit())
-                        && decoded.parse::<usize>().is_ok()) =>
-            {
-                match node.get("items") {
-                    Some(node) if node.is_object() => node,
-                    _ => return false,
-                }
-            }
             _ => return false,
         };
     }
@@ -98,6 +95,17 @@ pub fn recipient_pointer_valid(schema: &Value, pointer: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn recipient_pointers_cannot_select_only_one_array_element() {
+        let schema =
+            json!({"type":"object","properties":{"to":{"type":"array","items":{"type":"string"}}}});
+        assert!(!recipient_pointer_valid(&schema, "/to/0"));
+        assert!(recipient_pointer_valid(&schema, "/to"));
+        assert!(
+            collect_recipients(&["/to/0".into()], &json!({"to":["safe@x","other@y"]})).is_err()
+        );
+    }
 
     #[test]
     fn normalization_trims_emails_but_preserves_phone_and_chat_identifiers() {
@@ -116,7 +124,7 @@ mod tests {
     fn pointers_resolve_nested_escaped_properties_and_arrays() {
         let schema = json!({"type":"object","properties":{"a/b":{"type":"object","properties":{"~to":{"type":"array","items":{"type":"string"}}}}}});
         assert!(recipient_pointer_valid(&schema, "/a~1b/~0to"));
-        assert!(recipient_pointer_valid(&schema, "/a~1b/~0to/0"));
+        assert!(!recipient_pointer_valid(&schema, "/a~1b/~0to/0"));
         for pointer in [
             "/a~2b",
             "/missing",

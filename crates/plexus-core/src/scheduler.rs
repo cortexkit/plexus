@@ -430,7 +430,7 @@ where
 
         match crate::github::sweeper::sweep_receipts(&self.store, now_ms) {
             Ok(uncertain) if !uncertain.is_empty() => {
-                eprintln!(warn scheduler: "receipt sweep queued {} uncertain write(s)", uncertain.len());
+                eprintln!(warn scheduler: "receipt sweep recorded {} uncertain write(s)", uncertain.len());
             }
             Ok(_) => {}
             Err(error) => {
