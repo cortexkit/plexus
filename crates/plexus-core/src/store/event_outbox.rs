@@ -12,6 +12,8 @@ pub const QUOTA_WINDOW_MS: i64 = 3_600_000;
 // Ordered timestamp polling can widen its lookback to one hour. Retention
 // must preserve the full ceiling, not only the currently selected window.
 pub const RETENTION_MAX_WINDOW_MS: i64 = 3_600_000;
+/// Payloads in this vendor-time window are needed for sorted-head replay dedupe.
+pub const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 60_000;
 pub const REPO_RETRY_MS: i64 = 3_600_000;
 pub const REPO_REFRESH_MS: i64 = 24 * REPO_RETRY_MS;
 
@@ -51,6 +53,33 @@ pub struct PollGapInput<'a> {
 pub struct OutboxCursor {
     pub created_at_ms: i64,
     pub event_key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxVersion {
+    V1 = 1,
+    V2 = 2,
+}
+
+impl TryFrom<u8> for OutboxVersion {
+    type Error = StoreError;
+
+    fn try_from(version: u8) -> Result<Self, Self::Error> {
+        match version {
+            1 => Ok(Self::V1),
+            2 => Ok(Self::V2),
+            _ => Err(StoreError::Backend("unsupported outbox version".into())),
+        }
+    }
+}
+
+impl OutboxVersion {
+    fn published_column(self) -> &'static str {
+        match self {
+            Self::V1 => "published_at_ms",
+            Self::V2 => "published_v2_at_ms",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -99,6 +128,8 @@ pub struct OutboxHealth {
     pub dropped_on_unsubscribe: i64,
     pub dropped_on_delete: i64,
     pub orphaned_markers: i64,
+    pub relay_drops: std::collections::BTreeMap<String, i64>,
+    pub repository_identity_changed: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +215,8 @@ pub(super) fn insert_marker(
     body_v1: &str,
 ) -> rusqlite::Result<()> {
     let h = identity.headers;
+    // Keep an eager v1 snapshot: retention can move visibility to an overlapping
+    // watch with different payload bytes, but published digests must stay valid.
     conn.execute("INSERT INTO event_outbox
         (event_key, event_id, event_name, repo_id, change, repo, project, pr, branch, conclusion, created_at_ms, envelope_v2, digest_v2, body_v1, digest_v1)
          VALUES (?1, ?2, ?3, ?4, ?5, lower(?6), ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
@@ -200,7 +233,7 @@ pub(super) fn insert_marker(
     Ok(())
 }
 
-fn increment(conn: &Connection, name: &str, count: i64) -> rusqlite::Result<()> {
+pub(super) fn increment(conn: &Connection, name: &str, count: i64) -> rusqlite::Result<()> {
     if count > 0 {
         conn.execute(
             "INSERT INTO event_outbox_counters(name, value) VALUES (?1, ?2)
@@ -384,6 +417,7 @@ impl PlexusStore {
         now: i64,
         version: u8,
     ) -> Result<EventLookupOutcome, StoreError> {
+        OutboxVersion::try_from(version)?;
         self.inner.with_read(|conn| {
             let metadata = conn.query_row(LOOKUP_METADATA, [key], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?,
@@ -436,11 +470,13 @@ impl PlexusStore {
         self.drain_event_outbox_version(limit, 1)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn drain_event_outbox_version(
         &self,
         limit: usize,
         version: u8,
     ) -> Result<Vec<CanonicalEvent>, StoreError> {
+        OutboxVersion::try_from(version)?;
         self.inner.with_read(|conn| {
             let mut query = conn.prepare(&pending_query(version))?;
             let rows = query
@@ -458,6 +494,7 @@ impl PlexusStore {
         version: u8,
         after: Option<&OutboxCursor>,
     ) -> Result<Vec<(CanonicalEvent, OutboxCursor)>, StoreError> {
+        OutboxVersion::try_from(version)?;
         let (created, key) = after.map_or((i64::MIN, ""), |cursor| {
             (cursor.created_at_ms, cursor.event_key.as_str())
         });
@@ -488,20 +525,96 @@ impl PlexusStore {
         version: u8,
         at_ms: i64,
     ) -> Result<bool, StoreError> {
+        let version = OutboxVersion::try_from(version)?;
+        self.mark_events_published(&[key], version, at_ms)
+            .map(|count| count != 0)
+    }
+
+    /// Stamp an acknowledged batch in one fenced transaction. Existing stamps
+    /// and canonical bodies stay unchanged when a publish is retried.
+    pub fn mark_events_published(
+        &self,
+        keys: &[&str],
+        version: OutboxVersion,
+        at_ms: i64,
+    ) -> Result<usize, StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            let column = if version == 2 {
-                "published_v2_at_ms"
-            } else {
-                "published_at_ms"
-            };
-            Ok(conn.execute(
-                &format!(
-                    "UPDATE event_outbox SET {column} = ?2
-            WHERE event_key = ?1 AND {column} IS NULL"
-                ),
-                (key, at_ms),
-            )? != 0)
+            let column = version.published_column();
+            let mut update = conn.prepare(&format!(
+                "UPDATE event_outbox SET {column}=?2 WHERE event_key=?1 AND {column} IS NULL"
+            ))?;
+            let mut count = 0;
+            for key in keys {
+                count += update.execute((key, at_ms))?;
+            }
+            Ok(count)
         })
+    }
+
+    /// Persist a terminal publication failure without pretending it was sent.
+    /// The reason is a fixed diagnostic code, never payload or backend text.
+    pub fn mark_outbox_unpublishable(
+        &self,
+        event_key: &str,
+        version: OutboxVersion,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        if reason.is_empty()
+            || reason.len() > 64
+            || !reason
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(StoreError::Backend("invalid outbox failure code".into()));
+        }
+        self.inner.with_conn_fenced(|conn| {
+            let column = version.published_column();
+            conn.execute(&format!("INSERT INTO event_outbox_failures(event_key,version,failed_at_ms,failure_reason)
+                SELECT event_key,?2,?3,?4 FROM event_outbox WHERE event_key=?1 AND {column} IS NULL
+                ON CONFLICT(event_key,version) DO NOTHING"),
+                rusqlite::params![event_key, version as u8, now_ms, reason])?;
+            Ok(())
+        })
+    }
+
+    pub fn unpublishable_outbox_count(&self) -> Result<u64, StoreError> {
+        self.inner.with_read(|conn| {
+            conn.query_row(
+                "SELECT COUNT(DISTINCT event_key) FROM event_outbox_failures",
+                [],
+                |row| row.get(0),
+            )
+        })
+    }
+
+    /// Maintenance is independent of polling success or watch status. Fence
+    /// each watch separately so the writer is not held for the whole history.
+    pub fn prune_all_events(
+        &self,
+        max_age_ms: i64,
+        max_rows: usize,
+        now: i64,
+    ) -> Result<usize, StoreError> {
+        self.inner.with_conn_fenced(|conn| {
+            cleanup_orphans(conn)?;
+            conn.execute("DELETE FROM github_repo_id_cache WHERE repo NOT IN (
+                SELECT lower(json_extract(fixed_args,'$.owner') || '/' || json_extract(fixed_args,'$.repo'))
+                FROM trigger_subscriptions WHERE status <> 'retired' AND json_valid(fixed_args)
+                AND json_extract(fixed_args,'$.owner') IS NOT NULL AND json_extract(fixed_args,'$.repo') IS NOT NULL)", [])?;
+            Ok(())
+        })?;
+        let watches: Vec<(String, String)> = self.inner.with_read(|conn| {
+            conn.prepare("SELECT principal,subscription_id FROM trigger_subscriptions ORDER BY principal,subscription_id")?
+                .query_map([], |row| Ok((row.get(0)?,row.get(1)?)))?.collect()
+        })?;
+        let mut removed = 0;
+        for (principal, subscription) in watches {
+            removed += self.inner.with_conn_fenced(|conn| {
+                prune_events(conn, &principal, &subscription, max_age_ms, max_rows, now)
+            })?;
+        }
+        Ok(removed)
     }
 
     pub fn event_outbox_health(&self) -> Result<OutboxHealth, StoreError> {
@@ -534,6 +647,9 @@ impl PlexusStore {
                 dropped_on_unsubscribe: count("dropped_on_unsubscribe")?,
                 dropped_on_delete: count("dropped_on_delete")?,
                 orphaned_markers: count("orphaned_markers")?,
+                relay_drops: conn.prepare("SELECT name,value FROM event_outbox_counters WHERE name LIKE 'relay_drop_%' ORDER BY name")?
+                    .query_map([], |row| Ok((row.get(0)?,row.get(1)?)))?.collect::<rusqlite::Result<_>>()?,
+                repository_identity_changed: count("repository_identity_changed")?,
             })
         })
     }
@@ -678,9 +794,10 @@ fn pending_after_query(version: u8) -> String {
         "FROM event_outbox o",
         ", o.created_at_ms FROM event_outbox o",
     );
-    format!("{select} WHERE {predicate} AND (o.created_at_ms,o.event_key)>(?2,?3) ORDER BY o.created_at_ms,o.event_key LIMIT ?1")
+    format!("{select} WHERE {predicate} AND NOT EXISTS (SELECT 1 FROM event_outbox_failures f WHERE f.event_key=o.event_key AND f.version={version}) AND (o.created_at_ms,o.event_key)>(?2,?3) ORDER BY o.created_at_ms,o.event_key LIMIT ?1")
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn pending_query(version: u8) -> String {
     let pending = if version == 2 {
         "o.envelope_v2 IS NOT NULL AND o.published_v2_at_ms IS NULL"
@@ -690,7 +807,7 @@ fn pending_query(version: u8) -> String {
     // Seek from the smallest SQLite integer, including negative timestamps.
     // This gives both partial indexes a range search and preserves batch order.
     format!(
-        "{CANONICAL_SELECT} WHERE {pending} AND o.created_at_ms >= ?2
+        "{CANONICAL_SELECT} WHERE {pending} AND NOT EXISTS (SELECT 1 FROM event_outbox_failures f WHERE f.event_key=o.event_key AND f.version={version}) AND o.created_at_ms >= ?2
         ORDER BY o.created_at_ms, o.event_key LIMIT ?1"
     )
 }
@@ -709,11 +826,13 @@ pub(super) fn prune_events(
     let mut query=conn.prepare(
         "WITH candidates AS (
             SELECT e.event_id,e.created_at_ms,e.observed_at_ms,
+            CASE WHEN e.kind='gap' THEN COALESCE(e.gap_from_ms,e.observed_at_ms) ELSE e.observed_at_ms END AS coverage_from,
+            CASE WHEN e.kind='gap' THEN COALESCE(e.gap_to_ms,e.observed_at_ms) ELSE e.observed_at_ms END AS coverage_to,
             e.acked_at_ms IS NULL AND (o.published_at_ms IS NULL OR (o.envelope_v2 IS NOT NULL AND o.published_v2_at_ms IS NULL)) AS undelivered,
             COALESCE((o.event_id IS NOT NULL AND (o.published_at_ms IS NULL OR (o.envelope_v2 IS NOT NULL AND o.published_v2_at_ms IS NULL)))
             OR max(e.created_at_ms,COALESCE(o.published_at_ms,e.created_at_ms),COALESCE(o.published_v2_at_ms,e.created_at_ms))>?3
-            OR (e.activity_at_ms IS NOT NULL AND ((s.cursor_kind='ordered_timestamp' AND e.activity_at_ms>=json_extract(s.cursor_state,'$.watermark_ms')-?4)
-                OR (s.cursor_kind='sorted_head' AND e.activity_at_ms>=json_extract(s.cursor_state,'$.watermark_ms')))),0) AS protected
+            OR (s.status <> 'retired' AND e.activity_at_ms IS NOT NULL AND ((s.cursor_kind='ordered_timestamp' AND e.activity_at_ms>=json_extract(s.cursor_state,'$.watermark_ms')-?4)
+                OR (s.cursor_kind='sorted_head' AND e.activity_at_ms>=json_extract(s.cursor_state,'$.watermark_ms')-?7))),0) AS protected
             FROM trigger_events e LEFT JOIN event_outbox o ON o.event_id=e.event_id
             LEFT JOIN trigger_subscriptions s ON s.subscription_id=e.subscription_id
             WHERE e.principal=?1 AND e.subscription_id=?2
@@ -723,7 +842,7 @@ pub(super) fn prune_events(
             SELECT *,sum(created_at_ms>=?5) OVER (ORDER BY created_at_ms,event_id) AS recent_ordinal
             FROM candidates WHERE NOT protected
         )
-        SELECT event_id,observed_at_ms,undelivered FROM ranked,stats
+        SELECT event_id,coverage_from,undelivered,coverage_to FROM ranked,stats
         WHERE created_at_ms<?5 OR recent_ordinal<=max(0,total-aged-?6)
         ORDER BY created_at_ms,event_id LIMIT 1000"
     )?;
@@ -735,13 +854,15 @@ pub(super) fn prune_events(
                 now.saturating_sub(EVENT_BODY_FLOOR_MS),
                 RETENTION_MAX_WINDOW_MS,
                 now.saturating_sub(max_age_ms.max(0)),
-                i64::try_from(max_rows).unwrap_or(i64::MAX)
+                i64::try_from(max_rows).unwrap_or(i64::MAX),
+                SORTED_HEAD_REPLAY_WINDOW_MS
             ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, bool>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             },
         )?
@@ -751,7 +872,7 @@ pub(super) fn prune_events(
         .iter()
         .filter(|row| row.2)
         .fold((None, None), |interval, row| {
-            merge_intervals(interval, (Some(row.1), Some(row.1)))
+            merge_intervals(interval, (Some(row.1), Some(row.3)))
         });
     let ids: Vec<_> = rows.iter().map(|row| &row.0).collect();
     let mut removed = 0;
@@ -853,17 +974,8 @@ fn quota_admit(
             // A cached id outlives the watches that resolved it. Only a repository
             // that something still watches will ever be re-resolved, so only
             // those may hold back hourly requests from CI polling; counting every
-            // repository ever cached would shrink the CI share for good. The
-            // stale rows are deleted here as well, keeping a suspended watch's
-            // row so its recorded identity can still be compared.
-            conn.execute(
-                "DELETE FROM github_repo_id_cache WHERE repo NOT IN (
-                    SELECT lower(json_extract(fixed_args, '$.owner') || '/' || json_extract(fixed_args, '$.repo'))
-                    FROM trigger_subscriptions WHERE status <> 'retired' AND json_valid(fixed_args)
-                        AND json_extract(fixed_args, '$.owner') IS NOT NULL
-                        AND json_extract(fixed_args, '$.repo') IS NOT NULL)",
-                [],
-            )?;
+            // repository ever cached would shrink the CI share for good.
+            // Maintenance removes stale cache rows independently of admission.
             (CI_CYCLE_REQUESTS, effective_ci_ceiling(conn)?)
         }
         QuotaRequest::GetRepository => (1, GITHUB_ACTIONS_HOURLY_REQUESTS),
@@ -928,6 +1040,233 @@ mod tests {
     use serde_json::json;
 
     const KEY: &str = "90408920809451f415f29865340b3b6d57d032c1d13f5a8d2062742300645740";
+
+    #[test]
+    fn unknown_outbox_versions_never_read_or_stamp_v1() {
+        let store = store();
+        subscription(&store, "a", "scalar_diff");
+        commit(
+            &store,
+            "a",
+            &[input(&json!({"number":7}), KEY, &headers("p"))],
+        );
+        for version in [0, 3, 255] {
+            assert!(store.drain_event_outbox_version(10, version).is_err());
+            assert!(store
+                .drain_event_outbox_version_after(10, version, None)
+                .is_err());
+            assert!(store
+                .mark_event_version_published(KEY, version, 1234)
+                .is_err());
+        }
+        assert_eq!(store.drain_event_outbox(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn retention_keeps_the_original_unacked_gap_extent() {
+        let store = store();
+        subscription(&store, "a", "scalar_diff");
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                insert_gap_row(conn, "direct", "a", "a", 11, 99, "poll_gap", 100)?;
+                prune_events(conn, "direct", "a", 0, 0, EVENT_BODY_FLOOR_MS + 200)
+            })
+            .unwrap();
+        let extent: (i64, i64) = store
+            .inner
+            .with_read(|conn| {
+                conn.query_row(
+                    "SELECT gap_from_ms,gap_to_ms FROM trigger_events WHERE kind='gap'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            extent,
+            (11, 99),
+            "retention must preserve vendor-time coverage, not observation time"
+        );
+    }
+
+    #[test]
+    fn quota_cycle_request_cost_is_accepted_by_schema() {
+        let store = store();
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "INSERT INTO github_actions_quota VALUES ('cycle',0,?1)",
+                    [CI_CYCLE_REQUESTS],
+                )?;
+                assert!(conn
+                    .execute(
+                        "INSERT INTO github_actions_quota VALUES ('invalid',0,0)",
+                        []
+                    )
+                    .is_err());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn dead_letters_are_durable_versioned_and_keep_unpublished_bodies() {
+        let scratch = crate::test_scratch::Scratch::database("outbox-failure-reopen");
+        let descriptor = StorageDescriptor {
+            module_id: "plexus".into(),
+            storage_namespace: new_id("dead-letters"),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: scratch.path().to_string_lossy().into_owned(),
+            },
+        };
+        {
+            let store = PlexusStore::open(&descriptor).unwrap();
+            old_row(&store, "ci_runs", 0, None);
+            let original = store.canonical_event_by_key(KEY).unwrap().unwrap();
+            assert!(store
+                .mark_outbox_unpublishable(KEY, OutboxVersion::V1, "raw SQL: payload", 10)
+                .is_err());
+            store
+                .mark_outbox_unpublishable(KEY, OutboxVersion::V1, "invalid_headers", 10)
+                .unwrap();
+            store
+                .mark_outbox_unpublishable(KEY, OutboxVersion::V1, "invalid_body", 20)
+                .unwrap();
+            assert!(store.drain_event_outbox_version(10, 1).unwrap().is_empty());
+            assert!(store
+                .drain_event_outbox_version_after(10, 1, None)
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                store
+                    .drain_event_outbox_version_after(10, 2, None)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(store.unpublishable_outbox_count().unwrap(), 1);
+            assert_eq!(
+                store.prune_all_events(0, 0, now_ms()).unwrap(),
+                0,
+                "failed is not published"
+            );
+            assert_eq!(
+                store.canonical_event_by_key(KEY).unwrap().unwrap(),
+                original,
+                "failure cannot change published bytes or stamps"
+            );
+            let failure: (String, i64) = store
+                .inner
+                .with_read(|conn| {
+                    conn.query_row(
+                        "SELECT failure_reason,failed_at_ms FROM event_outbox_failures",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                })
+                .unwrap();
+            assert_eq!(failure, ("invalid_headers".into(), 10));
+        }
+        let store = PlexusStore::open(&descriptor).unwrap();
+        assert_eq!(store.unpublishable_outbox_count().unwrap(), 1);
+        assert!(store
+            .drain_event_outbox_version_after(10, 1, None)
+            .unwrap()
+            .is_empty());
+        store.unsubscribe("direct", "a").unwrap();
+        assert_eq!(
+            store.unpublishable_outbox_count().unwrap(),
+            0,
+            "marker deletion must cascade failure metadata"
+        );
+    }
+
+    #[test]
+    fn batch_publication_is_atomic_and_preserves_first_ack_time() {
+        let store = store();
+        subscription(&store, "a", "ci_runs");
+        let other = "a".repeat(64);
+        for key in [KEY, other.as_str()] {
+            let payload = json!({"number":key});
+            let h = headers("p");
+            let mut row = input(&payload, key, &h);
+            row.event.vendor_event_id = key;
+            commit(&store, "a", &[row]);
+        }
+        store.inner.with_conn_fenced(|conn| conn.execute_batch(&format!(
+            "CREATE TRIGGER reject_batch BEFORE UPDATE ON event_outbox WHEN NEW.event_key='{other}' BEGIN SELECT RAISE(ABORT,'rejected'); END;"))).unwrap();
+        assert!(store
+            .mark_events_published(&[KEY, &other], OutboxVersion::V1, 100)
+            .is_err());
+        assert!(store
+            .canonical_event_by_key(KEY)
+            .unwrap()
+            .unwrap()
+            .published_at_ms
+            .is_none());
+        store
+            .inner
+            .with_conn_fenced(|conn| conn.execute_batch("DROP TRIGGER reject_batch"))
+            .unwrap();
+        assert_eq!(
+            store
+                .mark_events_published(&[KEY, &other], OutboxVersion::V1, 100)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .mark_events_published(&[KEY, &other], OutboxVersion::V1, 200)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .canonical_event_by_key(KEY)
+                .unwrap()
+                .unwrap()
+                .published_at_ms,
+            Some(100)
+        );
+        assert_eq!(store.drain_event_outbox_version(10, 2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn maintenance_prunes_all_watch_statuses_but_keeps_pending_and_recent_publications() {
+        for status in ["active", "suspended", "retired"] {
+            for published in [false, true] {
+                let store = store();
+                old_row(
+                    &store,
+                    "ci_runs",
+                    0,
+                    published.then_some(8 * AUDIT_MILLIS_PER_DAY),
+                );
+                store
+                    .inner
+                    .with_conn_fenced(|conn| {
+                        conn.execute("UPDATE trigger_subscriptions SET status=?1", [status])
+                    })
+                    .unwrap();
+                assert_eq!(
+                    store.prune_all_events(0, 0, now_ms()).unwrap(),
+                    usize::from(published),
+                    "status={status}, published={published}"
+                );
+                assert_eq!(count(&store, "event_outbox"), i64::from(!published));
+            }
+        }
+        let store = store();
+        old_row(&store, "ci_runs", 0, Some(6 * AUDIT_MILLIS_PER_DAY));
+        assert_eq!(
+            store.prune_all_events(0, 0, now_ms()).unwrap(),
+            0,
+            "recent publication keeps its body floor"
+        );
+    }
 
     #[test]
     fn overlapping_watch_keeps_pending_publication_after_canonical_withdrawal() {
@@ -1866,10 +2205,18 @@ mod tests {
         store
             .prune("direct", "a", EVENT_BODY_FLOOR_MS, 100)
             .unwrap();
+        assert_eq!(
+            count(&store, "event_outbox"),
+            1,
+            "per-watch polling must not sweep the outbox"
+        );
+        store
+            .prune_all_events(EVENT_BODY_FLOOR_MS, 100, now_ms())
+            .unwrap();
         assert_eq!(count(&store, "event_outbox"), 0);
         assert_eq!(store.event_outbox_health().unwrap().orphaned_markers, 1);
         store
-            .prune("direct", "a", EVENT_BODY_FLOOR_MS, 100)
+            .prune_all_events(EVENT_BODY_FLOOR_MS, 100, now_ms())
             .unwrap();
         assert_eq!(store.event_outbox_health().unwrap().orphaned_markers, 1);
     }
@@ -2732,25 +3079,27 @@ mod tests {
     }
 
     #[test]
-    fn sorted_head_retains_exact_watermark_only() {
-        let store = store();
-        old_row(
-            &store,
-            "sorted_head",
-            10000000,
-            Some(8 * AUDIT_MILLIS_PER_DAY),
-        );
-        assert_eq!(
-            store
-                .prune("direct", "a", 30 * AUDIT_MILLIS_PER_DAY, 0)
-                .unwrap(),
-            0
-        );
+    fn sorted_head_retains_full_replay_window_and_boundary() {
+        for activity in [10_000_000, 9_999_999, 9_940_000] {
+            let store = store();
+            old_row(
+                &store,
+                "sorted_head",
+                activity,
+                Some(8 * AUDIT_MILLIS_PER_DAY),
+            );
+            assert_eq!(
+                store
+                    .prune("direct", "a", 30 * AUDIT_MILLIS_PER_DAY, 0)
+                    .unwrap(),
+                0
+            );
+        }
         let store2 = self::store();
         old_row(
             &store2,
             "sorted_head",
-            9999999,
+            9_939_999,
             Some(8 * AUDIT_MILLIS_PER_DAY),
         );
         assert_eq!(
@@ -2996,6 +3345,14 @@ mod tests {
             ),
             "590 used must leave room for one more cycle under 599"
         );
+        assert_eq!(
+            count(&store, "github_repo_id_cache"),
+            8,
+            "quota admission must not garbage-collect unrelated cache rows"
+        );
+        store
+            .prune_all_events(EVENT_BODY_FLOOR_MS, 100, 10000000)
+            .unwrap();
         assert_eq!(
             count(&store, "github_repo_id_cache"),
             1,

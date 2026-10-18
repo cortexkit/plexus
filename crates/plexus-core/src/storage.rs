@@ -1045,6 +1045,18 @@ CREATE INDEX idx_binding_ticket_retention ON binding_tickets(settled_at_ms) WHER
 CREATE INDEX idx_github_receipt_unsettled_retention ON github_bot_receipt(updated_at) WHERE state IN ('outcome_unknown','pending','pending_approval');
 "#,
     },
+    Migration {
+        version: 55,
+        statements: r#"
+CREATE TABLE event_outbox_failures (
+    event_key TEXT NOT NULL REFERENCES event_outbox(event_key) ON DELETE CASCADE,
+    version INTEGER NOT NULL CHECK(version IN (1,2)),
+    failed_at_ms INTEGER NOT NULL,
+    failure_reason TEXT NOT NULL,
+    PRIMARY KEY(event_key,version)
+);
+"#,
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
@@ -1099,7 +1111,9 @@ pub mod relay;
 
 #[path = "store/event_outbox.rs"]
 pub mod event_outbox;
-pub use event_outbox::{EventHeaders, KeyedEventIdentity, KeyedPollEventInput, PollGapInput};
+pub use event_outbox::{
+    EventHeaders, KeyedEventIdentity, KeyedPollEventInput, OutboxVersion, PollGapInput,
+};
 
 #[path = "store/repository_ownership.rs"]
 mod repository_ownership_store;
@@ -5869,7 +5883,6 @@ impl PlexusStore {
         max_rows: usize,
     ) -> Result<usize, StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            event_outbox::cleanup_orphans(conn)?;
             event_outbox::prune_events(
                 conn,
                 principal,
