@@ -211,13 +211,11 @@ fn staging_refuses_catalog_before_signing_or_publication() {
             .filter(|path| path.is_absolute())
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         assert_eq!(directory.parent(), Some(temp_root.as_path()));
-        assert!(
-            directory
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("plexus-exec.")
-        );
+        assert!(directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("plexus-exec."));
         let removed = !directory.exists();
         // Remove any captured copy before asserting, so a failed assertion
         // cannot leave a temporary executable behind.

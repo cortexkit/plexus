@@ -9890,7 +9890,7 @@ build_timeout_s = 3600
 id = "script-private-executable-copy"
 guards = "Catalog checks execute from independent owner-only directories"
 file = "scripts/lib/private-copy.sh"
-old = '    directory=$(mktemp -d /tmp/plexus-exec.XXXXXX) || return 1'
+old = '    directory=$(mktemp -d "$temp_root/plexus-exec.XXXXXX") || return 1'
 new = '    directory="${TMPDIR:-/tmp}/plexus-exec-fixed"; mkdir -p "$directory"; chmod 700 "$directory" # NON-VACUITY BREAK'
 test_file = "scripts/tests/test_operator_workflows.py"
 runner = "command"
@@ -11869,5 +11869,37 @@ package = "plexus-core"
 target = "--lib"
 select = "expected"
 expect_red = ["event_envelope::tests::ci_job_runner_name_is_null_when_missing_or_empty"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "engram-catalog-lease-path"
+guards = "Every cortexkit-store single-writer lease is declared device-local so it is never restored onto another machine"
+file = "crates/plexus-module/src/engram_catalog.rs"
+old = '"path": "*.lease"'
+new = '"path": "NON-VACUITY BREAK"'
+test_file = "crates/plexus-module/src/engram_catalog.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["engram_catalog::tests::engram_catalog_declares_exact_entry_ids_and_device_local_lease_pattern"]
+expect_message = "cortexkit-store lease files must remain out of backups"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "engram-catalog-atomic-replacement"
+guards = "The Engram backup catalog is published with a synced temporary file and atomic rename, never rewritten in place"
+file = "crates/plexus-module/src/engram_catalog.rs"
+old = "fs::rename(&temporary_path, &destination)?;"
+new = "fs::write(&destination, CATALOG_BYTES)?; fs::remove_file(&temporary_path)?; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/engram_catalog.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["engram_catalog::tests::engram_catalog_replaces_the_old_file_atomically"]
+expect_message = "catalog publication must replace the old inode rather than rewrite it in place"
 build_timeout_s = 3600
 timeout_s = 120
