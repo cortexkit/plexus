@@ -206,7 +206,18 @@ fn staging_refuses_catalog_before_signing_or_publication() {
         let copy = Path::new(copied.trim());
         assert_eq!(copy.file_name().unwrap(), "ckdev-plexus");
         let directory = copy.parent().unwrap();
-        assert!(directory.to_string_lossy().starts_with("/tmp/plexus-exec."));
+        let temp_root = std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        assert_eq!(directory.parent(), Some(temp_root.as_path()));
+        assert!(
+            directory
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("plexus-exec.")
+        );
         let removed = !directory.exists();
         // Remove any captured copy before asserting, so a failed assertion
         // cannot leave a temporary executable behind.
