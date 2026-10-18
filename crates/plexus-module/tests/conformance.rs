@@ -2398,12 +2398,22 @@ async fn vault_route_fixture() {
             }
             serde_json::to_value(subc_protocol::session::ModuleControlResponse::RouteBindAck {})
                 .unwrap()
+        } else if roles && request["method"] != "role.read" {
+            // Plexus also asks Entorhinal about repository ownership
+            // (`enumerate`, `resolve_remote`) on its hourly pass, which can
+            // start while a test is still running. This fixture models only
+            // the role, so it refuses those; plexus leaves ownership unchanged
+            // when Entorhinal does not answer.
+            json!({"error": {"code": "unsupported", "message": "this test fixture serves only role.read"}})
         } else {
-            assert!(if roles {
-                request["method"] == "role.read"
-            } else {
-                request["method"] == "credential.get_scoped"
-            });
+            assert_eq!(
+                request["method"],
+                if roles {
+                    "role.read"
+                } else {
+                    "credential.get_scoped"
+                }
+            );
             let plexus = Principal::Reserved {
                 module_id: MODULE_ID.to_string(),
             };

@@ -578,9 +578,17 @@ where
             }
         }
     });
-    if let Err(error) = blocking_section(plexus_probe::ProbeSandbox::warm_up) {
-        eprintln!(warn scheduler: "probe sandbox warm-up failed; initialization will retry on use: {error}");
-    }
+    // Compile the probe sandbox in the background so the first probe poll does
+    // not pay for it inside a scheduler pass. It must not delay the dispatch
+    // loop below: compiling can take seconds on a slow machine, and the
+    // supervisor's first health check gives the module only five seconds to
+    // answer. A probe that runs before warm-up finishes waits on the same
+    // one-time initialization.
+    tokio::task::spawn_blocking(|| {
+        if let Err(error) = plexus_probe::ProbeSandbox::warm_up() {
+            eprintln!(warn scheduler: "probe sandbox warm-up failed; initialization will retry on use: {error}");
+        }
+    });
     let (scheduler_shutdown, scheduler_stop) = mpsc::channel::<()>(1);
     let scheduler_task = spawn_trigger_scheduler(
         Arc::clone(&state),
