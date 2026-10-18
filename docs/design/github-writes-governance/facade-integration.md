@@ -28,7 +28,7 @@ The GitHub facade (`github.bot_request`) combines repository binding, authorizat
 - A failed `pre_transmit` compare-and-set on a receipt returns `nonce_in_flight` without transmitting.
 - Set the audit journal's `idempotency_key_fingerprint` to the receipt's `request_fingerprint` on every facade write.
 - The store sweeper records expired uncertain effects in reconciliation before returning them for diagnostics. Callers must not enqueue those effects again.
-- Pagination and receipt claims share `github::config::CLAIM_LEASE_SECONDS` (120 seconds).
+- Pagination and receipt claims share `github::receipt::DEFAULT_CLAIM_LEASE_SECONDS` (120 seconds).
 - Integration tests exercise terminal replay, uncertainty, claim ownership and takeover through the real facade path.
 
 ## Request kinds

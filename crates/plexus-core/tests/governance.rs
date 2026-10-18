@@ -1828,7 +1828,9 @@ fn mock_manifest_value(tier: &str) -> Value {
             "write_enabling": ["team"]
         },
         "actions_baseline": [
-            { "name": "write_item", "risk": "write" }
+            { "name": "write_item", "risk": "write", "input_schema": {
+                "type":"object", "properties":{"team":{"type":"string"}}
+            } }
         ],
         "defaults": {
             "ask_first_risk": ["write", "destructive"],
@@ -3694,9 +3696,13 @@ fn mock_manifest() -> plexus_core::IngestedManifest {
         "schema_version": 1, "key": "mock", "name": "Mock", "description": "retirement fixture",
         "reuse_path": "mcp_direct", "reuse_rationale": "tests", "tier": "S2",
         "transport": {"kind": "mcp_remote", "url": "https://example.invalid/mcp"},
-        "auth": {"mode": "api_key"}, "credential_bindings": [],
+        "auth": {"mode": "api_key"}, "credential_bindings": [{
+            "ref_role":"primary", "placement":"header", "key":"Authorization", "prefix":"Bearer ", "required":true
+        }],
         "resource_filters": {"required": ["team"], "optional": [], "write_enabling": ["team"]},
-        "actions_baseline": [{"name": "write_item", "risk": "write"}],
+        "actions_baseline": [{"name": "write_item", "risk": "write", "input_schema":{
+            "type":"object", "properties":{"team":{"type":"string"}}
+        }}],
         "defaults": {"ask_first_risk": [], "rate_limit": {"calls_per_min": 30}},
         "availability": "ga"
     }))

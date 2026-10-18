@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::credentials::CredentialSource;
 use crate::governance::Severity;
 use crate::jcs::jcs_sha256;
-use crate::manifest::{asks_first, AppManifest, AuthMode, Risk, TransportKind};
+use crate::manifest::{AppManifest, AuthMode, Risk, TransportKind};
 use crate::mcp_remote::{
     DiscoveredAction, McpConnection, McpRemoteConfig, McpRemoteError, McpRemoteTransport,
 };
@@ -128,6 +128,8 @@ pub struct CatalogReconciler {
     rest_transport: Arc<RestTransport>,
     refresh_gates: ConnectionRefreshGates,
     policy: CatalogRefreshPolicy,
+    #[cfg(any(test, feature = "test-support"))]
+    endpoint_overrides: std::sync::Mutex<HashMap<(String, String), String>>,
 }
 
 impl CatalogReconciler {
@@ -142,6 +144,8 @@ impl CatalogReconciler {
             rest_transport: Arc::new(RestTransport::default()),
             refresh_gates: std::sync::Mutex::new(HashMap::new()),
             policy,
+            #[cfg(any(test, feature = "test-support"))]
+            endpoint_overrides: Default::default(),
         }
     }
 
@@ -234,8 +238,12 @@ impl CatalogReconciler {
     /// not stop the remaining connections from being registered, and anything
     /// missed here is still repaired by the health probe that covers this today.
     pub fn register_transports(&self, principal: &str) -> usize {
-        let Ok(connections) = self.store.list_connections(principal) else {
-            return 0;
+        let connections = match self.store.list_connections(principal) {
+            Ok(connections) => connections,
+            Err(_) => {
+                crate::diag!(warn catalog: "transport registration skipped: connection store read failed");
+                return 0;
+            }
         };
         let mut registered = 0;
         for summary in connections {
@@ -244,39 +252,11 @@ impl CatalogReconciler {
             if summary.status != "active" && summary.status != "degraded" {
                 continue;
             }
-            let Ok(Some(connection)) = self.store.connection(principal, &summary.connection_id)
-            else {
-                continue;
-            };
-            let Ok(Some(manifest_value)) = self
-                .store
-                .manifest_json(CATALOG_PRINCIPAL, &connection.app_key)
-            else {
-                continue;
-            };
-            let Ok(manifest) = crate::manifest::validated_manifest(&manifest_value) else {
-                continue;
-            };
-            match manifest.transport.kind {
-                TransportKind::McpRemote => {
-                    self.transport
-                        .register_connection(McpConnection::from_manifest(
-                            &summary.connection_id,
-                            &manifest,
-                        ));
-                    registered += 1;
+            match self.load_connection(principal, &summary.connection_id, None) {
+                Ok(_) => registered += 1,
+                Err(error) => {
+                    crate::diag!(warn catalog: "transport registration skipped for connection {principal}/{}: {error}", summary.connection_id)
                 }
-                TransportKind::RestApi => {
-                    self.rest_transport
-                        .register_connection(RestConnection::from_manifest(
-                            &summary.connection_id,
-                            &manifest,
-                        ));
-                    registered += 1;
-                }
-                // Any other kind is unroutable and is refused at ingest; nothing
-                // to register, and no reason to fail the sweep over it.
-                _ => {}
             }
         }
         registered
@@ -313,8 +293,8 @@ impl CatalogReconciler {
     ///   token every probe to throw it away.
     /// - Catalog reconcile. For a REST connector the reviewed manifest is the
     ///   catalog and there is no vendor discovery to reconcile against.
-    ///   Manifest ingest already adds newly declared actions to existing
-    ///   handle connections and deliberately leaves existing rows (status,
+    ///   Manifest ingest updates reviewed policy and adds newly declared actions
+    ///   to existing handle connections, preserving operator decisions (status,
     ///   quarantine, schema pin) as they are; reconciling here every probe
     ///   would add a second writer that can change those rows.
     ///
@@ -385,7 +365,7 @@ impl CatalogReconciler {
         let credential = handle
             .resolve(credential_source)
             .map_err(|error| {
-                eprintln!(warn storage: "catalog credential resolution failed for connection {principal}/{connection_id}: class {}", error.class());
+                eprintln!(warn catalog: "catalog credential resolution failed for connection {principal}/{connection_id}: class {}", error.class());
                 CatalogError::Credential
             })?;
         Ok((manifest, prepared, credential))
@@ -400,6 +380,24 @@ impl CatalogReconciler {
         connection_id: &str,
         endpoint_override: Option<&str>,
     ) -> Result<(AppManifest, PreparedConnection), CatalogError> {
+        #[cfg(not(any(test, feature = "test-support")))]
+        if endpoint_override.is_some() {
+            return Err(CatalogError::Manifest);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        let endpoint = {
+            let mut overrides = self
+                .endpoint_overrides
+                .lock()
+                .map_err(|_| CatalogError::Manifest)?;
+            let key = (principal.to_string(), connection_id.to_string());
+            if let Some(endpoint) = endpoint_override {
+                overrides.insert(key.clone(), endpoint.to_string());
+            }
+            overrides.get(&key).cloned()
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        let endpoint_override = endpoint.as_deref();
         let connection = self
             .store
             .connection(principal, connection_id)
@@ -413,7 +411,7 @@ impl CatalogReconciler {
         let manifest: AppManifest = crate::manifest::validated_manifest(&manifest_value)
             .map_err(|error| {
                 let class = match error { crate::manifest::ManifestError::InvalidJson(_) => "invalid_json", crate::manifest::ManifestError::InvalidField(_) => "invalid_field" };
-                eprintln!(warn storage: "catalog manifest validation failed for connection {principal}/{connection_id}, app {}: class {class}", connection.app_key);
+                eprintln!(warn catalog: "catalog manifest validation failed for connection {principal}/{connection_id}, app {}: class {class}", connection.app_key);
                 CatalogError::Manifest
             })?;
         let prepared = match manifest.transport.kind {
@@ -539,13 +537,10 @@ impl CatalogReconciler {
         }
         match refresh() {
             Ok(_) => Ok(Freshness::Refreshed),
-            Err(_error) => {
+            Err(error) => {
+                crate::diag!(warn catalog: "catalog freshness refresh failed for connection {principal}/{connection_id}: {error}");
                 self.mark_degraded_id(principal, connection_id);
-                if is_write_severity(severity) {
-                    Err(CatalogError::StaleWrite)
-                } else {
-                    Ok(Freshness::AlreadyFresh)
-                }
+                Err(CatalogError::StaleWrite)
             }
         }
     }
@@ -647,9 +642,12 @@ impl CatalogReconciler {
             // and lets a manifest widen the set (e.g. add `read`) without ever
             // narrowing the floor. An undeclared action carries write risk, so
             // it asks first like any other write.
-            let ask_first = declared
-                .is_some_and(|action| action.ask_first || action.recipients.is_some())
-                || asks_first(risk, &manifest.defaults.ask_first_risk);
+            let ask_first = crate::manifest::action_asks_first(
+                risk,
+                &manifest.defaults.ask_first_risk,
+                declared.is_some_and(|action| action.ask_first),
+                declared.is_some_and(|action| action.recipients.is_some()),
+            );
             let (status, quarantine_reason) = match declared {
                 Some(declaration)
                     if declaration
@@ -708,13 +706,13 @@ impl CatalogReconciler {
             .store
             .clear_connection_degraded(principal, connection_id)
         {
-            eprintln!(warn storage: "clear degraded health failed for connection {principal}/{connection_id}: {error}");
+            eprintln!(warn catalog: "clear degraded health failed for connection {principal}/{connection_id}: {error}");
         }
         if let Err(error) = self
             .store
             .clear_connection_auth_required(principal, connection_id)
         {
-            eprintln!(warn storage: "clear auth_required health failed for connection {principal}/{connection_id}: {error}");
+            eprintln!(warn catalog: "clear auth_required health failed for connection {principal}/{connection_id}: {error}");
         }
     }
 
@@ -729,7 +727,7 @@ impl CatalogReconciler {
             "degraded",
             &serde_json::json!({"reason": "catalog_refresh_failed"}),
         ) {
-            eprintln!(warn storage: "mark degraded health failed for connection {principal}/{connection_id}: {error}");
+            eprintln!(warn catalog: "mark degraded health failed for connection {principal}/{connection_id}: {error}");
         }
     }
 
@@ -747,10 +745,6 @@ impl CatalogReconciler {
             Severity::S4 => Duration::ZERO,
         }
     }
-}
-
-fn is_write_severity(severity: Severity) -> bool {
-    matches!(severity, Severity::S2 | Severity::S3 | Severity::S4)
 }
 
 /// One discovered action per reviewed baseline action, with the action's
@@ -827,6 +821,52 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_STORE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn test_endpoint_override_survives_connection_reload() {
+        let (store, _path) = test_store();
+        store
+            .upsert_manifest(
+                CATALOG_PRINCIPAL,
+                &ingest_value(serde_json::to_value(test_manifest()).unwrap()).unwrap(),
+            )
+            .unwrap();
+        let reconciler = CatalogReconciler::new(
+            store,
+            Arc::new(McpRemoteTransport::default()),
+            Default::default(),
+        );
+        reconciler
+            .load_connection("direct", "connection", Some("http://127.0.0.1:12345/mcp"))
+            .unwrap();
+        let (_, PreparedConnection::Mcp(connection)) = reconciler
+            .load_connection("direct", "connection", None)
+            .unwrap()
+        else {
+            panic!("MCP fixture");
+        };
+        assert_eq!(connection.config.endpoint, "http://127.0.0.1:12345/mcp");
+    }
+
+    #[test]
+    fn failed_freshness_refresh_never_reports_fresh() {
+        let (store, _path) = test_store();
+        let reconciler = CatalogReconciler::new(
+            store,
+            Arc::new(McpRemoteTransport::default()),
+            Default::default(),
+        );
+        assert_eq!(
+            reconciler.ensure_fresh_with(
+                "direct",
+                "connection",
+                &test_manifest(),
+                Severity::S1,
+                || Err(CatalogError::Manifest)
+            ),
+            Err(CatalogError::StaleWrite)
+        );
+    }
 
     #[test]
     fn fresh_catalog_write_does_not_resolve_a_credential() {
@@ -1044,7 +1084,7 @@ mod tests {
             "transport": {"kind": "mcp_remote", "url": "http://127.0.0.1/mcp"},
             "auth": {"mode": "api_key"},
             "credential_bindings": [{
-                "ref_role": "credential", "placement": "header", "key": "Authorization",
+                "ref_role": "primary", "placement": "header", "key": "Authorization",
                 "prefix": "Bearer ", "required": true
             }],
             "resource_filters": {"required": [], "optional": [], "write_enabling": []},

@@ -88,7 +88,7 @@ const TABLES: &[&str] = &[
 /// copy, each with the reason. Every table a migration creates must be in
 /// [`TABLES`] or here; a test fails on a table that is in neither. Read only
 /// by that test: the import has nothing to do for these tables.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) const EXCLUDED_TABLES: &[(&str, &str)] = &[
     (
         "cortexkit_schema_version",
@@ -154,7 +154,15 @@ pub fn import_store(from: &Path, to: &Path) -> Result<Vec<TableSummary>> {
             to.display()
         ));
     }
-    let revocations = crate::grant_journal::read(&parent.join(crate::grant_journal::NAME))?;
+    let destination_journal = parent.join(crate::grant_journal::NAME);
+    let mut revocations = crate::grant_journal::read(&destination_journal)?;
+    let source_journal = from
+        .parent()
+        .ok_or("source needs a parent directory")?
+        .join(crate::grant_journal::NAME);
+    if source_journal != destination_journal {
+        revocations.extend(crate::grant_journal::read(&source_journal)?);
+    }
     let source = open_sqlite(&descriptor(&from)?).map_err(|e| {
         format!("cannot acquire source store: {e}; stop the plexus module before import-store")
     })?;
@@ -200,6 +208,19 @@ pub fn import_store(from: &Path, to: &Path) -> Result<Vec<TableSummary>> {
     std::fs::File::open(&staged)
         .and_then(|f| f.sync_all())
         .map_err(|e| e.to_string())?;
+    // Persist the union before publishing the database. A later restore in this
+    // directory must replay source-side revocations too. Append, never replace,
+    // so existing destination revocations survive an interrupted import.
+    crate::grant_journal::ensure(&destination_journal).map_err(|e| e.to_string())?;
+    let existing = crate::grant_journal::read(&destination_journal)?;
+    for entry in &revocations {
+        if !existing
+            .iter()
+            .any(|old| old.principal == entry.principal && old.grant_id == entry.grant_id)
+        {
+            crate::grant_journal::append(&destination_journal, entry).map_err(|e| e.to_string())?;
+        }
+    }
     // Reserve the final name with a hard link to the COMPLETE database. Unlike
     // an exists-then-rename check this cannot overwrite a concurrent creator.
     // Both names contain the same complete file even if the final rename fails.
@@ -276,6 +297,23 @@ fn copy_store(
             .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        let legacy_project_source =
+            table == "trigger_subscriptions" && !columns.iter().any(|c| c == "project_source");
+        let mut insert_columns = columns.clone();
+        if legacy_project_source {
+            insert_columns.push("project_source".into());
+        }
+        let names = insert_columns
+            .iter()
+            .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let placeholders = vec!["?"; insert_columns.len()].join(",");
+        let mut insert = tx
+            .prepare(&format!(
+                "INSERT INTO {table} ({names}) VALUES ({placeholders})"
+            ))
+            .map_err(|e| format!("{table}: {e}"))?;
         let mut rows = statement.query([]).map_err(|e| format!("{table}: {e}"))?;
         while let Some(row) = rows.next().map_err(|e| format!("{table}: {e}"))? {
             let mut record = Record::new();
@@ -291,26 +329,18 @@ fn copy_store(
                 transform(old, &tx, table, &mut record).map_err(|e| format!("{id}: {e}"))?;
             // Legacy imports have project labels but no provenance column.
             // Mark those labels as operator-written to preserve their meaning.
-            let mut insert_columns = columns.clone();
-            if table == "trigger_subscriptions" && !record.contains_key("project_source") {
+            if legacy_project_source {
                 let source = match record.get("project_id") {
                     Some(Value::Text(_)) => Value::Text("hand".into()),
                     _ => Value::Null,
                 };
                 record.insert("project_source".into(), source);
-                insert_columns.push("project_source".into());
             }
-            let names = insert_columns
-                .iter()
-                .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
-                .collect::<Vec<_>>()
-                .join(",");
-            let placeholders = vec!["?"; insert_columns.len()].join(",");
-            tx.execute(
-                &format!("INSERT INTO {table} ({names}) VALUES ({placeholders})"),
-                rusqlite::params_from_iter(insert_columns.iter().map(|c| &record[c])),
-            )
-            .map_err(|e| format!("{id}: {e}"))?;
+            insert
+                .execute(rusqlite::params_from_iter(
+                    insert_columns.iter().map(|c| &record[c]),
+                ))
+                .map_err(|e| format!("{id}: {e}"))?;
             summary.carried += 1;
             summary.recomputed += u64::from(recomputed);
         }

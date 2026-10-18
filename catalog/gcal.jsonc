@@ -22,10 +22,9 @@
       // registry: the manifest never carries endpoints, client credentials,
       // or refresh parameters; the vault owns those.
       "profile_id": "google-calendar",
-      "profile_digest": "sha256:TBD-pinned-at-first-connect",
-      "requested_scopes": [
-        "https://www.googleapis.com/auth/calendar.readonly"
-      ]
+      // Kept only so older Plexus builds parse this file; nothing reads these fields.
+      "profile_digest": "",
+      "requested_scopes": []
     }
   },
   "credential_bindings": [
@@ -38,8 +37,8 @@
     }
   ],
   "resource_filters": {
-    "required": ["calendar_allowlist"],
-    "optional": ["time_window", "attendee_domain"],
+    "required": [],
+    "optional": [],
     "write_enabling": []
   },
   "actions_baseline": [

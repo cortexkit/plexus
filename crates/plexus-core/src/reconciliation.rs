@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::credentials::CredentialSource;
 use crate::governance::{AuthorizationRequest, GovernanceEngine, TransportOutcome};
 use crate::storage::AuditRecord;
-use crate::transport::Transport;
+use crate::transport::{Retryability, Transport};
 
 /// A write whose vendor outcome was not definitive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,12 +27,7 @@ pub struct OutcomeUnknownRecord {
 }
 
 /// Declared reconciliation class loaded from the catalog/manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReconciliationClass {
-    pub correlation_fields: Vec<String>,
-    pub read_back_action: String,
-    pub timeout_s: u64,
-}
+pub type ReconciliationClass = crate::manifest::Reconciliation;
 
 /// Result of running reconciliation for one outcome_unknown write.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,23 +65,8 @@ impl ReconcileResult {
 
 /// Parse a catalog/manifest reconciliation object into the typed class.
 pub fn parse_reconciliation_class(value: &Value) -> Option<ReconciliationClass> {
-    let correlation_fields = value
-        .get("correlation_fields")?
-        .as_array()?
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let read_back_action = value.get("read_back_action")?.as_str()?.to_string();
-    let timeout_s = value.get("timeout_s")?.as_u64()?;
-    if read_back_action.is_empty() || timeout_s == 0 {
-        return None;
-    }
-    Some(ReconciliationClass {
-        correlation_fields,
-        read_back_action,
-        timeout_s,
-    })
+    let class: ReconciliationClass = serde_json::from_value(value.clone()).ok()?;
+    class.valid().then_some(class)
 }
 
 impl<C, T> GovernanceEngine<C, T>
@@ -131,7 +111,9 @@ where
         };
 
         let elapsed_ms = now.saturating_sub(record.occurred_at_ms);
-        let timeout_ms = (class.timeout_s as i64).saturating_mul(1_000);
+        let timeout_ms = i64::try_from(class.timeout_s)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1_000);
         if elapsed_ms >= timeout_ms {
             return self.finish_reconcile(
                 record,
@@ -170,6 +152,18 @@ where
             );
         }
 
+        if class
+            .correlation_fields
+            .iter()
+            .any(|field| record.args.get(field).is_none())
+        {
+            return self.finish_reconcile(
+                record,
+                ReconcileResult::Ambiguous {
+                    reason: "correlation_field_missing_from_write".into(),
+                },
+            );
+        }
         let read_args = correlation_args(&record.args, &class.correlation_fields);
         let authorization = AuthorizationRequest::new(
             record.acting_principal.clone(),
@@ -224,7 +218,12 @@ where
             );
         }
         let outcome = self.revalidate_and_dispatch(&reservation);
-        let result = correlate_outcome(&outcome.outcome, &record.args, &class.correlation_fields);
+        let result = correlate_dispatch(
+            &outcome.outcome,
+            outcome.retryability,
+            &record.args,
+            &class.correlation_fields,
+        );
         if let ReconcileResult::Retrying { reason } = &result {
             // Settling now would delete the queued record after a single
             // failed read, although the vendor may answer on the next sweep.
@@ -250,6 +249,9 @@ where
             .finish_write_reconciliation(record, status, reason)
         {
             eprintln!(warn governance: "write reconciliation completion failed: {error}");
+            return ReconcileResult::Retrying {
+                reason: "completion_store_failed".into(),
+            };
         }
 
         if let Err(error) = self.store().append_audit(&AuditRecord {
@@ -327,6 +329,22 @@ fn correlate_outcome(
             reason_code: code.clone(),
         },
     }
+}
+
+fn correlate_dispatch(
+    outcome: &TransportOutcome,
+    retryability: Retryability,
+    original: &Value,
+    fields: &[String],
+) -> ReconcileResult {
+    if let TransportOutcome::NotSent { code, .. } = outcome {
+        if retryability != Retryability::Terminal {
+            return ReconcileResult::Retrying {
+                reason: format!("read_back_not_sent:{code}"),
+            };
+        }
+    }
+    correlate_outcome(outcome, original, fields)
 }
 
 fn correlate_response(
@@ -426,9 +444,11 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
             args: reservation.args.clone(),
             occurred_at_ms: crate::storage::now_ms(),
         };
-        let class = self
-            .store()
-            .catalog_action(&record.principal, &record.connection_id, &record.action)
+        let lookup =
+            self.store()
+                .catalog_action(&record.principal, &record.connection_id, &record.action);
+        let lookup_failed = lookup.is_err();
+        let class = lookup
             .ok()
             .flatten()
             .and_then(|action| action.reconciliation)
@@ -441,11 +461,11 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
             status: "pending".to_string(),
             reason: None,
         };
-        if class.is_none() {
+        if class.is_none() && !lookup_failed {
             status.status = "unreconcilable".to_string();
             status.reason = Some("reconciliation_class_missing".to_string());
         }
-        let saved = if class.is_some() {
+        let saved = if class.is_some() || lookup_failed {
             self.store()
                 .enqueue_write_reconciliation(&record, reservation.intent_id.as_deref())
         } else {
@@ -467,12 +487,14 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
                 }
                 .to_string(),
             );
-            let _ = self.store().finish_write_reconciliation_with_intent(
+            if let Err(error) = self.store().finish_write_reconciliation_with_intent(
                 &record,
                 reservation.intent_id.as_deref(),
                 &status.status,
                 status.reason.as_deref(),
-            );
+            ) {
+                crate::diag!(warn governance: "unknown write fallback persistence failed: {error}");
+            }
         }
 
         status
@@ -489,22 +511,25 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
         result_retention_window_ms: i64,
     ) -> Result<usize, cortexkit_store::StoreError> {
         let pending = self.store().pending_write_reconciliations_at(now_ms)?;
-        let count = pending.len();
-        for pending in pending {
-            if now_ms >= pending.expires_at_ms {
+        let count = pending.len().min(8);
+        // Bound vendor work so a backlog cannot consume a whole poll pass.
+        for pending in pending.into_iter().take(8) {
+            let result = if now_ms >= pending.expires_at_ms {
                 self.finish_reconcile(
                     &pending.record,
                     ReconcileResult::Ambiguous {
                         reason: "retention_expired".to_string(),
                     },
-                );
+                )
             } else {
-                if matches!(
-                    self.reconcile(&pending.record),
-                    ReconcileResult::Retrying { .. }
-                ) {
-                    self.store()
-                        .backoff_write_reconciliation(&pending.record, now_ms)?;
+                self.reconcile(&pending.record)
+            };
+            if matches!(result, ReconcileResult::Retrying { .. }) {
+                if let Err(error) = self
+                    .store()
+                    .backoff_write_reconciliation(&pending.record, now_ms)
+                {
+                    crate::diag!(warn governance: "write reconciliation backoff failed: {error}");
                 }
             }
         }
@@ -518,6 +543,33 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn transient_not_sent_read_back_remains_retryable() {
+        let outcome = TransportOutcome::NotSent {
+            code: "connect_failed".into(),
+            message: "offline".into(),
+        };
+        assert!(matches!(
+            correlate_dispatch(&outcome, Retryability::AutoRetryable, &json!({}), &[]),
+            ReconcileResult::Retrying { .. }
+        ));
+        assert!(matches!(
+            correlate_dispatch(&outcome, Retryability::Terminal, &json!({}), &[]),
+            ReconcileResult::Denied { .. }
+        ));
+    }
+
+    #[test]
+    fn reconciliation_parser_refuses_malformed_fields_and_overflowing_timeout() {
+        for fields in [json!([]), json!([5]), json!([""])] {
+            assert!(parse_reconciliation_class(
+                &json!({"correlation_fields":fields,"read_back_action":"search","timeout_s":60})
+            )
+            .is_none());
+        }
+        assert!(parse_reconciliation_class(&json!({"correlation_fields":["title"],"read_back_action":"search","timeout_s":u64::MAX})).is_none());
+    }
 
     #[test]
     fn parse_class_requires_timeout_and_read_back() {

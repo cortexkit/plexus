@@ -55,7 +55,7 @@ fn vendor_manifest(actions: Value) -> Value {
             "prefix": "Bearer ",
             "required": true
         }],
-        "resource_filters": { "required": [], "optional": [], "write_enabling": ["team"] },
+        "resource_filters": { "required": [], "optional": [], "write_enabling": [] },
         "actions_baseline": actions,
         "defaults": {
             "ask_first_risk": ["write"],

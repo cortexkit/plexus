@@ -156,15 +156,11 @@ fn manifest_value() -> Value {
                 }
             },
             {
-                // Snapshot diff carries an item-count ceiling so `subscribe`
-                // accepts it; the poller still has no strategy for the kind, so
-                // polling it must suspend rather than approximate a diff.
                 "name": SNAPSHOT,
                 "risk": "read",
                 "poll": {
-                    "cursor_kind": "snapshot_diff",
-                    "item_kind": "issue",
-                    "item_count_ceiling": 100
+                    "cursor_kind": "sync_token",
+                    "item_kind": "issue"
                 }
             }
         ],
@@ -4049,15 +4045,31 @@ fn pregate_refusal_of_a_drifted_action_suspends_before_authorize() {
     let _ = std::fs::remove_file(path);
 }
 
-/// Cursor kinds this slice does not implement suspend rather than guess, because
-/// a wrong watermark silently skips records. `ordered_timestamp` is now
-/// implemented, so `snapshot_diff` is the remaining unimplemented kind used here.
+/// An unsupported cursor in a legacy store must suspend rather than guess,
+/// because a wrong watermark silently skips records. New catalogs cannot ingest
+/// snapshot_diff; insert the old shape only after the valid fixture is ingested.
 ///
 /// Mutation proved: returning a strategy for `snapshot_diff` (instead of
 /// suspending) fails the `cursor_kind_unsupported` suspension assertion.
 #[test]
 fn unsupported_cursor_kind_suspends_with_cursor_kind_unsupported() {
     let (poller, engine, path, _feed_id) = fixture("unsupported-cursor");
+    let mut legacy = manifest_value();
+    legacy["actions_baseline"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|action| action["name"] == SNAPSHOT)
+        .unwrap()["poll"] = json!({
+        "cursor_kind":"snapshot_diff", "item_kind":"issue", "item_count_ceiling":100
+    });
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE app_manifests SET manifest_json=?1 WHERE key='mock'",
+            [legacy.to_string()],
+        )
+        .unwrap();
     let snapshot = engine
         .store()
         .subscribe(PRINCIPAL, CONNECTION, SNAPSHOT, 30)

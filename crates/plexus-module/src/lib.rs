@@ -5296,7 +5296,9 @@ pub(crate) fn test_write_manifest(key: &str, url: &str) -> plexus_core::Ingested
             "prefix": "Bearer ", "required": true
         }],
         "resource_filters": {"required": [], "optional": ["team"], "write_enabling": ["team"]},
-        "actions_baseline": [{"name": "held_write", "risk": "write"}],
+        "actions_baseline": [{"name": "held_write", "risk": "write", "input_schema":{
+            "type":"object", "properties":{"team":{"type":"string"}}
+        }}],
         "defaults": {"ask_first_risk": ["write", "destructive"], "rate_limit": {"calls_per_min": 30}},
         "availability": "ga"
     }))
@@ -11777,15 +11779,7 @@ mod connection_admin_tests {
         // Configure validates the requested filters against the vendor's
         // declared selectors, so the manifest has to be in the catalog or the
         // op refuses before reaching the store write under test.
-        let manifest_source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/linear.jsonc"),
-        )
-        .expect("read a shipped manifest");
-        let normalized = subc_jsonc::jsonc_to_json(&manifest_source).expect("normalize manifest");
-        let ingested = plexus_core::ingest_value(
-            serde_json::from_str::<Value>(&normalized).expect("parse manifest"),
-        )
-        .expect("ingest manifest");
+        let ingested = test_write_manifest("configure_fixture", "https://example.invalid/mcp");
         store
             .upsert_manifest("system", &ingested)
             .expect("seed manifest");

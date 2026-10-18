@@ -150,6 +150,141 @@ fn assert_settled(f: &Fixture, expected: &str, calls: usize) {
 }
 
 #[test]
+fn missing_correlation_arguments_do_not_dispatch_a_read_back() {
+    let f = fixture(true);
+    dispatch(&f, "direct", MockResponse::OutcomeUnknown);
+    db(&f).execute("UPDATE catalog_actions SET reconciliation_json=?1 WHERE name='create'",
+        [json!({"correlation_fields":["missing"],"read_back_action":"search","timeout_s":120}).to_string()]).unwrap();
+    tick(&f);
+    assert_eq!(f.engine.transport().requests().len(), 1);
+    assert_eq!(
+        status(&f).1.as_deref(),
+        Some("correlation_field_missing_from_write")
+    );
+}
+
+#[test]
+fn catalog_lookup_failure_after_an_unknown_write_keeps_it_queued() {
+    struct CorruptCatalog(std::path::PathBuf);
+    impl plexus_core::transport::Transport for CorruptCatalog {
+        fn dispatch(
+            &self,
+            _: plexus_core::transport::TransportRequest,
+            _: &plexus_core::credentials::ResolvedCredential,
+        ) -> plexus_core::transport::TransportResponse {
+            rusqlite::Connection::open(&self.0).unwrap().execute("UPDATE catalog_actions SET reconciliation_json='invalid json' WHERE name='create'", []).unwrap();
+            plexus_core::transport::TransportResponse::unknown()
+        }
+    }
+    let f = fixture(true);
+    let credentials = StubCredentialSource::default();
+    credentials.set_success(b"test:binding", b"vendor-key".to_vec(), None, 1);
+    let engine = GovernanceEngine::new(
+        f.engine.store().clone(),
+        Arc::new(credentials),
+        Arc::new(CorruptCatalog(f.path.to_path_buf())),
+    );
+    let reservation = engine
+        .authorize(AuthorizationRequest::new(
+            "direct",
+            "conn",
+            "create",
+            json!({"title":"unique"}),
+        ))
+        .unwrap();
+    let result = engine.revalidate_and_dispatch(&reservation);
+    assert_eq!(result.reconciliation.unwrap().status, "pending");
+    assert_eq!(pending(&f), 1);
+    db(&f)
+        .execute(
+            "UPDATE catalog_actions SET reconciliation_json=?1 WHERE name='create'",
+            [
+                json!({"correlation_fields":["title"],"read_back_action":"search","timeout_s":120})
+                    .to_string(),
+            ],
+        )
+        .unwrap();
+    f.engine
+        .transport()
+        .set_response(MockResponse::Success(json!({"title":"unique"})));
+    tick(&f);
+    assert_eq!(status(&f).0, "confirmed");
+}
+
+#[test]
+fn reconciliation_sweep_caps_vendor_reads_per_pass() {
+    let f = fixture(true);
+    for _ in 0..12 {
+        dispatch(&f, "direct", MockResponse::OutcomeUnknown);
+    }
+    f.engine
+        .transport()
+        .set_response(MockResponse::Success(json!({"title":"unique"})));
+    tick(&f);
+    assert_eq!(
+        f.engine.transport().requests().len(),
+        20,
+        "eight reads at most"
+    );
+    assert_eq!(pending(&f), 4);
+}
+
+#[test]
+fn reconciliation_completion_failure_backs_off_without_a_false_terminal_audit() {
+    let f = fixture(true);
+    dispatch(&f, "direct", MockResponse::OutcomeUnknown);
+    db(&f).execute_batch("CREATE TRIGGER refuse_finish BEFORE DELETE ON pending_write_reconciliations BEGIN SELECT RAISE(ABORT, 'busy finish'); END;").unwrap();
+    f.engine
+        .transport()
+        .set_response(MockResponse::Success(json!({"title":"unique"})));
+    tick(&f);
+    tick(&f);
+    assert_eq!(
+        f.engine.transport().requests().len(),
+        2,
+        "failed completion must back off"
+    );
+    assert_eq!(pending(&f), 1);
+    let count: i64 = db(&f)
+        .query_row(
+            "SELECT count(*) FROM audit_journal WHERE reason_code='reconciliation_confirmed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn expired_reconciliation_waits_for_backoff_then_settles() {
+    let f = fixture(true);
+    dispatch(&f, "direct", MockResponse::OutcomeUnknown);
+    let now = plexus_core::storage::now_ms();
+    db(&f)
+        .execute(
+            "UPDATE pending_write_reconciliations SET expires_at_ms=?1,next_attempt_at_ms=?2",
+            [now - 1, now + 5000],
+        )
+        .unwrap();
+    assert_eq!(
+        f.engine
+            .sweep_write_reconciliations(now, 86_400_000)
+            .unwrap(),
+        0
+    );
+    assert_eq!(pending(&f), 1);
+    assert_eq!(
+        f.engine
+            .sweep_write_reconciliations(now + 5000, 86_400_000)
+            .unwrap(),
+        1
+    );
+    assert_eq!(pending(&f), 0);
+    assert_eq!(status(&f).1.as_deref(), Some("retention_expired"));
+    assert_eq!(f.engine.transport().requests().len(), 1);
+}
+
+#[test]
 fn unknown_write_persists_pending() {
     let f = fixture(true);
     let outcome = dispatch(&f, "direct", MockResponse::OutcomeUnknown);
@@ -415,7 +550,7 @@ fn discovery_manifest() -> Value {
         "actions_baseline": [
             {"name": "create", "risk": "write",
              "reconciliation": {"correlation_fields": ["title"], "read_back_action": "search", "timeout_s": 120},
-             "http": {"method": "POST", "path": "/items", "args_schema": {"type": "object"}}},
+              "http": {"method": "POST", "path": "/items", "args_schema": {"type": "object", "properties":{"title":{"type":"string"}}}}},
             {"name": "search", "risk": "read",
              "http": {"method": "GET", "path": "/items", "args_schema": {"type": "object"}}},
             {"name": "run_sql", "risk": "write",

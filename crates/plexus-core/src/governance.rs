@@ -7031,7 +7031,7 @@ mod tests {
                 "prefix": "Bearer ", "required": true
             }],
             "resource_filters": {"required": [], "optional": [], "write_enabling": ["repo"]},
-            "actions_baseline": [{"name": "write_item", "risk": "write"}],
+            "actions_baseline": [{"name": "write_item", "risk": "write", "input_schema":{"type":"object","properties":{"repo":{"type":"string"}}}}],
             "defaults": {"ask_first_risk": ["write", "destructive"], "rate_limit": {"calls_per_min": 30}},
             "availability": "ga"
         }))

@@ -1,6 +1,6 @@
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::credentials::ResolvedCredential;
-use plexus_core::github::config::claim_lease_seconds;
+use plexus_core::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS;
 use plexus_core::github::receipt::{Claim, Effect, RETENTION_MS};
 use plexus_core::github::sweeper::sweep_receipts;
 use plexus_core::transport::{MockTransport, Transport, TransportRequest};
@@ -49,10 +49,8 @@ fn unsettled_receipt_survives_audit_prune_until_its_own_lease_based_horizon() {
 }
 
 #[test]
-fn lease_defaults_to_120_and_floors_at_60() {
-    assert_eq!(claim_lease_seconds(None), 120);
-    assert_eq!(claim_lease_seconds(Some(1)), 60);
-    assert_eq!(claim_lease_seconds(Some(180)), 180);
+fn production_receipt_lease_is_120_seconds() {
+    assert_eq!(DEFAULT_CLAIM_LEASE_SECONDS, 120);
 }
 
 fn effects() -> Vec<Effect> {

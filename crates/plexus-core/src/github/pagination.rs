@@ -135,7 +135,7 @@ where
     let mut items = Vec::new();
     for page in 1..=MAX_PAGES {
         if now_ms().saturating_sub(started_at_ms)
-            >= crate::github::config::CLAIM_LEASE_SECONDS * 1000
+            >= crate::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS * 1000
         {
             return Err(WalkError::LeaseExpired);
         }
@@ -145,7 +145,7 @@ where
             per_page: PER_PAGE,
         })?;
         if now_ms().saturating_sub(started_at_ms)
-            >= crate::github::config::CLAIM_LEASE_SECONDS * 1000
+            >= crate::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS * 1000
         {
             return Err(WalkError::LeaseExpired);
         }

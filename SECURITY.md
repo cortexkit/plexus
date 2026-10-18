@@ -56,6 +56,13 @@ and agent-visible errors. Arguments that carry credential material are refused.
 A vendor's 403 is treated as a permission refusal and never invalidates a
 credential; only a 401 is reported to the vault.
 
+An action returning credential material is never declared in a reviewed catalog,
+even if the vendor calls it a read. In particular, Neon `get_connection_string`
+returns a password-bearing database URI and is excluded. Manifest validation
+rejects that known name; this reviewed denylist is not a general secret detector
+and cannot establish that other vendor replies are credential-free. Reviewers
+must inspect the output contract of every newly declared action.
+
 ### Governed vendor calls
 
 Nothing reaches a vendor except through the governance pipeline, including
@@ -71,6 +78,16 @@ governed read under the caller's current grants. Live vendor discovery pins
 each action's input schema by hash, and a changed schema quarantines the action
 until an operator re-pins it. Agents see sanitized vendor errors; full
 diagnostics go only to the operator log.
+
+The decision plane is the additional authorization service required for higher-severity
+actions. No implementation is wired in production, so S3/S4 actions refuse
+rather than bypass that required decision.
+Resource filters use dot-delimited paths into reviewed input schemas, not
+concept labels such as `repo_allowlist`. Catalog ingest refuses unknown paths.
+An allowlisted path missing from a call must refuse, never silently skip the
+fence. Only schema-backed filter declarations ship; unreviewed MCP filter
+labels have been removed. Availability and reuse rationale are display metadata,
+not permission or rollout gates.
 
 ### Consent cards
 
@@ -91,11 +108,21 @@ run; calls made inside an automated flow never get a card.
 Each governed call writes an audit row for the decision and one for the
 dispatch, correlated by request id, in the module's SQLite store. Audit rows
 cannot be updated (a trigger refuses it) and can be deleted only once they are
-older than seven days; retention defaults to 30 days
+older than seven days during ordinary operation; retention defaults to 30 days
 (`PLEXUS_AUDIT_RETENTION_DAYS`). On Unix the store and its write-ahead log are
 set to owner-only permissions (mode `0600`) when opened. A grant revocation is
 first appended to an owner-only journal beside the database, so restoring an
 older store cannot bring the grant back.
+
+Migration 40 is a one-time, operator-approved exception to those deletion guards:
+it temporarily dropped the audit and revocation delete triggers, purged revoked
+connections and their audit/revocation snapshots without the retention floor,
+and restored the triggers. The sidecar revocation journal was not purged.
+Migrations may rebuild or delete data and are not generally reversible. A binary
+rollback cannot recover purged rows; destructive migrations require explicit
+operator approval and a retained backup. Import-store merges the source and
+destination sidecar journals before publishing the imported database. Restoring
+both a database and its journal from an old snapshot still loses later revocations.
 
 ### Out of scope
 

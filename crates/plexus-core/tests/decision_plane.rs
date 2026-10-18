@@ -877,7 +877,9 @@ fn reconciliation_target_becomes_write_is_refused_without_dispatch() {
         "schema_version": 1, "key": "mock", "name": "Mock", "description": "Risk drift fixture",
         "reuse_path": "mcp_direct", "reuse_rationale": "Mock transport", "tier": "S2",
         "transport": {"kind": "mcp_remote", "url": "https://example.invalid/mcp"},
-        "auth": {"mode": "api_key"}, "credential_bindings": [],
+        "auth": {"mode": "api_key"}, "credential_bindings": [{
+            "ref_role":"primary", "placement":"header", "key":"Authorization", "prefix":"Bearer ", "required":true
+        }],
         "resource_filters": {"required": [], "optional": [], "write_enabling": []},
         "actions_baseline": [
             {"name": "destroy_item", "risk": "destructive", "reconciliation": {

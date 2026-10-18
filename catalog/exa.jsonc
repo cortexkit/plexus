@@ -27,7 +27,7 @@
   ],
   "resource_filters": {
     "required": [],
-    "optional": ["domain_allowlist", "domain_denylist", "content_category", "result_limit"],
+    "optional": [],
     "write_enabling": []
   },
   // Action names verified against the live https://mcp.exa.ai/mcp catalog

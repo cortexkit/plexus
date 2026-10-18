@@ -7,8 +7,8 @@ pub(crate) mod validation;
 pub mod vendor_band;
 
 use crate::credentials::CredentialSource;
-use crate::github::config::CLAIM_LEASE_SECONDS;
 use crate::github::receipt::Claim;
+use crate::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS;
 use crate::governance::GovernanceEngine;
 use crate::storage::PlexusStore;
 use crate::transport::Transport;
@@ -46,7 +46,7 @@ pub fn bot_request_scoped<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 request_id,
                 claim_owner,
                 now,
-                CLAIM_LEASE_SECONDS,
+                DEFAULT_CLAIM_LEASE_SECONDS,
             );
             let outcome = if matches!(
                 reply.claim,
@@ -72,7 +72,7 @@ pub fn bot_request_scoped<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         request_id,
         claim_owner,
         now,
-        CLAIM_LEASE_SECONDS,
+        DEFAULT_CLAIM_LEASE_SECONDS,
     );
     let outcome = match reply.claim.as_ref() {
         Some(Claim::PendingApproval(row)) => {

@@ -1,6 +1,6 @@
 // Notion.
-// S3 floor provider (deliberate): ordinary writes escalate to the external
-// decision plane. OAuth custody is operator-provisioned (ck auth + binding
+// S3 floor provider: writes require a decision plane and are refused while no
+// production plane is wired. OAuth custody is operator-provisioned (ck auth + binding
 // ticket) until the vault-driven connect seam ships.
 {
   "schema_version": 1,
@@ -21,8 +21,9 @@
       // registry: the manifest never carries endpoints, client credentials,
       // or refresh parameters; the vault owns those.
       "profile_id": "notion",
-      "profile_digest": "sha256:TBD-pinned-at-first-connect",
-      "requested_scopes": ["read", "update", "insert"]
+      // Kept only so older Plexus builds parse this file; nothing reads these fields.
+      "profile_digest": "",
+      "requested_scopes": []
     }
   },
   "credential_bindings": [
@@ -35,9 +36,9 @@
     }
   ],
   "resource_filters": {
-    "required": ["workspace"],
-    "optional": ["page_allowlist", "database_allowlist", "property_filter"],
-    "write_enabling": ["parent_allowlist"]
+    "required": [],
+    "optional": [],
+    "write_enabling": []
   },
   "actions_baseline": [
     { "name": "search", "risk": "read" },
@@ -45,23 +46,11 @@
     { "name": "read_page", "risk": "read" },
     {
       "name": "create_page",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["title", "parent", "time_window"],
-        "read_back_action": "search",
-        "timeout_s": 120
-      },
-      "idempotency": "none"
+      "risk": "write"
     },
     {
       "name": "append_block",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["page_id", "time_window"],
-        "read_back_action": "read_page",
-        "timeout_s": 120
-      },
-      "idempotency": "none"
+      "risk": "write"
     }
   ],
   "defaults": {

@@ -4,8 +4,6 @@
 //! storage, and the store-backed governance projections, live under
 //! `storage::github_store`.
 
-#[path = "../config/github_facade.rs"]
-pub mod config;
 pub mod control;
 pub mod credential;
 pub mod facade;

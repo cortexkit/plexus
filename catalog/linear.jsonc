@@ -21,8 +21,9 @@
       // registry: the manifest never carries endpoints, client credentials,
       // or refresh parameters; the vault owns those.
       "profile_id": "linear",
-      "profile_digest": "sha256:TBD-pinned-at-first-connect",
-      "requested_scopes": ["read", "write"]
+      // Kept only so older Plexus builds parse this file; nothing reads these fields.
+      "profile_digest": "",
+      "requested_scopes": []
     }
   },
   "credential_bindings": [
@@ -35,42 +36,24 @@
     }
   ],
   "resource_filters": {
-    "required": ["workspace", "team"],
-    "optional": ["project", "label", "cycle", "status"],
-    "write_enabling": ["team"]
+    "required": [],
+    "optional": [],
+    "write_enabling": []
   },
   "actions_baseline": [
     { "name": "search_issues", "risk": "read" },
     { "name": "get_issue", "risk": "read" },
     {
       "name": "create_issue",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["title", "creator", "time_window"],
-        "read_back_action": "search_issues",
-        "timeout_s": 120
-      },
-      "idempotency": "none"
+      "risk": "write"
     },
     {
       "name": "comment_issue",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["issue_id", "body_hash", "time_window"],
-        "read_back_action": "get_issue",
-        "timeout_s": 120
-      },
-      "idempotency": "none"
+      "risk": "write"
     },
     {
       "name": "update_issue_status",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["issue_id", "target_status"],
-        "read_back_action": "get_issue",
-        "timeout_s": 60
-      },
-      "idempotency": "natural"
+      "risk": "write"
     }
   ],
   "defaults": {

@@ -41,7 +41,9 @@ fn poll_store() -> Arc<PlexusStore> {
         "description": "A local scalar polling fixture",
         "reuse_path": "openapi_shim", "reuse_rationale": "Static REST polling fixture",
         "transport": {"kind": "rest_api", "url": "http://127.0.0.1:1"},
-        "auth": {"mode": "api_key"}, "credential_bindings": [],
+        "auth": {"mode": "api_key"}, "credential_bindings": [{
+            "ref_role":"primary", "placement":"header", "key":"Authorization", "prefix":"Bearer ", "required":true
+        }],
         "resource_filters": {"required": [], "optional": [], "write_enabling": []},
         "actions_baseline": [{"name": "poll", "risk": "read",
             "http": {"method": "GET", "path": "/poll", "args_schema": schema},
