@@ -658,16 +658,9 @@ impl HealthState {
         };
         let panic_recovery_age_ms = self.note_panic_recoveries(recoveries, awake_now_ms);
         let seen_panic_recoveries = self.transport_panic_recoveries_seen.load(Ordering::Acquire);
-        // Independent dispatch, task-liveness, and useful-progress facts can
-        // each degrade the module. A live scheduler is not necessarily a useful
-        // one: it may keep ticking while every due poll fails.
+        // Independent task-liveness and useful-progress facts can each degrade
+        // the module. A live scheduler may still fail every due poll.
         let mut failures = Vec::new();
-        if heartbeat_awake_age_ms > HEARTBEAT_STALE_MS {
-            failures.push(format!(
-                "dispatch heartbeat stale for {heartbeat_awake_age_ms}ms \
-                     (threshold {HEARTBEAT_STALE_MS}ms awake time)"
-            ));
-        }
         if !scheduler_alive {
             failures.push(
                 "trigger scheduler task is not running; subscriptions are not being polled"

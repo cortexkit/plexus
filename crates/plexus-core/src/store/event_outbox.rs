@@ -1269,6 +1269,39 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_retention_reaches_retired_events_and_ceremony_history() {
+        let store = std::sync::Arc::new(store());
+        old_row(&store, "ci_runs", 0, Some(8 * AUDIT_MILLIS_PER_DAY));
+        let now = now_ms();
+        store.inner.with_conn_fenced(|conn| {
+            conn.execute("UPDATE trigger_subscriptions SET status='retired'", [])?;
+            conn.execute("INSERT INTO action_requests(request_id,principal,connection_id,action,args_snapshot,schema_hash,requester,status,expires_at,created_at_ms,settled_at_ms)
+                SELECT 'old-ceremony',principal,connection_id,'read','{}','hash',principal,'denied',0,0,?1 FROM trigger_subscriptions LIMIT 1",
+                [now - 31 * AUDIT_MILLIS_PER_DAY])?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(count(&store, "trigger_events"), 1);
+        assert_eq!(count(&store, "action_requests"), 1);
+        let engine = crate::governance::GovernanceEngine::new(
+            std::sync::Arc::clone(&store),
+            std::sync::Arc::new(crate::credentials::StubCredentialSource::default()),
+            std::sync::Arc::new(crate::transport::MockTransport::default()),
+        );
+        let scheduler = crate::scheduler::Scheduler::new(engine, 30 * AUDIT_MILLIS_PER_DAY);
+        assert!(scheduler.run_pass(&[], now).is_empty());
+        assert_eq!(
+            count(&store, "trigger_events"),
+            0,
+            "scheduler must prune retired event history"
+        );
+        assert_eq!(
+            count(&store, "action_requests"),
+            0,
+            "scheduler must independently prune ceremony history"
+        );
+    }
+
+    #[test]
     fn maintenance_prunes_all_watch_statuses_but_keeps_pending_and_recent_publications() {
         for status in ["active", "suspended", "retired"] {
             for published in [false, true] {

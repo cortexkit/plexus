@@ -31,14 +31,15 @@ use crate::governance::{
 };
 use crate::manifest::PollShape;
 use crate::storage::{
-    event_outbox::{RepoIdUpdate, RepoResolutionAdmission},
+    event_outbox::{
+        RepoIdUpdate, RepoResolutionAdmission, RETENTION_MAX_WINDOW_MS as MAX_WINDOW_MS,
+        SORTED_HEAD_REPLAY_WINDOW_MS,
+    },
     now_ms, ActorSource, EventHeaders, KeyedEventIdentity, KeyedPollEventInput, PollEventInput,
     PollGapInput, TriggerEventInsertOutcome, TriggerSubscription,
 };
 use crate::transport::Transport;
-use plexus_probe::{
-    ActionInvoker, ProbeError, ProbeSandbox, ProbeValue, ReturnSchema, WALL_TIMEOUT,
-};
+use plexus_probe::{ActionInvoker, ProbeError, ProbeSandbox, ProbeValue, ReturnSchema};
 
 /// Stored-cursor and request-argument field used by the sync-token strategy.
 const CURSOR_TOKEN_KEY: &str = "sync_token";
@@ -86,18 +87,8 @@ const REQUEST_SINCE_KEY: &str = "since";
 /// was too small. It narrows again only after a quiet day (see
 /// [`WINDOW_DECAY_QUIET_MS`]), and never below this value.
 const INITIAL_WINDOW_MS: i64 = 60_000;
-const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 60_000;
 /// Bound sequential work to five list pages per ordered-timestamp poll.
 const ORDERED_TIMESTAMP_MAX_PAGES_PER_POLL: usize = 5;
-/// Ceiling for the adaptive overlap window: one hour.
-///
-/// Beyond an hour of overlap the re-fetched duplicates stop being a rounding
-/// error and start costing real quota, and a vendor whose write/visibility skew
-/// exceeds an hour is not reliably pollable by ANY window — that is a coverage
-/// gap to surface, not a window to keep growing. Doubling stops here; the
-/// widened state reaching this ceiling is itself the recorded evidence that the
-/// skew is larger than the strategy can absorb.
-const MAX_WINDOW_MS: i64 = 60 * 60 * 1000;
 /// How long a widened overlap window must go without a late row before it is
 /// halved back toward [`INITIAL_WINDOW_MS`]: one day.
 ///
@@ -4046,13 +4037,13 @@ where
     }
 }
 
-/// Same budget as the sandbox wall clock. The two clocks are independent: this
-/// one bounds the host callback the sandbox cannot interrupt. Unit tests use a
-/// short deadline so a test of the abandoned-call path does not wait seconds.
+/// Bounds a vendor callback independently of the sandbox's guest execution
+/// budget: synchronous vendor I/O cannot be interrupted by the sandbox clock.
+/// Tests use a short deadline to exercise abandoned-call recovery.
 const ACTION_CALLBACK_DEADLINE: Duration = if cfg!(test) {
     Duration::from_millis(300)
 } else {
-    WALL_TIMEOUT
+    Duration::from_secs(5)
 };
 
 /// Inconclusive code for a probe whose earlier action call is still running.

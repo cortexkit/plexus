@@ -64,6 +64,16 @@ Poll failures never retry within a pass. The next attempt is the next due time u
 
 Under the fleet spec's rule 6, polling, health probes, the retired-agent sweep and retention prunes are plexus's owned background work. Each is durable or deduplicated: a poll commits its cursor and events in one transaction, and events are deduplicated on (connection, subscription, vendor id, payload hash). Each is bounded by the limits in the table above.
 
+## Setup and maintenance boundaries
+
+Every agent-requested connector action passes through `GovernanceEngine` before credentialed dispatch. Connector metadata discovery, periodic health probes, and operator-authorized GitHub handle import/probe/bind validation are setup and maintenance exceptions: they may contact vendors with credentials outside the action-governance pipeline. These exceptions do not authorize ordinary agent actions, and their setup/health/control checks and available audit records are separate from invocation decision/dispatch audit pairs.
+
+## Pull event acknowledgements and retention
+
+The events list/ack pull surface is a shared work queue. The connection owner and all overlapping `events_consume` grantees see the same unacknowledged rows; an acknowledgement by any one of them drains those rows for all of them. This is not independent per-consumer broadcast delivery. Acknowledgement retains event payloads and does not affect event-outbox publication. Large acknowledgement requests are processed in idempotent transactions of at most 500 ids; a caller may safely retry the whole request after an ambiguous or partial failure.
+
+Runtime audit rows are immutable, and ordinary retention cannot delete rows within the seven-day SQL floor; the default retention window is thirty days. Migration 40 was a one-time historical exception: for eligible revoked connections it temporarily removed the deletion triggers, purged associated audit and grant-revocation rows, and restored the triggers. Runtime connection deletion leaves both audit evidence and revocation snapshots intact; audit retention removes only sufficiently old audit rows, while revocation snapshots are otherwise retained indefinitely.
+
 ## How this nests in the fleet's timeouts (fleet spec section 2)
 
 - **A tool call:** vault read (30 s) and vendor request (30 s) run one after the other, inside a 60 s reservation. So a governed call can take up to about 60 s plus approval time. A caller whose own timeout is shorter gets its reply dropped, and the call itself still completes and is audited. For writes, that's why an unanswered caller must treat the outcome as unknown, never as "not sent".

@@ -434,6 +434,25 @@ where
             }
         };
         if housekeeping_due {
+            match self.store.prune_all_events(
+                crate::poller::UNACKED_MAX_AGE_MS,
+                crate::poller::UNACKED_MAX_ROWS,
+                now_ms,
+            ) {
+                Ok(removed) if removed > 0 => {
+                    eprintln!(debug scheduler: "event retention pruned {removed} row(s)");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!(warn scheduler: "event retention pass failed: {error}");
+                }
+            }
+            if let Err(error) = self
+                .store
+                .prune_ceremony_history(now_ms, self.audit_retention_window_ms)
+            {
+                eprintln!(warn scheduler: "ceremony retention pass failed: {error}");
+            }
             match self
                 .store
                 .prune_audit(now_ms, self.audit_retention_window_ms)

@@ -525,7 +525,11 @@ fn data(conn: &rusqlite::Connection, schema: &Schema) -> rusqlite::Result<TableR
 #[test]
 fn migration_53_is_additive_and_preserves_existing_limits_and_rows() {
     let inner = open_sqlite(&descriptor()).unwrap();
-    let old = &MIGRATIONS[..MIGRATIONS.len() - 1];
+    let through_53 = &MIGRATIONS[..=MIGRATIONS
+        .iter()
+        .position(|migration| migration.version == 53)
+        .unwrap()];
+    let old = &through_53[..through_53.len() - 1];
     assert_eq!(old.last().unwrap().version, 52);
     inner.migrate("plexus", old).unwrap();
     inner.with_conn_fenced(|conn| conn.execute_batch("INSERT INTO web_search_limits (backend, per_caller_per_minute, per_backend_per_minute, updated_at_ms) VALUES ('exa', 7, 70, 123);
@@ -533,7 +537,7 @@ fn migration_53_is_additive_and_preserves_existing_limits_and_rows() {
         INSERT INTO audit_journal (ts, principal, actor, acting_principal, decision, reason_code) VALUES (1, 'owner', 'operator', 'owner', 'allow', 'test');")).unwrap();
     let before = inner.with_read(schema).unwrap();
     let before_data = inner.with_read(|conn| data(conn, &before)).unwrap();
-    let outcome = inner.migrate("plexus", MIGRATIONS).unwrap();
+    let outcome = inner.migrate("plexus", through_53).unwrap();
     assert_eq!((outcome.applied, outcome.recorded), (1, 53));
     let after = inner.with_read(schema).unwrap();
     for object in &before {
@@ -573,6 +577,7 @@ fn migration_53_is_additive_and_preserves_existing_limits_and_rows() {
         grant_journal: None,
         outbox_ready: tokio::sync::Notify::new(),
         ci_runs: Default::default(),
+        manifest_cache: Default::default(),
     };
     assert_eq!(
         store.web_search_limits("exa").unwrap(),

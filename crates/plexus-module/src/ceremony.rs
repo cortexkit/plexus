@@ -1088,10 +1088,10 @@ pub(crate) fn set_web_search_order(
             return json!({"error": {"code": "invalid_request", "message": "duplicate web search provider"}});
         }
     }
-    let dry_run = params
-        .get("dry_run")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let dry_run = match boolean_flag(params, "dry_run", true) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     let previous = if dry_run {
         state.store().web_search_order()
     } else if clear {
@@ -1148,10 +1148,10 @@ pub(crate) fn set_web_search_allowance(
         };
         Some(count as u32)
     };
-    let dry_run = params
-        .get("dry_run")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let dry_run = match boolean_flag(params, "dry_run", true) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     let previous = if dry_run {
         state.store().web_search_allowance(provider)
     } else if let Some(count) = proposed {
@@ -1868,6 +1868,26 @@ mod tests {
                     "{reply}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn web_search_preview_flags_are_named_refusals() {
+        let (state, _) = grant_test_state("web-search-preview");
+        for flag in [json!("false"), json!(0), Value::Null, json!({})] {
+            let params = json!({"providers":["exa"],"provider":"exa","count":10,"dry_run":flag});
+            for reply in [
+                set_web_search_order(&state, "direct", &params),
+                set_web_search_allowance(&state, "direct", &params),
+            ] {
+                assert_eq!(reply["error"]["code"], "invalid_request", "{reply}");
+                assert_eq!(
+                    reply["error"]["message"], "dry_run must be a boolean",
+                    "{reply}"
+                );
+            }
+            assert_eq!(state.store().web_search_order().unwrap(), None);
+            assert_eq!(state.store().web_search_allowance("exa").unwrap(), None);
         }
     }
 

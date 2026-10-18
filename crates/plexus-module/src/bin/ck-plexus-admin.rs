@@ -2860,7 +2860,7 @@ mod web_search_chain_cli_tests {
                 }
                 let flags = parsed(&items);
                 flags
-                    .refuse_unknown(accepted_flags("set-web-search-order", None).unwrap())
+                    .refuse_unknown(accepted_flags("set-web-search-order").unwrap())
                     .unwrap();
                 let (method, params) = set_web_search_order_request(&flags).unwrap();
                 assert_eq!(
@@ -2962,7 +2962,7 @@ mod web_search_chain_cli_tests {
             ] {
                 let flags = parsed(&items);
                 assert!(flags
-                    .refuse_unknown(accepted_flags(command, None).unwrap())
+                    .refuse_unknown(accepted_flags(command).unwrap())
                     .is_err());
             }
         }

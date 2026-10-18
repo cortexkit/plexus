@@ -643,7 +643,10 @@ async fn outbox_has_pending(store: &Arc<PlexusStore>) -> Result<bool, String> {
     let db = store.clone();
     tokio::task::spawn_blocking(move || {
         for &version in plexus_core::event_key::PUBLISHED_EVENT_VERSIONS {
-            if !db.drain_event_outbox_version(1, version)?.is_empty() {
+            if !db
+                .drain_event_outbox_version_after(1, version, None)?
+                .is_empty()
+            {
                 return Ok(true);
             }
         }

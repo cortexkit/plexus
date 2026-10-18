@@ -1259,6 +1259,11 @@ pub(crate) const CONNECTION_KEYED_TABLES: &[(&str, &str)] = &[
                              WHERE principal = ?1 AND connection_id = ?2)",
     ),
     (
+        "event_outbox_failures",
+        "event_key IN (SELECT event_key FROM event_outbox WHERE event_id IN
+            (SELECT event_id FROM trigger_events WHERE principal = ?1 AND connection_id = ?2))",
+    ),
+    (
         "event_outbox",
         "event_id IN (SELECT event_id FROM trigger_events WHERE principal = ?1 AND connection_id = ?2)",
     ),
@@ -1839,6 +1844,7 @@ pub enum SubscriptionRefusal {
     },
     ProbeNameRequired,
     ProbeScriptRequired,
+    ProbeSourceTooLarge,
     ProbeActionsRequired,
     ProbeReturnSchemaInvalid(String),
     ProbeRearmInvalid,
@@ -1958,6 +1964,7 @@ impl SubscriptionRefusal {
             Self::ActionNotCoveredByGrant { .. } => "action_not_covered_by_grant",
             Self::ProbeNameRequired => "probe_name_required",
             Self::ProbeScriptRequired => "probe_script_required",
+            Self::ProbeSourceTooLarge => "probe_source_too_large",
             Self::ProbeActionsRequired => "probe_actions_required",
             Self::ProbeReturnSchemaInvalid(_) => "probe_return_schema_invalid",
             Self::ProbeRearmInvalid => "probe_rearm_invalid",
@@ -2033,6 +2040,11 @@ impl std::fmt::Display for SubscriptionRefusal {
             Self::ProbeScriptRequired => {
                 formatter.write_str("probe script_source must be non-empty")
             }
+            Self::ProbeSourceTooLarge => write!(
+                formatter,
+                "probe script_source exceeds {} bytes",
+                plexus_probe::MAX_SOURCE_BYTES
+            ),
             Self::ProbeActionsRequired => {
                 formatter.write_str("probe must declare at least one action")
             }
@@ -4286,6 +4298,9 @@ impl PlexusStore {
         let name = request.name.trim();
         if name.is_empty() {
             return Ok(Err(SubscriptionRefusal::ProbeNameRequired));
+        }
+        if request.script_source.len() > plexus_probe::MAX_SOURCE_BYTES {
+            return Ok(Err(SubscriptionRefusal::ProbeSourceTooLarge));
         }
         if request.script_source.trim().is_empty() {
             return Ok(Err(SubscriptionRefusal::ProbeScriptRequired));
@@ -8044,7 +8059,6 @@ impl PlexusStore {
     pub fn prune_audit(&self, now_ms: i64, retention_window_ms: i64) -> Result<usize, StoreError> {
         let cutoff = now_ms.saturating_sub(retention_window_ms);
         self.inner.with_conn_fenced(|conn| {
-            prune_ceremony_history_on_conn(conn, now_ms, retention_window_ms)?;
             conn.execute(
                 "DELETE FROM audit_journal
                  WHERE journal_id IN (
@@ -8224,8 +8238,9 @@ impl PlexusStore {
             .map_err(StoreError::Backend)
     }
 
-    /// Preserve JSON errors separately from storage failures for watch refusals.
-    fn parsed_manifest(
+    /// Preserve missing documents and parse errors separately from storage
+    /// failures so tolerant projections can fail closed without hiding I/O errors.
+    pub(crate) fn parsed_manifest(
         &self,
         principal: &str,
         key: &str,
@@ -10401,7 +10416,7 @@ impl PlexusStore {
         now: i64,
     ) -> Result<Vec<crate::reconciliation::PendingWriteReconciliation>, StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            let mut stmt = conn.prepare("SELECT principal,request_id,record_json,expires_at_ms FROM pending_write_reconciliations WHERE next_attempt_at_ms<=?1 OR expires_at_ms<=?1 ORDER BY expires_at_ms,principal,request_id LIMIT ?2")?;
+            let mut stmt = conn.prepare("SELECT principal,request_id,record_json,expires_at_ms FROM pending_write_reconciliations WHERE next_attempt_at_ms<=?1 ORDER BY expires_at_ms,principal,request_id LIMIT ?2")?;
             let rows = stmt
                 .query_map((now, RECONCILIATION_BATCH_ROWS), |row| {
                     Ok((

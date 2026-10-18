@@ -199,6 +199,44 @@ fn wildcard_grantee_never_matches_or_mints() {
     );
 }
 #[test]
+fn probe_registration_enforces_source_byte_limit_before_storage() {
+    let store = fixture();
+    grant(&store, "poll", "caller", "read");
+    let register = |source: &str| {
+        store
+            .register_probe(
+                "caller",
+                "connection",
+                ProbeRegistration {
+                    name: "bounded",
+                    actions: &["read".into()],
+                    script_source: source,
+                    return_schema: &json!({"kind":"bool"}),
+                    rearm: "once",
+                    cadence_s: 30,
+                    fixed_args: &json!({}),
+                    cursor_state: &json!({}),
+                },
+            )
+            .unwrap()
+    };
+    let at_limit = "é".repeat(plexus_probe::MAX_SOURCE_BYTES / 2);
+    assert_eq!(at_limit.len(), plexus_probe::MAX_SOURCE_BYTES);
+    assert_eq!(
+        register(&format!("{at_limit}é")),
+        Err(SubscriptionRefusal::ProbeSourceTooLarge)
+    );
+    assert!(store
+        .list_subscriptions("owner", None, None)
+        .unwrap()
+        .is_empty());
+    assert!(
+        register(&at_limit).is_ok(),
+        "the byte limit itself remains admissible"
+    );
+}
+
+#[test]
 fn probe_registration_rechecks_revocation_at_insert() {
     let store = Arc::new(fixture());
     grant(&store, "poll", "caller", "read");
@@ -784,6 +822,11 @@ fn retention_uses_settlement_boundaries_and_keeps_live_requests() {
         Ok(())
     }).unwrap();
     store.prune_audit(now, window).unwrap();
+    assert!(
+        store.action_request("owner", "old").unwrap().is_some(),
+        "audit retention must not trim ceremony history"
+    );
+    store.prune_ceremony_history(now, window).unwrap();
     let ids = |table: &str, column: &str| {
         store
             .inner

@@ -578,6 +578,9 @@ where
             }
         }
     });
+    if let Err(error) = blocking_section(plexus_probe::ProbeSandbox::warm_up) {
+        eprintln!(warn scheduler: "probe sandbox warm-up failed; initialization will retry on use: {error}");
+    }
     let (scheduler_shutdown, scheduler_stop) = mpsc::channel::<()>(1);
     let scheduler_task = spawn_trigger_scheduler(
         Arc::clone(&state),
@@ -3813,9 +3816,12 @@ fn facade_events_ack(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
             Ok(acked) if acked == event_ids.len() => {
                 json!({"result": {"acked": acked, "unacked": []}})
             }
-            Ok(acked) => {
-                partial_ack_reply(acked, state.store().unacked_of(principal_key, &event_ids))
-            }
+            Ok(acked) => partial_ack_reply(
+                acked,
+                state
+                    .store()
+                    .unacked_of_at(principal_key, &event_ids, ack_now),
+            ),
             Err(error) => crate::wire::store_failure(
                 "events acknowledged",
                 "events could not be acknowledged",

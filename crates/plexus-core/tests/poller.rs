@@ -4066,8 +4066,8 @@ fn unsupported_cursor_kind_suspends_with_cursor_kind_unsupported() {
     rusqlite::Connection::open(&path)
         .unwrap()
         .execute(
-            "UPDATE app_manifests SET manifest_json=?1 WHERE key='mock'",
-            [legacy.to_string()],
+            "UPDATE app_manifests SET manifest_json=?1,content_hash=?2 WHERE key='mock'",
+            [legacy.to_string(), jcs_sha256(&legacy).unwrap()],
         )
         .unwrap();
     let snapshot = engine
@@ -6839,7 +6839,6 @@ fn a_poll_sending_an_undeclared_argument_suspends_by_name() {
 }
 
 #[test]
-#[ignore = "requires the storage resume-reason change from the storage owner"]
 fn malformed_response_can_resume_with_detailed_reason_and_cursor_intact() {
     let (poller, engine, _path, id) = fixture("resume-malformed");
     engine.transport().set_response(MockResponse::Success(
@@ -6870,7 +6869,6 @@ fn malformed_response_can_resume_with_detailed_reason_and_cursor_intact() {
 }
 
 #[test]
-#[ignore = "requires the sorted-head retention-window change from the store owner"]
 fn sorted_head_overlap_stays_quiet_after_retention_and_newest_disappears() {
     let (poller, engine, path, _) = fixture("sorted-retention");
     let id = sorted_head_subscription(&engine);

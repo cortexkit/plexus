@@ -322,11 +322,20 @@ async fn order_and_allowance_require_direct_management_and_explicit_apply() {
         (ORDER, json!({"providers": ["exa"]})),
         (ALLOWANCE, json!({"provider": "exa", "count": 2})),
     ] {
-        for dry_run in [Value::Null, json!("false"), json!(true)] {
+        let preview = command(&fixture, op, params.clone()).await;
+        assert_eq!(preview["result"]["dry_run"], true, "{preview}");
+        for dry_run in [Value::Null, json!("false")] {
             params["dry_run"] = dry_run;
             let reply = command(&fixture, op, params.clone()).await;
-            assert_eq!(reply["result"]["dry_run"], true, "{reply}");
+            assert_eq!(code(&reply), "invalid_request", "{reply}");
+            assert_eq!(
+                reply["error"]["message"], "dry_run must be a boolean",
+                "{reply}"
+            );
         }
+        params["dry_run"] = json!(true);
+        let preview = command(&fixture, op, params.clone()).await;
+        assert_eq!(preview["result"]["dry_run"], true, "{preview}");
         params["dry_run"] = json!(false);
         for principal in [aft(), basal()] {
             let reply = fixture

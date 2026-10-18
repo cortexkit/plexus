@@ -210,6 +210,17 @@ fn seed_connection(
         conn.execute("INSERT INTO event_outbox(event_key, event_id, event_name, repo_id, repo, created_at_ms)
             VALUES ('key-' || ?1, 'event-' || ?1, 'github_issue_changed', 101, 'owner/repo', 1)", [c])?;
     }
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='event_outbox_failures')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? {
+        conn.execute(
+            "INSERT INTO event_outbox_failures(event_key,version,failed_at_ms,failure_reason)
+            VALUES ('key-' || ?1,1,1,'invalid_body')",
+            [c],
+        )?;
+    }
     conn.execute(
         "INSERT INTO write_reconciliation_results (principal, request_id, acting_principal,
              connection_id, action, status, updated_at_ms)

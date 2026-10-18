@@ -16,20 +16,15 @@ impl PlexusStore {
         app_key: &str,
         action: &str,
     ) -> Result<Option<Vec<String>>, StoreError> {
-        let Some(manifest) = self.manifest_json(CATALOG_PRINCIPAL, app_key)? else {
+        let Some(document) = self.parsed_manifest(CATALOG_PRINCIPAL, app_key)? else {
             return Ok(None);
         };
-        let declaration = manifest
-            .get("actions_baseline")
-            .and_then(Value::as_array)
-            .and_then(|actions| actions.iter().find(|value| value["name"] == action))
-            .and_then(|value| value.get("recipients"));
-        declaration
-            .map(|value| {
-                serde_json::from_value(value.clone())
-                    .map_err(|error| StoreError::Backend(error.to_string()))
-            })
-            .transpose()
+        let manifest = document.map_err(StoreError::Backend)?;
+        Ok(manifest
+            .actions_baseline
+            .iter()
+            .find(|baseline| baseline.name == action)
+            .and_then(|baseline| baseline.recipients.clone()))
     }
 
     /// A NULL agent id selects the module-only list for a connection, separate

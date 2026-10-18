@@ -3676,8 +3676,8 @@ where
             &request.action,
             request.args_snapshot.clone(),
         )
-        .with_actor(actor)
-        .with_request_id(&request.request_id);
+        .with_actor(actor);
+        authorization.request_id = request.request_id.clone();
         authorization.scope = request.scope.as_ref().map(|scope| scope.to_call_scope());
         authorization.relay_origin = request.relay_origin.clone();
         let connection = self
@@ -3963,16 +3963,11 @@ where
     /// else its key.
     fn service_label(&self, app_key: &str) -> String {
         self.store
-            .manifest_json(crate::storage::CATALOG_PRINCIPAL, app_key)
+            .cached_manifest(app_key)
             .ok()
-            .flatten()
             .and_then(|manifest| {
-                manifest
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .map(str::to_string)
+                let name = manifest.name.trim();
+                (!name.is_empty()).then(|| name.to_owned())
             })
             .unwrap_or_else(|| app_key.to_string())
     }
@@ -4819,15 +4814,12 @@ fn effective_severity(
     app_key: &str,
     store: &PlexusStore,
 ) -> Result<Severity, cortexkit_store::StoreError> {
-    // The app's manifest sets the minimum severity for a write. If the manifest
-    // or its tier is missing, use S4, the strongest severity, just as
-    // `parse_tier` does for an unknown value. Using S1, the weakest severity,
-    // could let a write skip the separate approval service that high-severity
-    // actions require. Return a store read failure so the caller can retry;
-    // do not interpret that failure as a severity.
+    // Missing or unknown reviewed tiers use the strongest severity. Actual
+    // store read failures still propagate; they are not a severity decision.
     let tier_floor = store
-        .manifest_json(crate::storage::CATALOG_PRINCIPAL, app_key)?
-        .and_then(|manifest| manifest.get("tier").and_then(Value::as_str).map(parse_tier))
+        .parsed_manifest(crate::storage::CATALOG_PRINCIPAL, app_key)?
+        .and_then(Result::ok)
+        .map(|manifest| manifest.tier)
         .unwrap_or(Tier::S4);
     let tier_sev = match tier_floor {
         Tier::S1 => Severity::S1,
@@ -5036,21 +5028,6 @@ fn risk_str(risk: Risk) -> &'static str {
         Risk::Read => "read",
         Risk::Write => "write",
         Risk::Destructive => "destructive",
-    }
-}
-
-fn parse_tier(value: &str) -> Tier {
-    match value {
-        "S1" => Tier::S1,
-        "S2" => Tier::S2,
-        "S3" => Tier::S3,
-        "S4" => Tier::S4,
-        // An unrecognized severity is a row this binary does not understand -
-        // written by a newer schema, or corrupted. Reading it as the WEAKEST
-        // tier would wave exactly the actions that most need the decision
-        // plane past it, so the unknown maps to the strongest gating instead:
-        // S4 demands external approval, which is the recoverable direction.
-        _ => Tier::S4,
     }
 }
 
@@ -5678,16 +5655,26 @@ mod tests {
         action.name = "github.issue.search".into();
         action.risk = "read".into();
         let args = serde_json::json!({"terms":["open"]});
-        let allowed = vec!["org/a".into(), "org/b".into()];
-        let outside = vec!["org/a".into(), "other/b".into()];
+        let allowed = AuthorizationRequest::new("direct", "connection", &action.name, args.clone())
+            .with_resolved_github_search(vec!["org/a".into(), "org/b".into()]);
+        let outside = AuthorizationRequest::new("direct", "connection", &action.name, args.clone())
+            .with_resolved_github_search(vec!["org/a".into(), "other/b".into()]);
         assert_eq!(
-            resource_denial_with_repositories(&connection, &action, &args, Some(&allowed)),
+            resource_denial_with_repositories(
+                &connection,
+                &action,
+                &args,
+                allowed.resolved_github_search_repositories()
+            ),
             None
         );
-        assert!(
-            resource_denial_with_repositories(&connection, &action, &args, Some(&outside))
-                .is_some()
-        );
+        assert!(resource_denial_with_repositories(
+            &connection,
+            &action,
+            &args,
+            outside.resolved_github_search_repositories()
+        )
+        .is_some());
         assert!(resource_denial_with_repositories(&connection, &action, &args, None).is_some());
         assert!(
             resource_denial_with_repositories(&connection, &action, &args, Some(&[])).is_some()
@@ -7187,19 +7174,39 @@ mod tests {
         );
     }
 
-    /// Map unknown severity strings to S4, the strongest tier, so a newer or
-    /// corrupt stored value cannot bypass the separate approval service.
-    /// Check unknown values as well as the recognized spellings to preserve
-    /// the existing behavior for valid tiers.
     #[test]
     fn an_unknown_severity_string_gates_at_the_strongest_tier() {
-        assert!(matches!(parse_tier("S5"), Tier::S4));
-        assert!(matches!(parse_tier(""), Tier::S4));
-        assert!(matches!(parse_tier("s1"), Tier::S4));
-        assert!(matches!(parse_tier("S1"), Tier::S1));
-        assert!(matches!(parse_tier("S2"), Tier::S2));
-        assert!(matches!(parse_tier("S3"), Tier::S3));
-        assert!(matches!(parse_tier("S4"), Tier::S4));
+        let path = crate::test_scratch::Scratch::database("unknown-tier");
+        let engine = hash_test_engine_at(path.to_str().unwrap());
+        let action = engine
+            .store()
+            .catalog_action("direct", "connection", "write_item")
+            .unwrap()
+            .unwrap();
+        let db = rusqlite::Connection::open(&*path).unwrap();
+        for tier in ["S5", "", "s1", "S1", "S2", "S3", "S4"] {
+            db.execute("UPDATE app_manifests SET manifest_json=json_set(manifest_json,'$.tier',?1),content_hash=?1", [tier]).unwrap();
+            let expected = match tier {
+                "S1" | "S2" => Severity::S2,
+                "S3" => Severity::S3,
+                _ => Severity::S4,
+            };
+            assert_eq!(
+                effective_severity(&action, "mock", engine.store()).unwrap(),
+                expected,
+                "{tier}"
+            );
+        }
+        db.execute("DELETE FROM app_manifests", []).unwrap();
+        assert_eq!(
+            effective_severity(&action, "mock", engine.store()).unwrap(),
+            Severity::S4
+        );
+        db.execute("DROP TABLE app_manifests", []).unwrap();
+        assert!(
+            effective_severity(&action, "mock", engine.store()).is_err(),
+            "store errors must not become S4"
+        );
     }
 
     /// A ROUTING failure and a VAULT failure must not render as the same code.

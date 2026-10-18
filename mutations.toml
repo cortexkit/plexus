@@ -2763,8 +2763,8 @@ timeout_s = 60
 id = "bus-adapter-preserves-duplicate-receipt"
 guards = "The production NATS adapter preserves the duplicate bit and original stream sequence"
 file = "crates/plexus-module/src/bus.rs"
-old = "            .publish(subject, id, digest, headers)\n            .await\n            .map_err(|_| \"nats_publish_failed\".into())"
-new = "            .publish(subject, id, digest, headers)\n            .await\n            .map(|receipt| PublishReceipt::new(receipt.stream_sequence(), false)) // NON-VACUITY BREAK\n            .map_err(|_| \"nats_publish_failed\".into())"
+old = "            .publish(subject, id, digest, headers)\n            .await\n            .map_err(|error| {"
+new = "            .publish(subject, id, digest, headers)\n            .await\n            .map(|receipt| PublishReceipt::new(receipt.stream_sequence(), false)) /* NON-VACUITY BREAK */\n            .map_err(|error| {"
 test_file = "crates/plexus-module/src/bus.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -5519,8 +5519,8 @@ timeout_s = 60
 id = "health-outbox-drain-liveness"
 guards = "A stopped outbox drain task or unpublishable outbox rows degrade health instead of leaving it ok"
 file = "crates/plexus-module/src/health.rs"
-old = "        } else if outbox_drain_stopped {"
-new = "        } else if false && outbox_drain_stopped /* NON-VACUITY BREAK */ {"
+old = "        if outbox_drain_stopped {"
+new = "        if false && outbox_drain_stopped /* NON-VACUITY BREAK */ {"
 test_file = "crates/plexus-module/src/health.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -5711,8 +5711,8 @@ timeout_s = 60
 id = "health-credential-repair-degrades"
 guards = "A connection whose credential needs a person to repair it degrades module health, naming the connection and code"
 file = "crates/plexus-module/src/health.rs"
-old = "        } else if !credential_repair.is_empty() {"
-new = "        } else if false && !credential_repair.is_empty() /* NON-VACUITY BREAK */ {"
+old = "        if !credential_repair.is_empty() {"
+new = "        if false && !credential_repair.is_empty() /* NON-VACUITY BREAK */ {"
 test_file = "crates/plexus-module/src/health.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -5773,8 +5773,8 @@ build_timeout_s = 3600
 id = "outbox-idle-fallback"
 guards = "An idle drain falls back only after thirty seconds, not every 250 milliseconds"
 file = "crates/plexus-module/src/bus.rs"
-old = "} else {\n        Duration::from_secs(30)\n    }\n}"
-new = "} else {\n        Duration::from_millis(250) /* NON-VACUITY BREAK */\n    }\n}"
+old = "const OUTBOX_IDLE: Duration = Duration::from_secs(30);"
+new = "const OUTBOX_IDLE: Duration = Duration::from_millis(250); /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/bus.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -5787,7 +5787,9 @@ build_timeout_s = 3600
 [[control]]
 id = "outbox-full-batch-continuation"
 guards = "A full outbox batch schedules another immediate pass without a fresh insert wake"
-edits = [{ file = "crates/plexus-module/src/bus.rs", old = "if published >= 50 {", new = "if false && published >= 50 { /* NON-VACUITY BREAK */" }, { file = "crates/plexus-module/src/bus.rs", old = "delay = if unpublishable.pending_more() {", new = "delay = if false && unpublishable.pending_more() { /* NON-VACUITY BREAK */" }]
+file = "crates/plexus-module/src/bus.rs"
+old = "delay = if unpublishable.pending_more() {"
+new = "delay = if false && unpublishable.pending_more() { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/bus.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -6792,8 +6794,8 @@ timeout_s = 120
 id = "history-retention"
 guards = "Terminal history ages out while live rows and retention boundaries survive"
 file = "crates/plexus-core/src/storage.rs"
-old = "prune_ceremony_history_on_conn(conn, now_ms, retention_window_ms)?;"
-new = "/* NON-VACUITY BREAK */"
+old = "prune_ceremony_history_on_conn(conn, now, retention_window_ms)"
+new = "{ let _ = (conn, now, retention_window_ms); Ok(()) } /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -14176,8 +14178,8 @@ timeout_s = 120
 id = "reconciliation-expired-backoff"
 guards = "Expired reconciliation completion retries honor backoff then terminate"
 file = "crates/plexus-core/src/storage.rs"
-old = "WHERE next_attempt_at_ms<=?1 ORDER BY expires_at_ms,principal,request_id LIMIT 1000"
-new = "WHERE next_attempt_at_ms<=?1 OR expires_at_ms<=?1 /* NON-VACUITY BREAK */ ORDER BY expires_at_ms,principal,request_id LIMIT 1000"
+old = "WHERE next_attempt_at_ms<=?1 ORDER BY expires_at_ms,principal,request_id LIMIT ?2"
+new = "WHERE next_attempt_at_ms<=?1 OR expires_at_ms<=?1 /* NON-VACUITY BREAK */ ORDER BY expires_at_ms,principal,request_id LIMIT ?2"
 test_file = "crates/plexus-core/tests/it/write_reconciliation.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -14788,9 +14790,9 @@ expect_red = ["poller::ci_runs::tests::fresh_watch_rescan_drops_preexisting_atte
 [[control]]
 id = "sorted-head-late-visibility"
 guards = "Unseen rows in the replay window are delivered while stored payloads and a disappearing newest row stay quiet"
-file = "crates/plexus-core/src/poller.rs"
-old = "const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 60_000;"
-new = "const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 0; // NON-VACUITY BREAK"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "pub const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 60_000;"
+new = "pub const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 0; // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/tests/poller.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -14813,16 +14815,16 @@ expect_red = ["unparseable_response_suspends_with_response_shape_invalid"]
 
 [[control]]
 id = "probe-first-callback-failure"
-guards = "The first callback failure determines the poll outcome even if the script invokes a later successful action"
+guards = "A failed probe callback keeps its governed failure classification when the sandbox traps"
 file = "crates/plexus-core/src/poller.rs"
-old = "fn invoke(&self, action: &str, argument: Value) -> Result<Value, String> {"
-new = "fn invoke(&self, action: &str, argument: Value) -> Result<Value, String> {\n        *self.action_failure.lock().unwrap() = None; // NON-VACUITY BREAK"
+old = "Some(failure) => self.probe_action_failure_outcome(\n                        principal,\n                        &subscription.subscription_id,\n                        failure,\n                    ),"
+new = "Some(_failure) => self.probe_action_failure_outcome(\n                        principal,\n                        &subscription.subscription_id,\n                        ProbeActionFailure::Inconclusive { code: \"probe_action_failed\".into(), message: \"callback failed\".into() }, /* NON-VACUITY BREAK */\n                    ),"
 test_file = "crates/plexus-core/src/poller/tests/liveness_tests.rs"
 runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["poller::tests::liveness_tests::first_probe_callback_failure_survives_a_later_success"]
+expect_red = ["poller::tests::liveness_tests::a_failed_probe_callback_cannot_be_caught_and_retried"]
 
 [[control]]
 id = "probe-runtime-failure-breaker"
@@ -15330,7 +15332,7 @@ timeout_s = 120
 id = "conformance-mcp-wire-auth"
 guards = "Dropping the credential in the real MCP transport must fail a stub fixture"
 file = "crates/plexus-core/src/mcp_remote.rs"
-old = "    let mut headers = build_headers(&config.credential_bindings, credential)\n        .map_err(|_| AttemptError::Local(McpRemoteError::Configuration))?;"
+old = "    let mut headers = build_headers(&config.credential_bindings, credential).map_err(|_| {\n        eprintln!(warn transport: \"MCP credential could not be rendered as a header\");\n        AttemptError::Local(McpRemoteError::Configuration)\n    })?;"
 new = "    let mut headers = HeaderMap::new(); /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-conformance/src/runner.rs"
 runner = "cargo"
@@ -15755,5 +15757,80 @@ target = "--lib"
 select = "expected"
 expect_red = ["engram_catalog::tests::engram_catalog_replaces_the_old_file_atomically"]
 expect_message = "catalog publication must replace the old inode rather than rewrite it in place"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "probe-registration-source-byte-cap"
+guards = "Oversized probe source is refused before any subscription is persisted"
+file = "crates/plexus-core/src/storage.rs"
+old = "if request.script_source.len() > plexus_probe::MAX_SOURCE_BYTES {"
+new = "if false && request.script_source.len() > plexus_probe::MAX_SOURCE_BYTES { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::store_contract_tests::probe_registration_enforces_source_byte_limit_before_storage"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-order-preview-boolean"
+guards = "Malformed web-search order dry_run flags are named refusals rather than successful previews"
+file = "crates/plexus-module/src/ceremony.rs"
+old = "let dry_run = match boolean_flag(params, \"dry_run\", true) {\n        Ok(value) => value,\n        Err(error) => return error,\n    };\n    let previous = if dry_run {\n        state.store().web_search_order()"
+new = "let dry_run = params.get(\"dry_run\").and_then(Value::as_bool).unwrap_or(true); /* NON-VACUITY BREAK */\n    let previous = if dry_run {\n        state.store().web_search_order()"
+test_file = "crates/plexus-module/src/ceremony.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["ceremony::tests::web_search_preview_flags_are_named_refusals"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-allowance-preview-boolean"
+guards = "Malformed web-search allowance dry_run flags are named refusals rather than successful previews"
+file = "crates/plexus-module/src/ceremony.rs"
+old = "let dry_run = match boolean_flag(params, \"dry_run\", true) {\n        Ok(value) => value,\n        Err(error) => return error,\n    };\n    let previous = if dry_run {\n        state.store().web_search_allowance(provider)"
+new = "let dry_run = params.get(\"dry_run\").and_then(Value::as_bool).unwrap_or(true); /* NON-VACUITY BREAK */\n    let previous = if dry_run {\n        state.store().web_search_allowance(provider)"
+test_file = "crates/plexus-module/src/ceremony.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["ceremony::tests::web_search_preview_flags_are_named_refusals"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "scheduler-all-status-event-retention"
+guards = "Retention ticks prune old event history even when its watch is retired and no poll runs"
+file = "crates/plexus-core/src/scheduler.rs"
+old = "match self.store.prune_all_events(\n                crate::poller::UNACKED_MAX_AGE_MS,\n                crate::poller::UNACKED_MAX_ROWS,\n                now_ms,\n            ) {"
+new = "match Ok::<usize, cortexkit_store::StoreError>(0) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/event_outbox.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::event_outbox::tests::scheduler_retention_reaches_retired_events_and_ceremony_history"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "scheduler-independent-ceremony-retention"
+guards = "Ceremony history retention is scheduled independently of audit retention"
+file = "crates/plexus-core/src/scheduler.rs"
+old = "if let Err(error) = self\n                .store\n                .prune_ceremony_history(now_ms, self.audit_retention_window_ms)\n            {"
+new = "if let Err(error) = Ok::<(), cortexkit_store::StoreError>(()) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/event_outbox.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::event_outbox::tests::scheduler_retention_reaches_retired_events_and_ceremony_history"]
 build_timeout_s = 3600
 timeout_s = 120

@@ -336,11 +336,6 @@ The copies are:
     `908eba9f442e3cf1a95772bfae81808816074a4c`: the `*.jsonl` test vectors and
     `WIRE-CONTRACT.md`, which reproduces lines 242-422 of
     `docs/designs/webhook-relay-spec.md`.
-- From cortexkit-account (https://github.com/cortexkit/cortexkit-account):
-  - `crates/plexus-conformance/fixtures/account/two-key-overlap-samples.json`,
-    from `workers/account/test/fixtures/two-key-overlap-samples.json` at commit
-    `f56471b90e49d107663dd16193b243e70acf93dd`: synthetic JWT and key-rotation
-    test vectors.
 
 The README or SOURCE file in each directory, or the entry above, records the
 exact source path.

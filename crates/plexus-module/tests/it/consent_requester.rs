@@ -519,8 +519,17 @@ impl Fixture {
             [],
         )
         .unwrap();
-        sql.execute("INSERT INTO app_manifests (principal,key,schema_version,content_hash,manifest_json,ingested_at_ms) VALUES ('system','mock',1,'hash',?1,1)",
-            [json!({"key":"mock","name":"Mock Chat","tier":"S1","auth":{"mode":"none"}}).to_string()]).unwrap();
+        let reviewed = plexus_core::ingest_value(json!({
+            "schema_version":1,"key":"mock","name":"Mock Chat","description":"Consent requester fixture",
+            "reuse_path":"mcp_direct","reuse_rationale":"Test fixture","tier":"S1",
+            "transport":{"kind":"mcp_remote","url":"https://example.invalid/mcp"},
+            "auth":{"mode":"none"},"credential_bindings":[],
+            "resource_filters":{"required":[],"optional":[],"write_enabling":[]},
+            "actions_baseline":[{"name":ACTION,"risk":"write","ask_first":true,"input_schema":schema}],
+            "defaults":{"ask_first_risk":["write","destructive"],"rate_limit":{"calls_per_min":30}},
+            "availability":"ga"
+        })).unwrap();
+        store.upsert_manifest("system", &reviewed).unwrap();
         let scopes = Arc::new(Scopes(Mutex::new(head())));
         let credentials = StubCredentialSource::default();
         credentials.set_success(handle, b"vendor-token".to_vec(), None, 1);
@@ -575,7 +584,8 @@ impl Fixture {
 async fn files_redacted_scoped_card_with_requester_ref_and_carrier_dedup_key() {
     let f = Fixture::new().await;
     let mut request = f.request("original", "hello");
-    request.args["auth"] = json!({"token":"not-for-the-phone"});
+    let token = format!("ghp_{}", "Z".repeat(36));
+    request.args["note"] = json!(token);
     let held = f.engine.authorize(request);
     assert!(
         matches!(held, Err(Denial::ActionRequestCreated { .. })),
@@ -585,8 +595,8 @@ async fn files_redacted_scoped_card_with_requester_ref_and_carrier_dedup_key() {
     let row = &f.rows()[0];
     assert_eq!(body["requester_ref"], row.request_id);
     assert_eq!(body["dedup_key"], format!("{CARRIER}:original"));
-    assert_eq!(body["preview"]["text"], "auth: [withheld]\ntext: hello");
-    assert!(!body.to_string().contains("not-for-the-phone"));
+    assert_eq!(body["preview"]["text"], "note: [withheld]\ntext: hello");
+    assert!(!body.to_string().contains(&token));
     for field in [
         "subject",
         "agent_id",

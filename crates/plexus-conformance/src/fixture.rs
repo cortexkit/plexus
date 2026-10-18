@@ -127,7 +127,7 @@ impl ConnectorFixture {
                 "quarantine_candidate".to_string(),
             ],
             read_action: "read_item".to_string(),
-            read_args: json!({"q": "conformance"}),
+            read_args: json!({"q": "conformance", "team": "core"}),
             write_action: Some("write_item".to_string()),
             write_path: WritePath::AskFirst,
             canary_handle: b"test:CANARY-HANDLE-STUB-CONFORMANCE".to_vec(),
@@ -181,7 +181,7 @@ impl ConnectorFixture {
                 "update_issue_status".to_string(),
             ],
             read_action: "search_issues".to_string(),
-            read_args: json!({"q": "conformance"}),
+            read_args: json!({"q": "conformance", "workspace": "acme", "team": "core"}),
             write_action: Some("create_issue".to_string()),
             write_path: WritePath::AskFirst,
             canary_handle: b"test:CANARY-HANDLE-LINEAR-CONFORMANCE".to_vec(),
@@ -225,7 +225,7 @@ impl ConnectorFixture {
                 "resolve_issue".to_string(),
             ],
             read_action: "search_issues".to_string(),
-            read_args: json!({"q": "conformance"}),
+            read_args: json!({"q": "conformance", "org": "acme", "project": "api"}),
             write_action: Some("comment_issue".to_string()),
             write_path: WritePath::AskFirst,
             canary_handle: b"test:CANARY-HANDLE-SENTRY-CONFORMANCE".to_vec(),
@@ -272,6 +272,7 @@ impl ConnectorFixture {
             read_action: "search".to_string(),
             read_args: json!({
                 "workspace": "acme",
+                "parent_allowlist": "drafts",
                 "q": "conformance"
             }),
             write_action: Some("create_page".to_string()),
@@ -1141,6 +1142,7 @@ fn notion_stub_tool(name: &str) -> StubTool {
             "properties": {
                 "workspace": {"type": "string"},
                 "q": {"type": "string"},
+                "parent_allowlist": {"type": "string"},
                 "page_allowlist": {"type": "string"},
                 "database_allowlist": {"type": "string"}
             }

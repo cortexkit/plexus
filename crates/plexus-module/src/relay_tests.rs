@@ -2371,9 +2371,10 @@ async fn relay_polling_disconnect_catches_up_once_and_reconnects_fresh() {
     let (scratch, store, _) = fixture("relay-disconnect-catchup");
     let release = kind_watch(&store, "get_latest_release");
     kind_watch(&store, "list_workflow_runs");
+    let now = now_ms();
     sql(
         &scratch,
-        "UPDATE trigger_subscriptions SET last_polled_at_ms=9999999999999",
+        &format!("UPDATE trigger_subscriptions SET last_polled_at_ms={now}"),
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/v1/relay/github/ws", listener.local_addr().unwrap());
@@ -2404,7 +2405,7 @@ async fn relay_polling_disconnect_catches_up_once_and_reconnects_fresh() {
     wait_state(&status, State::Connected).await;
     age_relay(&status, 3600);
     assert_eq!(status.polling_status()["mode"], "relay_slow");
-    assert!(scheduler.due_now(&["direct".into()], now_ms()).is_empty());
+    assert!(scheduler.due_now(&["direct".into()], now).is_empty());
     socket.close(None).await.unwrap();
     wait_state(&status, State::Reconnecting).await;
     bounded(async {
@@ -2415,7 +2416,6 @@ async fn relay_polling_disconnect_catches_up_once_and_reconnects_fresh() {
     .await;
     assert_eq!(status.polling_status()["mode"], "normal");
     assert_eq!(status.polling_status()["last_clock_reset"], "reconnecting");
-    let now = now_ms();
     let catchup = scheduler.due_now(&["direct".into()], now);
     assert_eq!(
         catchup.len(),

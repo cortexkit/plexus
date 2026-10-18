@@ -22,7 +22,7 @@ fn probe(store: &PlexusStore, source: &str) -> String {
 }
 
 #[test]
-fn first_probe_callback_failure_survives_a_later_success() {
+fn a_failed_probe_callback_cannot_be_caught_and_retried() {
     let (store, engine, transport) = poll_engine(json!(true));
     let id = probe(&store, "() => { try { invoke('read_action', {}); } catch (e) {} return invoke('read_action', {}); }");
     transport.set_response_sequence_for_method(
@@ -42,7 +42,7 @@ fn first_probe_callback_failure_survives_a_later_success() {
             code: "http_503".into()
         }
     );
-    assert_eq!(transport.requests().len(), 2);
+    assert_eq!(transport.requests().len(), 1);
     let sub = store.subscription("direct", &id).unwrap().unwrap();
     assert_eq!(sub.consecutive_vendor_failures, 1);
     assert_eq!(sub.cursor_state, json!({}));

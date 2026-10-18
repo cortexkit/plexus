@@ -121,10 +121,19 @@ INSERT INTO web_search_allowance_counts (principal, provider, month_utc, used) V
     }
     let new = f.destination();
     assert_eq!(
-        scalar::<String>(&new, "SELECT providers FROM web_search_order WHERE singleton=1"),
+        scalar::<String>(
+            &new,
+            "SELECT providers FROM web_search_order WHERE singleton=1"
+        ),
         r#"["tavily","exa"]"#
     );
-    assert_eq!(scalar::<i64>(&new, "SELECT allowance FROM web_search_allowances WHERE provider='exa'"), 2);
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT allowance FROM web_search_allowances WHERE provider='exa'"
+        ),
+        2
+    );
     assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE principal='direct' AND provider='exa' AND month_utc='2024-02'"), 2);
     assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE principal='direct' AND provider='exa' AND month_utc='2024-03'"), 1);
     assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE principal='direct' AND provider='tavily' AND month_utc='2024-02'"), 1);
@@ -134,10 +143,13 @@ INSERT INTO web_search_allowance_counts (principal, provider, month_utc, used) V
 #[test]
 fn outbox_failures_follow_only_retained_publication_markers_on_import() {
     assert_eq!(
-        identity("event_outbox_failures", &Record::from([
-            ("event_key".into(), Value::Text("retained".into())),
-            ("version".into(), Value::Integer(2))
-        ])),
+        identity(
+            "event_outbox_failures",
+            &Record::from([
+                ("event_key".into(), Value::Text("retained".into())),
+                ("version".into(), Value::Integer(2))
+            ])
+        ),
         "event_outbox_failures [retained, 2]"
     );
     let f = Fixture::new();
@@ -152,12 +164,25 @@ fn outbox_failures_follow_only_retained_publication_markers_on_import() {
     let new = f.destination();
     let failures: Vec<(String,i64,i64,String)> = new.prepare("SELECT event_key,version,failed_at_ms,failure_reason FROM event_outbox_failures ORDER BY version").unwrap()
         .query_map([],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-    assert_eq!(failures, vec![
-        ("retained".into(), 1, 11, "invalid_headers".into()),
-        ("retained".into(), 2, 12, "invalid_body".into())
-    ], "cutover must retain terminal publication status only for surviving markers");
-    assert_eq!(scalar::<i64>(&new, "SELECT COUNT(*) FROM event_outbox WHERE event_key='orphan'"), 0);
-    assert_eq!(scalar::<i64>(&new, "SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+    assert_eq!(
+        failures,
+        vec![
+            ("retained".into(), 1, 11, "invalid_headers".into()),
+            ("retained".into(), 2, 12, "invalid_body".into())
+        ],
+        "cutover must retain terminal publication status only for surviving markers"
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT COUNT(*) FROM event_outbox WHERE event_key='orphan'"
+        ),
+        0
+    );
+    assert_eq!(
+        scalar::<i64>(&new, "SELECT COUNT(*) FROM pragma_foreign_key_check"),
+        0
+    );
 }
 
 /// Durable GitHub handle authority, bot-request receipts, the relay cursor,
