@@ -109,7 +109,7 @@ fn blocked_searches_keep_the_rate_budget() {
 
 /// An exa connection owned by `direct`, with `direct` holding a read grant
 /// for the search action.
-fn granted_exa_engine(
+pub(super) fn granted_exa_engine(
     name: &str,
 ) -> (
     GovernanceEngine<StubCredentialSource, MockTransport>,
@@ -119,7 +119,7 @@ fn granted_exa_engine(
     (engine, transport)
 }
 
-fn granted_exa_engine_with_path(
+pub(super) fn granted_exa_engine_with_path(
     name: &str,
 ) -> (
     GovernanceEngine<StubCredentialSource, MockTransport>,
@@ -186,7 +186,9 @@ fn granted_exa_engine_with_path(
     let transport = Arc::new(MockTransport::default());
     let engine = GovernanceEngine::new(
         store,
-        Arc::new(StubCredentialSource::default()),
+        Arc::new(StubCredentialSource::with_default_success(
+            b"test-credential".to_vec(),
+        )),
         transport.clone(),
     );
     (engine, transport, path)

@@ -1,8 +1,8 @@
 //! `web_search`: a vendor-neutral, governed web search tool.
 //!
 //! The module's handler only unpacks the wire frame; everything that decides
-//! whether a search runs lives here. The order of the checks is part of the
-//! contract:
+//! whether a search runs lives here. With no stored provider order, the checks
+//! retain the Exa compatibility contract:
 //!
 //! 1. validate the closed argument schema;
 //! 2. attribute the agent only from the daemon scope stamp;
@@ -13,12 +13,18 @@
 //!    dispatch through governance. The stamped agent never adds an agent
 //!    grant requirement to a search.
 //!
+//! With a stored order, `chain` prepares each provider's capability, resolves
+//! the caller's grant, then checks policy, action status, connection health and
+//! cooldown before charging rate limits and authorizing a governed dispatch.
+//! Argument validation and source-code refusal run once before either path.
+//!
 //! Every call writes one `web_search` audit row. A dispatched call also leaves
 //! the engine's own authorization and dispatch rows.
 
 pub mod backend;
 pub mod cache;
 pub mod capability;
+mod chain;
 mod code_lookup;
 pub mod limiter;
 pub mod providers;
@@ -40,6 +46,7 @@ use crate::transport::Transport;
 
 pub use backend::{ExaRestBackend, WebSearchBackend, WebSearchResult, EXCERPT_MAX_CHARS};
 pub use cache::{CacheKey, ResultCache, CACHE_CAPACITY, CACHE_TTL_MS};
+pub use chain::{ProviderSkip, SkipReason};
 pub use limiter::{
     default_limits, CallerKey, RateLimiter, DEFAULT_PER_BACKEND_PER_MINUTE,
     DEFAULT_PER_CALLER_PER_MINUTE,
@@ -68,6 +75,11 @@ pub enum WebSearchRefusal {
     /// More than one connection could serve the caller, and choosing one
     /// silently would pick whose credential and quota pays for the search.
     BackendAmbiguous,
+    /// No configured provider could serve. Details contain only public names
+    /// and closed reasons, never transport or vendor diagnostics.
+    WebSearchUnavailable {
+        providers: Vec<ProviderSkip>,
+    },
     InvalidQuery {
         field: String,
     },
@@ -88,6 +100,7 @@ impl WebSearchRefusal {
             Self::BackendUnavailable { .. } => "backend_unavailable",
             Self::BackendQuarantined { .. } => "backend_quarantined",
             Self::BackendAmbiguous => "backend_ambiguous",
+            Self::WebSearchUnavailable { .. } => "web_search_unavailable",
             Self::InvalidQuery { .. } => "invalid_query",
             Self::CodeLookup => "web_search_code_lookup",
             Self::PerCallApprovalUnsupported => "policy_ask_first",
@@ -100,6 +113,7 @@ impl WebSearchRefusal {
             Self::NotGranted | Self::Grant(_) => "no web search backend is granted to this caller",
             Self::RateLimited { .. } => "web search rate limit reached; retry after retry_after_ms",
             Self::BackendUnavailable { .. } => crate::transport::OPERATOR_DIAGNOSTIC_MESSAGE,
+            Self::WebSearchUnavailable { .. } => crate::transport::OPERATOR_DIAGNOSTIC_MESSAGE,
             Self::BackendQuarantined { .. } => {
                 "the web search backend action is quarantined pending operator review"
             }
@@ -127,6 +141,7 @@ impl WebSearchRefusal {
                 error["backend"] = json!(backend)
             }
             Self::InvalidQuery { field } => error["field"] = json!(field),
+            Self::WebSearchUnavailable { providers } => error["detail"] = json!(providers),
             Self::NotGranted
             | Self::BackendAmbiguous
             | Self::CodeLookup
@@ -144,8 +159,8 @@ pub struct WebSearchResponse {
     pub cached: bool,
 }
 
-/// The long-lived web search state: the backend, the rate limiter and the
-/// result cache. One instance serves every caller of the module.
+/// The long-lived web search state: compatibility backend, chain backends,
+/// rate limiter and result cache. One instance serves every caller of the module.
 pub struct WebSearchService {
     backend: Arc<dyn WebSearchBackend>,
     limiter: RateLimiter,
@@ -153,6 +168,8 @@ pub struct WebSearchService {
     /// Epoch milliseconds for rate limiting, cache age and recency windows.
     /// `fetched_at` always reads the real clock, since it reports an event.
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    chain_backends: std::collections::BTreeMap<&'static str, Arc<dyn WebSearchBackend>>,
+    chain_cooldowns: std::sync::Mutex<std::collections::HashMap<String, i64>>,
 }
 
 /// What the one `web_search` audit row of a call records, filled in as the
@@ -172,6 +189,7 @@ struct CallAudit {
     scope: Option<CallScope>,
     /// The call from which this search was relayed, if the relay stated one.
     relay_origin: Option<RelayOrigin>,
+    chain: Option<chain::ChainAudit>,
 }
 
 impl WebSearchService {
@@ -186,6 +204,8 @@ impl WebSearchService {
         clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Self {
         Self {
+            chain_backends: [(backend.name(), backend.clone())].into(),
+            chain_cooldowns: Default::default(),
             backend,
             limiter: RateLimiter::default(),
             cache: ResultCache::default(),
@@ -241,6 +261,7 @@ impl WebSearchService {
             dispatched: false,
             scope: scope.cloned(),
             relay_origin: relay_origin.cloned(),
+            chain: None,
         };
         let outcome = self.run(engine, arguments, now_ms, &mut audit);
         self.write_audit(engine.store(), &audit, &outcome);
@@ -266,6 +287,14 @@ impl WebSearchService {
         // Refuse before charging quota or reading old cached source-search results.
         if code_lookup::classify(&query).is_some() {
             return Err(WebSearchRefusal::CodeLookup);
+        }
+
+        let order = store.web_search_order().map_err(|error| {
+            eprintln!(error web_search: "web_search order unreadable: {error}");
+            self.unavailable()
+        })?;
+        if let Some(order) = order {
+            return self.run_chain(engine, &order, &query, now_ms, audit);
         }
 
         let limits = match store.web_search_limits(backend.name()) {
@@ -409,6 +438,26 @@ impl WebSearchService {
         is_flow: bool,
     ) -> Result<(ConnectionRecord, CatalogAction), WebSearchRefusal> {
         let backend = self.backend.as_ref();
+        self.backing_connection_for(
+            store,
+            caller,
+            now_ms,
+            is_flow,
+            chain::BackendIdentity::of(backend),
+            Self::grant_target(caller),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn backing_connection_for(
+        &self,
+        store: &PlexusStore,
+        caller: &str,
+        now_ms: i64,
+        is_flow: bool,
+        backend: chain::BackendIdentity,
+        target: crate::grant_refusal::GrantTarget,
+    ) -> Result<(ConnectionRecord, CatalogAction), WebSearchRefusal> {
         let store_failure = |error: cortexkit_store::StoreError| {
             eprintln!(error web_search: "web_search connection lookup failed: {error}");
             self.unavailable()
@@ -416,7 +465,7 @@ impl WebSearchService {
         let mut eligible = Vec::new();
         let mut cause = crate::grant_refusal::Cause::Missing;
         for connection_id in store
-            .web_search_candidate_connection_ids(caller, backend.app_key())
+            .web_search_candidate_connection_ids(caller, backend.app_key)
             .map_err(store_failure)?
         {
             let Some(connection) = store
@@ -427,7 +476,7 @@ impl WebSearchService {
             };
             // Reload after candidate selection: a connection may have changed
             // owner, backend or status between the two store reads.
-            if connection.app_key != backend.app_key()
+            if connection.app_key != backend.app_key
                 || matches!(
                     connection.status.as_str(),
                     "pending" | "disabled" | "revoked"
@@ -439,7 +488,7 @@ impl WebSearchService {
                 .catalog_action(
                     &connection.principal,
                     &connection.connection_id,
-                    backend.action(),
+                    backend.action,
                 )
                 .map_err(store_failure)?
             else {
@@ -454,11 +503,11 @@ impl WebSearchService {
                 caller,
                 None,
                 AUTHORITY_INVOKE,
-                backend.action(),
+                backend.action,
                 now_ms,
                 Some(&action.risk),
             );
-            match scoped_grant_refusal(grant.as_ref(), backend.action(), &action.risk, now_ms) {
+            match scoped_grant_refusal(grant.as_ref(), backend.action, &action.risk, now_ms) {
                 None => eligible.push((connection, action)),
                 Some(reason) => {
                     cause = match reason {
@@ -478,7 +527,7 @@ impl WebSearchService {
         }
         match eligible.len() {
             0 if is_flow => Err(WebSearchRefusal::Grant(
-                crate::grant_refusal::GrantRefusal::new(Self::grant_target(caller), cause),
+                crate::grant_refusal::GrantRefusal::new(target, cause),
             )),
             0 => Err(WebSearchRefusal::NotGranted),
             1 => Ok(eligible.remove(0)),
@@ -647,17 +696,26 @@ impl WebSearchService {
             app_handle_id: None,
             agent_handle: None,
             connection_id: audit.connection_id.clone(),
-            app_key: Some(self.backend.app_key().to_string()),
-            action: Some(self.backend.action().to_string()),
+            app_key: audit.chain.as_ref().map_or_else(
+                || Some(self.backend.app_key().to_string()),
+                |chain| chain.attempted.map(|backend| backend.app_key.to_string()),
+            ),
+            action: audit.chain.as_ref().map_or_else(
+                || Some(self.backend.action().to_string()),
+                |chain| chain.attempted.map(|backend| backend.action.to_string()),
+            ),
             risk: audit.risk.clone(),
             severity: audit.severity.clone(),
             decision: decision.to_string(),
             reason_code,
             gate: Some(audit.gate.to_string()),
-            args_redaction_summary: Some(
-                "web_search query recorded in query_text; assertion and other arguments omitted"
-                    .to_string(),
-            ),
+            args_redaction_summary: Some(audit.chain.as_ref().map_or_else(
+                || {
+                    "web_search query recorded in query_text; assertion and other arguments omitted"
+                        .to_string()
+                },
+                |chain| json!({"served_by": chain.served_by, "skipped": chain.skipped}).to_string(),
+            )),
             outcome: Some(row_outcome.to_string()),
             latency_ms: None,
             request_id: None,
