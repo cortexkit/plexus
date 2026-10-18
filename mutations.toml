@@ -12263,3 +12263,239 @@ select = "expected"
 expect_red = ["web_search::chain::tests::policy_status_connection_cooldown_then_rate_is_the_failure_order"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-completed-results"
+guards = "A mapped nonempty reply serves without contacting the next provider"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'Ok(results) => Classified::Serve(results),'
+new = 'Ok(results) if results.is_empty() => Classified::Serve(results), Ok(_) => Classified::MoveOn { reason: SkipReason::Unavailable, cooldown_ms: UNAVAILABLE_COOLDOWN_MS }, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::completed_results_stop_before_next_provider"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-completed-empty"
+guards = "A mapped empty reply serves rather than failing over"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'Ok(results) => Classified::Serve(results),'
+new = 'Ok(results) if !results.is_empty() => Classified::Serve(results), Ok(_) => Classified::MoveOn { reason: SkipReason::Unavailable, cooldown_ms: UNAVAILABLE_COOLDOWN_MS }, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::first_serving_provider_stops_the_walk_even_when_empty"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-request-rejected"
+guards = "HTTP 400 and 422 stop the chain with an audited provider-naming refusal"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'if matches!(status, Some(400 | 422)) {'
+new = 'if matches!(status, Some(400 | 422)) && false { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::request_rejected_is_audited_without_retry_or_vendor_text"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-retry-delay"
+guards = "Real REST Retry-After controls throttled cooldown and caps it at one hour"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'retry_after_ms.min(MAX_THROTTLED_COOLDOWN_MS)'
+new = 'THROTTLED_COOLDOWN_MS /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::recorded_rest_throttled_with_retry_is_capped"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-not-sent-retry"
+guards = "NotSent with a retry hint is throttled rather than unavailable"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'throttled || matches!(dispatched.outcome, TransportOutcome::NotSent { .. })'
+new = 'throttled /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/outcome/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::outcome::tests::throttled_retry_is_capped_and_not_sent_retry_is_throttled"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-throttled-without-retry"
+guards = "Real REST 429 without Retry-After is throttled for one minute"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'if throttled {'
+new = 'if throttled && false { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::recorded_rest_throttled_without_retry_uses_one_minute"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-payment-quota"
+guards = "Real REST 402 is quota with a one-hour cooldown"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'if status == Some(402)'
+new = 'if status == Some(402) && false /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::recorded_rest_payment_required_is_quota"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-private-quota-signal"
+guards = "A private quota signal applies only to eligible client or MCP errors"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'quota_signal == QuotaSignal::Exhausted'
+new = 'quota_signal == QuotaSignal::Exhausted && false /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/outcome/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::outcome::tests::quota_signal_matches_only_eligible_errors"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-credential"
+guards = "HTTP 401 is credential failure and the next search skips the connection for sixty seconds"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'if status == Some(401) {'
+new = 'if status == Some(401) && false { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::credential_cooldown_and_vault_reporting_exclude_forbidden"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-forbidden-unavailable"
+guards = "Plain HTTP 403 and other client errors are unavailable rather than quota"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = '''    Classified::MoveOn {
+        reason: SkipReason::Unavailable,
+        cooldown_ms: UNAVAILABLE_COOLDOWN_MS,
+    }
+}'''
+new = '''    Classified::MoveOn {
+        reason: SkipReason::Quota, /* NON-VACUITY BREAK */
+        cooldown_ms: UNAVAILABLE_COOLDOWN_MS,
+    }
+}'''
+test_file = "crates/plexus-core/src/web_search/chain/outcome/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::outcome::tests::forbidden_and_other_client_errors_are_unavailable"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-default-unavailable"
+guards = "Unknown, unsent, bodyless, malformed and other failed outcomes are unavailable for one minute"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'pub(super) const UNAVAILABLE_COOLDOWN_MS: u64 = 60_000;'
+new = 'pub(super) const UNAVAILABLE_COOLDOWN_MS: u64 = 0; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/outcome/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::outcome::tests::default_errors_are_unavailable"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-cooldown-connection-key"
+guards = "An exhausted connection does not cool a different caller's account of the same provider"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = '.entry(connection.connection_id.clone())'
+new = '.entry(name.clone()) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::quota_cooldown_is_connection_local"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-cooldown-expiry"
+guards = "A failure cools until exactly its expiry; restarting clears the memory-only state"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = '.is_some_and(|until| *until > now_ms)'
+new = '.is_some_and(|until| *until >= now_ms) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::unavailable_cooldown_expires_and_restart_resets_memory"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-map-failure"
+guards = "A malformed completed reply fails over rather than serving empty"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = '''Err(_) => Classified::MoveOn {
+                        reason: SkipReason::Unavailable,
+                        cooldown_ms: UNAVAILABLE_COOLDOWN_MS,
+                    },'''
+new = 'Err(_) => Classified::Serve(vec![]), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/outcome/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::outcome::tests::default_errors_are_unavailable"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-mcp-is-error"
+guards = "An MCP isError result consumes the private quota signal instead of mapping as success"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'if body.get("isError").and_then(Value::as_bool) == Some(true) {'
+new = 'if body.get("isError").and_then(Value::as_bool) == Some(true) && false { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/outcome/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::outcome::tests::quota_signal_matches_only_eligible_errors"]
+build_timeout_s = 3600
+timeout_s = 120

@@ -1,0 +1,27 @@
+{
+  "payment_required": {
+    "status": 402,
+    "headers": "",
+    "body": "{\"error\":\"payment required\"}"
+  },
+  "throttled_retry": {
+    "status": 429,
+    "headers": "Retry-After: 7\r\n",
+    "body": "{\"error\":\"quota exhausted\"}"
+  },
+  "throttled_long_retry": {
+    "status": 429,
+    "headers": "Retry-After: 7200\r\n",
+    "body": "{\"error\":\"rate limited\"}"
+  },
+  "throttled_no_retry": {
+    "status": 429,
+    "headers": "",
+    "body": "{\"error\":\"quota exhausted\"}"
+  },
+  "forbidden_quota": {
+    "status": 403,
+    "headers": "",
+    "body": "{\"error\":\"quota exhausted\"}"
+  }
+}
