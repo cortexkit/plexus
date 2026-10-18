@@ -66,7 +66,7 @@ pub trait GateStore {
         nonce: &str,
         mapped: &MappedRequest,
         handle: &Handle,
-        owner: &str,
+        claim_owner: &str,
         baseline: &Value,
         effects: &[Effect],
         ask_first: bool,
@@ -159,10 +159,10 @@ fn terminal_binding_replay(
     if nonce.is_empty() {
         return Ok(None);
     }
-    let Some(row) = store.receipt(agent, nonce)? else {
+    let Some(mut row) = store.receipt(agent, nonce)? else {
         return Ok(None);
     };
-    if !terminal_state(&row.state) {
+    if !terminal_state(&row.state) && !row.effects.iter().all(|effect| effect.outcome.is_some()) {
         return Ok(None);
     }
     let binding = Binding {
@@ -176,6 +176,13 @@ fn terminal_binding_replay(
     let Ok(mapped) = request_map::map(request, &resolved, repository) else {
         return Ok(None);
     };
+    if let Some(outcome) = super::vendor_band::recover_completed(&row, &mapped.request_kind) {
+        row.state = "completed".into();
+        row.outcome = Some(outcome);
+    }
+    if !terminal_state(&row.state) {
+        return Ok(None);
+    }
     if resolver::resolve(request, &handle.connection_id, |_| {
         Ok(Some(binding.clone()))
     })
@@ -207,7 +214,7 @@ pub fn run_scoped(
     request: &Value,
     nonce: &str,
     request_id: &str,
-    owner: &str,
+    claim_owner: &str,
     now: i64,
     lease_seconds: i64,
 ) -> GateReply {
@@ -218,7 +225,7 @@ pub fn run_scoped(
         request,
         nonce,
         request_id,
-        owner,
+        claim_owner,
         now,
         lease_seconds,
         false,
@@ -233,7 +240,7 @@ pub(crate) fn replay_scoped(
     request: &Value,
     nonce: &str,
     request_id: &str,
-    owner: &str,
+    claim_owner: &str,
     now: i64,
     lease_seconds: i64,
 ) -> GateReply {
@@ -244,7 +251,7 @@ pub(crate) fn replay_scoped(
         request,
         nonce,
         request_id,
-        owner,
+        claim_owner,
         now,
         lease_seconds,
         true,
@@ -259,7 +266,7 @@ fn run_scoped_mode(
     request: &Value,
     nonce: &str,
     request_id: &str,
-    owner: &str,
+    claim_owner: &str,
     now: i64,
     lease_seconds: i64,
     replay_only: bool,
@@ -297,7 +304,8 @@ fn run_scoped_mode(
     };
     // A bot binding must name both this agent and this App's credential.
     if handle.agent_id != agent
-        || handle.credential_reference != format!("github_app:{}", handle.app_handle_id)
+        || handle.credential_reference
+            != crate::github::credential::app_reference(&handle.app_handle_id)
     {
         return reply.refuse_g2("agent_handle_unknown");
     }
@@ -360,9 +368,15 @@ fn run_scoped_mode(
         );
     }
     match store.receipt(&agent, nonce) {
-        Ok(Some(existing)) => {
+        Ok(Some(mut existing)) => {
             if existing.request_fingerprint != mapped.fingerprint {
                 return reply.refuse("G4", "nonce_payload_mismatch");
+            }
+            if let Some(outcome) =
+                super::vendor_band::recover_completed(&existing, &mapped.request_kind)
+            {
+                existing.state = "completed".into();
+                existing.outcome = Some(outcome);
             }
             if terminal_state(&existing.state) {
                 return reply.replay(existing, mapped);
@@ -525,7 +539,7 @@ fn run_scoped_mode(
         nonce,
         &mapped,
         &handle,
-        owner,
+        claim_owner,
         &authority.baseline,
         &effects,
         effect == "ask_first",

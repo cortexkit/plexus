@@ -155,6 +155,17 @@ pub fn reconcile_from(
     now_ms: i64,
     resume_after: Option<&(String, String)>,
 ) -> Result<OwnershipReport, StoreError> {
+    let started = std::time::Instant::now();
+    reconcile_with_budget(store, registry, now_ms, resume_after, || started.elapsed())
+}
+
+fn reconcile_with_budget(
+    store: &PlexusStore,
+    registry: &dyn RepositoryRegistry,
+    now_ms: i64,
+    resume_after: Option<&(String, String)>,
+    elapsed: impl Fn() -> std::time::Duration,
+) -> Result<OwnershipReport, StoreError> {
     let watches = store.repository_watches()?;
     let mut report = OwnershipReport::default();
     let mut hand: BTreeSet<String> = watches
@@ -174,8 +185,10 @@ pub fn reconcile_from(
     }
     let mut repos: Vec<_> = repos.into_iter().collect();
     resume_order(&mut repos, resume_after);
+    let mut resolved = BTreeMap::new();
     for ((owner, repo), watches) in repos {
         let resolution = registry.resolve_remote(&owner, &repo);
+        resolved.insert((owner.clone(), repo.clone()), resolution.clone());
         if resolution == RemoteResolution::Unavailable {
             report.unanswered = true;
             report.stopped_at = Some((owner, repo));
@@ -192,7 +205,9 @@ pub fn reconcile_from(
             }
             let target = match &resolution {
                 RemoteResolution::Found(project) => Some(Some(project.as_str())),
-                RemoteResolution::None if watch.source.as_deref() == Some("entorhinal") => {
+                RemoteResolution::None | RemoteResolution::Ambiguous
+                    if watch.source.as_deref() == Some("entorhinal") =>
+                {
                     Some(None)
                 }
                 _ => None,
@@ -202,6 +217,11 @@ pub fn reconcile_from(
                     store.reconcile_watch_project(watch, target, target.map(|_| "entorhinal"))?
                         as usize;
             }
+        }
+        if elapsed() >= std::time::Duration::from_secs(2) {
+            report.unanswered = true;
+            report.stopped_at = Some((owner, repo));
+            break;
         }
     }
     report.unconfirmed_hand.sort();
@@ -228,7 +248,11 @@ pub fn reconcile_from(
                     if projects.len() != 1 {
                         continue;
                     }
-                    match registry.resolve_remote(&owner, &repo) {
+                    let resolution = resolved
+                        .get(&(owner.clone(), repo.clone()))
+                        .cloned()
+                        .unwrap_or_else(|| registry.resolve_remote(&owner, &repo));
+                    match resolution {
                         RemoteResolution::Found(project) if projects.contains(&project) => {
                             report.created +=
                                 store.create_repository_watches(&owner, &repo, &project, now_ms)?;
@@ -239,6 +263,11 @@ pub fn reconcile_from(
                             break;
                         }
                         _ => {}
+                    }
+                    if elapsed() >= std::time::Duration::from_secs(2) {
+                        report.unanswered = true;
+                        report.stopped_at = Some((owner, repo));
+                        break;
                     }
                 }
             }

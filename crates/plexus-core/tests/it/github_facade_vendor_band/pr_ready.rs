@@ -288,8 +288,9 @@ fn pr_ready_noop_in_both_directions_sends_no_mutation_and_replays() {
 #[test]
 fn pr_ready_graphql_errors_at_http_200_are_sanitized_refusals() {
     for undo in [false, true] {
-        // Partial data does not turn a GraphQL application failure into success.
-        let mut response = mutation(undo, undo);
+        // Null data proves no mutation result was produced; vendor messages
+        // remain private even for a definite application refusal.
+        let mut response = json!({"data":null});
         response["errors"] = json!([
             {"message":"bot-token-canary free vendor text", "path":["mutation"]},
             {"resource":"PullRequest","field":"draft","code":"invalid","message":"secret text"}
@@ -310,18 +311,27 @@ fn pr_ready_graphql_errors_at_http_200_are_sanitized_refusals() {
 }
 
 #[test]
-fn pr_ready_missing_graphql_pull_request_is_refused() {
+fn pr_ready_ambiguous_graphql_success_is_unknown_and_never_retried() {
     for undo in [false, true] {
         for response in [
             json!({"data":{}}),
             json!({"data":null}),
             json!({"errors":[{"message":"secret"}]}),
+            json!({"data":{"markPullRequestReadyForReview":{"pullRequest":{"number":7,"url":URL,"isDraft":false}}},"errors":[{"message":"partial"}]}),
         ] {
-            let run = ReadyRun::new("pr-ready-missing-data", vec![pull(!undo), response]);
+            let run = ReadyRun::new("pr-ready-missing-data", vec![pull(!undo), response.clone()]);
             let reply = run.call(&request(undo), "missing-data");
+            let expected = if response.get("errors").is_some()
+                && response.get("data").is_none_or(Value::is_null)
+            {
+                "refused"
+            } else {
+                "outcome_unknown"
+            };
+            assert_eq!(reply["result"]["status"], expected, "{reply}");
             assert_eq!(
-                reply["result"]["refusal_code"], "vendor_rejected{status: 422}",
-                "{reply}"
+                run.call(&request(undo), "missing-data")["result"],
+                reply["result"]
             );
             run.server.join().unwrap();
         }

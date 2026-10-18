@@ -1042,7 +1042,7 @@ fn g3_shim_request_kinds_map_to_one_write_and_fixed_reads() {
                 "fixtures/gh_shim_wire/requests/v12-issue-close.request.json"
             )),
             "close_issue",
-            &["github.issue.get"][..],
+            &[][..],
         ),
         (
             include_str!(concat!(
@@ -1050,7 +1050,7 @@ fn g3_shim_request_kinds_map_to_one_write_and_fixed_reads() {
                 "fixtures/gh_shim_wire/requests/v12-issue-reopen.request.json"
             )),
             "reopen_issue",
-            &["github.issue.get"][..],
+            &[][..],
         ),
         (
             include_str!(concat!(
@@ -1058,7 +1058,7 @@ fn g3_shim_request_kinds_map_to_one_write_and_fixed_reads() {
                 "fixtures/gh_shim_wire/requests/v12-pr-close.request.json"
             )),
             "close_issue",
-            &["github.issue.get"][..],
+            &[][..],
         ),
         (
             include_str!(concat!(
@@ -1066,7 +1066,7 @@ fn g3_shim_request_kinds_map_to_one_write_and_fixed_reads() {
                 "fixtures/gh_shim_wire/requests/v12-pr-reopen.request.json"
             )),
             "reopen_issue",
-            &["github.issue.get"][..],
+            &[][..],
         ),
         (
             include_str!(concat!(

@@ -2,6 +2,60 @@
 use crate::governance::{self, Denial, TransportOutcome};
 use serde_json::Value;
 
+#[derive(Debug)]
+pub(super) struct Failure {
+    pub code: String,
+    pub retryable: bool,
+}
+
+impl From<&str> for Failure {
+    fn from(code: &str) -> Self {
+        code.to_owned().into()
+    }
+}
+
+impl From<String> for Failure {
+    fn from(code: String) -> Self {
+        let retryable = matches!(
+            code.as_str(),
+            "store_failure"
+                | "pre_dispatch_read_incomplete{reason: lease_expired}"
+                | "pre_dispatch_read_incomplete{reason: invalid_response}"
+                | crate::github::credential::UNRESOLVABLE_TRANSIENT
+        );
+        Self { code, retryable }
+    }
+}
+
+pub(super) fn denied(reason: &Denial, gate: &str) -> Failure {
+    Failure {
+        code: denial(reason, gate),
+        retryable: reason.clears_by_waiting(),
+    }
+}
+
+pub(super) fn dispatched(result: governance::DispatchOutcome) -> Result<Value, Failure> {
+    let outcome = result.outcome;
+    let retryable = result.retryability != crate::transport::Retryability::Terminal
+        || match &outcome {
+            TransportOutcome::NotSent { code, .. } => matches!(
+                code.as_str(),
+                "rate_limited"
+                    | "throttled"
+                    | "transport_transient"
+                    | "connector_home_not_held"
+                    | "store_error"
+                    | "store_failure"
+                    | crate::github::credential::UNRESOLVABLE_TRANSIENT
+            ),
+            TransportOutcome::VendorFailed { code, .. } => {
+                matches!(code.as_str(), "http_429" | "http_503")
+            }
+            _ => false,
+        };
+    dispatch(outcome).map_err(|code| Failure { code, retryable })
+}
+
 pub(super) fn denial(denial: &Denial, gate: &str) -> String {
     if let Denial::GrantRefusal(refusal) = denial {
         return refusal.wire().to_string();

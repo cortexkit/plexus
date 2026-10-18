@@ -30,11 +30,8 @@ pub enum AgentLookup {
     Unavailable,
 }
 
-/// Resolves a delivery target while an operator changes a subscription.
-///
-/// The consumer does not call this during polling or dispatch. A target that
-/// becomes stale after it is stored is routing metadata for the consumer to
-/// handle, not a reason for Plexus to revalidate every event.
+/// Resolves delivery targets at subscription changes and identifies retired
+/// agents during periodic scheduler maintenance, not during event dispatch.
 pub trait AgentRegistry: Send + Sync {
     fn lookup(&self, agent_id: &str) -> AgentLookup;
 }
@@ -147,8 +144,20 @@ impl<P: PrefrontalRoutePeer + 'static> AgentRegistry for PrefrontalAgentRegistry
         ) else {
             return AgentLookup::Unavailable;
         };
-        resolve_agent_lookup_reply(&reply)
+        resolve_agent_lookup_reply_for(agent_id, &reply)
     }
+}
+
+fn resolve_agent_lookup_reply_for(agent_id: &str, reply: &Value) -> AgentLookup {
+    let body = reply.get("result").unwrap_or(reply);
+    if body
+        .pointer("/agent/agent_id")
+        .or_else(|| body.pointer("/gone/agent_id"))
+        .is_some_and(|echo| echo.as_str() != Some(agent_id))
+    {
+        return AgentLookup::Unavailable;
+    }
+    resolve_agent_lookup_reply(reply)
 }
 
 /// Decode prefrontal's registry reply without performing I/O.
@@ -228,6 +237,17 @@ mod tests {
                 AGENT_RESOLVE_OPERATION.to_string(),
                 serde_json::json!({"agent_id": "agent-1"}),
             )]
+        );
+    }
+
+    #[test]
+    fn registry_rejects_reply_echoing_a_different_agent() {
+        let peer = Arc::new(MockRoutePeer::default());
+        *peer.reply.lock().unwrap() =
+            Ok(serde_json::json!({"result":{"agent":{"agent_id":"someone-else"}}}));
+        assert_eq!(
+            PrefrontalAgentRegistry::new(peer).lookup("requested-agent"),
+            AgentLookup::Unavailable
         );
     }
 

@@ -1,7 +1,6 @@
 //! Ordered GitHub mutations and proof that required ownership reads finished
 //! before a mutation can be authorized.
 use crate::github::facade::request_map::MappedRequest;
-use crate::github::pagination::{CompletedWalk, ListRead};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -9,17 +8,15 @@ use std::collections::BTreeSet;
 pub struct OwnershipProof {
     kind: String,
     completed: Vec<&'static str>,
-    owned: bool,
 }
 
 impl OwnershipProof {
     // Only the code processing GitHub read responses constructs this proof;
     // ordinary invoke callers cannot claim that ownership reads completed.
-    pub(crate) fn new(kind: &str, completed: Vec<&'static str>, owned: bool) -> Self {
+    pub(crate) fn new(kind: &str, completed: Vec<&'static str>) -> Self {
         Self {
             kind: kind.into(),
             completed,
-            owned,
         }
     }
 
@@ -27,8 +24,7 @@ impl OwnershipProof {
         let Some(required) = reads_for_kind(&self.kind) else {
             return false;
         };
-        self.owned
-            && required.iter().all(|read| self.completed.contains(read))
+        required.iter().all(|read| self.completed.contains(read))
             && effects_for_kind(&self.kind).contains(&action)
     }
 }
@@ -76,9 +72,10 @@ pub fn reads_for_kind(kind: &str) -> Option<&'static [&'static str]> {
     Some(match kind {
         "comment_edit_last" => &["github.issue_comments.list", "github.issue_comment.get"],
         "comment_edit" => &["github.issue_comment.get"],
-        "close" | "reopen" | "issue_edit" => &["github.issue.get"],
+        "issue_edit" => &["github.issue.get"],
         "pr_ready" | "pr_draft" => &["github.pull_request.get"],
-        "comment" | "pr_review" | "reaction" | "issue_create" | "pr_create" => &[],
+        "comment" | "pr_review" | "reaction" | "issue_create" | "pr_create" | "close"
+        | "reopen" => &[],
         _ => return None,
     })
 }
@@ -195,12 +192,4 @@ pub(super) fn plan(mapped: &MappedRequest) -> Vec<(&'static str, Value)> {
         _ => result.push((mapped.action, args.clone())),
     }
     result
-}
-
-pub(super) fn comment_from_walk(walk: &CompletedWalk, slug: &str) -> Option<Value> {
-    walk.newest_bot_comment(slug).cloned()
-}
-
-pub(super) fn list_read() -> ListRead {
-    ListRead::IssueComments
 }

@@ -819,11 +819,9 @@ fn pause_at_contact(
 fn concurrent_first_calls_claim_before_reads_and_write_once() {
     let f = Arc::new(Fixture::new(&[
         ("github.issue.get", "read"),
-        ("add_issue_comment", "write"),
-        ("close_issue", "write"),
+        ("edit_issue", "write"),
     ]));
-    let request =
-        json!({"verb":"issue close","repository":"org/repo","number":"42","comment":"done"});
+    let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
     let (entered, resume) = pause_at_contact(&f.github.after_read);
     {
         // Owned workers avoid scope's unconditional autojoin during unwinding.
@@ -862,11 +860,15 @@ fn concurrent_first_calls_claim_before_reads_and_write_once() {
         );
         assert_eq!(winner["result"]["status"], "completed", "{winner}");
     }
+    assert_eq!(f.github.actions(), ["github.issue.get", "edit_issue"]);
     assert_eq!(
-        f.github.actions(),
-        ["github.issue.get", "add_issue_comment", "close_issue"]
+        f.github
+            .actions()
+            .iter()
+            .filter(|action| *action == "edit_issue")
+            .count(),
+        1
     );
-    assert_eq!(f.github.comments.lock().unwrap().as_slice(), ["done"]);
     assert_eq!(
         f.store
             .github_receipt("agent-fixture", "race")
@@ -940,7 +942,7 @@ fn concurrent_approved_retries_mutate_once() {
 }
 
 fn authority_movement(sql: &[&str], expected: &str) {
-    let f = Fixture::new(&[("github.issue.get", "read"), ("close_issue", "write")]);
+    let f = Fixture::new(&[("github.issue.get", "read"), ("edit_issue", "write")]);
     let path = f.path.clone();
     let statements: Vec<String> = sql.iter().map(|statement| (*statement).into()).collect();
     *f.github.after_read.lock().unwrap() = Some(Box::new(move || {
@@ -949,7 +951,7 @@ fn authority_movement(sql: &[&str], expected: &str) {
             db.execute_batch(&statement).unwrap();
         }
     }));
-    let request = json!({"verb":"issue close","repository":"org/repo","number":"42"});
+    let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
     let reply = f.request(&request, "moved");
     assert_eq!(
         reply["result"]["refusal_code"],
@@ -998,7 +1000,7 @@ baseline_case!(
     "module_grant_revoked",
     "DELETE FROM grants WHERE grant_id='module'"
 );
-baseline_case!(baseline_policy_changed, "policy_changed", "INSERT INTO policies (policy_id,principal,connection_id,action_selector,effect,updated_at_ms) VALUES ('changed','operator','conn-fixture','close_issue','block',1)");
+baseline_case!(baseline_policy_changed, "policy_changed", "INSERT INTO policies (policy_id,principal,connection_id,action_selector,effect,updated_at_ms) VALUES ('changed','operator','conn-fixture','edit_issue','block',1)");
 baseline_case!(
     baseline_credential_rotated,
     "credential_rotated",

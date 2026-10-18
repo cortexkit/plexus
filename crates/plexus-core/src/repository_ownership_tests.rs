@@ -223,6 +223,54 @@ fn audit_count(store: &PlexusStore) -> usize {
 }
 
 #[test]
+fn ambiguous_owner_clears_only_automatically_sourced_project_labels() {
+    let (store, _, _) = fixture();
+    watch(&store, "owner", "repo");
+    let registry = Registry::empty();
+    registry.answer("owner", "repo", RemoteResolution::Found("project".into()));
+    reconcile(&store, &registry, crate::now_ms()).unwrap();
+    registry.answer("owner", "repo", RemoteResolution::Ambiguous);
+    reconcile(&store, &registry, crate::now_ms()).unwrap();
+    assert_eq!(stamps(&store)[0].1, None);
+    assert_eq!(stamps(&store)[0].2, None);
+}
+
+#[test]
+fn owned_remote_uses_the_watch_resolution_once_per_pass() {
+    let (store, _, _) = fixture();
+    bind(&store, "owner/repo");
+    watch(&store, "owner", "repo");
+    let registry = Registry::empty();
+    registry.own("owner", "repo");
+    reconcile(&store, &registry, crate::now_ms()).unwrap();
+    assert_eq!(registry.calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn ownership_pass_budget_resumes_after_the_last_processed_remote() {
+    let (store, _, _) = fixture();
+    watch(&store, "owner", "a");
+    watch(&store, "owner", "z");
+    let registry = Registry::empty();
+    registry.answer("owner", "a", RemoteResolution::None);
+    registry.answer("owner", "z", RemoteResolution::None);
+    let first = reconcile_with_budget(&store, &registry, 1, None, || {
+        std::time::Duration::from_secs(2)
+    })
+    .unwrap();
+    assert_eq!(first.stopped_at, Some(("owner".into(), "a".into())));
+    assert_eq!(registry.calls.lock().unwrap().len(), 1);
+    reconcile_with_budget(&store, &registry, 2, first.stopped_at.as_ref(), || {
+        std::time::Duration::from_secs(2)
+    })
+    .unwrap();
+    assert_eq!(
+        registry.calls.lock().unwrap()[1],
+        ("owner".into(), "z".into())
+    );
+}
+
+#[test]
 fn found_converts_even_equal_hand_stamp_and_audits_once() {
     let (store, _, _) = fixture();
     let watch = watch(&store, "Owner", "Repo");

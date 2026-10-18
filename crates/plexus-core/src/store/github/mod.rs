@@ -43,6 +43,25 @@ pub struct AgentGithubHandle {
 }
 
 impl PlexusStore {
+    pub(crate) fn github_handle_agents(&self) -> Result<Vec<String>, StoreError> {
+        self.inner.with_read(|conn| {
+            let mut query =
+                conn.prepare("SELECT agent_id FROM github_app_handle ORDER BY agent_id")?;
+            let rows = query
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+    }
+
+    pub(crate) fn retire_github_agent(&self, agent: &str) -> Result<(), StoreError> {
+        self.inner.with_conn_fenced(|conn| {
+            conn.execute("UPDATE github_app_handle SET status='disabled',proven_at=NULL WHERE agent_id=?1 AND status<>'disabled'", [agent])?;
+            conn.execute("UPDATE action_requests SET status='denied' WHERE agent_id=?1 AND status IN ('pending','approved')", [agent])?;
+            Ok(())
+        })
+    }
+
     /// Resolve one canonical repository binding without enumerating unrelated handles.
     pub fn github_handle_for_repo(
         &self,
@@ -339,6 +358,46 @@ pub struct GithubGovernanceSeams<S: std::ops::Deref<Target = PlexusStore>> {
 impl<S: std::ops::Deref<Target = PlexusStore> + Send + Sync> GovernanceSeams
     for GithubGovernanceSeams<S>
 {
+    fn prepare_invoke(&self, request: &mut AuthorizationRequest) -> Result<(), ResolverDenial> {
+        if request.action != "github.issue.search" || request.resolved_github_search() {
+            return Ok(());
+        }
+        let Some(connection) = self
+            .store
+            .connection_for_invoke(&request.principal, &request.connection_id)
+            .map_err(|_| ResolverDenial::StoreFailure)?
+        else {
+            return Ok(());
+        };
+        if !self
+            .store
+            .is_github_handle_connection(&connection.principal, &connection.connection_id)
+            .map_err(|_| ResolverDenial::StoreFailure)?
+        {
+            return Ok(());
+        }
+        self.resolve_invoke(request)?;
+        let repositories = request.args["repositories"]
+            .as_array()
+            .ok_or(ResolverDenial::RepositoryUnbound)?;
+        let resolved = crate::github::resolver::ResolvedRepositories {
+            repositories: repositories
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .ok_or(ResolverDenial::RepositoryUnbound)
+                })
+                .collect::<Result<_, _>>()?,
+            binding: crate::github::resolver::Binding {
+                app_handle_id: String::new(),
+                connection_id: request.connection_id.clone(),
+            },
+        };
+        *request = crate::github::reads::prepare_search_request(request.clone(), &resolved)?;
+        Ok(())
+    }
+
     fn resolve_invoke(&self, request: &AuthorizationRequest) -> Result<(), ResolverDenial> {
         use crate::github::resolver::{self, Binding};
         // A handle is identified by its full connection key, which is unique
@@ -361,6 +420,16 @@ impl<S: std::ops::Deref<Target = PlexusStore> + Send + Sync> GovernanceSeams
             return Ok(());
         }
         let mut routed = request.clone();
+        if request.resolved_github_search() {
+            // Plexus built q from the binding-checked selection. Omit it only
+            // from this validation copy, where caller-built queries are forbidden;
+            // the governed request still sends Plexus's constructed query.
+            routed
+                .args
+                .as_object_mut()
+                .ok_or(ResolverDenial::RepositoryUnbound)?
+                .remove("q");
+        }
         if request.origin() == crate::governance::RequestOrigin::Facade {
             let owner = request
                 .args
@@ -952,7 +1021,7 @@ impl PlexusStore {
         now: i64,
     ) -> Result<bool, StoreError> {
         self.inner.with_conn_fenced(|conn| Ok(conn.execute("UPDATE github_bot_receipt SET
-            claim_owner=NULL, claim_lease_expires_at=?4, updated_at=?4
+            claim_owner=NULL, claim_lease_expires_at=NULL, updated_at=?4
             WHERE agent_id=?1 AND request_nonce=?2 AND claim_owner=?3 AND state='pending'
             AND NOT EXISTS (SELECT 1 FROM json_each(effects) WHERE json_type(value,'$.dispatch_attempted_at')='integer'
                 AND json_type(value,'$.outcome')='null')",
@@ -1045,8 +1114,9 @@ impl PlexusStore {
         })
     }
 
-    /// One bounded tick handles uncertainty before retention; pending approval
-    /// rows are neither expired nor consumed by the sweeper.
+    /// One bounded tick handles uncertainty before applying receipt retention.
+    /// Unsettled rows retain their retry evidence for thirty days after the
+    /// later of their last update and claim lease; approvals are not consumed.
     pub fn sweep_github_receipts(&self, now: i64, batch: i64) -> Result<Vec<Receipt>, StoreError> {
         self.inner.with_conn_fenced(|conn| {
             let mut statement = conn.prepare(&pending_receipts_query())?;
@@ -1064,6 +1134,10 @@ impl PlexusStore {
                 RECEIPT_RETENTION_DELETE,
                 params![now.saturating_sub(RETENTION_MS), now, batch],
             )?;
+            conn.execute(
+                UNSETTLED_RECEIPT_RETENTION_DELETE,
+                params![now.saturating_sub(RETENTION_MS), batch],
+            )?;
             Ok(changed)
         })
     }
@@ -1080,6 +1154,10 @@ pub(super) const RECEIPT_RETENTION_DELETE: &str = "DELETE FROM github_bot_receip
     (SELECT rowid FROM github_bot_receipt WHERE state IN ('completed','refused')
      AND updated_at<=?1 AND (claim_lease_expires_at IS NULL OR claim_lease_expires_at<=?2)
      LIMIT ?3)";
+
+const UNSETTLED_RECEIPT_RETENTION_DELETE: &str = "DELETE FROM github_bot_receipt WHERE rowid IN
+    (SELECT rowid FROM github_bot_receipt WHERE state IN ('outcome_unknown','pending','pending_approval')
+     AND updated_at<=?1 AND COALESCE(claim_lease_expires_at,updated_at)<=?1 LIMIT ?2)";
 
 #[cfg(test)]
 impl PlexusStore {
@@ -1105,7 +1183,6 @@ impl PlexusStore {
     pub fn audit_github_facade(
         &self,
         reply: &crate::github::facade::gates::GateReply,
-        _nonce: &str,
     ) -> Result<(), StoreError> {
         let scope = reply.scope.as_ref();
         self.inner.with_conn_fenced(|conn| {
@@ -1391,7 +1468,10 @@ impl crate::github::facade::gates::GateStore for PlexusStore {
             now,
             lease_seconds,
         )
-        .map_err(|error| format!("store_failure: {error}"))
+        .map_err(|error| {
+            eprintln!(warn storage: "GitHub receipt claim failed: {error}");
+            "store_failure".to_string()
+        })
     }
 }
 
@@ -1419,6 +1499,11 @@ impl PlexusStore {
             let existing = load(conn)?;
             if let Some(row) = &existing {
                 if row.request_fingerprint != mapped.fingerprint { return Ok(Claim::PayloadMismatch); }
+                if let Some(outcome) = crate::github::facade::vendor_band::recover_completed(row, &mapped.request_kind) {
+                    conn.execute("UPDATE github_bot_receipt SET state='completed',outcome=?3,claim_owner=NULL,claim_lease_expires_at=NULL,updated_at=?4 WHERE agent_id=?1 AND request_nonce=?2",
+                        params![agent, nonce, outcome.to_string(), now])?;
+                    return Ok(Claim::Replay(load(conn)?.expect("completed receipt")));
+                }
                 if ["completed", "refused"].contains(&row.state.as_str()) { return Ok(Claim::Replay(row.clone())); }
                 if row.state == "outcome_unknown" || has_uncertain_effect(row) {
                     return Ok(Claim::Unknown(row.clone()));
@@ -1648,6 +1733,16 @@ impl PlexusStore {
             let tx = conn;
             let mut planned = std::collections::BTreeMap::new();
             for row in rows {
+                let conflict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM github_app_handle WHERE app_handle_id=?1 OR agent_id=?2 OR credential_reference=?3)
+                    OR EXISTS(SELECT 1 FROM connections WHERE principal=?4 AND connection_id=?5)
+                    OR EXISTS(SELECT 1 FROM grants WHERE principal=?4 AND grant_id LIKE ?6)",
+                    params![row.handle.app_handle_id,row.handle.agent_id,row.handle.credential_reference,row.handle.connection_principal,row.handle.connection_id,
+                        format!("github-import:{}:%",row.handle.app_handle_id)], |row| row.get(0))?;
+                if conflict {
+                    eprintln!(warn storage: "GitHub import conflicts with an existing handle, agent, credential, connection or grant: handle {}, agent {}, connection {}/{}; inspect the existing rows and rerun the preview", row.handle.app_handle_id, row.handle.agent_id, row.handle.connection_principal, row.handle.connection_id);
+                    *refusal.lock().unwrap_or_else(|poison| poison.into_inner()) = Some("inventory_handle_invalid".into());
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
                 for repository in &row.repositories {
                     let repository = &crate::github::canonical_repository(repository);
                     let current: Option<String> = tx.query_row("SELECT app_handle_id FROM github_repo_binding WHERE repository=?1", [repository], |row| row.get(0)).optional()?;
@@ -2451,6 +2546,25 @@ impl PlexusStore {
         })
     }
 
+    pub fn read_github_bindings_for_connection(
+        &self,
+        connection_id: &str,
+        caller: &str,
+    ) -> Result<Value, StoreError> {
+        self.inner.with_read(|conn| {
+            let generation: i64 = conn.query_row("SELECT generation FROM github_repo_binding_generation WHERE singleton=1",[],|row| row.get(0))?;
+            let mut query = conn.prepare("SELECT b.repository,h.app_handle_id,h.agent_id FROM github_repo_binding b
+                JOIN github_app_handle h ON h.app_handle_id=b.app_handle_id
+                WHERE h.connection_id=?1 AND EXISTS(SELECT 1 FROM grants g WHERE g.principal=h.connection_principal
+                    AND g.connection_id=h.connection_id AND g.grantee_principal=?2 AND g.agent_id IS NULL
+                    AND g.authority_kind='invoke' AND (g.expires_at IS NULL OR g.expires_at>?3)) ORDER BY b.repository")?;
+            let bindings = query.query_map(params![connection_id,caller,now_ms()], |row| Ok(serde_json::json!({
+                "repository":row.get::<_,String>(0)?,"app_handle_id":row.get::<_,String>(1)?,"agent_id":row.get::<_,String>(2)?
+            })))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(serde_json::json!({"repo_binding_generation":generation,"bindings":bindings}))
+        })
+    }
+
     pub fn github_handle_and_bindings(
         &self,
         id: &str,
@@ -2492,16 +2606,19 @@ impl PlexusStore {
         })
     }
 
-    pub fn prove_github_handle(&self, id: &str, now: i64) -> Result<(), StoreError> {
+    pub fn prove_github_handle(
+        &self,
+        id: &str,
+        credential_generation: i64,
+        binding_generation: i64,
+        proven_at: Option<i64>,
+    ) -> Result<bool, StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            if conn.execute(
-                "UPDATE github_app_handle SET proven_at=?2 WHERE app_handle_id=?1",
-                params![id, now],
-            )? != 1
-            {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
-            }
-            Ok(())
+            Ok(conn.execute(
+                "UPDATE github_app_handle SET proven_at=?2 WHERE app_handle_id=?1 AND credential_generation=?3
+                    AND (SELECT generation FROM github_repo_binding_generation WHERE singleton=1)=?4",
+                params![id, proven_at, credential_generation, binding_generation],
+            )? == 1)
         })
     }
 }
