@@ -65,3 +65,11 @@ class PublicCiTests(unittest.TestCase):
         self.assertEqual(len(installers), 2)
         self.assertTrue(all(step.get('run') == 'bash scripts/install-nats-server.sh' for step in installers))
         self.assertNotIn('CortexKit layout', [step.get('name') for step in self.steps])
+
+    def test_guest_replay_compiler_is_installed_without_pinning_host_stable(self):
+        install = 'rustup toolchain install 1.99.0 --profile minimal --target wasm32-wasip1'
+        for job_name in ('test', 'mutations'):
+            job = self.jobs[job_name]
+            self.assertIn(install, [step.get('run') for step in job['steps']], job_name)
+            host = next(step for step in job['steps'] if step.get('uses', '').startswith('dtolnay/rust-toolchain@'))
+            self.assertNotIn('toolchain', host['with'], 'the host must continue tracking stable')

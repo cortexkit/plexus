@@ -90,6 +90,12 @@ jobs:
           components: clippy, rustfmt
           targets: wasm32-wasip1
 
+      # Guest mutation controls rebuild with the reproducibility compiler even
+      # after the host's floating stable toolchain moves to a newer release.
+      # Installing a named toolchain does not change the active host default.
+      - name: Install pinned guest compiler
+        run: rustup toolchain install 1.99.0 --profile minimal --target wasm32-wasip1
+
       - name: Rust compiler identity
         id: rust-identity
         run: echo "version=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
@@ -230,6 +236,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: wasm32-wasip1
+
+      - name: Install pinned guest compiler for replays
+        run: rustup toolchain install 1.99.0 --profile minimal --target wasm32-wasip1
 
       - name: Rust compiler identity
         id: rust-identity

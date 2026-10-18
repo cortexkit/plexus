@@ -12246,3 +12246,18 @@ command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
 test_count_pattern = "Ran {count} test"
 expect_red = ["test_operator_workflows.OperatorWorkflowTests.test_embedded_commit_resolves_dirty_candidates_and_keeps_binary_order"]
 timeout_s = 120
+
+[[control]]
+id = "ci-guest-replay-toolchain"
+guards = "Guest mutation replays provision their pinned compiler independently of host stable"
+file = ".github/workflows/ci.yml"
+old = '''      - name: Install pinned guest compiler for replays
+        run: rustup toolchain install 1.99.0 --profile minimal --target wasm32-wasip1'''
+new = '''      - name: Install pinned guest compiler for replays
+        run: true # NON-VACUITY BREAK: skip installing the guest compiler'''
+test_file = "scripts/tests/test_public_ci.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["test_public_ci.PublicCiTests.test_guest_replay_compiler_is_installed_without_pinning_host_stable"]
+timeout_s = 120
