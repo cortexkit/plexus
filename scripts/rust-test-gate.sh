@@ -39,6 +39,7 @@ TEMP_DIR_ALLOWED=(
   # Defines the scratch root itself, so it is the one place that must resolve
   # the shared temp directory.
   "crates/plexus-core/src/test_scratch.rs"
+  "crates/plexus-conformance/src/artifact.rs" # Fallible CLI scratch roots and private artifact staging directories.
 )
 
 refuse_raw_temp_dir() {

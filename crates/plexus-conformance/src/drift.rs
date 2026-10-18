@@ -60,6 +60,8 @@ pub enum DriftVerdict {
         /// the next only on the following run.
         actions: Vec<UnservedPollParameters>,
     },
+    /// Discovery would quarantine these actions until their schemas are reviewed.
+    SchemaUnreviewed { actions: Vec<String> },
     /// The check could not run. NOT a pass: kept as its own outcome so it can
     /// never be counted as clean, which is the failure mode that makes a sweep
     /// report a vendor nobody looked at as verified.
@@ -145,10 +147,7 @@ fn check_manifest_inner(
     // manifest rather than of REST.
     if manifest.transport.kind != TransportKind::McpRemote {
         return DriftVerdict::Skipped {
-            reason: format!(
-                "transport is {:?}; discovery is manifest-derived, not vendor-reported",
-                manifest.transport.kind
-            ),
+            reason: skip_reason(manifest.transport.kind),
         };
     }
 
@@ -180,13 +179,31 @@ fn check_manifest_inner(
 
     *observations = annotation_observations(&manifest, &discovered);
 
+    compare_discovery(
+        &manifest,
+        &discovered,
+        token.is_none() && manifest.auth.mode != AuthMode::None,
+    )
+}
+
+fn skip_reason(kind: TransportKind) -> String {
+    match kind {
+        TransportKind::McpStdio => "mcp_stdio discovery requires launching a vendor process; this checker supports remote MCP only".into(),
+        kind => format!("transport is {kind:?}; discovery is manifest-derived, not vendor-reported"),
+    }
+}
+
+fn compare_discovery(
+    manifest: &AppManifest,
+    discovered: &[DiscoveredAction],
+    anonymous: bool,
+) -> DriftVerdict {
     let served: Vec<String> = discovered.iter().map(|tool| tool.name.clone()).collect();
     let declared: Vec<String> = manifest
         .actions_baseline
         .iter()
         .map(|action| action.name.clone())
         .collect();
-    let anonymous = token.is_none() && manifest.auth.mode != AuthMode::None;
     let names = qualify(compare(&declared, &served), anonymous);
     // Names agreeing is a precondition, not the whole check. Only look at poll
     // parameters once the surfaces match: on a drifted manifest the schemas
@@ -195,7 +212,10 @@ fn check_manifest_inner(
     if !matches!(names, DriftVerdict::Clean { .. }) {
         return names;
     }
-    match compare_poll_parameters(&manifest, &discovered) {
+    if let Some(verdict) = compare_reviewed_schemas(manifest, discovered) {
+        return qualify(verdict, anonymous);
+    }
+    match compare_poll_parameters(manifest, discovered) {
         Some(verdict) => qualify(verdict, anonymous),
         None => names,
     }
@@ -267,6 +287,7 @@ fn compare_poll_parameters(
     discovered: &[DiscoveredAction],
 ) -> Option<DriftVerdict> {
     let mut findings = Vec::new();
+    let mut unknown = Vec::new();
     for action in &manifest.actions_baseline {
         // `continue`, never `?`. A `?` here would return from the whole function
         // at the first action WITHOUT a poll shape -- which in a 27-action
@@ -281,29 +302,53 @@ fn compare_poll_parameters(
         let Some(served) = discovered.iter().find(|tool| tool.name == action.name) else {
             continue;
         };
-        let properties = served
-            .input_schema
-            .get("properties")
-            .and_then(Value::as_object);
-        // A vendor that publishes no properties has told us nothing about what it
-        // accepts, so absence here is not evidence of refusal.
-        let Some(properties) = properties else {
-            continue;
+        let properties = match schema_properties(&served.input_schema, &served.input_schema, 0) {
+            Ok(Some(properties)) => properties,
+            _ => {
+                unknown.push(action.name.clone());
+                continue;
+            }
         };
-        let mut declared: Vec<String> = Vec::new();
-        if let Some(field) = poll.request_since_field.as_ref() {
+        use plexus_core::manifest::CursorKind;
+        let mut declared = Vec::new();
+        match poll.cursor_kind {
+            CursorKind::OrderedTimestamp => declared.push(
+                poll.request_since_field
+                    .as_deref()
+                    .unwrap_or("since")
+                    .to_owned(),
+            ),
+            CursorKind::SyncToken => declared.push(
+                poll.request_token_field
+                    .as_deref()
+                    .unwrap_or("sync_token")
+                    .to_owned(),
+            ),
+            _ => {}
+        }
+        if let Some(pagination) = &poll.pagination {
+            declared.push(pagination.request_cursor_field.clone());
+        }
+        if let Some(field) = &poll.request_page_size_field {
             declared.push(field.clone());
         }
-        if let Some(field) = poll.request_token_field.as_ref() {
-            declared.push(field.clone());
-        }
-        if let Some(constants) = poll.request_constants.as_ref() {
+        if let Some(constants) = &poll.request_constants {
             declared.extend(constants.keys().cloned());
         }
-        let unserved: Vec<String> = declared
+        declared.sort();
+        declared.dedup();
+        let unserved = declared
             .into_iter()
-            .filter(|field| !properties.contains_key(field))
-            .collect();
+            .filter(|field| {
+                let Some(schema) = properties.get(field) else {
+                    return true;
+                };
+                poll.request_constants
+                    .as_ref()
+                    .and_then(|constants| constants.get(field))
+                    .is_some_and(|value| !constant_allowed(&served.input_schema, schema, value, 0))
+            })
+            .collect::<Vec<_>>();
         if !unserved.is_empty() {
             findings.push(UnservedPollParameters {
                 action: action.name.clone(),
@@ -312,10 +357,127 @@ fn compare_poll_parameters(
         }
     }
     if findings.is_empty() {
-        None
+        if unknown.is_empty() {
+            None
+        } else {
+            Some(DriftVerdict::Unchecked {
+                reason: format!("poll input schema cannot be resolved for {unknown:?}"),
+            })
+        }
     } else {
         Some(DriftVerdict::PollShapeUnserved { actions: findings })
     }
+}
+
+fn schema_properties(
+    root: &Value,
+    schema: &Value,
+    depth: usize,
+) -> Result<Option<serde_json::Map<String, Value>>, ()> {
+    if depth > 32 || schema.get("anyOf").is_some() || schema.get("oneOf").is_some() {
+        return Err(());
+    }
+    let mut properties = schema.get("properties").and_then(Value::as_object).cloned();
+    let mut components = Vec::new();
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        components.push(
+            root.pointer(reference.strip_prefix('#').ok_or(())?)
+                .ok_or(())?,
+        );
+    }
+    if let Some(all) = schema.get("allOf") {
+        components.extend(all.as_array().ok_or(())?.iter());
+    }
+    for component in components {
+        let incoming = schema_properties(root, component, depth + 1)?.ok_or(())?;
+        let fields = properties.get_or_insert_with(serde_json::Map::new);
+        for (key, value) in incoming {
+            if let Some(existing) = fields.get(&key) {
+                fields.insert(key, serde_json::json!({"allOf":[existing, value]}));
+            } else {
+                fields.insert(key, value);
+            }
+        }
+    }
+    Ok(properties)
+}
+
+fn constant_allowed(root: &Value, schema: &Value, value: &Value, depth: usize) -> bool {
+    if depth > 32 || schema == &Value::Bool(false) {
+        return false;
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let Some(target) = reference
+            .strip_prefix('#')
+            .and_then(|pointer| root.pointer(pointer))
+        else {
+            return false;
+        };
+        if !constant_allowed(root, target, value, depth + 1) {
+            return false;
+        }
+    }
+    if schema
+        .get("const")
+        .is_some_and(|constant| constant != value)
+    {
+        return false;
+    }
+    if schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.contains(value))
+    {
+        return false;
+    }
+    if schema
+        .get("allOf")
+        .and_then(Value::as_array)
+        .is_some_and(|all| {
+            !all.iter()
+                .all(|part| constant_allowed(root, part, value, depth + 1))
+        })
+    {
+        return false;
+    }
+    for union in ["anyOf", "oneOf"] {
+        if let Some(parts) = schema.get(union).and_then(Value::as_array) {
+            let accepted = parts
+                .iter()
+                .filter(|part| constant_allowed(root, part, value, depth + 1))
+                .count();
+            if accepted == 0 || (union == "oneOf" && accepted != 1) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn compare_reviewed_schemas(
+    manifest: &AppManifest,
+    discovered: &[DiscoveredAction],
+) -> Option<DriftVerdict> {
+    let actions = manifest
+        .actions_baseline
+        .iter()
+        .filter_map(|declared| {
+            let served = discovered
+                .iter()
+                .find(|action| action.name == declared.name)?;
+            let schema_changed = declared
+                .input_schema
+                .as_ref()
+                .is_some_and(|expected| expected != &served.input_schema);
+            let recipients_changed = declared.recipients.as_ref().is_some_and(|pointers| {
+                pointers.iter().any(|pointer| {
+                    !plexus_core::recipients::recipient_pointer_valid(&served.input_schema, pointer)
+                })
+            });
+            (schema_changed || recipients_changed).then(|| declared.name.clone())
+        })
+        .collect::<Vec<_>>();
+    (!actions.is_empty()).then_some(DriftVerdict::SchemaUnreviewed { actions })
 }
 
 /// Downgrade a drift verdict reached WITHOUT a credential to `Unchecked`.
@@ -345,6 +507,11 @@ fn compare_poll_parameters(
 fn qualify(verdict: DriftVerdict, anonymous: bool) -> DriftVerdict {
     if !anonymous {
         return verdict;
+    }
+    if let DriftVerdict::SchemaUnreviewed { actions } = &verdict {
+        return DriftVerdict::Unchecked {
+            reason: format!("schema review compared anonymously: {actions:?}"),
+        };
     }
     if let DriftVerdict::PollShapeUnserved { actions } = &verdict {
         return DriftVerdict::Unchecked {
@@ -434,14 +601,16 @@ fn compare(declared: &[String], served: &[String]) -> DriftVerdict {
     }
 }
 
-fn parse_manifest(source: &str) -> Result<AppManifest, String> {
+pub fn parse_manifest(source: &str) -> Result<AppManifest, String> {
+    ingest_manifest(source).map(|ingested| ingested.manifest)
+}
+
+pub fn ingest_manifest(source: &str) -> Result<plexus_core::manifest::IngestedManifest, String> {
     let normalized =
         subc_jsonc::jsonc_to_json(source).map_err(|error| format!("normalize jsonc: {error}"))?;
     let value: Value =
         serde_json::from_str(&normalized).map_err(|error| format!("parse json: {error}"))?;
-    ingest_value(value)
-        .map(|ingested| ingested.manifest)
-        .map_err(|error| format!("ingest manifest: {error}"))
+    ingest_value(value).map_err(|error| format!("ingest manifest: {error}"))
 }
 
 /// Every `*.jsonc` manifest in a catalog directory, sorted for stable output.
@@ -536,6 +705,13 @@ pub fn render(reports: &[DriftReport]) -> u8 {
                      cursor advanced anyway"
                 );
             }
+            DriftVerdict::SchemaUnreviewed { actions } => {
+                drifted += 1;
+                println!(
+                    "  DRIFTED    {} (schemas require review): {actions:?}",
+                    report.key
+                );
+            }
             DriftVerdict::Unchecked { reason } => {
                 unchecked += 1;
                 println!("  UNCHECKED  {} — {reason}", report.key);
@@ -580,6 +756,14 @@ pub fn render(reports: &[DriftReport]) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stdio_skips_explain_the_process_boundary_not_manifest_discovery() {
+        let reason = skip_reason(TransportKind::McpStdio);
+        assert!(reason.contains("launching a vendor process"));
+        assert!(!reason.contains("manifest-derived"));
+        assert!(skip_reason(TransportKind::RestApi).contains("manifest-derived"));
+    }
 
     #[test]
     fn annotation_disagreement_preserves_absence_and_exit_codes() {
@@ -711,6 +895,79 @@ mod tests {
         }
     }
 
+    #[test]
+    fn effective_cursor_and_page_parameters_must_be_served() {
+        let mut manifest = manifest_with_poll("list_issues", "since", &[]);
+        let poll = manifest.actions_baseline[0].poll.as_mut().unwrap();
+        poll.request_since_field = None;
+        poll.pagination = Some(plexus_core::manifest::PollPagination {
+            request_cursor_field: "after".into(),
+            response_cursor_pointer: "/endCursor".into(),
+        });
+        poll.request_page_size_field = Some("perPage".into());
+        let served = vec![served_action("list_issues", &["renamed_after"])];
+        assert_eq!(
+            compare_poll_parameters(&manifest, &served),
+            unserved_poll(&[("list_issues", &["after", "perPage", "since"])]),
+            "effective poller parameters must all be checked"
+        );
+        let poll = manifest.actions_baseline[0].poll.as_mut().unwrap();
+        poll.cursor_kind = plexus_core::manifest::CursorKind::SyncToken;
+        poll.pagination = None;
+        poll.request_page_size_field = None;
+        assert_eq!(
+            compare_poll_parameters(&manifest, &served),
+            unserved_poll(&[("list_issues", &["sync_token"])])
+        );
+    }
+
+    #[test]
+    fn composed_schemas_and_constant_values_do_not_silently_pass() {
+        let manifest = manifest_with_poll("list_issues", "since", &["orderBy"]);
+        let mut served = served_action("list_issues", &[]);
+        served.input_schema = serde_json::json!({"$defs":{"args":{"type":"object","properties":{"since":{},"orderBy":{"enum":["changed"]}}}},"allOf":[{"$ref":"#/$defs/args"}]});
+        assert!(
+            matches!(
+                compare_poll_parameters(&manifest, &[served.clone()]),
+                Some(DriftVerdict::PollShapeUnserved { .. })
+            ),
+            "a rejected constant inside a composed schema must be reported"
+        );
+        served.input_schema = serde_json::json!({"$ref":"https://example.invalid/schema"});
+        assert!(
+            matches!(
+                compare_poll_parameters(&manifest, &[served]),
+                Some(DriftVerdict::Unchecked { .. })
+            ),
+            "an unresolved schema must not be clean"
+        );
+    }
+
+    #[test]
+    fn schemas_that_reconcile_would_quarantine_are_not_clean() {
+        let mut manifest = manifest_with_poll("list_issues", "since", &[]);
+        manifest.actions_baseline[0].poll = None;
+        manifest.actions_baseline[0].input_schema =
+            Some(serde_json::json!({"type":"object","properties":{"recipient":{"type":"string"}}}));
+        let served = vec![served_action("list_issues", &["other"])];
+        assert!(
+            matches!(
+                compare_discovery(&manifest, &served, false),
+                DriftVerdict::SchemaUnreviewed { .. }
+            ),
+            "a reviewed schema change must require review"
+        );
+        manifest.actions_baseline[0].input_schema = None;
+        manifest.actions_baseline[0].recipients = Some(vec!["/recipient".into()]);
+        assert!(
+            matches!(
+                compare_discovery(&manifest, &served, false),
+                DriftVerdict::SchemaUnreviewed { .. }
+            ),
+            "a recipient pointer missing from discovery must require review"
+        );
+    }
+
     /// A declared poll parameter the vendor does not accept is reported, and a
     /// vendor that accepts every declared parameter is not.
     ///
@@ -822,14 +1079,13 @@ mod tests {
         );
     }
 
-    /// A vendor publishing no `properties` is not evidence of refusal.
+    /// A vendor publishing no `properties` is inconclusive, not clean or drifted.
     ///
     /// An inputSchema without properties tells us nothing about what the tool
     /// accepts, so treating that silence as "accepts nothing" would report every
     /// declared parameter as unserved and make the check useless against any
     /// vendor with a sparse schema.
     ///
-    /// Mutation-proved: replacing the `continue` with a report fails this.
     #[test]
     fn a_vendor_publishing_no_properties_is_not_reported() {
         let manifest = manifest_with_poll("list_issues", "since", &[]);
@@ -840,10 +1096,12 @@ mod tests {
             annotations: None,
             input_schema: serde_json::json!({"type": "object"}),
         }];
-        assert_eq!(
-            compare_poll_parameters(&manifest, &served),
-            None,
-            "an absent properties map must not be read as a refusal"
+        assert!(
+            matches!(
+                compare_poll_parameters(&manifest, &served),
+                Some(DriftVerdict::Unchecked { .. })
+            ),
+            "an absent properties map must be explicitly inconclusive"
         );
     }
 

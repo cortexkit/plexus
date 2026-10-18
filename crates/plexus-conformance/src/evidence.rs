@@ -1,6 +1,6 @@
 //! Typed evidence records and leak-scan for harness output surfaces.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -137,7 +137,10 @@ pub fn leak_scan(surfaces: &[&str], forbidden: &[&str]) -> Result<(), Vec<String
                 serde_json::to_string(needle).expect("strings serialize to JSON"),
             );
             let escaped = &escaped[1..escaped.len() - 1];
-            if surface.contains(needle) || surface.contains(escaped) {
+            let double =
+                zeroize::Zeroizing::new(serde_json::to_string(escaped).expect("strings serialize"));
+            let double = &double[1..double.len() - 1];
+            if surface.contains(needle) || surface.contains(escaped) || surface.contains(double) {
                 hits.push(format!(
                     "forbidden pattern present in evidence surface (len={})",
                     needle.len()
@@ -159,8 +162,101 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-pub fn elapsed_ms(started: i64) -> u64 {
-    u64::try_from(now_ms().saturating_sub(started)).unwrap_or(0)
+pub fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+#[test]
+fn elapsed_time_is_measured_from_a_monotonic_start() {
+    let started = Instant::now() - std::time::Duration::from_millis(125);
+    assert!(
+        elapsed_ms(started) >= 125,
+        "duration must come from the monotonic clock"
+    );
+}
+
+/// Common wire encodings of the exact bytes served, including binary payloads.
+pub(crate) fn secret_variants(bytes: &[u8]) -> Vec<zeroize::Zeroizing<String>> {
+    use zeroize::Zeroizing;
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let mut variants = Vec::new();
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        variants.push(Zeroizing::new(text.to_owned()));
+    }
+    variants.push(Zeroizing::new(hex::encode(bytes)));
+    variants.push(Zeroizing::new(hex::encode_upper(bytes)));
+    let percent: String = bytes.iter().map(|byte| format!("%{byte:02X}")).collect();
+    variants.push(Zeroizing::new(percent.to_ascii_lowercase()));
+    variants.push(Zeroizing::new(percent));
+    let selective: String = bytes
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(byte) {
+                char::from(*byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect();
+    variants.push(Zeroizing::new(selective.replace("%20", "+")));
+    variants.push(Zeroizing::new(selective));
+    let encoded = Zeroizing::new(base64_encode(bytes));
+    variants.push(Zeroizing::new(encoded.trim_end_matches('=').to_owned()));
+    variants.push(Zeroizing::new(
+        encoded
+            .replace('+', "-")
+            .replace('/', "_")
+            .trim_end_matches('=')
+            .to_owned(),
+    ));
+    variants.push(Zeroizing::new(encoded.replace('+', "-").replace('/', "_")));
+    variants.push(encoded);
+    variants.push(Zeroizing::new(
+        serde_json::to_string(bytes).expect("byte array serializes"),
+    ));
+    variants
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for shift in [18, 12, 6, 0] {
+            encoded.push(char::from(TABLE[((n >> shift) & 63) as usize]));
+        }
+        if chunk.len() < 3 {
+            encoded.pop();
+            encoded.push('=');
+        }
+        if chunk.len() < 2 {
+            let end = encoded.len();
+            encoded.replace_range(end - 2..end - 1, "=");
+        }
+    }
+    encoded
+}
+
+#[test]
+fn encoded_binary_secrets_are_scanned_without_lossy_conversion() {
+    let variants = secret_variants(&[0xff, 0x00, 0x81, 0x20]);
+    let needles: Vec<_> = variants.iter().map(|text| text.as_str()).collect();
+    for surface in [
+        "/wCBIA==",
+        "_wCBIA",
+        "ff008120",
+        "%FF%00%81%20",
+        "[255,0,129,32]",
+    ] {
+        assert!(
+            leak_scan(&[surface], &needles).is_err(),
+            "encoded binary secret was missed: {surface}"
+        );
+    }
 }
 
 #[test]

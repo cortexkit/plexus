@@ -32,3 +32,4 @@ subc-protocol = { workspace = true }
 [dev-dependencies]
 plexus-core = { path = "../plexus-core", features = ["test-support"] }
 rusqlite = { workspace = true }
+tokio = { workspace = true }

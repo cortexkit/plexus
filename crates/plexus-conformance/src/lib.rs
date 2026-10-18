@@ -14,19 +14,21 @@
 
 #![forbid(unsafe_code)]
 
+mod artifact;
 pub mod drift;
 pub mod evidence;
 pub mod fixture;
-pub mod http_wire;
+mod http_wire;
 pub mod rest_stub_server;
 pub mod runner;
 pub mod stub_server;
 pub mod wire_trace;
 
+pub use artifact::write_owner_only;
 pub use drift::{catalog_manifests, check_manifest, DriftReport, DriftVerdict};
 pub use evidence::{ConformanceStep, RunEvidence, StepEvidence};
-pub use fixture::{ConnectorFixture, CredentialMode, TransportTarget, WritePath};
+pub use fixture::{ConnectorFixture, TransportTarget, WritePath};
 pub use rest_stub_server::{ExpectedCredential, StubRestRoute, StubRestServer};
 pub use runner::{run_fixture, run_fixture_with_options, RunOptions};
 pub use stub_server::{StubMcpServer, StubTool};
-pub use wire_trace::{open_owner_only, record_route_connect, TracingRoutePeer, WireTraceSink};
+pub use wire_trace::{record_route_connect, TracingRoutePeer, WireTraceSink};

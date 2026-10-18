@@ -17,12 +17,12 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The largest request a stub will buffer. Conformance requests are a few
 /// kilobytes; the cap keeps a misbehaving client from growing a stub's buffer
 /// without bound.
-pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 /// A bounded local HTTP stub. Fixed workers serve connections synchronously,
 /// so slow clients cannot create an unbounded number of detached threads.
@@ -30,6 +30,8 @@ pub(crate) struct StubHttpServer {
     endpoint: String,
     running: Arc<AtomicBool>,
     workers: Vec<std::thread::JoinHandle<()>>,
+    acceptor: Option<std::thread::JoinHandle<()>>,
+    address: std::net::SocketAddr,
 }
 
 impl StubHttpServer {
@@ -38,43 +40,52 @@ impl StubHttpServer {
         response: impl Fn(&str) -> String + Send + Sync + 'static,
     ) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|error| error.to_string())?;
-        let endpoint = format!(
-            "http://{}{path}",
-            listener.local_addr().map_err(|error| error.to_string())?
-        );
-        // Prepare all descriptors before starting workers; a clone failure then
-        // returns without leaving any accept loop running.
-        let listeners = (0..4)
-            .map(|_| listener.try_clone())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
+        let address = listener.local_addr().map_err(|error| error.to_string())?;
+        let endpoint = format!("http://{address}{path}");
         let running = Arc::new(AtomicBool::new(true));
         let response = Arc::new(response);
-        let workers = listeners
-            .into_iter()
-            .map(|listener| {
-                let running = running.clone();
-                let response = response.clone();
-                std::thread::spawn(move || {
-                    accept_until_stopped(
-                        &running,
-                        || listener.accept().map(|(stream, _)| stream),
-                        |stream| {
-                            if let Err(error) = serve_connection(stream, &*response) {
-                                eprintln!("stub HTTP connection failed: {error}");
-                            }
-                        },
-                    )
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<TcpStream>(4);
+        let receiver = Arc::new(std::sync::Mutex::new(receiver));
+        let workers = (0..4)
+            .map(|_| {
+                let receiver = Arc::clone(&receiver);
+                let response = Arc::clone(&response);
+                let running = Arc::clone(&running);
+                std::thread::spawn(move || loop {
+                    let stream = receiver.lock().unwrap().recv();
+                    let Ok(stream) = stream else {
+                        break;
+                    };
+                    if !running.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if let Err(error) = serve_connection(stream, &*response) {
+                        eprintln!("stub HTTP connection failed: {error}");
+                    }
                 })
             })
             .collect();
+        let accepting = Arc::clone(&running);
+        let acceptor = std::thread::spawn(move || {
+            accept_until_stopped(
+                &accepting,
+                || listener.accept().map(|(stream, _)| stream),
+                |stream| {
+                    if let Err(std::sync::mpsc::TrySendError::Full(mut stream)) =
+                        sender.try_send(stream)
+                    {
+                        let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+                        let _ = stream.write_all(http_empty(503).as_bytes());
+                    }
+                },
+            );
+        });
         Ok(Self {
             endpoint,
             running,
             workers,
+            acceptor: Some(acceptor),
+            address,
         })
     }
 
@@ -86,6 +97,10 @@ impl StubHttpServer {
 impl Drop for StubHttpServer {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
+        let _ = TcpStream::connect(self.address);
+        if let Some(acceptor) = self.acceptor.take() {
+            let _ = acceptor.join();
+        }
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
@@ -105,7 +120,19 @@ fn serve_connection(
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|error| error.to_string())?;
-    let request = read_http_request(&mut stream)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let request = match read_http_request(&mut DeadlineReader {
+        stream: &mut stream,
+        deadline,
+    }) {
+        Ok(request) => request,
+        Err(error) => {
+            let status = if error.contains("exceeds") { 413 } else { 400 };
+            let _ =
+                stream.write_all(http_json(status, r#"{"error":"invalid_request"}"#).as_bytes());
+            return Err(error);
+        }
+    };
     stream
         .write_all(response(&request).as_bytes())
         .map_err(|error| error.to_string())
@@ -125,10 +152,30 @@ fn serve_connection(
 /// large request is not re-scanned from the start on every read, and a request
 /// over [`MAX_REQUEST_BYTES`] is refused.
 ///
-/// A closed or would-block stream ends the read rather than failing: the caller
-/// is a test stub, and a peer hanging up mid-request should yield whatever
-/// arrived rather than an error masking the test's real assertion.
-pub fn read_http_request(stream: &mut impl Read) -> Result<String, String> {
+/// Incomplete requests are errors, never raw framing or partial JSON.
+pub(crate) fn read_http_request(stream: &mut impl Read) -> Result<String, String> {
+    read_http_request_until(stream, Instant::now() + Duration::from_secs(5))
+}
+
+struct DeadlineReader<'a> {
+    stream: &'a mut TcpStream,
+    deadline: Instant,
+}
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "request deadline exceeded")
+            })?;
+        self.stream
+            .set_read_timeout(Some(remaining.max(Duration::from_millis(1))))?;
+        self.stream.read(buffer)
+    }
+}
+
+fn read_http_request_until(stream: &mut impl Read, deadline: Instant) -> Result<String, String> {
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 4096];
     let mut body_start: Option<usize> = None;
@@ -136,11 +183,12 @@ pub fn read_http_request(stream: &mut impl Read) -> Result<String, String> {
     let mut chunked_cursor = 0;
     let mut chunked_body = Vec::new();
     loop {
+        if Instant::now() >= deadline {
+            return Err("request deadline exceeded".into());
+        }
         let read = match stream.read(&mut chunk) {
-            Ok(0) => break,
+            Ok(0) => return Err("incomplete HTTP request".into()),
             Ok(count) => count,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => break,
             Err(error) => return Err(error.to_string()),
         };
         // Only the last three bytes already held can begin a terminator that
@@ -167,7 +215,8 @@ pub fn read_http_request(stream: &mut impl Read) -> Result<String, String> {
         match framing {
             Framing::Length(length) => {
                 if bytes.len() >= start + length {
-                    break;
+                    bytes.truncate(start + length);
+                    return Ok(String::from_utf8_lossy(&bytes).into_owned());
                 }
             }
             Framing::Chunked => {
@@ -179,7 +228,6 @@ pub fn read_http_request(stream: &mut impl Read) -> Result<String, String> {
             }
         }
     }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[derive(Clone, Copy)]
@@ -280,14 +328,15 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// such an error would leave a handle that still reports its endpoint while
 /// nothing answers there, so every later request in the run would fail for a
 /// reason unrelated to the code under test.
-pub fn accept_until_stopped<S>(
+pub(crate) fn accept_until_stopped<S>(
     running: &AtomicBool,
     mut accept: impl FnMut() -> std::io::Result<S>,
     mut handle: impl FnMut(S),
 ) {
     while running.load(Ordering::Acquire) {
         match accept() {
-            Ok(stream) => handle(stream),
+            Ok(stream) if running.load(Ordering::Acquire) => handle(stream),
+            Ok(_) => break,
             Err(_) => std::thread::sleep(Duration::from_millis(5)),
         }
     }
@@ -298,7 +347,7 @@ pub fn accept_until_stopped<S>(
 /// The stubs serve one request per connection, so closing is what lets a client
 /// reading to EOF terminate rather than waiting on a keep-alive that will never
 /// carry another request.
-pub fn http_json(status: u16, body: &str) -> String {
+pub(crate) fn http_json(status: u16, body: &str) -> String {
     let crlf = "\r\n";
     format!(
         "HTTP/1.1 {status} {crlf}Content-Type: application/json{crlf}Content-Length: {}{crlf}Connection: close{crlf}{crlf}{body}",
@@ -307,7 +356,7 @@ pub fn http_json(status: u16, body: &str) -> String {
 }
 
 /// Format a response with no body.
-pub fn http_empty(status: u16) -> String {
+pub(crate) fn http_empty(status: u16) -> String {
     let crlf = "\r\n";
     format!("HTTP/1.1 {status} {crlf}Content-Length: 0{crlf}Connection: close{crlf}{crlf}")
 }
@@ -317,6 +366,63 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn progress_does_not_extend_the_request_deadline() {
+        struct Trickle(usize);
+        impl Read for Trickle {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 == 20 {
+                    return Ok(0);
+                }
+                self.0 += 1;
+                std::thread::sleep(Duration::from_millis(2));
+                buffer[0] = b'x';
+                Ok(1)
+            }
+        }
+        let error =
+            read_http_request_until(&mut Trickle(0), Instant::now() + Duration::from_millis(10))
+                .unwrap_err();
+        assert!(
+            error.contains("deadline"),
+            "progress must not reset the overall deadline: {error}"
+        );
+    }
+
+    #[test]
+    fn incomplete_framing_is_refused_and_malformed_requests_get_http_errors() {
+        for raw in [
+            b"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhi".as_slice(),
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n",
+        ] {
+            assert!(
+                read_http_request(&mut std::io::Cursor::new(raw)).is_err(),
+                "truncated bodies must be errors"
+            );
+        }
+        let server = StubHttpServer::start("", |_| http_empty(204)).unwrap();
+        for (length, status) in [
+            ("bad".to_owned(), 400),
+            ((MAX_REQUEST_BYTES + 1).to_string(), 413),
+        ] {
+            let mut stream = TcpStream::connect(server.address).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            write!(
+                stream,
+                "POST / HTTP/1.1\r\nContent-Length: {length}\r\n\r\n"
+            )
+            .unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            assert!(
+                reply.starts_with(&format!("HTTP/1.1 {status}")),
+                "malformed request must receive HTTP {status}: {reply}"
+            );
+        }
+    }
 
     #[test]
     fn stub_connections_use_a_fixed_worker_pool() {

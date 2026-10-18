@@ -4,15 +4,27 @@
 use plexus_conformance::{run_fixture, run_fixture_with_options, ConnectorFixture, RunOptions};
 use plexus_core::test_scratch::Scratch;
 
+fn evidence_for(name: &str) -> &'static plexus_conformance::RunEvidence {
+    static RUNS: std::sync::OnceLock<
+        std::collections::BTreeMap<String, plexus_conformance::RunEvidence>,
+    > = std::sync::OnceLock::new();
+    &RUNS.get_or_init(|| {
+        ConnectorFixture::known_names()
+            .iter()
+            .map(|name| {
+                let fixture = ConnectorFixture::by_name(name).expect("registered fixture");
+                let evidence =
+                    run_fixture(&fixture).unwrap_or_else(|error| panic!("fixture {name}: {error}"));
+                ((*name).to_owned(), evidence)
+            })
+            .collect()
+    })[name]
+}
+
 #[test]
 fn all_registered_fixtures_run_end_to_end_green() {
     for name in ConnectorFixture::known_names() {
-        let fixture = ConnectorFixture::by_name(name).unwrap_or_else(|error| {
-            panic!("fixture '{name}' must resolve via by_name: {error}");
-        });
-        let evidence = run_fixture(&fixture).unwrap_or_else(|error| {
-            panic!("fixture '{name}' run errored: {error}");
-        });
+        let evidence = evidence_for(name);
         assert!(
             evidence.passed,
             "fixture '{name}' failed at {:?}:\n{}",
@@ -105,20 +117,56 @@ fn schema_out_writes_the_observed_tool_schemas() {
 /// pass the test above while quietly producing artifacts nobody asked for.
 #[test]
 fn no_schema_file_is_written_without_the_flag() {
-    let fixture = ConnectorFixture::stub();
-    let evidence = run_fixture(&fixture).expect("stub fixture run");
-    assert!(evidence.passed, "{}", evidence.human_summary());
+    let dir = Scratch::file("no-schema-output", "unused");
+    let directory = dir.parent().unwrap();
+    let output = super::bounded::child_output(
+        std::process::Command::new(env!("CARGO_BIN_EXE_plexus-conformance"))
+            .current_dir(directory)
+            .args(["run", "--fixture", "stub"]),
+        std::time::Duration::from_secs(30),
+        "relocated CLI",
+    )
+    .expect("run relocated CLI");
     assert!(
-        !evidence.human_summary().contains("schemas written"),
-        "a schema file was written without the flag:\n{}",
-        evidence.human_summary()
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        output.stdout.is_empty(),
+        "evidence must not default to stdout"
+    );
+    assert_eq!(
+        std::fs::read_dir(directory).unwrap().count(),
+        0,
+        "a schema artifact appeared without the flag"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unusable_temp_directory_is_a_reported_error_not_a_panic() {
+    let path = Scratch::file("unusable-temp-directory", "not-a-directory");
+    std::fs::write(&path, b"not a directory").unwrap();
+    let output = super::bounded::child_output(
+        std::process::Command::new(env!("CARGO_BIN_EXE_plexus-conformance"))
+            .env("TMPDIR", path.to_path_buf())
+            .args(["run", "--fixture", "stub"]),
+        std::time::Duration::from_secs(30),
+        "unusable scratch root",
+    )
+    .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "scratch failures must be normal CLI errors, not panics"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("create store directory"));
 }
 
 #[test]
 fn stub_fixture_runs_end_to_end_green() {
-    let fixture = ConnectorFixture::stub();
-    let evidence = run_fixture(&fixture).expect("stub fixture run");
+    let evidence = evidence_for("stub");
     assert!(
         evidence.passed,
         "stub fixture failed at {:?}:\n{}",
@@ -131,8 +179,7 @@ fn stub_fixture_runs_end_to_end_green() {
 
 #[test]
 fn exa_fixture_runs_green_against_stub_server() {
-    let fixture = ConnectorFixture::exa();
-    let evidence = run_fixture(&fixture).expect("exa fixture run");
+    let evidence = evidence_for("exa");
     assert!(
         evidence.passed,
         "exa fixture failed at {:?}:\n{}",
@@ -144,8 +191,7 @@ fn exa_fixture_runs_green_against_stub_server() {
 
 #[test]
 fn linear_fixture_runs_green_against_stub_server() {
-    let fixture = ConnectorFixture::linear();
-    let evidence = run_fixture(&fixture).expect("linear fixture run");
+    let evidence = evidence_for("linear");
     assert!(
         evidence.passed,
         "linear fixture failed at {:?}:\n{}",
@@ -165,8 +211,7 @@ fn linear_fixture_runs_green_against_stub_server() {
 
 #[test]
 fn sentry_fixture_runs_green_against_stub_server() {
-    let fixture = ConnectorFixture::sentry();
-    let evidence = run_fixture(&fixture).expect("sentry fixture run");
+    let evidence = evidence_for("sentry");
     assert!(
         evidence.passed,
         "sentry fixture failed at {:?}:\n{}",
@@ -185,8 +230,7 @@ fn sentry_fixture_runs_green_against_stub_server() {
 
 #[test]
 fn notion_fixture_runs_green_with_s3_escalation() {
-    let fixture = ConnectorFixture::notion();
-    let evidence = run_fixture(&fixture).expect("notion fixture run");
+    let evidence = evidence_for("notion");
     assert!(
         evidence.passed,
         "notion fixture failed at {:?}:\n{}",
@@ -220,8 +264,7 @@ fn notion_fixture_runs_green_with_s3_escalation() {
 
 #[test]
 fn restdemo_fixture_runs_green_against_rest_stub() {
-    let fixture = ConnectorFixture::restdemo();
-    let evidence = run_fixture(&fixture).expect("restdemo fixture run");
+    let evidence = evidence_for("restdemo");
     assert!(
         evidence.passed,
         "restdemo fixture failed at {:?}:\n{}",
@@ -241,8 +284,7 @@ fn restdemo_fixture_runs_green_against_rest_stub() {
 
 #[test]
 fn gcal_fixture_runs_green_read_only_with_allowlist_denial() {
-    let fixture = ConnectorFixture::gcal();
-    let evidence = run_fixture(&fixture).expect("gcal fixture run");
+    let evidence = evidence_for("gcal");
     assert!(
         evidence.passed,
         "gcal fixture failed at {:?}:\n{}",
@@ -266,7 +308,11 @@ fn gcal_fixture_runs_green_read_only_with_allowlist_denial() {
         .find(|step| step.step.as_str() == "denied_calls")
         .expect("denied_calls step");
     assert!(
-        denied.detail.contains("resource") || denied.passed,
+        denied.detail.contains("resource denial recorded")
+            && evidence
+                .audit_dump
+                .iter()
+                .any(|row| row["gate"] == "resource_filter" && row["decision"] == "deny"),
         "gcal denied_calls should cover resource allowlist: {}",
         denied.detail
     );

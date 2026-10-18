@@ -3,21 +3,21 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::artifact::Scratch;
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
-use plexus_core::test_scratch::Scratch;
 use plexus_core::{
-    ingest_value, AppManifest, AuthorizationRequest, CatalogDenial, CatalogReconciler,
-    CatalogRefreshPolicy, ConnectionDenial, CredentialSource, Denial, GovernanceEngine,
-    GrantDenial, GrantInput, HttpMethod, McpRemoteTransport, PlexusStore, PolicyDenial,
-    PolicyInput, ResolvedCredential, ResourceDenial, RestTransport, StubCredentialSource,
-    Transport, TransportKind, TransportOutcome,
+    AppManifest, AuthorizationRequest, CatalogDenial, CatalogReconciler, CatalogRefreshPolicy,
+    ConnectionDenial, CredentialSource, Denial, GovernanceEngine, GrantDenial, GrantInput,
+    HttpMethod, McpRemoteTransport, PlexusStore, PolicyDenial, PolicyInput, ResolvedCredential,
+    ResourceDenial, RestTransport, StubCredentialSource, Transport, TransportKind,
+    TransportOutcome,
 };
 use serde_json::{json, Value};
 
-use crate::evidence::{elapsed_ms, leak_scan, now_ms, ConformanceStep, RunEvidence, StepEvidence};
-use crate::fixture::{ConnectorFixture, CredentialMode, TransportTarget, WritePath};
+use crate::evidence::{elapsed_ms, leak_scan, ConformanceStep, RunEvidence, StepEvidence};
+use crate::fixture::{ConnectorFixture, TransportTarget, WritePath};
 use crate::rest_stub_server::{ExpectedCredential, StubRestRoute, StubRestServer};
 use crate::stub_server::StubMcpServer;
 
@@ -29,6 +29,8 @@ use crate::stub_server::StubMcpServer;
 /// when exercising a real vendor endpoint with an operator-provisioned handle.
 #[derive(Default)]
 pub struct RunOptions {
+    #[cfg(test)]
+    before_audit_verification: Option<fn(&mut Vec<plexus_core::storage::AuditRow>)>,
     #[cfg(test)]
     before_store_operation: Option<fn(&str, &Scratch)>,
     /// Transport target override (from `--live` / `--endpoint`). `None` keeps
@@ -81,12 +83,7 @@ pub fn run_fixture_with_options(
     // Parse the manifest up front: ManifestEndpoint resolves transport.url from
     // it, and the connect step needs the ingested manifest regardless.
     let manifest_source = fixture.load_manifest_source()?;
-    let normalized = subc_jsonc::jsonc_to_json(&manifest_source)
-        .map_err(|error| format!("normalize manifest: {error}"))?;
-    let manifest_value: Value = serde_json::from_str(&normalized)
-        .map_err(|error| format!("parse manifest JSON: {error}"))?;
-    let ingested =
-        ingest_value(manifest_value).map_err(|error| format!("ingest manifest: {error}"))?;
+    let ingested = crate::drift::ingest_manifest(&manifest_source)?;
 
     let transport_target = options
         .transport_override
@@ -105,13 +102,19 @@ pub fn run_fixture_with_options(
     }
 
     let stub_server = match &transport_target {
-        TransportTarget::InProcessStub => Some(StubServerHandle::Mcp(
-            StubMcpServer::start(fixture.stub_tools())
+        TransportTarget::InProcessStub => {
+            fixture.validate_stub_arguments()?;
+            Some(StubServerHandle::Mcp(
+                StubMcpServer::start_checked(
+                    fixture.stub_tools(),
+                    expected_authorization(fixture, &ingested.manifest)?,
+                )
                 .map_err(|error| format!("start stub server: {error}"))?,
-        )),
+            ))
+        }
         TransportTarget::InProcessRestStub => Some(StubServerHandle::Rest(
             StubRestServer::start(
-                rest_stub_routes(&ingested.manifest),
+                rest_stub_routes(fixture, &ingested.manifest)?,
                 expected_authorization(fixture, &ingested.manifest)?,
             )
             .map_err(|error| format!("start REST stub server: {error}"))?,
@@ -210,7 +213,7 @@ pub fn run_fixture_with_options(
     let connection_id = format!("conn-{}", fixture.name);
 
     let mut ctx = RunContext {
-        fixture: fixture,
+        fixture,
         options: &options,
         evidence: &mut evidence,
         manifest: &ingested.manifest,
@@ -224,14 +227,18 @@ pub fn run_fixture_with_options(
         mcp_transport: &mcp_transport,
         rest_transport: &rest_transport,
         app_key: &app_key,
-        principal: principal,
+        principal,
         connection_id: &connection_id,
         endpoint: &endpoint,
-        bind_handle: bind_handle,
-        live: live,
+        bind_handle,
+        live,
         allowed_read_request_id: None,
+        approved_write_request_id: None,
+        stub_server: stub_server.as_ref(),
+        transport_target: &transport_target,
+        audit_high_water: 0,
     };
-    let steps: [fn(&mut RunContext<'_>) -> Result<(), String>; 9] = [
+    let steps: [RunStep; 9] = [
         step_connect,
         step_discover_catalog,
         step_allowed_read,
@@ -244,12 +251,23 @@ pub fn run_fixture_with_options(
     ];
     for step in steps {
         step(&mut ctx)?;
+        if let Some(last) = ctx.evidence.steps.last() {
+            if let Some(id) = last.audit_row_ids.iter().max() {
+                ctx.audit_high_water = ctx.audit_high_water.max(*id);
+            }
+        }
         if !ctx.evidence.steps.last().map(|s| s.passed).unwrap_or(false) {
             break;
         }
     }
+    drop(ctx);
+    drop(engine);
+    drop(reconciler);
+    drop(store);
     finalize(evidence, store_path, stub_server)
 }
+
+type RunStep = for<'ctx> fn(&mut RunContext<'ctx>) -> Result<(), String>;
 
 struct RunContext<'a> {
     fixture: &'a ConnectorFixture,
@@ -272,6 +290,10 @@ struct RunContext<'a> {
     bind_handle: &'a [u8],
     live: bool,
     allowed_read_request_id: Option<String>,
+    approved_write_request_id: Option<String>,
+    stub_server: Option<&'a StubServerHandle>,
+    transport_target: &'a TransportTarget,
+    audit_high_water: i64,
 }
 
 fn step_connect(ctx: &mut RunContext<'_>) -> Result<(), String> {
@@ -290,20 +312,45 @@ fn step_connect(ctx: &mut RunContext<'_>) -> Result<(), String> {
     let endpoint = ctx.endpoint;
     let bind_handle = ctx.bind_handle;
     // --- 1. connect ---
-    let step_started = now_ms();
+    let step_started = Instant::now();
     let connect_result = (|| -> Result<(Vec<i64>, String), String> {
         store
             .insert_connection(
                 principal,
                 &connection_id,
-                &app_key,
+                app_key,
                 "pending",
                 &fixture.resource_filters,
             )
             .map_err(|error| format!("insert connection: {error}"))?;
+        let risk = ctx
+            .manifest
+            .actions_baseline
+            .iter()
+            .map(|action| action.risk)
+            .max()
+            .ok_or("manifest has no actions")?;
+        let ceiling = store
+            .ceiling_within_manifest(app_key, &risk.to_string(), &fixture.expected_actions)
+            .map_err(|error| format!("resolve manifest ceiling: {error}"))?
+            .map_err(|error| format!("manifest ceiling refused: {error:?}"))?;
+        let anonymous = ctx.manifest.auth.mode == plexus_core::manifest::AuthMode::None;
+        let (role, reference) = if anonymous {
+            (plexus_core::storage::NO_CREDENTIAL_REF_ROLE, &[][..])
+        } else {
+            ("credential_reference", bind_handle)
+        };
         let ticket = store
-            .create_binding_ticket(principal, &connection_id, bind_handle)
-            .map_err(|error| format!("create binding ticket: {error}"))?;
+            .issue_binding_ticket(
+                principal,
+                &connection_id,
+                app_key,
+                role,
+                reference,
+                &ceiling,
+            )
+            .map_err(|error| format!("issue binding ticket: {error}"))?
+            .map_err(|error| format!("binding ticket refused: {error:?}"))?;
         let summary = store
             .connect_with_ticket(principal, &ticket.ticket_id)
             .map_err(|error| format!("connect with ticket: {error}"))?
@@ -311,12 +358,20 @@ fn step_connect(ctx: &mut RunContext<'_>) -> Result<(), String> {
         if summary.status != "active" {
             return Err(format!("connection status is {}", summary.status));
         }
+        if anonymous
+            && store
+                .connection_credential_binding_kind(principal, &connection_id)
+                .map_err(|error| format!("read anonymous binding: {error}"))?
+                .is_some()
+        {
+            return Err("credential-free enrollment unexpectedly stored a binding".into());
+        }
         #[cfg(test)]
         if let Some(hook) = options.before_store_operation {
-            hook("seed catalog", &store_path);
+            hook("seed catalog", store_path);
         }
         store
-            .seed_catalog_from_manifest(principal, &connection_id, &app_key)
+            .seed_catalog_from_manifest(principal, &connection_id, app_key)
             .map_err(|error| format!("seed catalog: {error}"))?;
         let endpoint_override = if endpoint.is_empty() {
             None
@@ -336,7 +391,7 @@ fn step_connect(ctx: &mut RunContext<'_>) -> Result<(), String> {
         Ok((
             audit_ids,
             format!(
-                "connection {} active for app {app_key}",
+                "connection {} active for app {app_key}; manifest-bounded ceiling={risk}; credential role={role}",
                 summary.connection_id
             ),
         ))
@@ -359,7 +414,7 @@ fn step_discover_catalog(ctx: &mut RunContext<'_>) -> Result<(), String> {
     let principal = ctx.principal;
     let connection_id = ctx.connection_id.clone();
     // --- 2. discover catalog ---
-    let step_started = now_ms();
+    let step_started = Instant::now();
     let discover_result = (|| -> Result<(Vec<i64>, String), String> {
         // Fixture ↔ manifest baseline consistency (cheap drift catch).
         // Every fixture expected_action must appear in the reviewed baseline;
@@ -378,7 +433,7 @@ fn step_discover_catalog(ctx: &mut RunContext<'_>) -> Result<(), String> {
             }
         }
         let is_stub_target = matches!(
-            fixture.transport_target,
+            ctx.transport_target,
             TransportTarget::InProcessStub | TransportTarget::InProcessRestStub
         );
         if is_stub_target {
@@ -442,11 +497,7 @@ fn step_discover_catalog(ctx: &mut RunContext<'_>) -> Result<(), String> {
                     .map_err(|error| format!("serialize schemas: {error}"))?;
                 // Owner-only like evidence and the wire trace: a tool schema is
                 // not secret, but it names a vendor surface this host can reach.
-                crate::open_owner_only(path)
-                    .and_then(|mut file| {
-                        use std::io::Write;
-                        file.write_all(rendered.as_bytes())
-                    })
+                crate::write_owner_only(path, rendered.as_bytes())
                     .map_err(|error| format!("write schemas to {}: {error}", path.display()))?;
                 format!("; schemas written to {}", path.display())
             }
@@ -477,9 +528,9 @@ fn step_allowed_read(ctx: &mut RunContext<'_>) -> Result<(), String> {
     let principal = ctx.principal;
     let connection_id = ctx.connection_id.clone();
     // --- 3. allowed read ---
-    let step_started = now_ms();
+    let step_started = Instant::now();
     let read_result = (|| -> Result<(Vec<i64>, String), String> {
-        let before = latest_audit_id(store.as_ref(), principal)?;
+        let before = ctx.audit_high_water;
         let request = AuthorizationRequest::new(
             principal,
             &connection_id,
@@ -496,6 +547,7 @@ fn step_allowed_read(ctx: &mut RunContext<'_>) -> Result<(), String> {
             TransportOutcome::Completed { .. } => {}
             other => return Err(format!("read dispatch outcome: {other:?}")),
         }
+        verify_stub_call(ctx.stub_server, &fixture.read_action, &fixture.read_args)?;
         let ids = audit_ids_since(store.as_ref(), principal, before)?;
         Ok((
             ids,
@@ -519,7 +571,7 @@ fn step_write(ctx: &mut RunContext<'_>) -> Result<(), String> {
     let principal = ctx.principal;
     let connection_id = ctx.connection_id.clone();
     // --- 4. write path: ask-first (S2) or s3_escalation (floor-S3) or SKIP ---
-    let step_started = now_ms();
+    let step_started = Instant::now();
     match fixture.write_path {
         WritePath::None => {
             push_step_maybe_skip(
@@ -536,7 +588,7 @@ fn step_write(ctx: &mut RunContext<'_>) -> Result<(), String> {
                 .as_deref()
                 .ok_or_else(|| "write_path=AskFirst requires write_action".to_string())?;
             let write_result = (|| -> Result<(Vec<i64>, String), String> {
-                let before = latest_audit_id(store.as_ref(), principal)?;
+                let before = ctx.audit_high_water;
                 // Ensure ask_first policy for the write action. `set_policy`
                 // replaces the scope's policy; a second row for one scope is
                 // refused by the schema.
@@ -562,6 +614,7 @@ fn step_write(ctx: &mut RunContext<'_>) -> Result<(), String> {
                     }
                 };
 
+                let before_approval = latest_audit_id(store.as_ref(), principal)?;
                 let outcome = engine
                     .approve_request(principal, &request_id, principal)
                     .map_err(|denial| format!("approve failed: {}", denial.reason_code()))?;
@@ -569,6 +622,17 @@ fn step_write(ctx: &mut RunContext<'_>) -> Result<(), String> {
                     TransportOutcome::Completed { .. } => {}
                     other => return Err(format!("approved write dispatch: {other:?}")),
                 }
+
+                verify_stub_call(ctx.stub_server, write_action, &fixture.write_args)?;
+                ctx.approved_write_request_id = store
+                    .list_audit(principal)
+                    .map_err(|error| format!("read approved write audit: {error}"))?
+                    .iter()
+                    .find(|row| {
+                        row.journal_id > before_approval
+                            && row.gate.as_deref() == Some("credential")
+                    })
+                    .and_then(|row| row.request_id.clone());
 
                 // Dispatch consumed the approval: it authorizes one send. Presenting it
                 // again for the identical call must be refused by name, not re-sent.
@@ -649,7 +713,7 @@ fn step_write(ctx: &mut RunContext<'_>) -> Result<(), String> {
                 .as_deref()
                 .ok_or_else(|| "write_path=S3Escalation requires write_action".to_string())?;
             let s3_result = (|| -> Result<(Vec<i64>, String), String> {
-                let before = latest_audit_id(store.as_ref(), principal)?;
+                let before = ctx.audit_high_water;
                 // Allow policy so the severity gate (not ask-first) is reached.
                 store
                     .set_policy(principal, &connection_id, write_action, "allow", None)
@@ -754,9 +818,9 @@ fn step_denied_calls(ctx: &mut RunContext<'_>) -> Result<(), String> {
     let principal = ctx.principal;
     let connection_id = ctx.connection_id.clone();
     // --- 5. denied calls ---
-    let step_started = now_ms();
+    let step_started = Instant::now();
     let denied_result = (|| -> Result<(Vec<i64>, String), String> {
-        let before = latest_audit_id(store.as_ref(), principal)?;
+        let before = ctx.audit_high_water;
         // Ungranted principal.
         let ungranted_request = AuthorizationRequest::new(
             "ungranted-principal",
@@ -786,13 +850,17 @@ fn step_denied_calls(ctx: &mut RunContext<'_>) -> Result<(), String> {
             &ungranted_denial,
         )?;
 
-        // Disallowed resource via filters. Floor-S3 writes hit the severity gate
-        // before the resource gate, so skip the probe for S3Escalation fixtures.
+        // Writes with a minimum severity of S3 stop at the severity gate before
+        // resource validation. A read action still reaches resource validation,
+        // so skip only when the resource-denial check targets that write.
         let resource_probe = fixture
             .resource_filter_action
             .as_ref()
             .or(fixture.write_action.as_ref())
-            .filter(|_| fixture.write_path != WritePath::S3Escalation)
+            .filter(|action| {
+                fixture.write_path != WritePath::S3Escalation
+                    || Some(action.as_str()) != fixture.write_action.as_deref()
+            })
             .filter(|_| {
                 !fixture
                     .denied_resource_args
@@ -848,7 +916,7 @@ fn step_denied_calls(ctx: &mut RunContext<'_>) -> Result<(), String> {
         if quarantine_target != fixture.read_action {
             #[cfg(test)]
             if let Some(hook) = options.before_store_operation {
-                hook("grant quarantine action", &store_path);
+                hook("grant quarantine action", store_path);
             }
             store
                 .insert_grant(&GrantInput {
@@ -912,7 +980,14 @@ fn step_denied_calls(ctx: &mut RunContext<'_>) -> Result<(), String> {
         let ids = audit_ids_since(store.as_ref(), principal, before)?;
         Ok((
             ids,
-            "ungranted / resource / quarantine denials recorded".to_string(),
+            format!(
+                "ungranted / quarantine denials recorded; {}",
+                if resource_probe.is_some() {
+                    "resource denial recorded"
+                } else {
+                    "resource probe skipped: no eligible action with denied_resource_args"
+                }
+            ),
         ))
     })();
     push_step(
@@ -936,9 +1011,9 @@ fn step_stale_authorization_abort(ctx: &mut RunContext<'_>) -> Result<(), String
     let principal = ctx.principal;
     let connection_id = ctx.connection_id.clone();
     // --- 6. stale-authorization abort ---
-    let step_started = now_ms();
+    let step_started = Instant::now();
     let stale_result = (|| -> Result<(Vec<i64>, String), String> {
-        let before = latest_audit_id(store.as_ref(), principal)?;
+        let before = ctx.audit_high_water;
         // Use the read action: re-activate it if it was quarantined above.
         let action = fixture.read_action.clone();
         // Re-seed / refresh the read action to active for this step.
@@ -952,7 +1027,7 @@ fn step_stale_authorization_abort(ctx: &mut RunContext<'_>) -> Result<(), String
         if read_row.status != "active" {
             #[cfg(test)]
             if let Some(hook) = options.before_store_operation {
-                hook("reactivate read action", &store_path);
+                hook("reactivate read action", store_path);
             }
             reactivate_action(store.as_ref(), principal, &connection_id, read_row)?;
         }
@@ -1013,9 +1088,9 @@ fn step_revoke(ctx: &mut RunContext<'_>) -> Result<(), String> {
     let principal = ctx.principal;
     let connection_id = ctx.connection_id.clone();
     // --- 7. revoke ---
-    let step_started = now_ms();
+    let step_started = Instant::now();
     let revoke_result = (|| -> Result<(Vec<i64>, String), String> {
-        let before = latest_audit_id(store.as_ref(), principal)?;
+        let before = ctx.audit_high_water;
         // Reactivate a fresh action and reserve, then revoke the connection.
         let actions = store
             .list_catalog_actions_all(principal, &connection_id)
@@ -1024,7 +1099,7 @@ fn step_revoke(ctx: &mut RunContext<'_>) -> Result<(), String> {
         if let Some(row) = actions.iter().find(|row| row.name == action) {
             #[cfg(test)]
             if let Some(hook) = options.before_store_operation {
-                hook("reactivate read action", &store_path);
+                hook("reactivate read action", store_path);
             }
             reactivate_action(store.as_ref(), principal, &connection_id, row)?;
         }
@@ -1040,10 +1115,7 @@ fn step_revoke(ctx: &mut RunContext<'_>) -> Result<(), String> {
             .revoke_connection(principal, &connection_id)
             .map_err(|error| format!("revoke connection: {error}"))?;
         let stale = engine.revalidate_and_dispatch(&reservation);
-        match stale.outcome {
-            TransportOutcome::NotSent { .. } => {}
-            other => return Err(format!("revoked reservation must not send, got {other:?}")),
-        }
+        verify_revoked_reservation(&stale.outcome)?;
         match engine.authorize(AuthorizationRequest::new(
             principal,
             &connection_id,
@@ -1083,11 +1155,16 @@ fn step_audit_completeness(ctx: &mut RunContext<'_>) -> Result<(), String> {
     let principal = ctx.principal;
     let connection_id = ctx.connection_id.clone();
     // --- 8. audit completeness ---
-    let step_started = now_ms();
+    let step_started = Instant::now();
     let audit_result = (|| -> Result<(Vec<i64>, String), String> {
-        let rows = store
+        #[allow(unused_mut)]
+        let mut rows = store
             .list_audit(principal)
             .map_err(|error| format!("list audit: {error}"))?;
+        #[cfg(test)]
+        if let Some(hook) = ctx.options.before_audit_verification {
+            hook(&mut rows);
+        }
         if rows.is_empty() {
             return Err("audit journal is empty".to_string());
         }
@@ -1095,55 +1172,21 @@ fn step_audit_completeness(ctx: &mut RunContext<'_>) -> Result<(), String> {
             .allowed_read_request_id
             .as_deref()
             .ok_or_else(|| "allowed read request_id was not captured".to_string())?;
-        let read_rows: Vec<_> = rows
-            .iter()
-            .filter(|row| row.request_id.as_deref() == Some(read_request_id))
-            .collect();
-        if read_rows.len() != 2 {
-            return Err(format!(
-                "allowed read request {read_request_id} expected exactly 2 audit rows, found {}",
-                read_rows.len()
-            ));
-        }
-        let authorization = read_rows
-            .iter()
-            .find(|row| row.gate.as_deref() == Some("credential") && row.outcome.is_none())
-            .ok_or_else(|| "allowed read missing authorization decision row".to_string())?;
-        if authorization.decision != "allow" {
-            return Err(format!(
-                "allowed read authorization decision was {}",
-                authorization.decision
-            ));
-        }
-        let credential_fingerprint = authorization
-            .credential_fingerprint
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                "allowed read authorization missing credential fingerprint".to_string()
-            })?;
-        let dispatch = read_rows
-            .iter()
-            .find(|row| row.gate.as_deref() == Some("dispatch"))
-            .ok_or_else(|| "allowed read missing dispatch audit row".to_string())?;
-        if dispatch.outcome.as_deref() != Some("completed") {
-            return Err(format!(
-                "allowed read dispatch outcome was {:?}",
-                dispatch.outcome
-            ));
-        }
-        if dispatch.credential_fingerprint.as_deref() != Some(credential_fingerprint) {
-            return Err("allowed read audit rows disagree on credential fingerprint".to_string());
-        }
-        if authorization.action != dispatch.action
-            || authorization.action.as_deref() != Some(fixture.read_action.as_str())
-        {
-            return Err("allowed read audit rows disagree on action".to_string());
-        }
-        if authorization.connection_id != dispatch.connection_id
-            || authorization.connection_id.as_deref() != Some(connection_id.as_str())
-        {
-            return Err("allowed read audit rows disagree on connection".to_string());
+        verify_completed_audit(&rows, read_request_id, &fixture.read_action, &connection_id)?;
+        if fixture.write_path == WritePath::AskFirst {
+            let request_id = ctx
+                .approved_write_request_id
+                .as_deref()
+                .ok_or("approved write request id missing")?;
+            verify_completed_audit(
+                &rows,
+                request_id,
+                fixture
+                    .write_action
+                    .as_deref()
+                    .ok_or("write action missing")?,
+                &connection_id,
+            )?;
         }
         if !rows
             .iter()
@@ -1201,7 +1244,7 @@ fn step_secret_safety(ctx: &mut RunContext<'_>) -> Result<(), String> {
     let rest_transport = ctx.rest_transport;
     let live = ctx.live;
     // --- 9. secret safety ---
-    let step_started = now_ms();
+    let step_started = Instant::now();
     let secret_result = (|| -> Result<(Vec<i64>, String), String> {
         let evidence_json = serde_json::to_string(&evidence.steps)
             .map_err(|error| format!("serialize steps: {error}"))?;
@@ -1258,6 +1301,81 @@ fn step_secret_safety(ctx: &mut RunContext<'_>) -> Result<(), String> {
         step_started,
         secret_result,
     );
+    Ok(())
+}
+
+fn verify_revoked_reservation(outcome: &TransportOutcome) -> Result<(), String> {
+    match outcome {
+        TransportOutcome::NotSent { code, .. } if code == "aborted_stale_authorization" => Ok(()),
+        other => Err(format!(
+            "revoked reservation expected aborted_stale_authorization, got {other:?}"
+        )),
+    }
+}
+
+fn verify_completed_audit(
+    rows: &[plexus_core::storage::AuditRow],
+    request_id: &str,
+    action: &str,
+    connection_id: &str,
+) -> Result<(), String> {
+    let read_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.request_id.as_deref() == Some(request_id))
+        .collect();
+    if read_rows.len() != 2 {
+        return Err(format!(
+            "allowed read request {request_id} expected exactly 2 audit rows, found {}",
+            read_rows.len()
+        ));
+    }
+    let authorization = read_rows
+        .iter()
+        .find(|row| row.gate.as_deref() == Some("credential") && row.outcome.is_none())
+        .ok_or_else(|| "allowed read missing authorization decision row".to_string())?;
+    if authorization.decision != "allow" {
+        return Err(format!(
+            "allowed read authorization decision was {}",
+            authorization.decision
+        ));
+    }
+    let credential_fingerprint = authorization
+        .credential_fingerprint
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "allowed read authorization missing credential fingerprint".to_string())?;
+    let dispatch = read_rows
+        .iter()
+        .find(|row| row.gate.as_deref() == Some("dispatch"))
+        .ok_or_else(|| "allowed read missing dispatch audit row".to_string())?;
+    if dispatch.outcome.as_deref() != Some("completed") {
+        return Err(format!(
+            "allowed read dispatch outcome was {:?}",
+            dispatch.outcome
+        ));
+    }
+    if dispatch.credential_fingerprint.as_deref() != Some(credential_fingerprint) {
+        return Err("allowed read audit rows disagree on credential fingerprint".to_string());
+    }
+    if authorization.action != dispatch.action || authorization.action.as_deref() != Some(action) {
+        return Err("allowed read audit rows disagree on action".to_string());
+    }
+    if authorization.connection_id != dispatch.connection_id
+        || authorization.connection_id.as_deref() != Some(connection_id)
+    {
+        return Err("allowed read audit rows disagree on connection".to_string());
+    }
+    Ok(())
+}
+
+fn verify_stub_call(
+    server: Option<&StubServerHandle>,
+    name: &str,
+    args: &Value,
+) -> Result<(), String> {
+    if let Some(StubServerHandle::Mcp(server)) = server {
+        server.verify_last_call(name, args)?;
+    }
     Ok(())
 }
 
@@ -1356,7 +1474,7 @@ fn open_store(label: &str) -> Result<(Scratch, PlexusStore), String> {
             .unwrap_or(0),
         RUN_SEQ.fetch_add(1, Ordering::Relaxed)
     );
-    let path = Scratch::database(&format!("conformance-{label}"));
+    let path = Scratch::database().map_err(|error| format!("create store directory: {error}"))?;
     let descriptor = StorageDescriptor {
         module_id: "plexus".to_string(),
         storage_namespace: format!("conformance-{unique}"),
@@ -1458,7 +1576,7 @@ fn verify_denial_audit(
 fn push_step(
     evidence: &mut RunEvidence,
     step: ConformanceStep,
-    started: i64,
+    started: Instant,
     result: Result<(Vec<i64>, String), String>,
 ) {
     push_step_maybe_skip(evidence, step, started, result, None);
@@ -1467,7 +1585,7 @@ fn push_step(
 fn push_step_maybe_skip(
     evidence: &mut RunEvidence,
     step: ConformanceStep,
-    started: i64,
+    started: Instant,
     result: Result<(Vec<i64>, String), String>,
     skipped: Option<&str>,
 ) {
@@ -1500,8 +1618,8 @@ fn push_step_maybe_skip(
 
 fn finalize(
     mut evidence: RunEvidence,
-    // Taken by value and dropped here: the guard removes the whole scratch
-    // directory, which is what takes the store's write-ahead-log pair with it.
+    // The store and its engine/reconciler owners have closed before this
+    // directory is removed, including their SQLite write-ahead logs.
     _store_path: Scratch,
     _stub_server: Option<StubServerHandle>,
 ) -> Result<RunEvidence, String> {
@@ -1518,18 +1636,88 @@ enum StubServerHandle {
 
 /// The routes a REST stub answers for a manifest: one per declared HTTP
 /// operation, each answering 200 with a deterministic body.
-fn rest_stub_routes(manifest: &AppManifest) -> Vec<StubRestRoute> {
-    manifest
-        .actions_baseline
-        .iter()
-        .filter_map(|action| {
-            let http = action.http.as_ref()?;
-            Some(StubRestRoute::new(
+fn rest_stub_routes(
+    fixture: &ConnectorFixture,
+    manifest: &AppManifest,
+) -> Result<Vec<StubRestRoute>, String> {
+    let calls = std::iter::once((fixture.read_action.as_str(), &fixture.read_args)).chain(
+        fixture
+            .write_action
+            .as_deref()
+            .map(|name| (name, &fixture.write_args)),
+    );
+    calls
+        .map(|(name, args)| {
+            let http = manifest
+                .actions_baseline
+                .iter()
+                .find(|action| action.name == name)
+                .and_then(|action| action.http.as_ref())
+                .ok_or_else(|| format!("missing HTTP action {name}"))?;
+            let mut remaining = args
+                .as_object()
+                .ok_or("REST arguments must be an object")?
+                .clone();
+            if let Some(constants) = &http.request_constants {
+                remaining.extend(
+                    constants
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
+            }
+            let mut path = http.path.clone();
+            for (key, value) in remaining.clone() {
+                let placeholder = format!("{{{key}}}");
+                if path.contains(&placeholder) {
+                    path = path.replace(
+                        &placeholder,
+                        &percent_encode(value.as_str().ok_or("path argument must be a string")?),
+                    );
+                    remaining.remove(&key);
+                }
+            }
+            if path.contains(['{', '}']) {
+                return Err("unsubstituted REST path placeholder".into());
+            }
+            if matches!(http.method, HttpMethod::Get | HttpMethod::Delete) && !remaining.is_empty()
+            {
+                let query = remaining
+                    .iter()
+                    .map(|(key, value)| {
+                        format!(
+                            "{}={}",
+                            percent_encode(key),
+                            percent_encode(
+                                &value
+                                    .as_str()
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| value.to_string())
+                            )
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("&");
+                path.push('?');
+                path.push_str(&query);
+            }
+            Ok(StubRestRoute::new(
                 http_method_name(http.method),
-                http.path.clone(),
+                path,
                 200,
-                json!({"stub": true, "action": action.name}),
+                json!({"stub":true,"action":name}),
             ))
+        })
+        .collect()
+}
+
+fn percent_encode(text: &str) -> String {
+    text.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
         })
         .collect()
 }
@@ -1546,9 +1734,7 @@ fn http_method_name(method: HttpMethod) -> &'static str {
 
 /// The credential bytes the in-code stub source serves for a fixture.
 fn stub_payload(fixture: &ConnectorFixture) -> Vec<u8> {
-    match &fixture.credential_mode {
-        CredentialMode::Stub { payload } => payload.clone(),
-    }
+    fixture.stub_payload.clone()
 }
 
 /// Every value the secret-safety step must find nowhere in evidence: the bound
@@ -1563,15 +1749,13 @@ fn secret_needles(
     operator_credential_id: Option<&str>,
     served_payloads: &[zeroize::Zeroizing<Vec<u8>>],
 ) -> Vec<zeroize::Zeroizing<String>> {
-    let mut needles = vec![zeroize::Zeroizing::new(match operator_credential_id {
-        Some(id) => id.to_string(),
-        None => String::from_utf8_lossy(&fixture.canary_handle).into_owned(),
-    })];
-    needles.extend(
-        served_payloads
-            .iter()
-            .map(|payload| zeroize::Zeroizing::new(String::from_utf8_lossy(payload).into_owned())),
-    );
+    let mut needles = crate::evidence::secret_variants(match operator_credential_id {
+        Some(id) => id.as_bytes(),
+        None => &fixture.canary_handle,
+    });
+    for payload in served_payloads {
+        needles.extend(crate::evidence::secret_variants(payload));
+    }
     needles.retain(|needle| !needle.is_empty());
     needles.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     needles.dedup_by(|a, b| a.as_str() == b.as_str());
@@ -1668,6 +1852,9 @@ fn expected_authorization(
     fixture: &ConnectorFixture,
     manifest: &AppManifest,
 ) -> Result<Option<ExpectedCredential>, String> {
+    if manifest.credential_bindings.len() > 1 {
+        return Err("stub requires an independently checked credential header for every binding; multiple bindings are unsupported".into());
+    }
     if manifest.credential_bindings.is_empty() {
         return Ok(None);
     }
@@ -1732,6 +1919,145 @@ fn reactivate_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_stub_checks_the_wire_credential_name_and_arguments() {
+        let evidence = run_fixture(&ConnectorFixture::stub()).unwrap();
+        assert!(
+            evidence.passed,
+            "MCP wire contract failed: {}",
+            evidence.human_summary()
+        );
+    }
+
+    #[test]
+    fn rest_stub_checks_the_wire_project_and_query_arguments() {
+        let evidence = run_fixture(&ConnectorFixture::posthog_rest()).unwrap();
+        assert!(
+            evidence.passed,
+            "REST wire contract failed: {}",
+            evidence.human_summary()
+        );
+    }
+
+    #[test]
+    fn skipped_resource_probes_are_not_reported_as_exercised() {
+        let evidence = run_fixture(&ConnectorFixture::exa()).unwrap();
+        assert!(evidence.passed, "{}", evidence.human_summary());
+        let denied = evidence
+            .steps
+            .iter()
+            .find(|step| step.step == ConformanceStep::DeniedCalls)
+            .unwrap();
+        assert!(
+            denied.detail.contains("resource probe skipped"),
+            "evidence must name skipped probes"
+        );
+        assert!(!denied.detail.contains("resource denial recorded"));
+    }
+
+    #[test]
+    fn an_unrelated_not_sent_error_does_not_prove_revocation() {
+        assert!(
+            verify_revoked_reservation(&TransportOutcome::NotSent {
+                code: "credential_unavailable".into(),
+                message: "unavailable".into()
+            })
+            .is_err(),
+            "revocation must be observed by its specific refusal code"
+        );
+        assert!(verify_revoked_reservation(&TransportOutcome::NotSent {
+            code: "aborted_stale_authorization".into(),
+            message: "stale".into()
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn a_ticket_cannot_name_actions_outside_the_manifest() {
+        let mut fixture = ConnectorFixture::stub();
+        fixture.expected_actions.push("unreviewed_action".into());
+        let evidence = run_fixture(&fixture).unwrap();
+        assert_eq!(
+            evidence.failed_step.as_deref(),
+            Some("connect"),
+            "manifest ceiling must refuse before discovery"
+        );
+        assert!(evidence.steps[0]
+            .detail
+            .contains("manifest ceiling refused"));
+    }
+
+    #[test]
+    fn anonymous_enrollment_stores_no_credential_binding() {
+        let evidence = run_fixture(&ConnectorFixture::deepwiki()).unwrap();
+        assert!(evidence.passed, "{}", evidence.human_summary());
+        assert!(
+            evidence.steps[0].detail.contains("credential role=none"),
+            "anonymous enrollment must use the no-credential role"
+        );
+    }
+
+    #[test]
+    fn approved_writes_require_their_own_matching_audit_pair() {
+        fn remove_write_dispatch(rows: &mut Vec<plexus_core::storage::AuditRow>) {
+            rows.retain(|row| {
+                !(row.action.as_deref() == Some("write_item")
+                    && row.gate.as_deref() == Some("dispatch"))
+            });
+        }
+        let evidence = run_fixture_with_options(
+            &ConnectorFixture::stub(),
+            RunOptions {
+                before_audit_verification: Some(remove_write_dispatch),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            evidence.failed_step.as_deref(),
+            Some("audit_completeness"),
+            "missing approved-write dispatch must fail audit completeness"
+        );
+        assert!(evidence
+            .steps
+            .last()
+            .unwrap()
+            .detail
+            .contains("expected exactly 2 audit rows"));
+    }
+
+    #[test]
+    fn modelled_vendor_schemas_refuse_fixture_typos() {
+        let mut fixture = ConnectorFixture::exa();
+        fixture.read_args["misspelled_vendor_argument"] = json!(1);
+        let error = run_fixture(&fixture)
+            .expect_err("modelled schemas must not widen to accept fixture arguments");
+        assert!(error.contains("misspelled_vendor_argument"));
+    }
+
+    #[test]
+    fn endpoint_overrides_use_the_effective_discovery_rule() {
+        let mut fixture = ConnectorFixture::stub();
+        let server = StubMcpServer::start(fixture.stub_tools()).unwrap();
+        fixture.expected_actions.pop();
+        let evidence = run_fixture_with_options(
+            &fixture,
+            RunOptions {
+                transport_override: Some(TransportTarget::Endpoint(server.endpoint().into())),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            evidence
+                .steps
+                .iter()
+                .any(|step| step.step == ConformanceStep::DiscoverCatalog && step.passed),
+            "effective endpoint targets allow a baseline larger than the fixture subset: {}",
+            evidence.human_summary()
+        );
+    }
 
     #[test]
     fn setup_store_errors_name_the_failing_operation() {
@@ -1890,26 +2216,20 @@ mod tests {
             !manifest.credential_bindings.is_empty(),
             "restdemo must bind a credential for this test to mean anything"
         );
-        fixture.credential_mode = CredentialMode::Stub {
-            payload: vec![0xff, 0xfe],
-        };
+        fixture.stub_payload = vec![0xff, 0xfe];
         let result = expected_authorization(&fixture, &manifest);
         assert!(
             result.is_err(),
             "an uncheckable payload disabled the credential gate: {result:?}"
         );
 
-        fixture.credential_mode = CredentialMode::Stub {
-            payload: Vec::new(),
-        };
+        fixture.stub_payload = Vec::new();
         assert!(expected_authorization(&fixture, &manifest).is_err());
     }
 
     fn load_manifest(fixture: &ConnectorFixture) -> AppManifest {
         let source = fixture.load_manifest_source().expect("manifest source");
-        let normalized = subc_jsonc::jsonc_to_json(&source).expect("jsonc");
-        let value: Value = serde_json::from_str(&normalized).expect("json");
-        ingest_value(value).expect("ingest").manifest
+        crate::drift::parse_manifest(&source).expect("ingest")
     }
 
     #[test]
