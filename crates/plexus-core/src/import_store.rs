@@ -53,6 +53,11 @@ const TABLES: &[&str] = &[
     // keep only the status and never the arguments.
     "pending_write_reconciliations",
     "write_reconciliation_results",
+    // Chain configuration and counts survive cutover, including counts for an
+    // allowance that was cleared and may be set again in the same month.
+    "web_search_order",
+    "web_search_allowances",
+    "web_search_allowance_counts",
     // Operator-set per-minute limits for each web search backend.
     "web_search_limits",
     // The answer cursor from when plexus read card answers from prefrontal.
@@ -362,6 +367,9 @@ fn identity(table: &str, row: &Record) -> String {
             vec!["principal", "request_id"]
         }
         "web_search_limits" => vec!["backend"],
+        "web_search_order" => vec![],
+        "web_search_allowances" => vec!["provider"],
+        "web_search_allowance_counts" => vec!["provider", "connection_id", "month_utc"],
         "github_repo_id_cache" => vec!["repo"],
         "github_actions_quota" => vec!["reservation_id"],
         "event_outbox_counters" => vec!["name"],
@@ -407,6 +415,7 @@ fn transform(old: &Connection, new: &Connection, table: &str, row: &mut Record) 
         "args_snapshot",
         "actions",
         "return_schema",
+        "providers",
     ] {
         if let Some(value) = row.get(column) {
             if !matches!(value, Value::Null) {
@@ -471,6 +480,9 @@ fn transform(old: &Connection, new: &Connection, table: &str, row: &mut Record) 
         if !exists {
             return Err("missing connection".into());
         }
+    } else if table == "web_search_allowance_counts" {
+        // Usage is historical, not authority: keep it even if its connection
+        // was deleted. Counts have no principal and cannot authorize a call.
     } else if table == "write_reconciliation_results"
         && text(row, "connection_id")?.is_empty()
         && text(row, "status")? == "unreconcilable"

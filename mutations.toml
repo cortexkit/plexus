@@ -11999,3 +11999,33 @@ select = "expected"
 expect_red = ["event_envelope::tests::ci_job_runner_name_is_null_when_missing_or_empty"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = '''web-search-allowance-reservation-bound'''
+guards = '''A monthly reservation cannot increment an already exhausted connection'''
+file = '''crates/plexus-core/src/store/web_search.rs'''
+old = '''WHERE used < ?4'''
+new = '''WHERE used <= ?4 /* NON-VACUITY BREAK */'''
+test_file = '''crates/plexus-core/src/store/web_search_tests.rs'''
+runner = '''cargo'''
+package = '''plexus-core'''
+target = '''--lib'''
+select = '''expected'''
+expect_red = ['storage::web_search_store::tests::reservation_stops_at_allowance_and_does_not_increment_when_exhausted']
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = '''web-search-allowance-release-zero'''
+guards = '''Releasing an empty count is a no-op rather than an underflow'''
+file = '''crates/plexus-core/src/store/web_search.rs'''
+old = '''AND used > 0'''
+new = '''AND used >= 0 /* NON-VACUITY BREAK */'''
+test_file = '''crates/plexus-core/src/store/web_search_tests.rs'''
+runner = '''cargo'''
+package = '''plexus-core'''
+target = '''--lib'''
+select = '''expected'''
+expect_red = ['storage::web_search_store::tests::release_never_underflows_or_inserts_a_missing_count']
+build_timeout_s = 3600
+timeout_s = 120

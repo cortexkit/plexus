@@ -1,10 +1,64 @@
-//! Store access shared by search facades: per-backend rate limits, the audit
-//! row that carries the query, and the connections that could back a search.
+//! Store access shared by search facades: chain order, monthly allowances,
+//! per-backend rate limits, query audit rows and candidate connections.
 
 use cortexkit_store::StoreError;
 use rusqlite::OptionalExtension;
 
 use super::{now_ms, AuditRecord, PlexusStore};
+use crate::web_search::providers::provider_named;
+
+pub const MAX_WEB_SEARCH_ALLOWANCE: u32 = 10_000_000;
+
+/// Admission with no configured allowance does not create a count or a receipt.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WebSearchAllowanceAdmission {
+    Unlimited,
+    Reserved(WebSearchAllowanceReservation),
+    Exhausted,
+}
+
+/// A counted attempt, bound to the UTC month in which it was admitted. Keep it
+/// for Sent/OutcomeUnknown; consume it with `release_web_search_allowance` when
+/// nothing was sent. It is deliberately not Clone, so settlement owns the receipt.
+#[derive(Debug, PartialEq, Eq)]
+pub struct WebSearchAllowanceReservation {
+    provider: String,
+    connection_id: String,
+    month_utc: String,
+}
+
+fn validate_provider(provider: &str) -> Result<(), StoreError> {
+    if provider_named(provider).is_none() {
+        return Err(StoreError::Backend("unknown web search provider".into()));
+    }
+    Ok(())
+}
+
+fn order_on_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Option<Vec<String>>> {
+    conn.query_row(
+        "SELECT providers FROM web_search_order WHERE singleton = 1",
+        [],
+        |row| super::parse_json_column(&row.get::<_, String>(0)?),
+    )
+    .optional()
+}
+
+fn allowance_on_conn(conn: &rusqlite::Connection, provider: &str) -> rusqlite::Result<Option<u32>> {
+    conn.query_row(
+        "SELECT allowance FROM web_search_allowances WHERE provider = ?1",
+        [provider],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn month_on_conn(conn: &rusqlite::Connection, at_ms: i64) -> rusqlite::Result<String> {
+    conn.query_row(
+        "SELECT strftime('%Y-%m', ?1 / 1000.0, 'unixepoch')",
+        [at_ms],
+        |row| row.get(0),
+    )
+}
 
 /// Operator-set per-minute limits for one web search backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +71,168 @@ pub struct WebSearchLimits {
 }
 
 impl PlexusStore {
+    /// The operator's ordered names, or None for the Exa compatibility path.
+    pub fn web_search_order(&self) -> Result<Option<Vec<String>>, StoreError> {
+        self.inner.with_read(order_on_conn)
+    }
+
+    /// Replace a nonempty, duplicate-free order and return the replaced order.
+    pub fn set_web_search_order(
+        &self,
+        providers: &[String],
+    ) -> Result<Option<Vec<String>>, StoreError> {
+        if providers.is_empty() {
+            return Err(StoreError::Backend(
+                "web search order must not be empty".into(),
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for provider in providers {
+            validate_provider(provider)?;
+            if !seen.insert(provider) {
+                return Err(StoreError::Backend("duplicate web search provider".into()));
+            }
+        }
+        let json = serde_json::to_string(providers)
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        self.inner.with_conn_fenced(|conn| {
+            let previous = order_on_conn(conn)?;
+            conn.execute(
+                "INSERT INTO web_search_order (singleton, providers) VALUES (1, ?1)
+                ON CONFLICT (singleton) DO UPDATE SET providers = excluded.providers",
+                [json],
+            )?;
+            Ok(previous)
+        })
+    }
+
+    /// Return to compatibility mode, returning the order removed by this write.
+    pub fn clear_web_search_order(&self) -> Result<Option<Vec<String>>, StoreError> {
+        self.inner.with_conn_fenced(|conn| {
+            let previous = order_on_conn(conn)?;
+            conn.execute("DELETE FROM web_search_order WHERE singleton = 1", [])?;
+            Ok(previous)
+        })
+    }
+
+    pub fn web_search_allowance(&self, provider: &str) -> Result<Option<u32>, StoreError> {
+        validate_provider(provider)?;
+        self.inner
+            .with_read(|conn| allowance_on_conn(conn, provider))
+    }
+
+    /// Set a per-connection monthly limit without resetting any usage.
+    pub fn set_web_search_allowance(
+        &self,
+        provider: &str,
+        allowance: u32,
+    ) -> Result<Option<u32>, StoreError> {
+        validate_provider(provider)?;
+        if !(1..=MAX_WEB_SEARCH_ALLOWANCE).contains(&allowance) {
+            return Err(StoreError::Backend(
+                "web search allowance must be between 1 and 10000000".into(),
+            ));
+        }
+        self.inner.with_conn_fenced(|conn| {
+            let previous = allowance_on_conn(conn, provider)?;
+            conn.execute(
+                "INSERT INTO web_search_allowances (provider, allowance) VALUES (?1, ?2)
+                ON CONFLICT (provider) DO UPDATE SET allowance = excluded.allowance",
+                (provider, allowance),
+            )?;
+            Ok(previous)
+        })
+    }
+
+    /// Remove only the limit. Retained usage applies if the limit is set again.
+    pub fn clear_web_search_allowance(&self, provider: &str) -> Result<Option<u32>, StoreError> {
+        validate_provider(provider)?;
+        self.inner.with_conn_fenced(|conn| {
+            let previous = allowance_on_conn(conn, provider)?;
+            conn.execute(
+                "DELETE FROM web_search_allowances WHERE provider = ?1",
+                [provider],
+            )?;
+            Ok(previous)
+        })
+    }
+
+    /// Count for the calendar month UTC containing `at_ms` (Unix milliseconds).
+    pub fn web_search_allowance_used(
+        &self,
+        provider: &str,
+        connection_id: &str,
+        at_ms: i64,
+    ) -> Result<u32, StoreError> {
+        validate_provider(provider)?;
+        self.inner.with_read(|conn| {
+            let month = month_on_conn(conn, at_ms)?;
+            Ok(conn
+                .query_row(
+                    "SELECT used FROM web_search_allowance_counts
+                WHERE provider = ?1 AND connection_id = ?2 AND month_utc = ?3",
+                    (provider, connection_id, month),
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0))
+        })
+    }
+
+    /// Check the live allowance and reserve one attempt in the same fenced
+    /// transaction. The caller supplies its admission clock in Unix milliseconds.
+    pub fn reserve_web_search_allowance(
+        &self,
+        provider: &str,
+        connection_id: &str,
+        at_ms: i64,
+    ) -> Result<WebSearchAllowanceAdmission, StoreError> {
+        validate_provider(provider)?;
+        self.inner.with_conn_fenced(|conn| {
+            let Some(allowance) = allowance_on_conn(conn, provider)? else {
+                return Ok(WebSearchAllowanceAdmission::Unlimited);
+            };
+            let month = month_on_conn(conn, at_ms)?;
+            let changed = conn.execute(
+                "INSERT INTO web_search_allowance_counts (provider, connection_id, month_utc, used)
+                VALUES (?1, ?2, ?3, 1)
+                ON CONFLICT (provider, connection_id, month_utc) DO UPDATE SET used = used + 1
+                WHERE used < ?4",
+                rusqlite::params![provider, connection_id, month, allowance],
+            )?;
+            if changed == 0 {
+                return Ok(WebSearchAllowanceAdmission::Exhausted);
+            }
+            Ok(WebSearchAllowanceAdmission::Reserved(
+                WebSearchAllowanceReservation {
+                    provider: provider.to_owned(),
+                    connection_id: connection_id.to_owned(),
+                    month_utc: month,
+                },
+            ))
+        })
+    }
+
+    /// Release a NotSent attempt against its original month, even if the month
+    /// rolled over or the allowance was cleared while dispatch was in flight.
+    /// Returns false if the count is already zero or absent; never underflows.
+    pub fn release_web_search_allowance(
+        &self,
+        reservation: WebSearchAllowanceReservation,
+    ) -> Result<bool, StoreError> {
+        self.inner.with_conn_fenced(|conn| {
+            Ok(conn.execute(
+                "UPDATE web_search_allowance_counts SET used = used - 1
+                WHERE provider = ?1 AND connection_id = ?2 AND month_utc = ?3 AND used > 0",
+                (
+                    reservation.provider,
+                    reservation.connection_id,
+                    reservation.month_utc,
+                ),
+            )? == 1)
+        })
+    }
+
     /// The stored limits for `backend`, or `None` when the operator never set
     /// any and the compiled defaults apply.
     pub fn web_search_limits(&self, backend: &str) -> Result<Option<WebSearchLimits>, StoreError> {
@@ -130,3 +346,7 @@ impl PlexusStore {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "web_search_tests.rs"]
+mod tests;

@@ -99,6 +99,47 @@ fn recipient_allowlist_is_carried_on_current_store_cutover() {
     assert_eq!(scalar::<i64>(&new,"SELECT COUNT(*) FROM recipient_allowlist WHERE principal='direct' AND connection_id='c' AND agent_id='agent' AND recipient='bob@example.com'"),1);
 }
 
+#[test]
+fn web_search_order_allowances_and_counts_survive_store_cutover() {
+    let f = Fixture::new();
+    let source = open_sqlite(&descriptor(&f.from).unwrap()).unwrap();
+    source.migrate("plexus", MIGRATIONS).unwrap();
+    source.with_conn_fenced(|conn| conn.execute_batch(r#"
+INSERT INTO web_search_order (singleton, providers) VALUES (1, '["tavily","exa"]');
+INSERT INTO web_search_allowances (provider, allowance) VALUES ('exa', 2);
+INSERT INTO web_search_allowance_counts (provider, connection_id, month_utc, used) VALUES ('exa','c','2024-02',2), ('tavily','c','2024-02',1), ('exa','c','2024-03',1), ('exa','deleted','2024-02',1);
+"#)).unwrap();
+    drop(source);
+    let report = f.import();
+    for (table, count) in [
+        ("web_search_order", 1),
+        ("web_search_allowances", 1),
+        ("web_search_allowance_counts", 4),
+    ] {
+        let row = report.iter().find(|row| row.table == table).unwrap();
+        assert_eq!((row.read, row.carried, row.scrubbed), (count, count, 0));
+    }
+    let new = f.destination();
+    assert_eq!(
+        scalar::<String>(
+            &new,
+            "SELECT providers FROM web_search_order WHERE singleton=1"
+        ),
+        r#"["tavily","exa"]"#
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT allowance FROM web_search_allowances WHERE provider='exa'"
+        ),
+        2
+    );
+    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE provider='exa' AND connection_id='c' AND month_utc='2024-02'"), 2);
+    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE provider='exa' AND connection_id='c' AND month_utc='2024-03'"), 1);
+    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE provider='tavily' AND connection_id='c' AND month_utc='2024-02'"), 1);
+    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE provider='exa' AND connection_id='deleted' AND month_utc='2024-02'"), 1);
+}
+
 /// Durable GitHub handle authority, bot-request receipts, the relay cursor,
 /// publishing markers of carried events and writes still being reconciled
 /// all survive the cutover; the marker of an acked (dropped) event does not.
@@ -373,6 +414,9 @@ fn production_v23_round_trip_dispositions_and_routing() {
             | "pending_write_reconciliations"
             | "write_reconciliation_results"
             | "web_search_limits"
+            | "web_search_order"
+            | "web_search_allowances"
+            | "web_search_allowance_counts"
             | "elicitation_answers_cursor"
             | "github_repo_id_cache"
             | "github_actions_quota"
