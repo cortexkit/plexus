@@ -12305,3 +12305,18 @@ select = "expected"
 expect_red = ["wire_safety_tests::rebinding_a_channel_replaces_the_released_epoch"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "module-deadline-requires-explicit-recall"
+guards = "After a waiting tool call exceeds its deadline, its approval stays unused until the agent repeats the same call; the scheduler cannot execute it"
+file = "crates/plexus-core/src/governance.rs"
+old = 'if denial.clears_by_waiting() && !recall_only {'
+new = 'if denial.clears_by_waiting() && true { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/consent_capacity_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["consent_capacity_tests::expired_consent_request_keeps_approval_without_dispatching"]
+build_timeout_s = 3600
+timeout_s = 120

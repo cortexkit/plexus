@@ -508,6 +508,17 @@ async fn expired_consent_request_keeps_approval_without_dispatching() {
     let rows = fixture.store.list_action_requests("direct").unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, "approved");
+    assert_eq!(
+        state.runtime.engine.retry_waiting_approvals(10),
+        0,
+        "a request deadline must not enqueue its approval for background execution"
+    );
+    assert!(
+        fixture.transport.requests().is_empty(),
+        "the scheduler must not send an expired held call"
+    );
+    let unused = fixture.store.list_action_requests("direct").unwrap();
+    assert_eq!(unused[0].status, "approved");
     let (writer, mut rx) = mpsc::channel(1);
     handle_tool_request(request(1, 2, held_body(999)), &writer, &state, &routes)
         .await
@@ -517,5 +528,15 @@ async fn expired_consent_request_keeps_approval_without_dispatching() {
             .await;
     let body: Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(body["result"]["transmission"], "completed", "{body}");
+    assert_eq!(fixture.transport.requests().len(), 1);
+    let (writer, mut rx) = mpsc::channel(1);
+    handle_tool_request(request(1, 3, held_body(999)), &writer, &state, &routes)
+        .await
+        .unwrap();
+    let reply =
+        crate::bounded::recv_within(rx.recv(), Duration::from_secs(5), "consumed approval reply")
+            .await;
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["error"]["code"], "approval_consumed");
     assert_eq!(fixture.transport.requests().len(), 1);
 }
