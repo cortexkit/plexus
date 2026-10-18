@@ -53,6 +53,11 @@ const TABLES: &[&str] = &[
     // keep only the status and never the arguments.
     "pending_write_reconciliations",
     "write_reconciliation_results",
+    // Chain configuration and counts survive cutover, including counts for an
+    // allowance that was cleared and may be set again in the same month.
+    "web_search_order",
+    "web_search_allowances",
+    "web_search_allowance_counts",
     // Operator-set per-minute limits for each web search backend.
     "web_search_limits",
     // The answer cursor from when plexus read card answers from prefrontal.
@@ -362,6 +367,9 @@ fn identity(table: &str, row: &Record) -> String {
             vec!["principal", "request_id"]
         }
         "web_search_limits" => vec!["backend"],
+        "web_search_order" => vec![],
+        "web_search_allowances" => vec!["provider"],
+        "web_search_allowance_counts" => vec!["principal", "provider", "month_utc"],
         "github_repo_id_cache" => vec!["repo"],
         "github_actions_quota" => vec!["reservation_id"],
         "event_outbox_counters" => vec!["name"],
@@ -407,6 +415,7 @@ fn transform(old: &Connection, new: &Connection, table: &str, row: &mut Record) 
         "args_snapshot",
         "actions",
         "return_schema",
+        "providers",
     ] {
         if let Some(value) = row.get(column) {
             if !matches!(value, Value::Null) {

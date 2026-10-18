@@ -1045,6 +1045,26 @@ CREATE INDEX idx_binding_ticket_retention ON binding_tickets(settled_at_ms) WHER
 CREATE INDEX idx_github_receipt_unsettled_retention ON github_bot_receipt(updated_at) WHERE state IN ('outcome_unknown','pending','pending_approval');
 "#,
     },
+    Migration {
+        version: 53,
+        statements: r#"
+CREATE TABLE web_search_order (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    providers TEXT NOT NULL CHECK (json_valid(providers) AND json_type(providers) = 'array' AND json_array_length(providers) > 0)
+);
+CREATE TABLE web_search_allowances (
+    provider TEXT PRIMARY KEY NOT NULL,
+    allowance INTEGER NOT NULL CHECK (allowance BETWEEN 1 AND 10000000)
+);
+CREATE TABLE web_search_allowance_counts (
+    principal TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    month_utc TEXT NOT NULL CHECK (month_utc GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]' AND substr(month_utc, 6, 2) BETWEEN '01' AND '12'),
+    used INTEGER NOT NULL CHECK (used >= 0),
+    PRIMARY KEY (principal, provider, month_utc)
+);
+"#,
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
