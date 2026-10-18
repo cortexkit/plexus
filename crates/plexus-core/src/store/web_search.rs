@@ -22,8 +22,8 @@ pub enum WebSearchAllowanceAdmission {
 /// nothing was sent. It is deliberately not Clone, so settlement owns the receipt.
 #[derive(Debug, PartialEq, Eq)]
 pub struct WebSearchAllowanceReservation {
+    owner_principal: String,
     provider: String,
-    connection_id: String,
     month_utc: String,
 }
 
@@ -121,7 +121,8 @@ impl PlexusStore {
             .with_read(|conn| allowance_on_conn(conn, provider))
     }
 
-    /// Set a per-connection monthly limit without resetting any usage.
+    /// Set a monthly limit applied separately to each connection owner's usage,
+    /// without resetting any usage when that owner reconnects.
     pub fn set_web_search_allowance(
         &self,
         provider: &str,
@@ -158,10 +159,12 @@ impl PlexusStore {
     }
 
     /// Count for the calendar month UTC containing `at_ms` (Unix milliseconds).
+    /// `owner_principal` is the resolved connection's owner, not a caller that
+    /// invokes it through a grant. All of that owner's connections share usage.
     pub fn web_search_allowance_used(
         &self,
         provider: &str,
-        connection_id: &str,
+        owner_principal: &str,
         at_ms: i64,
     ) -> Result<u32, StoreError> {
         validate_provider(provider)?;
@@ -170,8 +173,8 @@ impl PlexusStore {
             Ok(conn
                 .query_row(
                     "SELECT used FROM web_search_allowance_counts
-                WHERE provider = ?1 AND connection_id = ?2 AND month_utc = ?3",
-                    (provider, connection_id, month),
+                WHERE principal = ?1 AND provider = ?2 AND month_utc = ?3",
+                    (owner_principal, provider, month),
                     |row| row.get(0),
                 )
                 .optional()?
@@ -181,10 +184,12 @@ impl PlexusStore {
 
     /// Check the live allowance and reserve one attempt in the same fenced
     /// transaction. The caller supplies its admission clock in Unix milliseconds.
+    /// Pass the resolved connection's owner as `owner_principal`, never the
+    /// grantee making the call; reconnecting must not create a fresh allowance.
     pub fn reserve_web_search_allowance(
         &self,
         provider: &str,
-        connection_id: &str,
+        owner_principal: &str,
         at_ms: i64,
     ) -> Result<WebSearchAllowanceAdmission, StoreError> {
         validate_provider(provider)?;
@@ -194,19 +199,19 @@ impl PlexusStore {
             };
             let month = month_on_conn(conn, at_ms)?;
             let changed = conn.execute(
-                "INSERT INTO web_search_allowance_counts (provider, connection_id, month_utc, used)
+                "INSERT INTO web_search_allowance_counts (principal, provider, month_utc, used)
                 VALUES (?1, ?2, ?3, 1)
-                ON CONFLICT (provider, connection_id, month_utc) DO UPDATE SET used = used + 1
+                ON CONFLICT (principal, provider, month_utc) DO UPDATE SET used = used + 1
                 WHERE used < ?4",
-                rusqlite::params![provider, connection_id, month, allowance],
+                rusqlite::params![owner_principal, provider, month, allowance],
             )?;
             if changed == 0 {
                 return Ok(WebSearchAllowanceAdmission::Exhausted);
             }
             Ok(WebSearchAllowanceAdmission::Reserved(
                 WebSearchAllowanceReservation {
+                    owner_principal: owner_principal.to_owned(),
                     provider: provider.to_owned(),
-                    connection_id: connection_id.to_owned(),
                     month_utc: month,
                 },
             ))
@@ -223,10 +228,10 @@ impl PlexusStore {
         self.inner.with_conn_fenced(|conn| {
             Ok(conn.execute(
                 "UPDATE web_search_allowance_counts SET used = used - 1
-                WHERE provider = ?1 AND connection_id = ?2 AND month_utc = ?3 AND used > 0",
+                WHERE principal = ?1 AND provider = ?2 AND month_utc = ?3 AND used > 0",
                 (
+                    reservation.owner_principal,
                     reservation.provider,
-                    reservation.connection_id,
                     reservation.month_utc,
                 ),
             )? == 1)

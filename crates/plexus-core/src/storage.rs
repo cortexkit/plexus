@@ -1057,11 +1057,11 @@ CREATE TABLE web_search_allowances (
     allowance INTEGER NOT NULL CHECK (allowance BETWEEN 1 AND 10000000)
 );
 CREATE TABLE web_search_allowance_counts (
+    principal TEXT NOT NULL,
     provider TEXT NOT NULL,
-    connection_id TEXT NOT NULL,
     month_utc TEXT NOT NULL CHECK (month_utc GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]' AND substr(month_utc, 6, 2) BETWEEN '01' AND '12'),
     used INTEGER NOT NULL CHECK (used >= 0),
-    PRIMARY KEY (provider, connection_id, month_utc)
+    PRIMARY KEY (principal, provider, month_utc)
 );
 "#,
     },

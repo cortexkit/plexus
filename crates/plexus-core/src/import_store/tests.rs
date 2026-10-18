@@ -107,7 +107,7 @@ fn web_search_order_allowances_and_counts_survive_store_cutover() {
     source.with_conn_fenced(|conn| conn.execute_batch(r#"
 INSERT INTO web_search_order (singleton, providers) VALUES (1, '["tavily","exa"]');
 INSERT INTO web_search_allowances (provider, allowance) VALUES ('exa', 2);
-INSERT INTO web_search_allowance_counts (provider, connection_id, month_utc, used) VALUES ('exa','c','2024-02',2), ('tavily','c','2024-02',1), ('exa','c','2024-03',1), ('exa','deleted','2024-02',1);
+INSERT INTO web_search_allowance_counts (principal, provider, month_utc, used) VALUES ('direct','exa','2024-02',2), ('direct','tavily','2024-02',1), ('direct','exa','2024-03',1), ('former-owner','exa','2024-02',1);
 "#)).unwrap();
     drop(source);
     let report = f.import();
@@ -134,10 +134,10 @@ INSERT INTO web_search_allowance_counts (provider, connection_id, month_utc, use
         ),
         2
     );
-    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE provider='exa' AND connection_id='c' AND month_utc='2024-02'"), 2);
-    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE provider='exa' AND connection_id='c' AND month_utc='2024-03'"), 1);
-    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE provider='tavily' AND connection_id='c' AND month_utc='2024-02'"), 1);
-    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE provider='exa' AND connection_id='deleted' AND month_utc='2024-02'"), 1);
+    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE principal='direct' AND provider='exa' AND month_utc='2024-02'"), 2);
+    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE principal='direct' AND provider='exa' AND month_utc='2024-03'"), 1);
+    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE principal='direct' AND provider='tavily' AND month_utc='2024-02'"), 1);
+    assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE principal='former-owner' AND provider='exa' AND month_utc='2024-02'"), 1);
 }
 
 /// Durable GitHub handle authority, bot-request receipts, the relay cursor,

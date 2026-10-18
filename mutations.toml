@@ -12002,7 +12002,7 @@ timeout_s = 120
 
 [[control]]
 id = '''web-search-allowance-reservation-bound'''
-guards = '''A monthly reservation cannot increment an already exhausted connection'''
+guards = '''A monthly reservation cannot increment an exhausted owner/provider bucket'''
 file = '''crates/plexus-core/src/store/web_search.rs'''
 old = '''WHERE used < ?4'''
 new = '''WHERE used <= ?4 /* NON-VACUITY BREAK */'''
@@ -12017,7 +12017,7 @@ timeout_s = 120
 
 [[control]]
 id = '''web-search-allowance-release-zero'''
-guards = '''Releasing an empty count is a no-op rather than an underflow'''
+guards = '''Releasing an empty owner/provider count is a no-op rather than an underflow'''
 file = '''crates/plexus-core/src/store/web_search.rs'''
 old = '''AND used > 0'''
 new = '''AND used >= 0 /* NON-VACUITY BREAK */'''
@@ -12027,5 +12027,23 @@ package = '''plexus-core'''
 target = '''--lib'''
 select = '''expected'''
 expect_red = ['storage::web_search_store::tests::release_never_underflows_or_inserts_a_missing_count']
+build_timeout_s = 3600
+timeout_s = 120
+
+# Keep each owner's free-tier budget separate without resetting it on reconnect.
+# Accounting rule: "key the monthly counts by `(principal, provider, month_utc)`,
+# where the principal is the connection's owner."
+[[control]]
+id = '''web-search-allowance-owner-isolation'''
+guards = '''Different connection owners must not share a provider/month allowance bucket'''
+file = '''crates/plexus-core/src/store/web_search.rs'''
+old = '''rusqlite::params![owner_principal, provider, month, allowance]'''
+new = '''rusqlite::params!["shared-owner", provider, month, allowance] /* NON-VACUITY BREAK */'''
+test_file = '''crates/plexus-core/src/store/web_search_tests.rs'''
+runner = '''cargo'''
+package = '''plexus-core'''
+target = '''--lib'''
+select = '''expected'''
+expect_red = ['storage::web_search_store::tests::two_principals_using_the_same_provider_are_counted_separately']
 build_timeout_s = 3600
 timeout_s = 120

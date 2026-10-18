@@ -369,7 +369,7 @@ fn identity(table: &str, row: &Record) -> String {
         "web_search_limits" => vec!["backend"],
         "web_search_order" => vec![],
         "web_search_allowances" => vec!["provider"],
-        "web_search_allowance_counts" => vec!["provider", "connection_id", "month_utc"],
+        "web_search_allowance_counts" => vec!["principal", "provider", "month_utc"],
         "github_repo_id_cache" => vec!["repo"],
         "github_actions_quota" => vec!["reservation_id"],
         "event_outbox_counters" => vec!["name"],
@@ -480,9 +480,6 @@ fn transform(old: &Connection, new: &Connection, table: &str, row: &mut Record) 
         if !exists {
             return Err("missing connection".into());
         }
-    } else if table == "web_search_allowance_counts" {
-        // Usage is historical, not authority: keep it even if its connection
-        // was deleted. Counts have no principal and cannot authorize a call.
     } else if table == "write_reconciliation_results"
         && text(row, "connection_id")?.is_empty()
         && text(row, "status")? == "unreconcilable"
