@@ -1144,8 +1144,8 @@ build_timeout_s = 3600
 id = "facade-text-full-envelope"
 guards = "content[0].text carries the entire facade reply envelope including result and binding generation"
 file = "crates/plexus-module/src/lib.rs"
-old = "let text = pretty_json(&original);"
-new = "let text = pretty_json(result); /* NON-VACUITY BREAK */"
+old = "pretty_json(&reply)\n    };\n    let Some(fields)"
+new = "pretty_json(&reply[\"result\"]) /* NON-VACUITY BREAK */\n    };\n    let Some(fields)"
 test_file = "crates/plexus-module/src/web_search_tests.rs"
 package = "plexus-module"
 target = "--lib"
@@ -5150,8 +5150,8 @@ timeout_s = 120
 id = "consume-grants-deliver-each-event-once"
 guards = "Two overlapping consume grants from one owner deliver each event once"
 file = "crates/plexus-core/src/storage.rs"
-old = "if permitted && delivered.insert(event.event_id.clone()) {"
-new = "if permitted && (delivered.insert(event.event_id.clone()) || true) { /* NON-VACUITY BREAK */"
+old = "FROM trigger_events e\n                 WHERE e.acked_at_ms IS NULL"
+new = "FROM trigger_events e JOIN json_each('[1,2]') duplicate /* NON-VACUITY BREAK */\n                 WHERE e.acked_at_ms IS NULL"
 test_file = "crates/plexus-core/src/storage.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -5564,8 +5564,8 @@ timeout_s = 60
 id = "tool-request-failure-is-answered"
 guards = "A route request whose handler fails before replying is logged and answered with internal_error instead of being dropped silently"
 file = "crates/plexus-module/src/lib.rs"
-old = "serve_tool_request(frame, &writer, &state, &route_bindings).await;"
-new = "let _ = handle_tool_request(frame, &writer, &state, &route_bindings).await; /* NON-VACUITY BREAK */"
+old = "                    send_tool_error(\n                        writer,\n                        frame.header.ver,\n                        frame.header.channel,\n                        frame.header.epoch,\n                        frame.header.corr,\n                        \"internal_error\",\n                        \"plexus failed while serving this request; the module log names the cause\",\n                    )\n                    .await?;"
+new = "/* NON-VACUITY BREAK: omit the admission read-failure reply */"
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -5678,14 +5678,8 @@ timeout_s = 60
 id = "connect-seed-failure-reported"
 guards = "A connect whose catalog seed fails reports degraded discovery with a reason, never complete"
 file = "crates/plexus-module/src/lib.rs"
-old = """                        &connection.app_key,
-                    ) {
-                        eprintln!(warn catalog:
-                            "catalog seed failed during connect"""
-new = """                        &connection.app_key,
-                    ).or(Ok::<usize, String>(0)) /* NON-VACUITY BREAK */ {
-                        eprintln!(warn catalog:
-                            "catalog seed failed during connect"""
+old = "                    &connection.app_key,\n                ) {\n                    eprintln!(warn catalog:\n                        \"catalog seed failed during connect"
+new = "                    &connection.app_key,\n                ).or(Ok::<usize, String>(0)) /* NON-VACUITY BREAK */ {\n                    eprintln!(warn catalog:\n                        \"catalog seed failed during connect"
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -5700,16 +5694,8 @@ timeout_s = 60
 id = "set-deliver-to-reads-subscription-id-first"
 guards = "set_deliver_to reads subscription_id before subscription, as every sibling events op does"
 file = "crates/plexus-module/src/lib.rs"
-old = '''            let subscription_id = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty());'''
-new = '''            let subscription_id = arguments
-                .get("subscription") /* NON-VACUITY BREAK */
-                .or_else(|| arguments.get("subscription_id"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty());'''
+old = ".get(\"subscription_id\")\n        .or_else(|| arguments.get(\"subscription\"))"
+new = ".get(\"subscription\") /* NON-VACUITY BREAK */\n        .or_else(|| arguments.get(\"subscription_id\"))"
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -5756,12 +5742,8 @@ timeout_s = 60
 id = "set-project-omitted-field-refused"
 guards = "set_project refuses a missing project_id instead of reading it as a clear, so a misspelled field cannot wipe the binding"
 file = "crates/plexus-module/src/lib.rs"
-old = '''            let project_id = match arguments.get("project_id") {
-                None => {'''
-new = '''            let project_id = match arguments.get("project_id") {
-                None => None, /* NON-VACUITY BREAK */
-                #[allow(unreachable_patterns)]
-                None => {'''
+old = "        let project_id = match arguments.get(\"project_id\") {\n            None => {"
+new = "        let project_id = match arguments.get(\"project_id\") {\n            None => None, /* NON-VACUITY BREAK */\n            #[allow(unreachable_patterns)]\n            None => {"
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -8569,7 +8551,7 @@ build_timeout_s = 3600
 id = "revoke-unregister"
 guards = "Successful connection revocation unregisters its transport configuration only after the store commits"
 file = "crates/plexus-module/src/lib.rs"
-old = "state\n                            .runtime\n                            .mcp_transport\n                            .unregister_connection(connection_id);"
+old = "state\n                        .runtime\n                        .mcp_transport\n                        .unregister_connection(connection_id);"
 new = "/* NON-VACUITY BREAK: keep revoked MCP configuration */"
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
@@ -9015,8 +8997,10 @@ build_timeout_s = 3600
 id = "module-route-goodbye"
 guards = "A route Goodbye removes that epoch's principal and scope"
 file = "crates/plexus-module/src/lib.rs"
-old = ".remove(&(channel, epoch));"
-new = ".remove(&(channel, epoch.wrapping_add(100))); /* NON-VACUITY BREAK */"
+old = '''            .map_err(|_| ModuleError::Message("route binding state was poisoned".into()))?
+            .remove(&(channel, epoch));'''
+new = '''            .map_err(|_| ModuleError::Message("route binding state was poisoned".into()))?
+            .remove(&(channel, epoch.wrapping_add(100))); /* NON-VACUITY BREAK */'''
 test_file = "crates/plexus-module/src/wire_safety_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -10892,8 +10876,8 @@ timeout_s = 60
 id = "flow-audience-agentless-lookup"
 guards = "Agentless Basal routes consult core before dispatch"
 file = "crates/plexus-module/src/flow_audience.rs"
-old = 'principal == "reserved:basal" && scope.flow_id.is_some() && scope.agent_id.is_none()'
-new = 'false /* NON-VACUITY BREAK */ && principal == "reserved:basal" && scope.flow_id.is_some() && scope.agent_id.is_none()'
+old = "principal == principal::BASAL_PRINCIPAL"
+new = "false && principal == principal::BASAL_PRINCIPAL /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/flow_audience_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -11869,5 +11853,365 @@ package = "plexus-core"
 target = "--lib"
 select = "expected"
 expect_red = ["event_envelope::tests::ci_job_runner_name_is_null_when_missing_or_empty"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-body-before-admission"
+guards = "Oversized frames are refused before retaining admission"
+file = "crates/plexus-module/src/lib.rs"
+old = "let budget = request_execution::RequestBudget::new();\n            if frame.body.len() > MAX_REQUEST_BYTES {"
+new = "let budget = request_execution::RequestBudget::new();\n            if false && frame.body.len() > MAX_REQUEST_BYTES { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::oversized_frames_do_not_take_admission"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-body-before-decoding"
+guards = "Direct handler entry refuses oversized JSON before parsing"
+file = "crates/plexus-module/src/lib.rs"
+old = "    if frame.body.len() > MAX_REQUEST_BYTES {\n        return send_tool_error("
+new = "    if false && frame.body.len() > MAX_REQUEST_BYTES { /* NON-VACUITY BREAK */\n        return send_tool_error("
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::oversized_body_is_refused_before_json_decoding"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-probe-script-bound"
+guards = "Probe scripts are bounded before registration"
+file = "crates/plexus-module/src/lib.rs"
+old = "if script_source.len() > MAX_PROBE_SCRIPT_BYTES"
+new = "if false && script_source.len() > MAX_PROBE_SCRIPT_BYTES /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::oversized_probe_script_is_refused_before_registration"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-would-ask-bound"
+guards = "Grant previews bound evaluation work"
+file = "crates/plexus-module/src/grants_would_ask.rs"
+old = "if items.len() > 100 {"
+new = "if false && items.len() > 100 { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::oversized_would_ask_batch_is_refused_before_evaluation"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-queued-deadline"
+guards = "Waiting work expires before its caller budget is exhausted"
+file = "crates/plexus-module/src/lib.rs"
+old = "tokio::time::timeout_at(\n                    queue_deadline,"
+new = "tokio::time::timeout_at(\n                    queue_deadline + std::time::Duration::from_secs(1000), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::queued_request_expires_before_work_capacity_returns"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-held-deadline"
+guards = "Expired held calls cannot dispatch or consume their approval"
+file = "crates/plexus-module/src/lib.rs"
+old = "guard_budget.expired().then(request_expired_reply)"
+new = "false.then(request_expired_reply) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/consent_capacity_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["consent_capacity_tests::expired_consent_request_keeps_approval_without_dispatching"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-panic-reply"
+guards = "A panicking worker returns a correlated internal error"
+file = "crates/plexus-module/src/lib.rs"
+old = "    if let Err(error) = result {"
+new = "    if result.is_err() { return; } /* NON-VACUITY BREAK */\n    if let Err(error) = result {"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::panicking_request_worker_is_answered_with_its_coordinates"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-route-idle-reaping"
+guards = "Lost goodbye notifications cannot retain idle routes forever"
+file = "crates/plexus-module/src/lib.rs"
+old = "now.duration_since(binding.last_used) < ROUTE_IDLE_TTL"
+new = "true /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::route_bindings_reap_idle_entries_and_enforce_a_bound"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-route-binding-bound"
+guards = "The route cache cannot grow beyond its bound"
+file = "crates/plexus-module/src/lib.rs"
+old = "if routes.len() >= MAX_ROUTE_BINDINGS &&"
+new = "if false && routes.len() >= MAX_ROUTE_BINDINGS && /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::route_bindings_reap_idle_entries_and_enforce_a_bound"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-management-mode"
+guards = "Management routes must carry Classic operator work"
+file = "crates/plexus-module/src/lib.rs"
+old = "|| binding.mode != CallMode::Classic"
+new = "|| false /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::management_refuses_non_classic_direct_routes"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-management-scope"
+guards = "Scoped agent work cannot use Direct management authority"
+file = "crates/plexus-module/src/lib.rs"
+old = "|| binding.scope.is_some()"
+new = "|| false /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::management_refuses_classic_agent_scopes"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-listing-duplicates"
+guards = "Large listings preserve result without duplicate payload envelopes"
+file = "crates/plexus-module/src/lib.rs"
+old = "let bounded_listing = listing && !json_fits(&reply, 64 * 1024);"
+new = "let bounded_listing = false && listing && !json_fits(&reply, 64 * 1024); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::large_listings_avoid_duplicate_payloads_but_preserve_the_result"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-audit-error-redaction"
+guards = "Backend audit errors stay off the caller wire"
+file = "crates/plexus-module/src/lib.rs"
+old = "format!(\"{what} took effect, but its audit row could not be written; the module log names the cause\")"
+new = "format!(\"{what} audit append failed: {error}\") /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::audit_failure_warning_does_not_expose_backend_errors"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-holder-transition"
+guards = "Holder-name changes participate in gate transition detection"
+file = "crates/plexus-module/src/lib.rs"
+old = "gate[\"holder_name\"].clone()"
+new = "gate[\"holder\"].clone() /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::gate_transitions_include_the_reported_holder_name"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-request-identifiers"
+guards = "Request identifiers never repeat within the process"
+file = "crates/plexus-module/src/lib.rs"
+old = "NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)"
+new = "NEXT.fetch_add(0, std::sync::atomic::Ordering::Relaxed) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::request_identifiers_do_not_repeat_across_calls"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-management-retired-identity"
+guards = "Management refuses retired identity fields before dispatch"
+file = "crates/plexus-module/src/lib.rs"
+old = ".and_then(retired_identity_field)"
+new = ".and_then(|_| None) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::management_refuses_retired_identity_fields"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-principal-fairness"
+guards = "One principal cannot retain the whole global admission budget"
+file = "crates/plexus-module/src/lib.rs"
+old = "const MAX_PRINCIPAL_REQUESTS: usize = 64;"
+new = "const MAX_PRINCIPAL_REQUESTS: usize = 256; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::one_principal_cannot_exhaust_global_admission"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-ci-cadence-failure"
+guards = "A failed cadence read is null rather than an infinite valid-looking number"
+file = "crates/plexus-module/src/lib.rs"
+old = "metrics[\"effectiveCiCadenceS\"] = Value::Null;"
+new = "metrics[\"effectiveCiCadenceS\"] = json!(i64::MAX); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::failed_ci_cadence_read_is_null_not_an_infinite_cadence"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-read-failure-shape"
+guards = "Read failures carry stable structured transmission data"
+file = "crates/plexus-module/src/lib.rs"
+old = "TransportOutcome::VendorFailed { code, .. } => (\"failed\", Some(code)),"
+new = "TransportOutcome::VendorFailed { code, .. } => (\"not_sent\", Some(code)), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::github_read_failures_are_structured_and_do_not_leak_debug_messages"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-inspect-target"
+guards = "Request inspection requires its target rather than listing every request"
+file = "crates/plexus-module/src/lib.rs"
+old = "return facade_requests_inspect(&call)"
+new = "return facade_requests_list(&call) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::inspect_requires_a_target_and_legacy_event_get_is_closed"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-hello-deadline"
+guards = "HELLO acknowledgement cannot wait forever"
+file = "crates/plexus-module/src/lib.rs"
+old = "tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(reader))"
+new = "tokio::time::timeout(std::time::Duration::from_secs(60), read_frame(reader)) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::hello_ack_wait_is_bounded"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-audience-lru"
+guards = "At capacity only the least recently used audience is evicted"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = "cache.remove(&oldest);"
+new = "cache.clear(); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::cache_capacity_evicts_one_entry_instead_of_all_audiences"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-audience-single-flight"
+guards = "Concurrent misses for one flow share the same lookup"
+file = "crates/plexus-module/src/flow_audience.rs"
+old = "lookups.insert(flow_id.into(), Arc::downgrade(&lookup));"
+new = "drop(Arc::downgrade(&lookup)); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/flow_audience_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["flow_audience::tests::concurrent_audience_misses_share_one_lookup"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-event-cursor"
+guards = "Event page cursors are exclusive stable timestamp and id boundaries"
+file = "crates/plexus-core/src/storage.rs"
+old = "AND (?5 IS NULL OR (e.created_at_ms,e.event_id) > (?5,?6))"
+new = "AND (?5 IS NULL OR 1=1) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["events_get_tests::event_pages_preserve_full_listing_and_stable_ties"]
 build_timeout_s = 3600
 timeout_s = 120

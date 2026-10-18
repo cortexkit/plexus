@@ -982,3 +982,65 @@ fn failed_ci_cadence_read_is_null_not_an_infinite_cadence() {
     let snapshot = state.health.store_metrics.lock().unwrap();
     assert_eq!(snapshot.get("effectiveCiCadenceS"), Some(&Value::Null));
 }
+
+#[tokio::test]
+async fn oversized_frames_do_not_take_admission() {
+    let state = state();
+    let routes = Arc::new(RouteBindings::new());
+    routes.insert(1, 1, Principal::Direct).unwrap();
+    let _blocked = routes
+        .blocking
+        .clone()
+        .acquire_many_owned(MAX_BLOCKING_REQUESTS as u32)
+        .await
+        .unwrap();
+    let (writer, mut rx) = mpsc::channel(1);
+    handle_frame(
+        frame(
+            FrameType::Request,
+            1,
+            990,
+            json!({"padding":"x".repeat(MAX_REQUEST_BYTES)}),
+        ),
+        &writer,
+        &state,
+        &routes,
+    )
+    .await
+    .unwrap();
+    assert_eq!(routes.in_flight.available_permits(), MAX_IN_FLIGHT_REQUESTS);
+    let reply = recv_within(rx.recv(), Duration::from_secs(5), "oversize refusal").await;
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn management_refuses_classic_agent_scopes() {
+    let routes = Arc::new(RouteBindings::new());
+    let scope = CallScope::from_stamp(&crate::consent_test_support::worker_stamp("worker", 1));
+    routes
+        .insert_mode(1, 1, Principal::Direct, Some(scope), CallMode::Classic)
+        .unwrap();
+    let (writer, mut rx) = mpsc::channel(1);
+    handle_tool_request(
+        frame(
+            FrameType::Request,
+            1,
+            991,
+            json!({"method":"plexus.admin.list_grants","params":{}}),
+        ),
+        &writer,
+        &state(),
+        &routes,
+    )
+    .await
+    .unwrap();
+    let reply = recv_within(
+        rx.recv(),
+        Duration::from_secs(5),
+        "scoped management refusal",
+    )
+    .await;
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["error"]["code"], "operator_authority_required");
+}

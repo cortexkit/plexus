@@ -5727,7 +5727,7 @@ impl PlexusStore {
                    AND (e.principal=?1 OR EXISTS (
                        SELECT 1 FROM json_each(?4) g
                        JOIN trigger_subscriptions s ON s.subscription_id=e.subscription_id
-                            AND s.principal=e.principal
+                            AND s.principal=e.principal AND s.connection_id=e.connection_id
                        JOIN json_each(g.value, '$.selectors') selector
                        WHERE json_extract(g.value,'$.owner')=e.principal
                          AND json_extract(g.value,'$.connection')=e.connection_id
