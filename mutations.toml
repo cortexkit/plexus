@@ -11962,32 +11962,17 @@ build_timeout_s = 3600
 timeout_s = 120
 
 [[control]]
-id = "module-route-idle-reaping"
-guards = "Lost goodbye notifications cannot retain idle routes forever"
-file = "crates/plexus-module/src/lib.rs"
-old = "now.duration_since(binding.last_used) < ROUTE_IDLE_TTL"
-new = "true /* NON-VACUITY BREAK */"
-test_file = "crates/plexus-module/src/wire_safety_tests.rs"
-runner = "cargo"
-package = "plexus-module"
-target = "--lib"
-select = "expected"
-expect_red = ["wire_safety_tests::route_bindings_reap_idle_entries_and_enforce_a_bound"]
-build_timeout_s = 3600
-timeout_s = 120
-
-[[control]]
 id = "module-route-binding-bound"
 guards = "The route cache cannot grow beyond its bound"
 file = "crates/plexus-module/src/lib.rs"
-old = "if routes.len() >= MAX_ROUTE_BINDINGS &&"
-new = "if false && routes.len() >= MAX_ROUTE_BINDINGS && /* NON-VACUITY BREAK */"
+old = "if routes.len() >= MAX_ROUTE_BINDINGS {"
+new = "if false && routes.len() >= MAX_ROUTE_BINDINGS { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/wire_safety_tests.rs"
 runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["wire_safety_tests::route_bindings_reap_idle_entries_and_enforce_a_bound"]
+expect_red = ["wire_safety_tests::route_bindings_are_bounded_without_evicting_open_routes"]
 build_timeout_s = 3600
 timeout_s = 120
 
@@ -12243,5 +12228,80 @@ package = "plexus-module"
 target = "--lib"
 select = "expected"
 expect_red = ["wire_safety_tests::inspect_returns_only_the_named_request_and_action"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-route-capacity-warning"
+guards = "Route-capacity pressure is visible in one bounded diagnostic rather than silent refusal"
+file = "crates/plexus-module/src/lib.rs"
+old = 'if self.should_log_route_capacity(std::time::Instant::now()) {'
+new = 'if false && self.should_log_route_capacity(std::time::Instant::now()) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::route_capacity_refusals_emit_one_warning_per_period"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-route-capacity-warning-window"
+guards = "Repeated capacity refusals cannot flood diagnostics more than once per minute"
+file = "crates/plexus-module/src/lib.rs"
+old = 'now.saturating_duration_since(at)'
+new = '(now.saturating_duration_since(at) + std::time::Duration::from_secs(60)) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::route_capacity_warning_is_rate_limited_by_monotonic_time"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-connection-close-clears-bindings"
+guards = "EOF and read errors clear authority cached for a closed daemon connection"
+file = "crates/plexus-module/src/lib.rs"
+old = 'self.0.clear();'
+new = 'let _ = &self.0; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::connection_end_and_read_failure_clear_all_route_bindings"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-daemon-goodbye-clears-bindings"
+guards = "A daemon GOODBYE clears cached authority when the dispatch loop exits"
+file = "crates/plexus-module/src/lib.rs"
+old = "self.0.clear();"
+new = "let _ = &self.0; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::daemon_goodbye_clears_bindings_but_request_error_and_cancel_do_not"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-rebind-replaces-released-epoch"
+guards = "A new daemon bind for one channel replaces its released epoch without dropping other channels"
+file = "crates/plexus-module/src/lib.rs"
+old = 'routes.retain(|(bound_channel, _), _| *bound_channel != channel);'
+new = 'routes.retain(|_, _| true); /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::rebinding_a_channel_replaces_the_released_epoch"]
 build_timeout_s = 3600
 timeout_s = 120

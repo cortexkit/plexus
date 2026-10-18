@@ -122,7 +122,6 @@ const HEALTH_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 /// scope the route was opened under when the bind carried one.
 #[derive(Clone)]
 struct RouteBinding {
-    last_used: std::time::Instant,
     admission: Arc<tokio::sync::Semaphore>,
     principal: Principal,
     scope: Option<CallScope>,
@@ -136,8 +135,8 @@ const MAX_IN_FLIGHT_REQUESTS: usize = 256;
 const MAX_BLOCKING_REQUESTS: usize = 32;
 // One caller may retain a quarter of admission, leaving room for other modules.
 const MAX_PRINCIPAL_REQUESTS: usize = 64;
+// A quiet route still carries authority; bound retention instead of expiring it.
 const MAX_ROUTE_BINDINGS: usize = 4096;
-const ROUTE_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_PROBE_SCRIPT_BYTES: usize = 64 * 1024;
 const MAX_PROBE_ACTIONS: usize = 100;
@@ -147,6 +146,7 @@ pub struct RouteBindings {
     inner: Arc<RwLock<HashMap<(u16, u32), RouteBinding>>>,
     in_flight: Arc<tokio::sync::Semaphore>,
     blocking: Arc<tokio::sync::Semaphore>,
+    last_capacity_warning: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     principals: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Semaphore>>>>,
 }
 
@@ -156,6 +156,7 @@ impl Default for RouteBindings {
             inner: Arc::default(),
             in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
             blocking: Arc::new(tokio::sync::Semaphore::new(MAX_BLOCKING_REQUESTS)),
+            last_capacity_warning: Arc::default(),
             principals: Arc::default(),
         }
     }
@@ -199,9 +200,12 @@ impl RouteBindings {
             .inner
             .write()
             .map_err(|_| ModuleError::Message("route binding state was poisoned".to_string()))?;
-        let now = std::time::Instant::now();
-        routes.retain(|_, binding| now.duration_since(binding.last_used) < ROUTE_IDLE_TTL);
-        if routes.len() >= MAX_ROUTE_BINDINGS && !routes.contains_key(&(channel, epoch)) {
+        // The daemon's bind for a reused channel supersedes its released epoch.
+        routes.retain(|(bound_channel, _), _| *bound_channel != channel);
+        if routes.len() >= MAX_ROUTE_BINDINGS {
+            if self.should_log_route_capacity(std::time::Instant::now()) {
+                eprintln!(warn wire: "route binding capacity exhausted ({MAX_ROUTE_BINDINGS} open routes); daemon close notifications may be missing");
+            }
             return Err(ModuleError::RouteCapacity);
         }
         let admission = {
@@ -222,7 +226,6 @@ impl RouteBindings {
         routes.insert(
             (channel, epoch),
             RouteBinding {
-                last_used: now,
                 admission,
                 principal,
                 scope,
@@ -230,6 +233,20 @@ impl RouteBindings {
             },
         );
         Ok(())
+    }
+
+    fn should_log_route_capacity(&self, now: std::time::Instant) -> bool {
+        let mut last = self
+            .last_capacity_warning
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if last.is_some_and(|at| {
+            now.saturating_duration_since(at) < std::time::Duration::from_secs(60)
+        }) {
+            return false;
+        }
+        *last = Some(now);
+        true
     }
 
     #[cfg(test)]
@@ -243,20 +260,18 @@ impl RouteBindings {
     /// principal reads them together here, because separate reads could
     /// straddle a re-bind and pair one bind's principal with another's scope.
     fn binding(&self, channel: u16, epoch: u32) -> Result<Option<RouteBinding>, ModuleError> {
-        let mut routes = self
+        let routes = self
             .inner
-            .write()
+            .read()
             .map_err(|_| ModuleError::Message("route binding state was poisoned".to_string()))?;
-        if routes
-            .get(&(channel, epoch))
-            .is_some_and(|binding| binding.last_used.elapsed() >= ROUTE_IDLE_TTL)
-        {
-            routes.remove(&(channel, epoch));
-        }
-        Ok(routes.get_mut(&(channel, epoch)).map(|binding| {
-            binding.last_used = std::time::Instant::now();
-            binding.clone()
-        }))
+        Ok(routes.get(&(channel, epoch)).cloned())
+    }
+
+    fn clear(&self) {
+        self.inner
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
     }
 
     fn remove(&self, channel: u16, epoch: u32) -> Result<(), ModuleError> {
@@ -265,6 +280,14 @@ impl RouteBindings {
             .map_err(|_| ModuleError::Message("route binding state was poisoned".into()))?
             .remove(&(channel, epoch));
         Ok(())
+    }
+}
+
+/// A daemon connection owns its bindings; every loop exit invalidates the cache.
+struct ClearBindingsOnClose(Arc<RouteBindings>);
+impl Drop for ClearBindingsOnClose {
+    fn drop(&mut self) {
+        self.0.clear();
     }
 }
 
@@ -618,13 +641,9 @@ async fn dispatch_loop<R>(
 where
     R: AsyncRead + Unpin,
 {
+    let _clear_on_exit = ClearBindingsOnClose(route_bindings.clone());
     loop {
-        // Bounded idle wake-up: the heartbeat means "the dispatch loop is
-        // responsive", not "a frame arrived recently". A frame-driven-only
-        // stamp makes every idle module self-report a Degraded false positive
-        // under supervision. Re-stamping on a periodic wake while parked here
-        // keeps an idle-but-healthy module Ok; a handler that wedges the loop
-        // still goes stale because the wake only runs between frames.
+        // Keep the diagnostic heartbeat age fresh while idle.
         //
         // The read future is pinned and polled through select! rather than
         // wrapped in `timeout()`: a timeout would DROP the future on expiry,
@@ -7005,6 +7024,49 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stderr).expect("UTF-8 stderr")
+    }
+
+    #[test]
+    fn route_capacity_log_fixture() {
+        logging::init_child();
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (_scratch, _store, state) = two_connection_fixture("route-capacity-log");
+                let routes = Arc::new(RouteBindings::new());
+                for channel in 10..(10 + MAX_ROUTE_BINDINGS as u16) {
+                    routes.insert(channel, 1, Principal::Direct).unwrap();
+                }
+                let (writer, mut responses) = mpsc::channel(4);
+                for _ in 0..3 {
+                    handle_control_request(bind(Some(Principal::Direct)), &writer, &state, &routes)
+                        .await
+                        .unwrap();
+                    let reply = recv_within(
+                        responses.recv(),
+                        std::time::Duration::from_secs(5),
+                        "route capacity refusal",
+                    )
+                    .await;
+                    assert_eq!(reply.header.ty, FrameType::Error);
+                    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+                    assert_eq!(body["code"], "resource_exhausted");
+                }
+                assert_eq!(routes.inner.read().unwrap().len(), MAX_ROUTE_BINDINGS);
+            });
+    }
+
+    #[test]
+    fn route_capacity_refusals_emit_one_warning_per_period() {
+        let stderr = module_diagnostic_output("tests::route_capacity_log_fixture");
+        assert_eq!(
+            stderr.matches("route binding capacity exhausted").count(),
+            1,
+            "cap pressure must emit exactly one warning per minute: {stderr}"
+        );
     }
 
     #[test]

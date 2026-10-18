@@ -171,7 +171,6 @@ async fn thirty_third_blocking_job_waits_without_refusal() {
 async fn route_goodbye_removes_only_its_epoch() {
     let routes = Arc::new(RouteBindings::new());
     routes.insert(3, 1, Principal::Direct).unwrap();
-    routes.insert(3, 2, Principal::Direct).unwrap();
     let (writer, _) = mpsc::channel(1);
     handle_frame(
         frame(FrameType::Goodbye, 3, 0, Value::Null),
@@ -185,6 +184,16 @@ async fn route_goodbye_removes_only_its_epoch() {
         routes.binding(3, 1).unwrap().is_none(),
         "closed route must lose its authority"
     );
+    routes.insert(3, 2, Principal::Direct).unwrap();
+    // The daemon may resend an old pair's close after the channel has been reused.
+    handle_frame(
+        frame(FrameType::Goodbye, 3, 0, Value::Null),
+        &writer,
+        &state(),
+        &routes,
+    )
+    .await
+    .unwrap();
     assert!(routes.binding(3, 2).unwrap().is_some());
 }
 
@@ -798,25 +807,21 @@ async fn one_principal_cannot_exhaust_global_admission() {
 }
 
 #[test]
-fn route_bindings_reap_idle_entries_and_enforce_a_bound() {
+fn route_bindings_are_bounded_without_evicting_open_routes() {
     let routes = RouteBindings::new();
-    routes.insert(1, 1, Principal::Direct).unwrap();
-    routes
-        .inner
-        .write()
-        .unwrap()
-        .get_mut(&(1, 1))
-        .unwrap()
-        .last_used = std::time::Instant::now() - ROUTE_IDLE_TTL;
-    routes.insert(2, 1, Principal::Direct).unwrap();
-    assert!(!routes.inner.read().unwrap().contains_key(&(1, 1)));
-    for channel in 3..=(MAX_ROUTE_BINDINGS as u16 + 1) {
+    for channel in 1..=MAX_ROUTE_BINDINGS as u16 {
         routes.insert(channel, 1, Principal::Direct).unwrap();
     }
     assert!(matches!(
         routes.insert(9000, 1, Principal::Direct),
         Err(ModuleError::RouteCapacity)
     ));
+    for channel in 1..=MAX_ROUTE_BINDINGS as u16 {
+        assert!(
+            routes.binding(channel, 1).unwrap().is_some(),
+            "a full cache must preserve open route authority"
+        );
+    }
 }
 
 #[test]
@@ -1127,4 +1132,90 @@ async fn inspect_returns_only_the_named_request_and_action() {
     let reply=call(&state,&routes,2,json!({"name":"catalog","arguments":{"op":"inspect","connection":"conn-held","action":"search"}})).await;
     assert_eq!(reply["result"]["actions"].as_array().unwrap().len(), 1);
     assert_eq!(reply["result"]["actions"][0]["name"], "search");
+}
+
+#[test]
+fn route_capacity_warning_is_rate_limited_by_monotonic_time() {
+    let routes = RouteBindings::new();
+    let now = std::time::Instant::now();
+    assert!(routes.should_log_route_capacity(now));
+    assert!(!routes.should_log_route_capacity(now));
+    assert!(!routes.should_log_route_capacity(now + Duration::from_secs(59)));
+    assert!(routes.should_log_route_capacity(now + Duration::from_secs(60)));
+}
+
+#[tokio::test]
+async fn connection_end_and_read_failure_clear_all_route_bindings() {
+    for (bytes, expect_error) in [(Vec::new(), false), (vec![0u8; 128], true)] {
+        let routes = Arc::new(RouteBindings::new());
+        routes.insert(1, 1, Principal::Direct).unwrap();
+        routes.insert(2, 7, Principal::Direct).unwrap();
+        let (writer, _rx) = mpsc::channel(1);
+        let mut reader = bytes.as_slice();
+        let result = dispatch_loop(
+            &mut reader,
+            writer,
+            state(),
+            routes.clone(),
+            Arc::new(PendingControlReplies::default()),
+        )
+        .await;
+        assert_eq!(result.is_err(), expect_error);
+        assert!(routes.binding(1, 1).unwrap().is_none());
+        assert!(routes.binding(2, 7).unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn daemon_goodbye_clears_bindings_but_request_error_and_cancel_do_not() {
+    let routes = Arc::new(RouteBindings::new());
+    routes.insert(1, 1, Principal::Direct).unwrap();
+    let (writer, _rx) = mpsc::channel(1);
+    let state = state();
+    for kind in [FrameType::Error, FrameType::Cancel] {
+        handle_frame(frame(kind, 1, 42, Value::Null), &writer, &state, &routes)
+            .await
+            .unwrap();
+        assert!(routes.binding(1, 1).unwrap().is_some());
+    }
+    let goodbye = Frame::build_with_version(
+        PROTOCOL_VERSION,
+        FrameType::Goodbye,
+        wire::control_flags(),
+        0,
+        0,
+        0,
+        Vec::new(),
+    )
+    .unwrap();
+    let (mut daemon, mut reader) = tokio::io::duplex(256);
+    subc_transport::write_frame(&mut daemon, &goodbye)
+        .await
+        .unwrap();
+    dispatch_loop(
+        &mut reader,
+        writer,
+        state,
+        routes.clone(),
+        Arc::new(PendingControlReplies::default()),
+    )
+    .await
+    .unwrap();
+    assert!(routes.binding(1, 1).unwrap().is_none());
+}
+
+#[test]
+fn rebinding_a_channel_replaces_the_released_epoch() {
+    let routes = RouteBindings::new();
+    routes.insert(3, 1, Principal::Direct).unwrap();
+    routes.insert(4, 1, Principal::Direct).unwrap();
+    assert!(routes.binding(3, 1).unwrap().is_some());
+    let next = Principal::Reserved {
+        module_id: "aft".into(),
+    };
+    routes.insert(3, 2, next.clone()).unwrap();
+    assert!(routes.binding(3, 1).unwrap().is_none());
+    assert_eq!(routes.get(3, 2).unwrap(), Some(next));
+    assert!(routes.binding(4, 1).unwrap().is_some());
+    assert_eq!(routes.inner.read().unwrap().len(), 2);
 }
