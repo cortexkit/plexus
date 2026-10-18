@@ -89,6 +89,14 @@ pub struct CallScope {
 }
 
 impl CallScope {
+    /// Session identity excludes attribution and delegation, which are checked
+    /// separately before authority is exercised.
+    pub fn same_session(&self, other: &Self) -> bool {
+        self.owner == other.owner
+            && self.scope_ref == other.scope_ref
+            && self.scope_epoch == other.scope_epoch
+    }
+
     pub fn from_stamp(stamp: &ScopeStamp) -> Self {
         Self {
             owner: principal_label(&stamp.owner),

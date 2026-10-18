@@ -2022,18 +2022,20 @@ mod tests {
                 })
                 .expect("reactivate write");
 
-            // STATE + behaviour: the write asks first and the request exists.
+            // Ask-first remains pinned even when severity refuses execution
+            // before consent: unavailable execution must not file a useless card.
             let engine = authorize_engine(&store, "write_tool", "write");
-            let Err(crate::Denial::ActionRequestCreated { request_id }) = engine.authorize(
+            match engine.authorize(
                 AuthorizationRequest::new("direct", "connection", "write_tool", json!({})),
-            ) else {
-                panic!("write under narrowing manifest {declared:?} must still ask first");
-            };
-            assert!(store
+            ) {
+                Err(crate::Denial::ActionRequestCreated { request_id }) => assert!(store
                 .list_action_requests("direct")
                 .expect("requests")
                 .iter()
-                .any(|item| item.request_id == request_id && item.status == "pending"));
+                .any(|item| item.request_id == request_id && item.status == "pending")),
+                Err(crate::Denial::NeedsDecisionPlane(_)) => assert!(store.list_action_requests("direct").unwrap().is_empty()),
+                other => panic!("write under narrowing manifest {declared:?} must ask first or refuse unavailable execution: {other:?}"),
+            }
             let _ = std::fs::remove_file(path);
         }
     }

@@ -1065,6 +1065,13 @@ CREATE TABLE web_search_allowance_counts (
 );
 "#,
     },
+    Migration {
+        version: 54,
+        statements: r#"
+ALTER TABLE action_requests ADD COLUMN routing_context TEXT;
+ALTER TABLE grant_revocations ADD COLUMN agent_id TEXT;
+"#,
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
@@ -2358,6 +2365,8 @@ pub struct SnapshotGenerations {
     pub catalog_action: i64,
     pub grant: i64,
     pub policy: i64,
+    #[serde(default)]
+    pub policy_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2779,6 +2788,7 @@ fn find_action_request_by_shape_on_conn(
     schema_hash: &str,
     now: i64,
     scope: Option<&CallScope>,
+    requester: &str,
 ) -> rusqlite::Result<Option<ActionRequestRecord>> {
     let mut statement = conn.prepare(&format!(
         "SELECT {ACTION_REQUEST_COLUMNS}
@@ -2788,7 +2798,8 @@ fn find_action_request_by_shape_on_conn(
                AND status IN ('pending', 'approved')
                AND expires_at > ?6
                AND scope_owner IS ?7 AND scope_ref IS ?8 AND scope_epoch IS ?9
-               AND call_key IS NULL
+                AND call_key IS NULL
+                AND requester = ?10
               ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at_ms"
     ))?;
     let rows = statement.query_map(
@@ -2802,6 +2813,7 @@ fn find_action_request_by_shape_on_conn(
             scope.map(|scope| scope.owner.as_str()),
             scope.map(|scope| scope.scope_ref.as_str()),
             scope.map(|scope| epoch_to_sql(scope.scope_epoch)),
+            requester,
         ],
         map_action_request_row,
     )?;
@@ -2872,7 +2884,7 @@ impl PlexusStore {
         // Parse before opening SQLite: malformed restore evidence must cause no writes.
         let revocations = grant_journal
             .as_deref()
-            .map(crate::grant_journal::read)
+            .map(|path| crate::grant_journal::scan(path, |_| Ok(())))
             .transpose()
             .map_err(StoreError::Backend)?
             .unwrap_or_default();
@@ -2902,11 +2914,17 @@ impl PlexusStore {
         // An empty replay needs no write fence. Store copies can retain a database
         // epoch ahead of their fresh lease; opening them must not claim authority
         // when there are no revocations to apply.
-        if !revocations.is_empty() {
+        if revocations != 0 {
             store.with_conn_fenced(|conn| {
-                for entry in &revocations {
-                    crate::grant_journal::apply(conn, entry)?;
-                }
+                crate::grant_journal::scan(
+                    grant_journal.as_deref().expect("journal was scanned"),
+                    |entry| {
+                        crate::grant_journal::apply(conn, &entry)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    },
+                )
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
                 Ok(())
             })?;
         }
@@ -5947,6 +5965,7 @@ impl PlexusStore {
                  WHERE principal = ?1 AND connection_id = ?2
                    AND authority_kind = ?4
                    AND grantee_principal = ?3 AND grantee_principal <> '*'
+                   AND agent_id IS NULL
                  ORDER BY grant_id",
             )?;
             let rows = statement
@@ -6139,6 +6158,32 @@ impl PlexusStore {
         Ok(row.request_id)
     }
 
+    /// Preserve crate-internal routing without forwarding it as vendor arguments.
+    /// A reused request may not change the routing shown when consent was filed.
+    pub(crate) fn bind_action_request_routing(
+        &self,
+        principal: &str,
+        id: &str,
+        routing: &Value,
+    ) -> Result<bool, StoreError> {
+        let routing =
+            serde_json::to_string(routing).map_err(|e| StoreError::Backend(e.to_string()))?;
+        self.inner.with_conn_fenced(|conn| {
+            Ok(conn.execute("UPDATE action_requests SET routing_context=?3 WHERE principal=?1 AND request_id=?2 AND (routing_context IS NULL OR routing_context=?3)", (principal, id, &routing))? == 1)
+        })
+    }
+
+    pub(crate) fn action_request_routing(
+        &self,
+        principal: &str,
+        id: &str,
+    ) -> Result<Option<Value>, StoreError> {
+        self.inner.with_read(|conn| {
+            let routing: Option<String> = conn.query_row("SELECT routing_context FROM action_requests WHERE principal=?1 AND request_id=?2", (principal, id), |row| row.get(0)).optional()?.flatten();
+            routing.as_deref().map(parse_json_column).transpose()
+        })
+    }
+
     /// Create-or-reuse the stable intent row for a logical write. A reused row
     /// keeps the `relay_origin` it was created with: the origin is attribution
     /// and never part of the shape the row is matched on.
@@ -6182,6 +6227,7 @@ impl PlexusStore {
                 schema_hash,
                 now_ms(),
                 scope,
+                requester,
             )? {
                 return Ok(existing.request_id);
             }
@@ -6457,11 +6503,12 @@ impl PlexusStore {
             let mut statement = conn.prepare(&format!(
                 "SELECT {ACTION_REQUEST_COLUMNS}
                  FROM action_requests
-                 WHERE status = 'approved' AND scope_outcome = ?1
+                  WHERE status = 'approved' AND scope_outcome = ?1
+                    AND (expires_at <= ?3 OR scope_checked_at_ms <= ?4)
                  ORDER BY scope_checked_at_ms,created_at_ms,principal,request_id LIMIT ?2"
             ))?;
             let rows = statement.query_map(
-                rusqlite::params![crate::scope::APPROVED_WAITING, limit as i64],
+                rusqlite::params![crate::scope::APPROVED_WAITING, limit as i64, now_ms(), now_ms().saturating_sub(5_000)],
                 map_action_request_row,
             )?;
             let rows=rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -6867,10 +6914,10 @@ impl PlexusStore {
             )> = conn
                 .query_row(
                     "SELECT status, expires_at,
-                            (SELECT generation FROM connections
-                             WHERE principal = ?1 AND connection_id = ?2),
-                            (SELECT generation FROM catalog_actions
-                             WHERE principal = ?1 AND connection_id = ?2 AND name = ?3),
+                            COALESCE((SELECT generation FROM connections
+                             WHERE principal = ?1 AND connection_id = ?2), -1),
+                            COALESCE((SELECT generation FROM catalog_actions
+                             WHERE principal = ?1 AND connection_id = ?2 AND name = ?3), -1),
                             -- Pin the grant that authorized this reservation.
                             -- A maximum across matching grants cannot detect
                             -- the revocation of the authorizing grant whenever
@@ -6880,7 +6927,7 @@ impl PlexusStore {
                             -- coalesces to -1 and can never equal a stored
                             -- generation, so revocation always aborts.
                             COALESCE((SELECT generation FROM grants
-                             WHERE principal = ?1 AND grant_id = (
+                             WHERE principal = ?1 AND (expires_at IS NULL OR expires_at > ?5) AND grant_id = (
                                  SELECT grant_id FROM reservations
                                  WHERE principal = ?1 AND reservation_id = ?4
                          )), -1),
@@ -6889,7 +6936,7 @@ impl PlexusStore {
                             -- the same way. NULL when the call named no agent
                             -- grant or the grant is gone.
                             (SELECT generation FROM grants
-                             WHERE principal = ?1 AND grant_id = reservations.agent_grant_id)
+                             WHERE principal = ?1 AND (expires_at IS NULL OR expires_at > ?5) AND grant_id = reservations.agent_grant_id)
                      FROM reservations
                      WHERE principal = ?1 AND reservation_id = ?4",
                     (
@@ -6897,6 +6944,7 @@ impl PlexusStore {
                         reservation.connection_id.as_str(),
                         reservation.action.as_str(),
                         reservation.reservation_id.as_str(),
+                        claim_now,
                     ),
                     |row| {
                         Ok((
@@ -6929,8 +6977,7 @@ impl PlexusStore {
                 &reservation.connection_id,
                 &reservation.action,
                 claim_now,
-            )?
-            .map_or(0, |value| value.generation);
+            )?;
             let agent_grant_unchanged = match reservation.agent_grant.as_ref() {
                 Some(pinned) => agent_grant == Some(pinned.generation),
                 None => true,
@@ -6940,7 +6987,8 @@ impl PlexusStore {
                 && connection == reservation.snapshot.connection
                 && catalog == reservation.snapshot.catalog_action
                 && grant == reservation.snapshot.grant
-                && policy == reservation.snapshot.policy
+                && policy.as_ref().map_or(0, |value| value.generation) == reservation.snapshot.policy
+                && policy.as_ref().map(|value| &value.policy_id) == reservation.snapshot.policy_id.as_ref()
                 && agent_grant_unchanged;
             if valid {
                 if let Some(approval_request_id) = approval_request_id.as_deref() {
@@ -10618,6 +10666,8 @@ mod tests {
             inner.migrate("plexus", &MIGRATIONS[..3]).unwrap().applied,
             0
         );
+        // Current authority queries require the later agent-layer columns.
+        inner.migrate("plexus", MIGRATIONS).unwrap();
         let store = PlexusStore {
             inner,
             grant_journal: None,

@@ -1292,6 +1292,8 @@ fn verify_denial_audit(
         Denial::Credential(_) => "credential",
         Denial::ConnectorHomeNotHeld { .. } => "connector_home",
         Denial::StoreFailure => "store",
+        Denial::OwnershipProofMissing => "facade",
+        Denial::CredentialMaterialForbidden => "credential",
     };
     let row = &rows[0];
     if row.decision != "deny" {

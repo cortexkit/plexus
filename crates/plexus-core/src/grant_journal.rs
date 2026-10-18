@@ -3,7 +3,7 @@
 //! loses revocations newer than that generation.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use rusqlite::Connection;
@@ -45,42 +45,54 @@ fn parse_record(line: &[u8]) -> Result<Revocation, String> {
 /// because revoking an additional grant cannot restore revoked authority.
 /// Require every newline-terminated record to parse.
 pub(crate) fn read(path: &Path) -> Result<Vec<Revocation>, String> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("{}: {error}", path.display())),
-    };
-    let (complete, torn_tail) = split_torn_tail(&bytes);
-    let mut entries = complete
-        .into_iter()
-        .flat_map(|complete| complete.split(|byte| *byte == b'\n'))
-        .enumerate()
-        .map(|(index, line)| {
-            parse_record(line).map_err(|e| format!("{} line {}: {e}", path.display(), index + 1))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if let Some(tail) = torn_tail {
-        match parse_record(tail) {
-            Ok(entry) => entries.push(entry),
-            Err(error) => eprintln!(warn governance:
-                "{}: skipping an unterminated final line left by an interrupted append ({error}); it was never acknowledged",
-                path.display()
-            ),
-        }
-    }
+    let mut entries = Vec::new();
+    scan(path, |entry| {
+        entries.push(entry);
+        Ok(())
+    })?;
     Ok(entries)
 }
 
-/// Split the journal into its newline-terminated lines (without the final
-/// newline; `None` when there are none) and an unterminated final line, if
-/// there is one.
-fn split_torn_tail(bytes: &[u8]) -> (Option<&[u8]>, Option<&[u8]>) {
-    match bytes.iter().rposition(|byte| *byte == b'\n') {
-        _ if bytes.is_empty() => (None, None),
-        Some(last) if last + 1 == bytes.len() => (Some(&bytes[..last]), None),
-        Some(last) => (Some(&bytes[..last]), Some(&bytes[last + 1..])),
-        None => (None, Some(bytes)),
+/// Visit one record at a time so lifetime revocations need not fit in memory.
+pub(crate) fn scan(
+    path: &Path,
+    mut visit: impl FnMut(Revocation) -> Result<(), String>,
+) -> Result<usize, String> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut count = 0;
+    loop {
+        line.clear();
+        if reader
+            .read_until(b'\n', &mut line)
+            .map_err(|e| e.to_string())?
+            == 0
+        {
+            break;
+        }
+        let complete = line.last() == Some(&b'\n');
+        if complete {
+            line.pop();
+        }
+        match parse_record(&line) {
+            Ok(entry) => {
+                visit(entry)?;
+                count += 1;
+            }
+            Err(error) if complete => {
+                return Err(format!("{} line {}: {error}", path.display(), count + 1))
+            }
+            Err(error) => {
+                eprintln!(warn governance: "{}: skipping an unterminated final line left by an interrupted append ({error}); it was never acknowledged", path.display())
+            }
+        }
     }
+    Ok(count)
 }
 
 pub(crate) fn ensure(path: &Path) -> std::io::Result<()> {
@@ -176,14 +188,22 @@ pub(crate) fn apply_as(
     entry: &Revocation,
     actor: &str,
 ) -> rusqlite::Result<usize> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM grants WHERE principal=?1 AND grant_id=?2)",
+        (&entry.principal, &entry.grant_id),
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(0);
+    }
     conn.execute(
         "INSERT INTO grant_revocations
             (revocation_id, grant_id, principal, connection_id, grantee_principal,
              authority_kind, risk_ceiling, action_selectors, expires_at, generation,
-             created_at_ms, revoked_at_ms, revoked_by)
+             created_at_ms, revoked_at_ms, revoked_by, agent_id)
          SELECT ?3, grant_id, principal, connection_id, grantee_principal,
                 authority_kind, risk_ceiling, action_selectors, expires_at, generation,
-                created_at_ms, ?4, ?5
+                 created_at_ms, ?4, ?5, agent_id
          FROM grants WHERE principal = ?1 AND grant_id = ?2",
         (
             &entry.principal,

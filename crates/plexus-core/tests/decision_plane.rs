@@ -161,12 +161,64 @@ fn write_request() -> AuthorizationRequest {
 }
 
 #[test]
+fn local_resource_refusal_precedes_the_decision_plane() {
+    let plane = Arc::new(StubDecisionPlane::new());
+    let (engine, _path, plane) = seed_s3("local-resource-before-plane", plane);
+    let result = engine.authorize(AuthorizationRequest::new(
+        "direct",
+        "conn-1",
+        "destroy_item",
+        json!({}),
+    ));
+    assert!(matches!(
+        result,
+        Err(plexus_core::Denial::ResourceFilter(_))
+    ));
+    assert!(
+        plane.envelopes().is_empty(),
+        "local refusals must not leave an unreported approved verdict"
+    );
+}
+
+#[test]
+fn reservation_failure_reports_refusal_after_plane_approval() {
+    let plane = Arc::new(StubDecisionPlane::new());
+    let (engine, path, plane) = seed_s3("reservation-failure-report", plane);
+    rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE TRIGGER reject_reservation BEFORE INSERT ON reservations BEGIN SELECT RAISE(ABORT, 'reservation write failed'); END;").unwrap();
+    assert_eq!(
+        engine.authorize(write_request()),
+        Err(plexus_core::Denial::StoreFailure)
+    );
+    assert_eq!(plane.envelopes().len(), 1);
+    assert!(matches!(
+        plane.reports().as_slice(),
+        [plexus_core::decision_plane::OutcomeReport {
+            terminal: plexus_core::decision_plane::OutcomeTerminal::Refused { .. },
+            ..
+        }]
+    ));
+    assert!(engine.transport().requests().is_empty());
+}
+
+#[test]
 fn intent_id_stable_across_transient_reattempt_and_fresh_for_new_write() {
     let plane = Arc::new(StubDecisionPlane::new());
     let (engine, path, plane) = seed_s3("intent-stable", plane);
 
     let first = engine.authorize(write_request()).expect("first allow");
     let intent_a = first.intent_id.clone().expect("intent on reservation");
+    let routing: String = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT routing_context FROM action_requests WHERE request_id=?1",
+            [&intent_a],
+            |row| row.get(0),
+        )
+        .expect("plane-created intent keeps routing");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&routing).unwrap()["tool"],
+        "invoke"
+    );
     let second = engine.authorize(write_request()).expect("reattempt allow");
     let intent_b = second.intent_id.clone().expect("intent on reattempt");
     assert_eq!(
@@ -672,14 +724,14 @@ fn a_new_quorum_verdict_invalidates_an_earlier_unclaimed_allow() {
 
 #[test]
 fn a_failed_allow_verdict_write_refuses_before_reservation_or_dispatch() {
-    let (engine, path, _) = seed_s3(
+    let (engine, path, plane) = seed_s3(
         "plane-verdict-store-failure",
         Arc::new(StubDecisionPlane::new()),
     );
     rusqlite::Connection::open(&path)
         .unwrap()
         .execute_batch(
-            "CREATE TRIGGER fail_plane_verdict BEFORE UPDATE ON action_requests
+            "CREATE TRIGGER fail_plane_verdict BEFORE UPDATE OF decision_id ON action_requests
          BEGIN SELECT RAISE(ABORT, 'verdict write unavailable'); END;",
         )
         .unwrap();
@@ -694,6 +746,11 @@ fn a_failed_allow_verdict_write_refuses_before_reservation_or_dispatch() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].status, "pending");
     assert!(requests[0].decision_id.is_none());
+    assert_eq!(plane.envelopes().len(), 1);
+    assert!(
+        matches!(plane.reports().as_slice(), [plexus_core::decision_plane::OutcomeReport { terminal: plexus_core::decision_plane::OutcomeTerminal::Refused { reason }, .. }] if reason == "store_failure"),
+        "a valid allow refused by persistence must be reported unsent"
+    );
     let _ = fs::remove_file(path);
 }
 
@@ -774,6 +831,10 @@ fn a_failing_outcome_report_is_retried_then_audited() {
         .iter()
         .find(|row| row.reason_code == "outcome_report_failed")
         .expect("a failed report-back must leave an audit row");
+    assert_eq!(
+        row.decision, "allow",
+        "report failure must not turn an executed call into an authority denial"
+    );
     assert_eq!(
         row.attempt_no,
         Some(plexus_core::OUTCOME_REPORT_ATTEMPTS as i64),

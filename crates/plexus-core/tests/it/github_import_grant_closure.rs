@@ -139,6 +139,86 @@ fn imported_from(label: &str, inventory: &Inventory) -> Imported {
     imported_with(label, inventory, &Repositories)
 }
 
+#[test]
+fn poll_regrant_survives_restart_while_restored_issuance_stays_revoked() {
+    let label = "poll-grant-replay";
+    let fixture = imported(label, &["add_reaction"]);
+    let grant = plexus_core::storage::github_store::GithubHandlePollGrant {
+        app_handle_id: "app-fixture".into(),
+        actions: vec!["github.issue.get".into()],
+        dry_run: false,
+    };
+    let mint = |store: &PlexusStore| store.grant_github_handle_poll(&grant).unwrap().unwrap();
+    let first = mint(&fixture.store);
+    let old = first["grants"][0]["grant_id"].as_str().unwrap().to_owned();
+    assert_eq!(mint(&fixture.store)["grants"][0]["op"], "unchanged");
+    let backup = fixture._scratch.path().with_file_name("before-revoke.db");
+    rusqlite::Connection::open(fixture._scratch.path())
+        .unwrap()
+        .execute("VACUUM INTO ?1", [backup.to_str().unwrap()])
+        .unwrap();
+    assert!(fixture.store.revoke_grant("direct", &old).unwrap());
+    let second = mint(&fixture.store);
+    let new = second["grants"][0]["grant_id"].as_str().unwrap().to_owned();
+    let Imported {
+        _scratch: scratch,
+        store,
+        engine,
+        ..
+    } = fixture;
+    drop(engine);
+    drop(store);
+    let descriptor = StorageDescriptor {
+        module_id: "plexus".into(),
+        storage_namespace: label.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: scratch.path().to_string_lossy().into_owned(),
+        },
+    };
+    let store = PlexusStore::open(&descriptor).unwrap();
+    assert!(store
+        .list_grants("direct", "github-handle-app-fixture")
+        .unwrap()
+        .iter()
+        .any(|row| row.grant_id == new && row.revoked_at_ms.is_none()));
+    assert_ne!(old, new, "a regrant must not reuse a journaled issuance id");
+    drop(store);
+    std::fs::copy(&backup, scratch.path()).unwrap();
+    let restored = PlexusStore::open(&descriptor).unwrap();
+    assert!(restored
+        .list_grants("direct", "github-handle-app-fixture")
+        .unwrap()
+        .iter()
+        .all(|row| row.grant_id != old || row.revoked_at_ms.is_some()));
+}
+
+#[test]
+fn a_second_single_use_import_refuses_without_duplicate_grants() {
+    let fixture = imported("single-use-import", &["add_reaction"]);
+    let before = fixture
+        .store
+        .list_grants("direct", "github-handle-app-fixture")
+        .unwrap();
+    assert!(control::import(
+        &fixture.store,
+        "direct",
+        &inventory(&["add_reaction"]),
+        &Token,
+        &Repositories,
+        0,
+        false
+    )
+    .is_err());
+    assert_eq!(
+        fixture
+            .store
+            .list_grants("direct", "github-handle-app-fixture")
+            .unwrap(),
+        before
+    );
+}
+
 /// As [`imported_from`], with the import's installation listing supplied by
 /// `reader`, for inventories that bind more than the one fixture repository.
 fn imported_with(label: &str, inventory: &Inventory, reader: &dyn InstallationReader) -> Imported {
