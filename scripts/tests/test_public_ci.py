@@ -59,3 +59,9 @@ class PublicCiTests(unittest.TestCase):
 
     def test_main_verification_is_not_cancelled_by_a_later_main_push(self):
         self.assertEqual(self.workflow['concurrency']['cancel-in-progress'], "${{ github.ref != 'refs/heads/main' }}")
+
+    def test_ci_jobs_share_nats_setup_and_layout_runs_once_in_the_gate(self):
+        installers = [step for step in self.steps if step.get('name') == 'Install pinned nats-server']
+        self.assertEqual(len(installers), 2)
+        self.assertTrue(all(step.get('run') == 'bash scripts/install-nats-server.sh' for step in installers))
+        self.assertNotIn('CortexKit layout', [step.get('name') for step in self.steps])

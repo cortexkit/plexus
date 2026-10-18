@@ -12220,3 +12220,16 @@ target = "--bin ck-plexus-admin"
 select = "expected"
 expect_red = ["tests::post_submission_failures_warn_against_blind_retries"]
 build_timeout_s = 3600
+
+[[control]]
+id = "ci-nats-installer-checksum"
+guards = "The shared CI installer verifies the archive checksum before installation"
+file = "scripts/install-nats-server.sh"
+old = '''if ! printf '%s  %s\n' "$NATS_SERVER_LINUX_AMD64_SHA256" "$install_dir/$archive" | sha256sum --check --strict -; then'''
+new = 'if false; then # NON-VACUITY BREAK'
+test_file = "scripts/tests/test_ci_setup.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["test_ci_setup.NatsInstallerTests.test_archive_checksum_is_checked_before_installation"]
+timeout_s = 120

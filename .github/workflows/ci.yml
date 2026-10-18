@@ -81,11 +81,6 @@ jobs:
       - name: Train preconditions
         run: ./scripts/check-train-preconditions.sh
 
-      # Internal documents stay out of the published tree; see
-      # scripts/check-cortexkit-layout.sh for what it checks.
-      - name: CortexKit layout
-        run: ./scripts/check-cortexkit-layout.sh
-
       - name: Plan nonempty mutation shards
         id: mutation-plan
         run: python3 scripts/mutation-plan.py --event "$GITHUB_EVENT_NAME" --ref "$GITHUB_REF" >> "$GITHUB_OUTPUT"
@@ -114,18 +109,7 @@ jobs:
             rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-identity.outputs.version }}-${{ hashFiles('plexus/Cargo.lock') }}-
 
       - name: Install pinned nats-server
-        run: |
-          set -euo pipefail
-          install_dir="$(mktemp -d)"
-          trap 'rm -rf "$install_dir"' EXIT
-          archive="nats-server-v${NATS_SERVER_VERSION}-linux-amd64.tar.gz"
-          curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 120 \
-            "https://github.com/nats-io/nats-server/releases/download/v${NATS_SERVER_VERSION}/${archive}" \
-            --output "$install_dir/$archive"
-          printf '%s  %s\n' "$NATS_SERVER_LINUX_AMD64_SHA256" "$install_dir/$archive" | sha256sum --check --strict -
-          tar -xzf "$install_dir/$archive" -C "$install_dir"
-          sudo install -m 0755 "$install_dir/nats-server-v${NATS_SERVER_VERSION}-linux-amd64/nats-server" /usr/local/bin/nats-server
-          nats-server --version
+        run: bash scripts/install-nats-server.sh
 
       - name: Cache mutation runner
         id: mutate-cache
@@ -262,18 +246,7 @@ jobs:
           key: rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-identity.outputs.version }}-${{ hashFiles('plexus/Cargo.lock') }}-${{ github.sha }}
 
       - name: Install pinned nats-server
-        run: |
-          set -euo pipefail
-          install_dir="$(mktemp -d)"
-          trap 'rm -rf "$install_dir"' EXIT
-          archive="nats-server-v${NATS_SERVER_VERSION}-linux-amd64.tar.gz"
-          curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 120 \
-            "https://github.com/nats-io/nats-server/releases/download/v${NATS_SERVER_VERSION}/${archive}" \
-            --output "$install_dir/$archive"
-          printf '%s  %s\n' "$NATS_SERVER_LINUX_AMD64_SHA256" "$install_dir/$archive" | sha256sum --check --strict -
-          tar -xzf "$install_dir/$archive" -C "$install_dir"
-          sudo install -m 0755 "$install_dir/nats-server-v${NATS_SERVER_VERSION}-linux-amd64/nats-server" /usr/local/bin/nats-server
-          nats-server --version
+        run: bash scripts/install-nats-server.sh
 
       - name: Cache mutation runner
         id: mutate-cache
