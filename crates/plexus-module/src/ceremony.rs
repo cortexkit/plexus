@@ -27,7 +27,8 @@
 
 use std::sync::Arc;
 
-use plexus_core::storage::web_search_store::WebSearchLimits;
+use plexus_core::storage::web_search_store::{WebSearchLimits, MAX_WEB_SEARCH_ALLOWANCE};
+use plexus_core::web_search::providers::{provider_named, PROVIDER_NAMES};
 use plexus_core::{
     AuditRecord, Ceiling, CeremonyRefusal, DeleteConnectionOutcome, GrantMintRequest, PolicyRecord,
     RepinActionRefusal,
@@ -893,18 +894,11 @@ pub(crate) fn set_web_search_limit(
     principal_key: &str,
     params: &Value,
 ) -> Value {
-    let backend = state.runtime.web_search.backend_name();
-    match params.get("backend").and_then(Value::as_str) {
-        Some(named) if named == backend => {}
-        Some(named) => {
-            return json!({"error": {
-                "code": "unknown_backend",
-                "message": format!("'{named}' is not a web search backend; known: {backend}"),
-            }})
-        }
-        None => {
-            return json!({"error": {"code": "invalid_request", "message": "set_web_search_limit requires backend"}})
-        }
+    let Some(backend) = params.get("backend").and_then(Value::as_str) else {
+        return json!({"error": {"code": "invalid_request", "message": "set_web_search_limit requires backend"}});
+    };
+    if let Err(error) = known_web_search_provider(backend) {
+        return error;
     }
     let limit = |field: &str| {
         params
@@ -992,6 +986,177 @@ pub(crate) fn set_web_search_limit(
         "current": limits_json(proposed),
         "dry_run": false,
     }})
+}
+
+fn known_web_search_provider(name: &str) -> Result<(), Value> {
+    if provider_named(name).is_none() {
+        return Err(json!({"error": {
+            "code": "unknown_backend",
+            "message": format!("'{name}' is not a web search backend; known: {}",
+                PROVIDER_NAMES.iter().map(|provider| provider.name).collect::<Vec<_>>().join(", ")),
+        }}));
+    }
+    Ok(())
+}
+
+fn web_search_clear(params: &Value) -> Result<bool, Value> {
+    match params.get("clear") {
+        None | Some(Value::Bool(false)) => Ok(false),
+        Some(Value::Bool(true)) => Ok(true),
+        _ => {
+            Err(json!({"error": {"code": "invalid_request", "message": "clear must be a boolean"}}))
+        }
+    }
+}
+
+/// The store returns the value replaced by the write, so the ceremony records
+/// the actual predecessor even when two operator changes race.
+fn web_search_change_result(
+    state: &Arc<ModuleState>,
+    principal_key: &str,
+    action: &str,
+    dry_run: bool,
+    mut change: Value,
+) -> Value {
+    if !dry_run {
+        let mut record = AuditRecord::ceremony(principal_key, None, None, action, "write", None);
+        record.args_redaction_summary = Some(change.to_string());
+        if let Err(error) = state.store().append_audit(&record) {
+            eprintln!(error governance: "audit append failed: ceremony {action} principal={principal_key:?}: {error}");
+        }
+    }
+    change["dry_run"] = json!(dry_run);
+    change["outcome"] = json!(match (dry_run, change["new"].is_null()) {
+        (true, true) => "would_clear",
+        (true, false) => "would_set",
+        (false, true) => "cleared",
+        (false, false) => "set",
+    });
+    json!({"result": change})
+}
+
+pub(crate) fn set_web_search_order(
+    state: &Arc<ModuleState>,
+    principal_key: &str,
+    params: &Value,
+) -> Value {
+    let clear = match web_search_clear(params) {
+        Ok(clear) => clear,
+        Err(error) => return error,
+    };
+    let providers = match params.get("providers") {
+        None if clear => Vec::new(),
+        Some(Value::Array(names)) if names.iter().all(Value::is_string) => names
+            .iter()
+            .map(|name| name.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        _ => {
+            return json!({"error": {"code": "invalid_request", "message": "providers must be an array of names"}})
+        }
+    };
+    if clear && !providers.is_empty() {
+        return json!({"error": {"code": "invalid_request", "message": "clear takes no provider names"}});
+    }
+    if !clear && providers.is_empty() {
+        return json!({"error": {"code": "invalid_request", "message": "web search order requires at least one name"}});
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for provider in &providers {
+        if let Err(error) = known_web_search_provider(provider) {
+            return error;
+        }
+        if !seen.insert(provider) {
+            return json!({"error": {"code": "invalid_request", "message": "duplicate web search provider"}});
+        }
+    }
+    let dry_run = params
+        .get("dry_run")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let previous = if dry_run {
+        state.store().web_search_order()
+    } else if clear {
+        state.store().clear_web_search_order()
+    } else {
+        state.store().set_web_search_order(&providers)
+    };
+    let previous = match previous {
+        Ok(previous) => previous,
+        Err(error) => {
+            return crate::wire::store_failure(
+                "web search order change",
+                "web search order could not be read or changed",
+                &error,
+            )
+        }
+    };
+    web_search_change_result(
+        state,
+        principal_key,
+        "set_web_search_order",
+        dry_run,
+        json!({"previous": previous, "new": if clear { None } else { Some(providers) }}),
+    )
+}
+
+pub(crate) fn set_web_search_allowance(
+    state: &Arc<ModuleState>,
+    principal_key: &str,
+    params: &Value,
+) -> Value {
+    let Some(provider) = params.get("provider").and_then(Value::as_str) else {
+        return json!({"error": {"code": "invalid_request", "message": "web search allowance requires provider"}});
+    };
+    if let Err(error) = known_web_search_provider(provider) {
+        return error;
+    }
+    let clear = match web_search_clear(params) {
+        Ok(clear) => clear,
+        Err(error) => return error,
+    };
+    if clear && params.get("count").is_some() {
+        return json!({"error": {"code": "invalid_request", "message": "clear takes no count"}});
+    }
+    let proposed = if clear {
+        None
+    } else {
+        let Some(count) = params
+            .get("count")
+            .and_then(Value::as_u64)
+            .filter(|count| (1..=u64::from(MAX_WEB_SEARCH_ALLOWANCE)).contains(count))
+        else {
+            return json!({"error": {"code": "invalid_request", "message": format!("count must be an integer in 1..={MAX_WEB_SEARCH_ALLOWANCE}")}});
+        };
+        Some(count as u32)
+    };
+    let dry_run = params
+        .get("dry_run")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let previous = if dry_run {
+        state.store().web_search_allowance(provider)
+    } else if let Some(count) = proposed {
+        state.store().set_web_search_allowance(provider, count)
+    } else {
+        state.store().clear_web_search_allowance(provider)
+    };
+    let previous = match previous {
+        Ok(previous) => previous,
+        Err(error) => {
+            return crate::wire::store_failure(
+                "web search allowance change",
+                "web search allowance could not be read or changed",
+                &error,
+            )
+        }
+    };
+    web_search_change_result(
+        state,
+        principal_key,
+        "set_web_search_allowance",
+        dry_run,
+        json!({"provider": provider, "previous": previous, "new": proposed}),
+    )
 }
 
 /// Only the operator's direct connection may manage recipient lists. Omitting

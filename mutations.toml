@@ -12047,3 +12047,93 @@ select = '''expected'''
 expect_red = ['storage::web_search_store::tests::two_principals_using_the_same_provider_are_counted_separately']
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-admin-provider-name"
+guards = "Order, allowance and per-minute limit commands reject names outside the shared provider table before preview or apply"
+file = "crates/plexus-module/src/ceremony.rs"
+old = 'if provider_named(name).is_none() {'
+new = 'if false && provider_named(name).is_none() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/web_search_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::admin::admin_commands_accept_every_table_name_and_reject_unknown_names"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-admin-order-empty"
+guards = "An order without clear requires at least one provider, including in a dry run"
+file = "crates/plexus-module/src/ceremony.rs"
+old = 'if !clear && providers.is_empty() {'
+new = 'if false && !clear && providers.is_empty() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/web_search_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::admin::order_rejects_empty_duplicate_and_malformed_lists_without_writes"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-admin-order-duplicate"
+guards = "An order cannot repeat a provider, including in a dry run"
+file = "crates/plexus-module/src/ceremony.rs"
+old = 'if !seen.insert(provider) {'
+new = 'if false && !seen.insert(provider) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/web_search_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::admin::order_rejects_empty_duplicate_and_malformed_lists_without_writes"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-admin-allowance-range"
+guards = "Allowance counts are bounded to integers from 1 to 10000000 before preview or apply"
+file = "crates/plexus-module/src/ceremony.rs"
+old = '.filter(|count| (1..=u64::from(MAX_WEB_SEARCH_ALLOWANCE)).contains(count))'
+new = '.filter(|_count| true) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/web_search_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::admin::allowance_rejects_out_of_range_and_noninteger_counts_without_writes"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-admin-order-clear"
+guards = "Clearing the provider order refuses supplied names instead of silently discarding them"
+file = "crates/plexus-module/src/ceremony.rs"
+old = 'if clear && !providers.is_empty() {'
+new = 'if false && clear && !providers.is_empty() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/web_search_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::admin::clear_rejects_names_counts_missing_provider_and_nonboolean_intent"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-admin-allowance-clear"
+guards = "Clearing one provider allowance refuses any supplied count instead of silently discarding it"
+file = "crates/plexus-module/src/ceremony.rs"
+old = 'if clear && params.get("count").is_some() {'
+new = 'if false && clear && params.get("count").is_some() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/web_search_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::admin::clear_rejects_names_counts_missing_provider_and_nonboolean_intent"]
+build_timeout_s = 3600
+timeout_s = 120

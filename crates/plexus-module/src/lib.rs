@@ -1556,6 +1556,8 @@ async fn handle_management_request(
             | manifest::ADMIN_DELETE_CONNECTION_OP
             | manifest::ADMIN_REBIND_CREDENTIAL_OP
             | manifest::ADMIN_SET_WEB_SEARCH_LIMIT_OP
+            | manifest::ADMIN_SET_WEB_SEARCH_ORDER_OP
+            | manifest::ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP
             | manifest::ADMIN_RECIPIENTS_ADD_OP
             | manifest::ADMIN_RECIPIENTS_REMOVE_OP
             | manifest::ADMIN_RECIPIENTS_LIST_OP
@@ -1740,6 +1742,12 @@ async fn handle_management_request(
         }
         manifest::ADMIN_SET_WEB_SEARCH_LIMIT_OP => {
             ceremony::set_web_search_limit(state, &principal_key, params)
+        }
+        manifest::ADMIN_SET_WEB_SEARCH_ORDER_OP => {
+            ceremony::set_web_search_order(state, &principal_key, params)
+        }
+        manifest::ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP => {
+            ceremony::set_web_search_allowance(state, &principal_key, params)
         }
         _ => unreachable!("management operation was checked above"),
     };

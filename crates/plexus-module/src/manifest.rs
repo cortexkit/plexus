@@ -105,6 +105,8 @@ pub const ADMIN_REBIND_CREDENTIAL_OP: &str = "plexus.admin.rebind_credential";
 /// Set the per-caller and per-backend per-minute limits of one web search
 /// backend.
 pub const ADMIN_SET_WEB_SEARCH_LIMIT_OP: &str = "plexus.admin.set_web_search_limit";
+pub const ADMIN_SET_WEB_SEARCH_ORDER_OP: &str = "plexus.admin.set_web_search_order";
+pub const ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP: &str = "plexus.admin.set_web_search_allowance";
 /// Adding a recipient entry lets the agent send to that recipient without
 /// asking for approval, widening its authority under an allow policy.
 pub const ADMIN_RECIPIENTS_ADD_OP: &str = "plexus.admin.recipients_add";
@@ -365,6 +367,16 @@ pub fn build_with_launch_nonce_source(
                     name: ADMIN_SET_WEB_SEARCH_LIMIT_OP.to_string(),
                     kind: ManagementOperationKind::Mutate,
                     description: Some("Set one web search backend's per-caller and per-backend calls per minute".to_string()),
+                },
+                ManagementOperation {
+                    name: ADMIN_SET_WEB_SEARCH_ORDER_OP.to_string(),
+                    kind: ManagementOperationKind::Mutate,
+                    description: Some("Preview or apply the web search provider order, or clear it for compatibility mode".to_string()),
+                },
+                ManagementOperation {
+                    name: ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP.to_string(),
+                    kind: ManagementOperationKind::Mutate,
+                    description: Some("Preview or apply one provider's monthly web search allowance, or clear it".to_string()),
                 },
                 ManagementOperation {
                     name: crate::connector_home::STATUS_OP.to_string(),
@@ -1294,6 +1306,8 @@ mod tests {
                 "repin_action",
                 "delete_connection",
                 "set_web_search_limit",
+                "set_web_search_order",
+                "set_web_search_allowance",
                 "handle.import",
                 "handle.probe",
                 "handle.grant",
@@ -1344,6 +1358,8 @@ mod tests {
                 ADMIN_DELETE_CONNECTION_OP,
                 ADMIN_REBIND_CREDENTIAL_OP,
                 ADMIN_SET_WEB_SEARCH_LIMIT_OP,
+                ADMIN_SET_WEB_SEARCH_ORDER_OP,
+                ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP,
                 crate::connector_home::STATUS_OP,
                 crate::relay::STATUS_OP,
             ]
