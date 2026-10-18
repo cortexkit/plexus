@@ -241,7 +241,7 @@ id = "ownership-retire-audit-atomic"
 guards = "Identity retirement and its ownership audit are inseparable"
 file = "crates/plexus-core/src/store/repository_ownership.rs"
 old = '''ownership_audit(conn, "direct", id, "retire",
-                        &serde_json::json!({"reason":"repository_identity_changed","replacement":"active_trio"}).to_string())?;'''
+                        &serde_json::json!({"reason":"obsolete_watch","replacement":"active_trio"}).to_string())?;'''
 new = '/* NON-VACUITY BREAK: omit the retirement audit. */'
 test_file = "crates/plexus-core/src/store/repository_ownership.rs"
 runner = "cargo"
@@ -2000,7 +2000,7 @@ timeout_s = 60
 id = "ci-fleet-cadence"
 guards = "Every active CI watch follows the fleet cadence rather than a fixed five-minute interval"
 file = "crates/plexus-core/src/store/repository_ownership.rs"
-old = "let cadence = if cycles_per_hour == 0 {\n        i64::MAX\n    } else {\n        (count\n            .saturating_mul(3600)\n            .saturating_add(cycles_per_hour - 1)\n            / cycles_per_hour)\n            .max(300)\n    };"
+old = "let cadence = if cycles_per_hour == 0 {\n        // Quota admission still defers these polls. A finite cadence keeps\n        // scheduler stall detection meaningful when capacity is exhausted.\n        86_400\n    } else {\n        (count\n            .saturating_mul(3600)\n            .saturating_add(cycles_per_hour - 1)\n            / cycles_per_hour)\n            .clamp(300, 86_400)\n    };"
 new = "let cadence = 300; /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/store/repository_ownership.rs"
 runner = "cargo"
@@ -2224,7 +2224,7 @@ timeout_s = 60
 
 [[control]]
 id = "sorted-head-boundary-retention"
-guards = "Sorted-head retention includes the exact watermark boundary"
+guards = "Sorted-head retention includes the exact sixty-second replay-window boundary"
 file = "crates/plexus-core/src/store/event_outbox.rs"
 old = "s.cursor_kind='sorted_head' AND e.activity_at_ms>=json_extract"
 new = "s.cursor_kind='sorted_head' AND e.activity_at_ms>json_extract /* NON-VACUITY BREAK */"
@@ -2233,7 +2233,7 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["storage::event_outbox::tests::sorted_head_retains_exact_watermark_only"]
+expect_red = ["storage::event_outbox::tests::sorted_head_retains_full_replay_window_and_boundary"]
 expect_message = "assertion"
 build_timeout_s = 3600
 timeout_s = 60
@@ -2242,8 +2242,8 @@ timeout_s = 60
 id = "retention-gap-observed-interval"
 guards = "Retention gaps cover the observation times of only undelivered pruned rows"
 file = "crates/plexus-core/src/store/event_outbox.rs"
-old = "SELECT event_id,observed_at_ms,undelivered FROM ranked,stats"
-new = "SELECT event_id,created_at_ms,undelivered /* NON-VACUITY BREAK */ FROM ranked,stats"
+old = "SELECT event_id,coverage_from,undelivered,coverage_to FROM ranked,stats"
+new = "SELECT event_id,created_at_ms,undelivered,created_at_ms /* NON-VACUITY BREAK */ FROM ranked,stats"
 test_file = "crates/plexus-core/src/store/event_outbox.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -2436,8 +2436,9 @@ build_timeout_s = 3600
 id = "relay-poll-dedup"
 guards = "Webhook identity derives the polling key so either insertion order keeps one event and outbox row"
 file = "crates/plexus-core/src/store/relay.rs"
-old = "let issue_project = match &pair {"
-new = "let key = if conn.query_row(\"SELECT count(*) FROM event_outbox WHERE event_key=?1\", [&key], |r| r.get::<_, i64>(0))? > 0 { \"0\".repeat(64) } else { key }; /* NON-VACUITY BREAK */\n    let issue_project = match &pair {"
+old = 'let targets = if matches!(action, "list_issues" | "list_pull_requests") {'
+new = '''let key = if conn.query_row("SELECT count(*) FROM event_outbox WHERE event_key=?1", [&key], |r| r.get::<_, i64>(0))? > 0 { "0".repeat(64) } else { key }; /* NON-VACUITY BREAK */
+    let targets = if matches!(action, "list_issues" | "list_pull_requests") {'''
 test_file = "crates/plexus-module/src/relay_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -2716,8 +2717,8 @@ build_timeout_s = 3600
 id = "relay-no-issue-watch-fallback"
 guards = "CI webhooks without a counting CI watch are dropped, never stored on the repository's issue watch"
 file = "crates/plexus-core/src/store/relay.rs"
-old = "_ => match watch(conn, &repo, action)? {\n            Some(target) => target,\n            None => return Ok(Err(DropReason::UnwatchedRepository)),\n        },"
-new = "_ => match watch(conn, &repo, action)?.or(watch(conn, &repo, \"list_issues\")?) { /* NON-VACUITY BREAK */\n            Some(target) => target,\n            None => return Ok(Err(DropReason::UnwatchedRepository)),\n        },"
+old = 'watch(conn, &repo, action)?.into_iter().collect()'
+new = 'watch(conn, &repo, action)?.or(watch(conn, &repo, "list_issues")?).into_iter().collect() /* NON-VACUITY BREAK */'
 test_file = "crates/plexus-module/src/relay_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -5051,7 +5052,7 @@ timeout_s = 120
 
 [[control]]
 id = "ci-quota-prunes-unwatched-cache"
-guards = "The CI admission deletes cached repository ids that no watch names"
+guards = "Periodic event maintenance deletes cached repository ids that no watch names"
 file = "crates/plexus-core/src/store/event_outbox.rs"
 old = '''"DELETE FROM github_repo_id_cache WHERE repo NOT IN ('''
 new = '''"DELETE FROM github_repo_id_cache WHERE 0 AND repo NOT IN ( /* NON-VACUITY BREAK */'''
@@ -5069,8 +5070,10 @@ timeout_s = 120
 id = "ci-quota-counts-only-watched"
 guards = "Only repositories an active watch names hold back hourly requests from CI polling"
 file = "crates/plexus-core/src/store/event_outbox.rs"
-old = '''"SELECT COUNT(DISTINCT'''
-new = '''"SELECT 7 /* NON-VACUITY BREAK */ + COUNT(DISTINCT'''
+old = '''"SELECT COUNT(DISTINCT
+        lower(json_extract'''
+new = '''"SELECT 7 /* NON-VACUITY BREAK */ + COUNT(DISTINCT
+        lower(json_extract'''
 test_file = "crates/plexus-core/src/store/event_outbox.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -5386,8 +5389,8 @@ timeout_s = 120
 id = "relay-release-webhook-without-pair"
 guards = "A release webhook needs only its own watch, not the issue and pull request pair"
 file = "crates/plexus-core/src/store/relay.rs"
-old = '''"release" | "workflow_job" | "workflow_run"'''
-new = '''"no-such-event" /* NON-VACUITY BREAK */'''
+old = 'let targets = if matches!(action, "list_issues" | "list_pull_requests") {'
+new = 'let targets = if matches!(action, "list_issues" | "list_pull_requests" | "get_latest_release") { /* NON-VACUITY BREAK */'
 test_file = "crates/plexus-core/src/store/relay.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -5419,9 +5422,9 @@ id = "import-carries-event-outbox"
 guards = "Store import carries the publishing markers of the events it carries"
 file = "crates/plexus-core/src/import_store.rs"
 old = '''    "event_outbox",
-    // Where the webhook relay'''
+    "event_outbox_failures",'''
 new = '''    // NON-VACUITY BREAK
-    // Where the webhook relay'''
+    "event_outbox_failures",'''
 test_file = "crates/plexus-core/src/import_store/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -11744,8 +11747,8 @@ id = "github-v2-ci-webhook-job-run-cache"
 guards = "A workflow_job webhook's v2 envelope takes actor, triggering_actor, event and fork status from the cached workflow_run webhooks of its run attempt"
 file = "crates/plexus-core/src/store/relay.rs"
 old = '''ci_run: (item_kind == "ci_job")
-                    .then(|| ci_runs.for_job(&repo, payload, received))
-                    .flatten(),'''
+                        .then(|| ci_runs.for_job(&repo, payload, received))
+                        .flatten(),'''
 new = '''ci_run: None, /* NON-VACUITY BREAK */'''
 test_file = "crates/plexus-core/src/store/relay.rs"
 runner = "cargo"
@@ -11869,5 +11872,247 @@ package = "plexus-core"
 target = "--lib"
 select = "expected"
 expect_red = ["event_envelope::tests::ci_job_runner_name_is_null_when_missing_or_empty"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-maintenance-all-statuses"
+guards = "Event retention includes suspended and retired watches without requiring a successful poll"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "SELECT principal,subscription_id FROM trigger_subscriptions ORDER BY principal,subscription_id"
+new = "SELECT principal,subscription_id FROM trigger_subscriptions WHERE status='active' ORDER BY principal,subscription_id /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/event_outbox.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::event_outbox::tests::maintenance_prunes_all_watch_statuses_but_keeps_pending_and_recent_publications"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-dead-letter-persistence"
+guards = "An unpublishable row is durably marked per wire version without changing canonical bytes"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "SELECT event_key,?2,?3,?4 FROM event_outbox WHERE event_key=?1 AND {column} IS NULL"
+new = "SELECT event_key,?2,?3,?4 FROM event_outbox WHERE 0 AND event_key=?1 AND {column} IS NULL /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/event_outbox.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::event_outbox::tests::dead_letters_are_durable_versioned_and_keep_unpublished_bodies"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-dead-letter-keyset-exclusion"
+guards = "A restart or keyset pass does not retry a terminally unpublishable wire version"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "AND f.version={version}) AND (o.created_at_ms,o.event_key)"
+new = "AND f.version=0) AND (o.created_at_ms,o.event_key) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/event_outbox.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::event_outbox::tests::dead_letters_are_durable_versioned_and_keep_unpublished_bodies"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-batch-publication-all-keys"
+guards = "The acknowledged batch stamps every key atomically rather than only its first member"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "for key in keys {"
+new = "for key in keys.iter().take(1) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/event_outbox.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::event_outbox::tests::batch_publication_is_atomic_and_preserves_first_ack_time"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-quota-cost-schema-contract"
+guards = "The configured CI cycle request cost is admitted by the persisted quota schema"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "pub(crate) const CI_CYCLE_REQUESTS: i64 = 8;"
+new = "pub(crate) const CI_CYCLE_REQUESTS: i64 = 7; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/event_outbox.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::event_outbox::tests::quota_cycle_request_cost_is_accepted_by_schema"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-unknown-wire-version"
+guards = "An unknown wire version cannot silently read or stamp v1"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = '_ => Err(StoreError::Backend("unsupported outbox version".into())),'
+new = '_ => Ok(Self::V1), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/store/event_outbox.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::event_outbox::tests::unknown_outbox_versions_never_read_or_stamp_v1"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-pruned-gap-coverage"
+guards = "Retention preserves the original coverage of an unacknowledged gap"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "CASE WHEN e.kind='gap' THEN COALESCE(e.gap_from_ms,e.observed_at_ms)"
+new = "CASE WHEN 0 AND e.kind='gap' THEN COALESCE(e.gap_from_ms,e.observed_at_ms) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/event_outbox.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::event_outbox::tests::retention_keeps_the_original_unacked_gap_extent"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-ci-finite-cadence"
+guards = "Zero quota capacity never stores an effectively infinite health stall threshold"
+file = "crates/plexus-core/src/store/repository_ownership.rs"
+old = "        86_400\n    } else {"
+new = "        i64::MAX /* NON-VACUITY BREAK */\n    } else {"
+test_file = "crates/plexus-core/src/store/repository_ownership.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::repository_ownership_store::tests::ci_cadence_stays_finite_when_no_cycle_fits"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-schema-watch-retirement"
+guards = "A complete replacement trio retires obsolete automatic schema-mismatch watches"
+file = "crates/plexus-core/src/store/repository_ownership.rs"
+old = "suspended_reason IN ('repository_identity_changed','catalog_schema_mismatch')"
+new = "suspended_reason IN ('repository_identity_changed') /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/repository_ownership.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::repository_ownership_store::tests::ci_reconcile_replaces_schema_suspended_watch_with_current_pins"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-malformed-watch-diagnostic"
+guards = "Malformed watch arguments produce a visible read error instead of disappearing from reconciliation"
+file = "crates/plexus-core/src/store/repository_ownership.rs"
+old = '''Err(rusqlite::Error::InvalidParameterName(
+                "malformed repository watch arguments".into(),
+            ))'''
+new = 'Ok((String::new(),String::new())) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/store/repository_ownership.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::repository_ownership_store::tests::malformed_repository_watch_arguments_are_reported"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-relay-paired-fanout"
+guards = "Every same-principal same-project issue/PR pair receives visibility without extra canonical notices"
+file = "crates/plexus-core/src/store/relay.rs"
+old = "for target in targets {"
+new = "for target in targets.into_iter().take(1) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/relay.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::relay::tests::paired_relay_fanout_keeps_one_canonical_notice_and_wake"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-relay-unwatched-identity"
+guards = "Stale cache entries cannot trigger identity-change handling for unwatched repositories"
+file = "crates/plexus-core/src/store/relay.rs"
+old = "if !watched {"
+new = "if false && !watched { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/relay.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::relay::tests::unwatched_relay_repositories_do_not_change_cached_identity"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-relay-cache-after-commit"
+guards = "A failed relay transaction cannot seed in-memory run attribution"
+file = "crates/plexus-core/src/store/relay.rs"
+old = "let current = cursor(conn, source)?.ok_or_else(protocol_error)?;"
+new = "self.ci_runs.remember(event,received); /* NON-VACUITY BREAK */ let current = cursor(conn, source)?.ok_or_else(protocol_error)?;"
+test_file = "crates/plexus-core/src/store/relay.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::relay::tests::failed_relay_commit_does_not_seed_run_cache"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-relay-counters-readable"
+guards = "Persisted relay drop counters are exposed by store health queries"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "WHERE name LIKE 'relay_drop_%' ORDER BY name"
+new = "WHERE 0 AND name LIKE 'relay_drop_%' ORDER BY name /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/relay.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::relay::tests::unwatched_relay_repositories_do_not_change_cached_identity"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-binding-expression-index"
+guards = "Case-insensitive binding lookups use a matching repository expression index"
+file = "crates/plexus-core/src/storage.rs"
+old = "CREATE INDEX idx_github_binding_lower_repo ON github_repo_binding(lower(repository));"
+new = "CREATE INDEX idx_github_binding_lower_repo ON github_repo_binding(repository); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/event_outbox.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::event_outbox::tests::case_insensitive_binding_lookups_use_the_expression_index"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-dead-letter-import"
+guards = "Retained publication markers carry their terminal wire-version failures across store cutover"
+file = "crates/plexus-core/src/import_store.rs"
+old = '"event_outbox_failures" => " WHERE event_key IN (SELECT event_key FROM event_outbox WHERE event_id IN (SELECT event_id FROM trigger_events))",'
+new = '"event_outbox_failures" => " WHERE 0 AND event_key IN (SELECT event_key FROM event_outbox WHERE event_id IN (SELECT event_id FROM trigger_events))", /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/import_store/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["import_store::tests::outbox_failures_follow_only_retained_publication_markers_on_import"]
 build_timeout_s = 3600
 timeout_s = 120
