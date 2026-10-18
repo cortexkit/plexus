@@ -39,8 +39,24 @@ pub trait WebSearchBackend: Send + Sync {
     fn app_key(&self) -> &'static str;
     /// The catalog action a search dispatches.
     fn action(&self) -> &'static str;
+    /// The request envelope and filter encodings this backend can honour.
+    fn capability(&self) -> super::capability::WebSearchCapability;
+    /// Chain admission, before any connection, allowance or cooldown work.
+    /// A skip is a complete record; no vendor argument mapping runs on failure.
+    fn prepare(
+        &self,
+        query: &WebSearchQuery,
+        now_ms: i64,
+    ) -> Result<super::capability::PreparedSearch, super::capability::CapabilitySkip> {
+        let query = self
+            .capability()
+            .prepare_query(self.name(), query, now_ms)?;
+        let vendor_args = self.vendor_args(&query, now_ms);
+        Ok(super::capability::PreparedSearch { query, vendor_args })
+    }
     /// The vendor arguments for one validated query. `now_ms` anchors a
-    /// recency window.
+    /// recency window. In chain mode `prepare` already composed query operators:
+    /// forward `query.query` unchanged and map native filter fields here.
     fn vendor_args(&self, query: &WebSearchQuery, now_ms: i64) -> Value;
     /// Map a vendor reply onto neutral results, at most `max_results` of them.
     fn map_reply(
@@ -73,6 +89,29 @@ impl WebSearchBackend for ExaRestBackend {
 
     fn action(&self) -> &'static str {
         "search"
+    }
+
+    fn capability(&self) -> super::capability::WebSearchCapability {
+        use super::capability::*;
+        // https://exa.ai/docs/exa-spec.yaml (SearchRequest): numResults <= 100,
+        // includeDomains <= 1200; no query maximum is published. The query cap
+        // is our existing tool envelope, not a claimed vendor maximum. Native
+        // filters leave the existing request mapping intact.
+        WebSearchCapability {
+            query_length: QueryLengthLimit {
+                max: super::query::MAX_QUERY_CHARS,
+                unit: QueryLengthUnit::UnicodeScalars,
+            },
+            max_results: 100,
+            domains: DomainCapability {
+                max_domains: 1200,
+                encoding: FilterEncoding::Native,
+            },
+            recency: RecencyCapability {
+                supported: ALL_RECENCIES,
+                encoding: FilterEncoding::Native,
+            },
+        }
     }
 
     fn vendor_args(&self, query: &WebSearchQuery, now_ms: i64) -> Value {

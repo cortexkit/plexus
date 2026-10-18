@@ -9675,6 +9675,134 @@ expect_message = "PoisonError"
 build_timeout_s = 3600
 
 [[control]]
+id = "web-search-capability-final-length"
+guards = "Provider query length includes every domain and recency operator before admission"
+file = "crates/plexus-core/src/web_search/capability.rs"
+old = 'if !self.query_length.accepts(&prepared.query) {'
+new = 'if !self.query_length.accepts(&query.query) { /* NON-VACUITY BREAK: check before operators */'
+test_file = "crates/plexus-core/src/web_search/capability/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::capability::tests::final_query_length_includes_domain_and_recency_operators"]
+expect_message = "unsupported capability must skip before vendor mapping"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-capability-domain-count"
+guards = "A provider cannot silently discard domains beyond its zero or single-domain capacity"
+file = "crates/plexus-core/src/web_search/capability.rs"
+old = 'if query.include_domains.len() > self.domains.max_domains {'
+new = 'if false && query.include_domains.len() > self.domains.max_domains { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/capability/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::capability::tests::domain_capacity_rejects_zero_or_one_domain_overflow"]
+expect_message = "unsupported capability must skip before vendor mapping"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-capability-recency"
+guards = "Unsupported recency is recorded as a capability skip rather than dropped"
+file = "crates/plexus-core/src/web_search/capability.rs"
+old = '.is_some_and(|recency| !self.recency.supported.contains(&recency))'
+new = '.is_some_and(|recency| false && !self.recency.supported.contains(&recency)) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/capability/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::capability::tests::unsupported_recency_is_recorded_instead_of_dropped"]
+expect_message = "unsupported capability must skip before vendor mapping"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-capability-result-clamp"
+guards = "Vendor arguments and reply mapping use the provider's clamped result bound"
+file = "crates/plexus-core/src/web_search/capability.rs"
+old = 'prepared.max_results = prepared.max_results.min(self.max_results);'
+new = 'prepared.max_results = query.max_results; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/capability/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::capability::tests::result_count_is_clamped_for_request_and_reply"]
+expect_message = "provider result maximum must clamp vendor arguments"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-capability-compose-domains"
+guards = "Query operator composition retains all requested domains rather than only the first"
+file = "crates/plexus-core/src/web_search/capability.rs"
+old = 'sites.join(" OR ")'
+new = 'sites.first().cloned().unwrap_or_default() /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/capability/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::capability::tests::operator_composition_preserves_every_requested_filter"]
+expect_message = "composition must preserve every domain and the recency bound"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-capability-compose-recency"
+guards = "Composing recency retains the publication bound alongside domain operators"
+file = "crates/plexus-core/src/web_search/capability.rs"
+old = 'prepared.query = format!("({}) after:{day}", prepared.query);'
+new = 'let _ = day; /* NON-VACUITY BREAK: omit the publication bound */'
+test_file = "crates/plexus-core/src/web_search/capability/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::capability::tests::operator_composition_preserves_every_requested_filter"]
+expect_message = "composition must preserve every domain and the recency bound"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-capability-utf8-units"
+guards = "A byte-limited vendor does not admit multi-byte queries by counting Unicode scalars"
+file = "crates/plexus-core/src/web_search/capability.rs"
+old = 'QueryLengthUnit::Utf8Bytes => query.len(),'
+new = 'QueryLengthUnit::Utf8Bytes => query.chars().count(), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/capability/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::capability::tests::vendor_length_units_are_not_interchangeable"]
+expect_message = "unsupported capability must skip before vendor mapping"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-capability-utf16-units"
+guards = "A UTF-16-limited vendor counts supplementary characters as two code units"
+file = "crates/plexus-core/src/web_search/capability.rs"
+old = 'QueryLengthUnit::Utf16CodeUnits => query.encode_utf16().count(),'
+new = 'QueryLengthUnit::Utf16CodeUnits => query.chars().count(), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/capability/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::capability::tests::vendor_length_units_are_not_interchangeable"]
+expect_message = "unsupported capability must skip before vendor mapping"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "conformance-write-fixture-preflight"
 guards = "An incomplete write fixture is refused before starting the checklist"
 file = "crates/plexus-conformance/src/runner.rs"

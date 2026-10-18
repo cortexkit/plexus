@@ -5,6 +5,40 @@ use crate::{MockTransport, StubCredentialSource};
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 
 #[test]
+fn fixed_results_serialize_identically_except_for_backend() {
+    let results = vec![WebSearchResult {
+        url: "https://example.org/news".into(),
+        title: "A fixed result".into(),
+        excerpt: "An excerpt with é and a newline\nthat must survive serialization.".into(),
+        published_at: Some("2026-09-21T00:00:00.000Z".into()),
+        fetched_at: "2026-09-28T12:00:00.000Z".into(),
+    }];
+    for cached in [false, true] {
+        let exa = WebSearchResponse {
+            results: results.clone(),
+            backend: "exa".into(),
+            cached,
+        };
+        let tavily = WebSearchResponse {
+            results: results.clone(),
+            backend: "tavily".into(),
+            cached,
+        };
+        let exa_bytes = serde_json::to_vec(&exa).unwrap();
+        let tavily_bytes = serde_json::to_vec(&tavily).unwrap();
+        assert_ne!(exa_bytes, tavily_bytes);
+        assert_eq!(
+            String::from_utf8(exa_bytes)
+                .unwrap()
+                .replace("\"backend\":\"exa\"", "\"backend\":\"tavily\"")
+                .as_bytes(),
+            tavily_bytes,
+            "one fixed result list and cached value must differ only in backend"
+        );
+    }
+}
+
+#[test]
 #[ignore = "performance measurement"]
 fn measure_cached_search_authorization() {
     let (engine, _) = granted_exa_engine("search-authorization-measurement");
