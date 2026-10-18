@@ -209,6 +209,86 @@ pub fn run_fixture_with_options(
     let principal = fixture.principal.as_str();
     let connection_id = format!("conn-{}", fixture.name);
 
+    let mut ctx = RunContext {
+        fixture: fixture,
+        options: &options,
+        evidence: &mut evidence,
+        manifest: &ingested.manifest,
+        store: &store,
+        #[cfg(test)]
+        store_path: &store_path,
+        engine: &engine,
+        reconciler: &reconciler,
+        credentials: &credentials,
+        recording: &recording,
+        mcp_transport: &mcp_transport,
+        rest_transport: &rest_transport,
+        app_key: &app_key,
+        principal: principal,
+        connection_id: &connection_id,
+        endpoint: &endpoint,
+        bind_handle: bind_handle,
+        live: live,
+        allowed_read_request_id: None,
+    };
+    let steps: [fn(&mut RunContext<'_>) -> Result<(), String>; 9] = [
+        step_connect,
+        step_discover_catalog,
+        step_allowed_read,
+        step_write,
+        step_denied_calls,
+        step_stale_authorization_abort,
+        step_revoke,
+        step_audit_completeness,
+        step_secret_safety,
+    ];
+    for step in steps {
+        step(&mut ctx)?;
+        if !ctx.evidence.steps.last().map(|s| s.passed).unwrap_or(false) {
+            break;
+        }
+    }
+    finalize(evidence, store_path, stub_server)
+}
+
+struct RunContext<'a> {
+    fixture: &'a ConnectorFixture,
+    options: &'a RunOptions,
+    evidence: &'a mut RunEvidence,
+    manifest: &'a AppManifest,
+    store: &'a Arc<PlexusStore>,
+    #[cfg(test)]
+    store_path: &'a Scratch,
+    engine: &'a GovernanceEngine<dyn CredentialSource, dyn Transport>,
+    reconciler: &'a CatalogReconciler,
+    credentials: &'a Arc<dyn CredentialSource>,
+    recording: &'a RecordingCredentialSource,
+    mcp_transport: &'a McpRemoteTransport,
+    rest_transport: &'a RestTransport,
+    app_key: &'a str,
+    principal: &'a str,
+    connection_id: &'a String,
+    endpoint: &'a String,
+    bind_handle: &'a [u8],
+    live: bool,
+    allowed_read_request_id: Option<String>,
+}
+
+fn step_connect(ctx: &mut RunContext<'_>) -> Result<(), String> {
+    let fixture = ctx.fixture;
+    #[cfg(test)]
+    let options = ctx.options;
+    let evidence = &mut *ctx.evidence;
+    let store = ctx.store;
+    #[cfg(test)]
+    let store_path = ctx.store_path;
+    let reconciler = ctx.reconciler;
+    let credentials = ctx.credentials;
+    let app_key = ctx.app_key;
+    let principal = ctx.principal;
+    let connection_id = ctx.connection_id.clone();
+    let endpoint = ctx.endpoint;
+    let bind_handle = ctx.bind_handle;
     // --- 1. connect ---
     let step_started = now_ms();
     let connect_result = (|| -> Result<(Vec<i64>, String), String> {
@@ -262,15 +342,22 @@ pub fn run_fixture_with_options(
         ))
     })();
     push_step(
-        &mut evidence,
+        evidence,
         ConformanceStep::Connect,
         step_started,
         connect_result,
     );
-    if !evidence.steps.last().map(|s| s.passed).unwrap_or(false) {
-        return finalize(evidence, store_path, stub_server);
-    }
+    Ok(())
+}
 
+fn step_discover_catalog(ctx: &mut RunContext<'_>) -> Result<(), String> {
+    let fixture = ctx.fixture;
+    let options = ctx.options;
+    let evidence = &mut *ctx.evidence;
+    let manifest = ctx.manifest;
+    let store = ctx.store;
+    let principal = ctx.principal;
+    let connection_id = ctx.connection_id.clone();
     // --- 2. discover catalog ---
     let step_started = now_ms();
     let discover_result = (|| -> Result<(Vec<i64>, String), String> {
@@ -278,8 +365,7 @@ pub fn run_fixture_with_options(
         // Every fixture expected_action must appear in the reviewed baseline;
         // for in-process stubs the sets must match exactly. Real endpoints may
         // expose extra tools, so only baseline ⊆ discovered is required there.
-        let baseline_names: Vec<String> = ingested
-            .manifest
+        let baseline_names: Vec<String> = manifest
             .actions_baseline
             .iter()
             .map(|action| action.name.clone())
@@ -375,18 +461,23 @@ pub fn run_fixture_with_options(
         ))
     })();
     push_step(
-        &mut evidence,
+        evidence,
         ConformanceStep::DiscoverCatalog,
         step_started,
         discover_result,
     );
-    if !evidence.steps.last().map(|s| s.passed).unwrap_or(false) {
-        return finalize(evidence, store_path, stub_server);
-    }
+    Ok(())
+}
 
+fn step_allowed_read(ctx: &mut RunContext<'_>) -> Result<(), String> {
+    let fixture = ctx.fixture;
+    let evidence = &mut *ctx.evidence;
+    let store = ctx.store;
+    let engine = ctx.engine;
+    let principal = ctx.principal;
+    let connection_id = ctx.connection_id.clone();
     // --- 3. allowed read ---
     let step_started = now_ms();
-    let mut allowed_read_request_id = None;
     let read_result = (|| -> Result<(Vec<i64>, String), String> {
         let before = latest_audit_id(store.as_ref(), principal)?;
         let request = AuthorizationRequest::new(
@@ -399,7 +490,7 @@ pub fn run_fixture_with_options(
         let reservation = engine
             .authorize(request)
             .map_err(|denial| format!("read authorize denied: {}", denial.reason_code()))?;
-        allowed_read_request_id = Some(request_id);
+        ctx.allowed_read_request_id = Some(request_id);
         let outcome = engine.revalidate_and_dispatch(&reservation);
         match outcome.outcome {
             TransportOutcome::Completed { .. } => {}
@@ -412,21 +503,27 @@ pub fn run_fixture_with_options(
         ))
     })();
     push_step(
-        &mut evidence,
+        evidence,
         ConformanceStep::AllowedRead,
         step_started,
         read_result,
     );
-    if !evidence.steps.last().map(|s| s.passed).unwrap_or(false) {
-        return finalize(evidence, store_path, stub_server);
-    }
+    Ok(())
+}
 
+fn step_write(ctx: &mut RunContext<'_>) -> Result<(), String> {
+    let fixture = ctx.fixture;
+    let evidence = &mut *ctx.evidence;
+    let store = ctx.store;
+    let engine = ctx.engine;
+    let principal = ctx.principal;
+    let connection_id = ctx.connection_id.clone();
     // --- 4. write path: ask-first (S2) or s3_escalation (floor-S3) or SKIP ---
     let step_started = now_ms();
     match fixture.write_path {
         WritePath::None => {
             push_step_maybe_skip(
-                &mut evidence,
+                evidence,
                 ConformanceStep::AskFirstWrite,
                 step_started,
                 Ok((Vec::new(), "fixture has no write action".to_string())),
@@ -540,7 +637,7 @@ pub fn run_fixture_with_options(
                 ))
             })();
             push_step(
-                &mut evidence,
+                evidence,
                 ConformanceStep::AskFirstWrite,
                 step_started,
                 write_result,
@@ -635,17 +732,27 @@ pub fn run_fixture_with_options(
                 ))
             })();
             push_step(
-                &mut evidence,
+                evidence,
                 ConformanceStep::S3Escalation,
                 step_started,
                 s3_result,
             );
         }
     }
-    if !evidence.steps.last().map(|s| s.passed).unwrap_or(false) {
-        return finalize(evidence, store_path, stub_server);
-    }
+    Ok(())
+}
 
+fn step_denied_calls(ctx: &mut RunContext<'_>) -> Result<(), String> {
+    let fixture = ctx.fixture;
+    #[cfg(test)]
+    let options = ctx.options;
+    let evidence = &mut *ctx.evidence;
+    let store = ctx.store;
+    #[cfg(test)]
+    let store_path = ctx.store_path;
+    let engine = ctx.engine;
+    let principal = ctx.principal;
+    let connection_id = ctx.connection_id.clone();
     // --- 5. denied calls ---
     let step_started = now_ms();
     let denied_result = (|| -> Result<(Vec<i64>, String), String> {
@@ -809,15 +916,25 @@ pub fn run_fixture_with_options(
         ))
     })();
     push_step(
-        &mut evidence,
+        evidence,
         ConformanceStep::DeniedCalls,
         step_started,
         denied_result,
     );
-    if !evidence.steps.last().map(|s| s.passed).unwrap_or(false) {
-        return finalize(evidence, store_path, stub_server);
-    }
+    Ok(())
+}
 
+fn step_stale_authorization_abort(ctx: &mut RunContext<'_>) -> Result<(), String> {
+    let fixture = ctx.fixture;
+    #[cfg(test)]
+    let options = ctx.options;
+    let evidence = &mut *ctx.evidence;
+    let store = ctx.store;
+    #[cfg(test)]
+    let store_path = ctx.store_path;
+    let engine = ctx.engine;
+    let principal = ctx.principal;
+    let connection_id = ctx.connection_id.clone();
     // --- 6. stale-authorization abort ---
     let step_started = now_ms();
     let stale_result = (|| -> Result<(Vec<i64>, String), String> {
@@ -876,15 +993,25 @@ pub fn run_fixture_with_options(
         ))
     })();
     push_step(
-        &mut evidence,
+        evidence,
         ConformanceStep::StaleAuthorizationAbort,
         step_started,
         stale_result,
     );
-    if !evidence.steps.last().map(|s| s.passed).unwrap_or(false) {
-        return finalize(evidence, store_path, stub_server);
-    }
+    Ok(())
+}
 
+fn step_revoke(ctx: &mut RunContext<'_>) -> Result<(), String> {
+    let fixture = ctx.fixture;
+    #[cfg(test)]
+    let options = ctx.options;
+    let evidence = &mut *ctx.evidence;
+    let store = ctx.store;
+    #[cfg(test)]
+    let store_path = ctx.store_path;
+    let engine = ctx.engine;
+    let principal = ctx.principal;
+    let connection_id = ctx.connection_id.clone();
     // --- 7. revoke ---
     let step_started = now_ms();
     let revoke_result = (|| -> Result<(Vec<i64>, String), String> {
@@ -941,15 +1068,20 @@ pub fn run_fixture_with_options(
         ))
     })();
     push_step(
-        &mut evidence,
+        evidence,
         ConformanceStep::Revoke,
         step_started,
         revoke_result,
     );
-    if !evidence.steps.last().map(|s| s.passed).unwrap_or(false) {
-        return finalize(evidence, store_path, stub_server);
-    }
+    Ok(())
+}
 
+fn step_audit_completeness(ctx: &mut RunContext<'_>) -> Result<(), String> {
+    let fixture = ctx.fixture;
+    let evidence = &mut *ctx.evidence;
+    let store = ctx.store;
+    let principal = ctx.principal;
+    let connection_id = ctx.connection_id.clone();
     // --- 8. audit completeness ---
     let step_started = now_ms();
     let audit_result = (|| -> Result<(Vec<i64>, String), String> {
@@ -959,7 +1091,8 @@ pub fn run_fixture_with_options(
         if rows.is_empty() {
             return Err("audit journal is empty".to_string());
         }
-        let read_request_id = allowed_read_request_id
+        let read_request_id = ctx
+            .allowed_read_request_id
             .as_deref()
             .ok_or_else(|| "allowed read request_id was not captured".to_string())?;
         let read_rows: Vec<_> = rows
@@ -1050,15 +1183,23 @@ pub fn run_fixture_with_options(
         Ok((ids, format!("{} audit rows verified", rows.len())))
     })();
     push_step(
-        &mut evidence,
+        evidence,
         ConformanceStep::AuditCompleteness,
         step_started,
         audit_result,
     );
-    if !evidence.steps.last().map(|s| s.passed).unwrap_or(false) {
-        return finalize(evidence, store_path, stub_server);
-    }
+    Ok(())
+}
 
+fn step_secret_safety(ctx: &mut RunContext<'_>) -> Result<(), String> {
+    let fixture = ctx.fixture;
+    let options = ctx.options;
+    let evidence = &mut *ctx.evidence;
+    let manifest = ctx.manifest;
+    let recording = ctx.recording;
+    let mcp_transport = ctx.mcp_transport;
+    let rest_transport = ctx.rest_transport;
+    let live = ctx.live;
     // --- 9. secret safety ---
     let step_started = now_ms();
     let secret_result = (|| -> Result<(Vec<i64>, String), String> {
@@ -1067,12 +1208,11 @@ pub fn run_fixture_with_options(
         let audit_json = serde_json::to_string(&evidence.audit_dump)
             .map_err(|error| format!("serialize audit dump: {error}"))?;
         let log_text = evidence.harness_log.join("\n");
-        let rendered_transport =
-            if matches!(ingested.manifest.transport.kind, TransportKind::RestApi) {
-                format!("{rest_transport:?}")
-            } else {
-                format!("{mcp_transport:?}")
-            };
+        let rendered_transport = if matches!(manifest.transport.kind, TransportKind::RestApi) {
+            format!("{rest_transport:?}")
+        } else {
+            format!("{mcp_transport:?}")
+        };
 
         let needles = secret_needles(
             fixture,
@@ -1113,13 +1253,12 @@ pub fn run_fixture_with_options(
         }
     })();
     push_step(
-        &mut evidence,
+        evidence,
         ConformanceStep::SecretSafety,
         step_started,
         secret_result,
     );
-
-    finalize(evidence, store_path, stub_server)
+    Ok(())
 }
 
 fn verify_envelope_args_hash(args: &Value, actual: &str) -> Result<(), String> {
