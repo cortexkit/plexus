@@ -14,9 +14,8 @@ Ship this file and that directory with every binary distribution of
 
 Crates resolved by Cargo keep their own licenses. The locked graphs are
 `Cargo.lock` (the workspace and both shipped binaries),
-`crates/plexus-probe/guest/Cargo.lock` (the embedded probe guest) and
-`benches/js-interpreter-eval/Cargo.lock` (a separate evaluation harness that
-is not shipped). Every external package in these graphs comes from crates.io
+`crates/plexus-probe/guest/Cargo.lock` (the embedded probe guest).
+Every external package in these graphs comes from crates.io
 and declares a license; each declaration includes a permissive option.
 
 To list each package with its declared license:
@@ -26,9 +25,8 @@ cargo metadata --locked --format-version 1 \
   | python3 -c 'import json,sys; [print(p["name"], p["version"], p["license"]) for p in json.load(sys.stdin)["packages"]]'
 ```
 
-Repeat with `--manifest-path crates/plexus-probe/guest/Cargo.toml` or
-`--manifest-path benches/js-interpreter-eval/Cargo.toml` for the other two
-graphs. The `license` field is the crate's declaration; the crate's published
+Repeat with `--manifest-path crates/plexus-probe/guest/Cargo.toml` for the guest
+graph. The `license` field is the crate's declaration; the crate's published
 source carries the license and copyright files themselves.
 
 Where a declaration joins licenses with `AND`, both apply. The ones that matter
