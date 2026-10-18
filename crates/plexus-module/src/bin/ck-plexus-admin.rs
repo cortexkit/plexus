@@ -1560,6 +1560,10 @@ fn schema_type(schema: &Value) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn version_does_not_contact_the_daemon() {
+        super::run(&["--version".to_owned()]).unwrap();
+    }
+    #[test]
     fn post_submission_failures_warn_against_blind_retries() {
         let error = super::Failure::unknown("connection closed before reply");
         assert_eq!(error.code, 3);

@@ -120,6 +120,21 @@ esac
         self.assertEqual(result.stdout.strip(), head)
         self.assertEqual(count.read_text().splitlines(), ['call'], "packed stamps must use one Git batch, not one process per window")
 
+    def test_embedded_commit_resolves_dirty_candidates_and_keeps_binary_order(self):
+        commits = [subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', ref], text=True).strip()
+                   for ref in ['HEAD', 'HEAD~1']]
+        binary = self.tmp / 'stamps'
+        binary.write_text('0' * 40 + '-dirty\n' + commits[0] + '\n')
+        command = ['python3', SCRIPTS / 'lib/embedded-commit.py', binary, REPO, '40']
+        result = run(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), commits[0], 'unresolvable dirty stamps must be ignored')
+        first, second = sorted(commits, reverse=True)
+        binary.write_text(first + '\n' + second + '\n')
+        result = run(command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), first, 'candidate order must follow the binary, not lexical sorting')
+
     def test_watch_defaults_to_the_local_ci_workflow(self):
         tools = self.tmp / 'bin'
         write_executable(tools / 'gh', '''#!/bin/sh
