@@ -37,6 +37,7 @@ const TABLES: &[&str] = &[
     // Publishing markers for the events carried above, so an unacked event
     // that was not yet published is still published from the new store.
     "event_outbox",
+    "event_outbox_failures",
     // Where the webhook relay stream was committed, so delivery resumes
     // instead of replaying or skipping.
     "relay_cursor",
@@ -258,6 +259,7 @@ fn copy_store(
             // the new store record those items again.
             "trigger_events" => "",
             "event_outbox" => " WHERE event_id IN (SELECT event_id FROM trigger_events)",
+            "event_outbox_failures" => " WHERE event_key IN (SELECT event_key FROM event_outbox WHERE event_id IN (SELECT event_id FROM trigger_events))",
             "action_requests" => {
                 let receipts: bool = old.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='github_bot_receipt')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
                 if receipts { " WHERE reconciliation_status IS NOT NULL OR request_id IN (SELECT action_request_id FROM github_bot_receipt WHERE action_request_id IS NOT NULL)" }
@@ -359,6 +361,7 @@ fn identity(table: &str, row: &Record) -> String {
         "consent_call_keys" => vec!["requester", "call_key"],
         "trigger_events" => vec!["event_id"],
         "event_outbox" => vec!["event_key"],
+        "event_outbox_failures" => vec!["event_key", "version"],
         "relay_cursor" => vec!["source"],
         "github_app_handle" => vec!["app_handle_id"],
         "github_repo_binding" => vec!["repository"],
@@ -379,7 +382,12 @@ fn identity(table: &str, row: &Record) -> String {
     format!(
         "{table} [{}]",
         keys.iter()
-            .map(|k| text(row, k).unwrap_or("<invalid id>"))
+            .map(|k| match row.get(*k) {
+                Some(Value::Integer(version))
+                    if table == "event_outbox_failures" && *k == "version" =>
+                    version.to_string(),
+                _ => text(row, k).unwrap_or("<invalid id>").to_owned(),
+            })
             .collect::<Vec<_>>()
             .join(", ")
     )

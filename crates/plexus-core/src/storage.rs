@@ -1086,6 +1086,19 @@ ALTER TABLE action_requests ADD COLUMN routing_context TEXT;
 ALTER TABLE grant_revocations ADD COLUMN agent_id TEXT;
 "#,
     },
+    Migration {
+        version: 55,
+        statements: r#"
+CREATE TABLE event_outbox_failures (
+    event_key TEXT NOT NULL REFERENCES event_outbox(event_key) ON DELETE CASCADE,
+    version INTEGER NOT NULL CHECK(version IN (1,2)),
+    failed_at_ms INTEGER NOT NULL,
+    failure_reason TEXT NOT NULL,
+    PRIMARY KEY(event_key,version)
+);
+CREATE INDEX idx_github_binding_lower_repo ON github_repo_binding(lower(repository));
+"#,
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
@@ -1140,7 +1153,9 @@ pub mod relay;
 
 #[path = "store/event_outbox.rs"]
 pub mod event_outbox;
-pub use event_outbox::{EventHeaders, KeyedEventIdentity, KeyedPollEventInput, PollGapInput};
+pub use event_outbox::{
+    EventHeaders, KeyedEventIdentity, KeyedPollEventInput, OutboxVersion, PollGapInput,
+};
 
 #[path = "store/repository_ownership.rs"]
 mod repository_ownership_store;
@@ -5865,7 +5880,6 @@ impl PlexusStore {
         max_rows: usize,
     ) -> Result<usize, StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            event_outbox::cleanup_orphans(conn)?;
             event_outbox::prune_events(
                 conn,
                 principal,

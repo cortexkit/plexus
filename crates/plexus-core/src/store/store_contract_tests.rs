@@ -1415,6 +1415,10 @@ fn event_retention_returns_at_most_one_bounded_batch() {
 fn webhook_identity_change_updates_cache_before_a_replacement_watch() {
     let store = fixture();
     watch(&store, "old");
+    store
+        .inner
+        .with_conn_fenced(|conn| conn.execute("UPDATE connections SET app_key='github'", []))
+        .unwrap();
     store.inner.with_conn_fenced(|conn|conn.execute("UPDATE trigger_subscriptions SET fixed_args='{\"owner\":\"owner\",\"repo\":\"repo\"}'",[])).unwrap();
     store
         .record_repo_id_resolution("owner/repo", Some(1), now_ms())
@@ -1483,6 +1487,11 @@ fn relay_identity_changes_warn_once_per_new_id() {
     if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
         logging::init_child();
         let store = fixture();
+        watch(&store, "identity-watch");
+        store.inner.with_conn_fenced(|conn| {
+            conn.execute("UPDATE connections SET app_key='github'",[])?;
+            conn.execute("UPDATE trigger_subscriptions SET fixed_args='{\"owner\":\"owner\",\"repo\":\"repo\"}'",[])
+        }).unwrap();
         store
             .record_repo_id_resolution("owner/repo", Some(1), 1000)
             .unwrap();
