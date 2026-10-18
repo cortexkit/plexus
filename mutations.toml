@@ -12215,3 +12215,33 @@ select = "expected"
 expect_red = ["events_get_tests::event_pages_preserve_full_listing_and_stable_ties"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "module-inspect-request-filter"
+guards = "Request inspection returns only the named request, not other held arguments"
+file = "crates/plexus-module/src/lib.rs"
+old = '.filter(|request| request.request_id == id)'
+new = '.filter(|_| true) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::inspect_returns_only_the_named_request_and_action"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-inspect-action-filter"
+guards = "Catalog inspection returns only the named action, not the whole catalog"
+file = "crates/plexus-module/src/lib.rs"
+old = '.filter(|row| row.name == action)'
+new = '.filter(|_| true) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::inspect_returns_only_the_named_request_and_action"]
+build_timeout_s = 3600
+timeout_s = 120

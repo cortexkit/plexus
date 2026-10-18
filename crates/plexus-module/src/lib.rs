@@ -10209,6 +10209,11 @@ mod events_get_tests {
                 json!({"op":"list"}),
             )
             .await;
+            let mut expected = store.list_events("direct", None, None).unwrap();
+            if !matches!(principal, Principal::Direct) {
+                expected.retain(|event| event.connection_id == "conn-github");
+            }
+            assert_eq!(full["result"]["events"], json!(expected));
             let first = execute_tool_call(
                 store.clone(),
                 principal.clone(),

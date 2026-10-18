@@ -1044,3 +1044,87 @@ async fn management_refuses_classic_agent_scopes() {
     let body: Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(body["error"]["code"], "operator_authority_required");
 }
+
+#[tokio::test]
+async fn inspect_returns_only_the_named_request_and_action() {
+    let fixture = crate::withdraw_tests::Fixture::new("targeted-inspect");
+    let state = Arc::new(ModuleState {
+        health: Arc::new(health::HealthState::new()),
+        runtime: fixture.runtime(),
+    });
+    let routes = Arc::new(RouteBindings::new());
+    routes
+        .insert_scoped(
+            1,
+            1,
+            Principal::Reserved {
+                module_id: "aft".into(),
+            },
+            Some(CallScope::from_stamp(
+                &crate::consent_test_support::worker_stamp("worker-7", 4),
+            )),
+        )
+        .unwrap();
+    routes.insert(2, 1, Principal::Direct).unwrap();
+    async fn call(
+        state: &Arc<ModuleState>,
+        routes: &Arc<RouteBindings>,
+        channel: u16,
+        body: Value,
+    ) -> Value {
+        let (writer, mut rx) = mpsc::channel(1);
+        handle_tool_request(
+            frame(FrameType::Request, channel, 1, body),
+            &writer,
+            state,
+            routes,
+        )
+        .await
+        .unwrap();
+        let reply = recv_within(rx.recv(), Duration::from_secs(5), "inspect fixture reply").await;
+        serde_json::from_slice(&reply.body).unwrap()
+    }
+    for index in 0..2 {
+        let reply=call(&state, &routes, 1, json!({"name":"invoke","arguments":{"op":"call","connection":"conn-held","action":"search","args":{"query":format!("query-{index}")}}})).await;
+        assert_eq!(
+            reply["structuredContent"]["code"], "access_pending",
+            "{reply}"
+        );
+    }
+    let requests = fixture.store.list_action_requests("direct").unwrap();
+    assert_eq!(requests.len(), 2);
+    let reply = call(
+        &state,
+        &routes,
+        2,
+        json!({"name":"requests","arguments":{"op":"inspect","request_id":requests[0].request_id}}),
+    )
+    .await;
+    assert_eq!(reply["result"]["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        reply["result"]["requests"][0]["request_id"],
+        requests[0].request_id
+    );
+    assert_eq!(reply["result"]["reconciliations"], json!([]));
+    let schema = json!({"type":"object"});
+    fixture
+        .store
+        .upsert_catalog_action(&plexus_core::CatalogActionInput {
+            connection_id: "conn-held".into(),
+            principal: "direct".into(),
+            name: "second".into(),
+            title: None,
+            schema: schema.clone(),
+            schema_hash: plexus_core::jcs_sha256(&schema).unwrap(),
+            risk: "read".into(),
+            severity: "S1".into(),
+            ask_first: false,
+            status: "active".into(),
+            quarantine_reason: None,
+            reconciliation: None,
+        })
+        .unwrap();
+    let reply=call(&state,&routes,2,json!({"name":"catalog","arguments":{"op":"inspect","connection":"conn-held","action":"search"}})).await;
+    assert_eq!(reply["result"]["actions"].as_array().unwrap().len(), 1);
+    assert_eq!(reply["result"]["actions"][0]["name"], "search");
+}
