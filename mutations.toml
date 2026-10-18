@@ -12116,3 +12116,18 @@ select = "expected"
 expect_red = ["import_store::tests::outbox_failures_follow_only_retained_publication_markers_on_import"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "store-relay-principal-project"
+guards = "CI and release routing inherits only the target principal's issue-watch annotation"
+file = "crates/plexus-core/src/store/relay.rs"
+old = "WHERE s.principal=?2 AND s.status='active' AND s.action='list_issues'"
+new = "WHERE ?2 IS NOT NULL AND s.status='active' AND s.action='list_issues' /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/relay.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::relay::tests::ci_and_release_inherit_only_their_principals_issue_project"]
+build_timeout_s = 3600
+timeout_s = 120

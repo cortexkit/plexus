@@ -541,6 +541,26 @@ fn relay_headers(repo: &str, project: Option<String>, kind: &str, payload: &Valu
     }
 }
 
+fn relay_project(
+    conn: &Connection,
+    repo: &str,
+    target: &Watch,
+    action: &str,
+) -> rusqlite::Result<Option<String>> {
+    if matches!(action, "list_issues" | "list_pull_requests") {
+        return Ok(target.project.clone());
+    }
+    // CI and release watches inherit the repository's issue-watch annotation,
+    // but another principal's annotation must not replace their own routing.
+    let issue_project = conn.query_row("SELECT s.project_id FROM trigger_subscriptions s
+        JOIN connections c ON c.principal=s.principal AND c.connection_id=s.connection_id
+        WHERE s.principal=?2 AND s.status='active' AND s.action='list_issues'
+        AND c.status='active' AND c.app_key='github'
+        AND lower(json_extract(s.fixed_args,'$.owner') || '/' || json_extract(s.fixed_args,'$.repo'))=lower(?1)
+        ORDER BY s.subscription_id LIMIT 1", (repo, &target.principal), |row| row.get::<_,Option<String>>(0)).optional()?;
+    Ok(issue_project.unwrap_or_else(|| target.project.clone()))
+}
+
 fn admit(
     conn: &rusqlite::Connection,
     event: &Event,
@@ -662,7 +682,7 @@ fn admit(
     let mut delivery_id = Some(event.delivery_id.as_str());
     for target in targets {
         let headers = EventHeaders {
-            project: target.project.clone(),
+            project: relay_project(conn, &repo, &target, action)?,
             ..headers.clone()
         };
         let identity = KeyedEventIdentity {
@@ -712,6 +732,52 @@ fn admit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ci_and_release_inherit_only_their_principals_issue_project() {
+        let store = ci_relay_store();
+        for principal in ["direct", "other"] {
+            store
+                .insert_connection(principal, "issues", "github", "active", &json!({}))
+                .unwrap();
+        }
+        store.inner.with_conn_fenced(|conn| {
+            for (id,principal,action,project) in [
+                ("0-other","other","list_issues",Some("other-project")),
+                ("9-own","direct","list_issues",Some("own-project")),
+                ("release","direct","get_latest_release",None),
+            ] {
+                conn.execute("INSERT INTO trigger_subscriptions(subscription_id,principal,connection_id,action,cadence_s,cursor_kind,schema_hash,status,created_at_ms,fixed_args,project_id,project_source)
+                    VALUES (?1,?2,'issues',?3,300,'scalar_diff','hash','active',0,'{\"owner\":\"cortexkit\",\"repo\":\"aft\"}',?4,?5)",
+                    rusqlite::params![id,principal,action,project,project.map(|_| "hand")])?;
+            }
+            Ok(())
+        }).unwrap();
+        let run = ci_webhook(
+            1,
+            "completed",
+            "workflow_run",
+            capture("webhook_ci_run"),
+            "2030-10-08T09:00:00.000Z",
+        );
+        store.commit_relay_event("github", "stream", &run).unwrap();
+        let release: Event = serde_json::from_value(json!({"seq":2,"delivery_id":"release-own","event":"release","action":"published","installation_id":42,
+            "received_at":"2030-10-08T09:00:00.000Z","stub":null,"body":{"repository":{"id":183627762,"full_name":"cortexkit/aft"},"release":{"id":7,"published_at":"2030-10-08T09:00:00Z"}}})).unwrap();
+        // The release must carry the same numeric repository identity as the run.
+        let mut release = release;
+        release.body["repository"]["id"] = run.body["repository"]["id"].clone();
+        store
+            .commit_relay_event("github", "stream", &release)
+            .unwrap();
+        let events = store.drain_event_outbox(10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.headers.project.as_deref() == Some("own-project")),
+            "CI/release routing inherits only the target principal's issue annotation"
+        );
+    }
 
     #[tokio::test]
     async fn paired_relay_fanout_keeps_one_canonical_notice_and_wake() {
