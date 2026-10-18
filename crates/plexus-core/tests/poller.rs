@@ -542,7 +542,7 @@ fn prime_issue_actor_window_at(
     let conn = rusqlite::Connection::open(path).expect("open actor-window fixture");
     assert_eq!(
         conn.execute(
-            "UPDATE trigger_events SET observed_at_ms = ?1
+            "UPDATE trigger_events SET activity_at_ms = ?1
              WHERE principal = ?2 AND subscription_id = ?3",
             rusqlite::params![previous_ms, PRINCIPAL, id],
         )
@@ -980,7 +980,7 @@ fn actor_window_excludes_before_and_includes_after_previous_observation() {
     let conn = rusqlite::Connection::open(&path).expect("open window fixture");
     assert_eq!(
         conn.execute(
-            "UPDATE trigger_events SET observed_at_ms = ?1
+            "UPDATE trigger_events SET activity_at_ms = ?1
              WHERE principal = ?2 AND subscription_id = ?3",
             rusqlite::params![previous, PRINCIPAL, id],
         )
@@ -1170,7 +1170,7 @@ fn same_second_comment_after_previous_observation_fails_open_to_unknown() {
     let conn = rusqlite::Connection::open(&path).expect("open same-second fixture");
     assert_eq!(
         conn.execute(
-            "UPDATE trigger_events SET observed_at_ms = ?1
+            "UPDATE trigger_events SET activity_at_ms = ?1
              WHERE principal = ?2 AND subscription_id = ?3",
             rusqlite::params![previous, PRINCIPAL, id],
         )
@@ -1247,7 +1247,7 @@ fn ambiguous_human_after_collected_agent_cannot_leave_suppressing_partial_set() 
     let conn = rusqlite::Connection::open(&path).expect("open partial-set fixture");
     assert_eq!(
         conn.execute(
-            "UPDATE trigger_events SET observed_at_ms = ?1
+            "UPDATE trigger_events SET activity_at_ms = ?1
              WHERE principal = ?2 AND subscription_id = ?3",
             rusqlite::params![previous, PRINCIPAL, id],
         )
@@ -1337,7 +1337,7 @@ fn the_real_mc289_payload_windows_to_the_single_in_window_commenter() {
     let conn = rusqlite::Connection::open(&path).expect("open mc289 fixture");
     assert_eq!(
         conn.execute(
-            "UPDATE trigger_events SET observed_at_ms = ?1
+            "UPDATE trigger_events SET activity_at_ms = ?1
              WHERE principal = ?2 AND subscription_id = ?3",
             rusqlite::params![previous, PRINCIPAL, id],
         )
@@ -2309,7 +2309,7 @@ fn semantic_unknown_does_not_retry() {
     let conn = rusqlite::Connection::open(&path).expect("open semantic fixture");
     assert_eq!(
         conn.execute(
-            "UPDATE trigger_events SET observed_at_ms = ?1
+            "UPDATE trigger_events SET activity_at_ms = ?1
              WHERE principal = ?2 AND subscription_id = ?3",
             rusqlite::params![previous, PRINCIPAL, id],
         )
@@ -6343,7 +6343,7 @@ fn first_timestamped_pass(
     let conn = rusqlite::Connection::open(path).expect("open store for pinning");
     assert_eq!(
         conn.execute(
-            "UPDATE trigger_events SET observed_at_ms = ?1
+            "UPDATE trigger_events SET activity_at_ms = ?1
              WHERE principal = ?2 AND subscription_id = ?3",
             rusqlite::params![ACTOR_WINDOW_PREVIOUS_MS, PRINCIPAL, id],
         )
