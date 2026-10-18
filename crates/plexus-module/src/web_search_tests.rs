@@ -8,6 +8,9 @@ use plexus_core::web_search::{ExaRestBackend, WebSearchService};
 use plexus_core::{jcs_sha256, CatalogActionInput, GrantInput, MockResponse};
 use rusqlite::{params, Connection};
 
+#[path = "web_search_admin_tests.rs"]
+mod admin;
+
 /// An Exa `/search` reply built from Exa's published API example; see the
 /// README beside it for exactly what is documentation and what is shaped.
 const REPLY: &str = include_str!("../tests/fixtures/web_search/exa_search_reply.json");

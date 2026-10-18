@@ -230,10 +230,22 @@ delete-connection --connection <id> [--apply]
 set-web-search-limit --backend <name> --per-caller <n> --per-backend <n> [--apply]
     Sets how many web_search calls one caller (a principal, plus its agent
     when the call carries one) and all callers together may make per minute
-    through the named backend (today: exa). Without a stored row the limits
+    through a backend from the provider name table. Without a stored row the limits
     are 30 per caller and 120 per backend. Takes effect on the next search.
     Without --apply this is a dry run that prints the current and proposed
     limits and writes nothing.
+
+set-web-search-order <name>... [--apply]
+set-web-search-order --clear [--apply]
+    Sets a nonempty order of distinct provider names. --clear takes no names
+    and restores Exa compatibility mode. Without --apply, previews only.
+
+set-web-search-allowance <name> <count> [--apply]
+set-web-search-allowance <name> --clear [--apply]
+    Sets one provider's monthly allowance, an integer from 1 to 10,000,000.
+    --clear removes only that provider's allowance, retaining usage counts.
+    Allowances are stored without an order but apply only in an order.
+    Without --apply, previews only. There is no clear-all.
 ";
 
 fn run(arguments: &[String]) -> Result<(), Failure> {
@@ -260,7 +272,15 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
             "connector-home claim was removed; use ck roles take connector_home",
         ));
     }
-    let flags = Flags::parse(&arguments[if connector_command.is_some() { 2 } else { 1 }..])?;
+    let command_args = &arguments[if connector_command.is_some() { 2 } else { 1 }..];
+    let flags = if matches!(
+        command.as_str(),
+        "set-web-search-order" | "set-web-search-allowance"
+    ) {
+        Flags::parse_positionals(command_args, true)?
+    } else {
+        Flags::parse(command_args)?
+    };
     if flags.help {
         println!("{USAGE}");
         return Ok(());
@@ -332,6 +352,8 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         "delete-connection" => delete_connection_request(&flags)?,
         "rebind-credential" => rebind_credential_request(&flags)?,
         "set-web-search-limit" => set_web_search_limit_request(&flags)?,
+        "set-web-search-order" => set_web_search_order_request(&flags)?,
+        "set-web-search-allowance" => set_web_search_allowance_request(&flags)?,
         "recipients-add" | "recipients-remove" | "recipients-list" => {
             recipients_request(command, &flags)?
         }
@@ -425,6 +447,7 @@ fn accepted_flags(
         ("delete-connection", _) => &["--connection", "--apply"],
         ("rebind-credential", _) => &["--connection", "--credential-id", "--apply"],
         ("set-web-search-limit", _) => &["--backend", "--per-caller", "--per-backend", "--apply"],
+        ("set-web-search-order" | "set-web-search-allowance", _) => &["--clear", "--apply"],
         ("recipients-add" | "recipients-remove", _) => {
             &["--connection", "--agent", "--recipient", "--apply"]
         }
@@ -436,19 +459,25 @@ fn accepted_flags(
 /// Parsed command line: flags with values, plus bare `--help`.
 /// Flags that take no value. An allowlist, so a mistyped value-taking flag
 /// still refuses rather than being read as a boolean.
-const BARE_FLAGS: &[&str] = &["--all", "--apply"];
+const BARE_FLAGS: &[&str] = &["--all", "--apply", "--clear"];
 
 struct Flags {
     values: Vec<(String, String)>,
     bare: Vec<String>,
     help: bool,
+    positionals: Vec<String>,
 }
 
 impl Flags {
     fn parse(arguments: &[String]) -> Result<Self, Failure> {
+        Self::parse_positionals(arguments, false)
+    }
+
+    fn parse_positionals(arguments: &[String], allow_positionals: bool) -> Result<Self, Failure> {
         let mut values = Vec::new();
         let mut bare = Vec::new();
         let mut help = false;
+        let mut positionals = Vec::new();
         let mut index = 0;
         while index < arguments.len() {
             let argument = &arguments[index];
@@ -458,6 +487,11 @@ impl Flags {
                 continue;
             }
             if !argument.starts_with("--") {
+                if allow_positionals {
+                    positionals.push(argument.clone());
+                    index += 1;
+                    continue;
+                }
                 return Err(Failure::usage(format!("unexpected argument '{argument}'")));
             }
             // Value-less flags are an explicit allowlist rather than "any flag with
@@ -480,7 +514,12 @@ impl Flags {
             values.push((argument.clone(), value.clone()));
             index += 2;
         }
-        Ok(Self { values, bare, help })
+        Ok(Self {
+            values,
+            bare,
+            help,
+            positionals,
+        })
     }
 
     fn has(&self, name: &str) -> bool {
@@ -904,6 +943,49 @@ fn set_web_search_limit_request(flags: &Flags) -> Result<(&'static str, Value), 
     ))
 }
 
+fn set_web_search_order_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
+    let clear = flags.has("--clear");
+    if clear && !flags.positionals.is_empty() {
+        return Err(Failure::usage("--clear takes no provider names"));
+    }
+    if !clear && flags.positionals.is_empty() {
+        return Err(Failure::usage(
+            "set-web-search-order requires at least one name",
+        ));
+    }
+    Ok((
+        plexus_module::manifest::ADMIN_SET_WEB_SEARCH_ORDER_OP,
+        json!({"providers": flags.positionals, "clear": clear, "dry_run": !flags.has("--apply")}),
+    ))
+}
+
+fn set_web_search_allowance_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
+    let clear = flags.has("--clear");
+    if flags.positionals.len() != if clear { 1 } else { 2 } {
+        return Err(Failure::usage(
+            "set-web-search-allowance requires <name> <count>, or <name> --clear",
+        ));
+    }
+    let mut params = json!({
+        "provider": flags.positionals[0], "clear": clear, "dry_run": !flags.has("--apply"),
+    });
+    if !clear {
+        let count = flags.positionals[1]
+            .parse::<u32>()
+            .ok()
+            .filter(|count| {
+                (1..=plexus_core::storage::web_search_store::MAX_WEB_SEARCH_ALLOWANCE)
+                    .contains(count)
+            })
+            .ok_or_else(|| Failure::usage("count must be an integer from 1 to 10,000,000"))?;
+        params["count"] = json!(count);
+    }
+    Ok((
+        plexus_module::manifest::ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP,
+        params,
+    ))
+}
+
 fn catalog_app_auth_mode(
     connection_file: &Path,
     module_id: &str,
@@ -1186,6 +1268,11 @@ fn report(command: &str, response: &Value, flags: &Flags) -> Result<(), Failure>
                 println!("{line}");
             }
         }
+        "set-web-search-order" | "set-web-search-allowance" => {
+            for line in web_search_change_lines(result) {
+                println!("{line}");
+            }
+        }
         "repin-action" => {
             println!("action re-pinned: {}", text(&result["action"]));
             println!("status:          {}", text(&result["status"]));
@@ -1389,6 +1476,25 @@ fn web_search_limit_lines(result: &Value) -> Vec<String> {
             text(&after["per_backend_per_minute"])
         ),
         format!("previous values were:  {}", text(before_source)),
+    ]
+}
+
+fn web_search_change_lines(result: &Value) -> Vec<String> {
+    vec![
+        format!(
+            "{} {}",
+            if result["dry_run"].as_bool().unwrap_or(true) {
+                "dry run (nothing written; rerun with --apply):"
+            } else {
+                "applied:"
+            },
+            result
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or("provider order")
+        ),
+        format!("previous: {}", result["previous"]),
+        format!("new:      {}", result["new"]),
     ]
 }
 
@@ -2541,5 +2647,148 @@ mod recipient_cli_tests {
         assert_eq!(method, plexus_module::manifest::ADMIN_RECIPIENTS_LIST_OP);
         assert!(params.get("dry_run").is_none());
         assert!(USAGE.contains("recipients-add|recipients-remove"));
+    }
+}
+
+#[cfg(test)]
+mod web_search_chain_cli_tests {
+    use super::*;
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    fn parsed(items: &[&str]) -> Flags {
+        Flags::parse_positionals(&args(items), true).unwrap()
+    }
+
+    #[test]
+    fn order_cli_sends_positional_names_or_clear_and_previews_unless_applied() {
+        for apply in [false, true] {
+            for clear in [false, true] {
+                let mut items = if clear {
+                    vec!["--clear"]
+                } else {
+                    vec!["exa", "tavily"]
+                };
+                items.extend(["--subc", "operator.json", "--module", "plexus"]);
+                if apply {
+                    items.push("--apply");
+                }
+                let flags = parsed(&items);
+                flags
+                    .refuse_unknown(accepted_flags("set-web-search-order", None).unwrap())
+                    .unwrap();
+                let (method, params) = set_web_search_order_request(&flags).unwrap();
+                assert_eq!(
+                    method,
+                    plexus_module::manifest::ADMIN_SET_WEB_SEARCH_ORDER_OP
+                );
+                assert_eq!(
+                    params,
+                    json!({"providers": if clear { json!([]) } else { json!(["exa", "tavily"]) }, "clear": clear, "dry_run": !apply})
+                );
+            }
+        }
+        for items in [
+            vec![],
+            vec!["--apply"],
+            vec!["exa", "--clear"],
+            vec!["--clear", "tavily"],
+        ] {
+            assert!(
+                set_web_search_order_request(&parsed(&items)).is_err(),
+                "{items:?}"
+            );
+            let mut command = vec!["set-web-search-order"];
+            command.extend(items);
+            assert_eq!(run(&args(&command)).unwrap_err().code, EXIT_USAGE);
+        }
+        let lines =
+            web_search_change_lines(&json!({"previous": ["exa"], "new": null, "dry_run": true}))
+                .join("\n");
+        assert!(lines.contains("nothing written"));
+        assert!(lines.contains("previous: [\"exa\"]"));
+        assert!(lines.contains("new:      null"));
+    }
+
+    #[test]
+    fn allowance_cli_requires_one_provider_and_count_or_clear_with_bounded_integer() {
+        for count in ["1", "10000000"] {
+            for apply in [false, true] {
+                let mut items = vec!["tavily", count];
+                if apply {
+                    items.push("--apply");
+                }
+                let (method, params) = set_web_search_allowance_request(&parsed(&items)).unwrap();
+                assert_eq!(
+                    method,
+                    plexus_module::manifest::ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP
+                );
+                assert_eq!(
+                    params,
+                    json!({"provider": "tavily", "count": count.parse::<u32>().unwrap(), "clear": false, "dry_run": !apply})
+                );
+            }
+        }
+        for apply in [false, true] {
+            let mut items = vec!["--clear", "exa"];
+            if apply {
+                items.push("--apply");
+            }
+            let (_, params) = set_web_search_allowance_request(&parsed(&items)).unwrap();
+            assert_eq!(
+                params,
+                json!({"provider": "exa", "clear": true, "dry_run": !apply})
+            );
+        }
+        for items in [
+            vec![],
+            vec!["--clear"],
+            vec!["exa"],
+            vec!["exa", "2", "--clear"],
+            vec!["exa", "2", "tavily"],
+            vec!["exa", "0"],
+            vec!["exa", "-1"],
+            vec!["exa", "1.5"],
+            vec!["exa", "10000001"],
+            vec!["exa", "18446744073709551615"],
+        ] {
+            assert!(
+                set_web_search_allowance_request(&parsed(&items)).is_err(),
+                "{items:?}"
+            );
+        }
+        let lines = web_search_change_lines(
+            &json!({"provider": "tavily", "previous": 2, "new": null, "dry_run": false}),
+        )
+        .join("\n");
+        assert!(lines.contains("applied: tavily"));
+        assert!(lines.contains("previous: 2"));
+        assert!(lines.contains("new:      null"));
+    }
+
+    #[test]
+    fn positional_commands_keep_flag_allowlists_and_other_commands_stay_flag_only() {
+        for command in ["set-web-search-order", "set-web-search-allowance"] {
+            for items in [
+                vec!["--clear", "--clear"],
+                vec!["--apply", "--apply"],
+                vec!["--typo", "exa"],
+                vec!["--all"],
+            ] {
+                let flags = parsed(&items);
+                assert!(flags
+                    .refuse_unknown(accepted_flags(command, None).unwrap())
+                    .is_err());
+            }
+        }
+        assert!(Flags::parse(&args(&["exa"])).is_err());
+        assert!(run(&args(&["set-web-search-limit", "--clear"]))
+            .unwrap_err()
+            .message
+            .contains("unknown flag --clear"));
+        assert!(USAGE.contains("set-web-search-order <name>..."));
+        assert!(USAGE.contains("set-web-search-allowance <name> --clear"));
     }
 }
