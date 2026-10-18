@@ -30,6 +30,7 @@ mod connector_home_tests;
 mod consent_capacity_tests;
 #[cfg(test)]
 mod consent_test_support;
+mod engram_catalog;
 pub mod health;
 pub mod manifest;
 pub mod principal;
@@ -481,9 +482,12 @@ where
     send_hello(&writer, config).await?;
     let hello_ack = expect_hello_ack(reader).await?;
     let store = blocking_section(|| {
-        let store = initialize_store(&hello_ack).map(Arc::new)?;
+        let (store, data_directory) = initialize_store(&hello_ack)?;
+        if let Some(data_directory) = data_directory {
+            engram_catalog::write_best_effort(&data_directory);
+        }
         ingest_catalog(&store)?;
-        Ok::<_, ModuleError>(store)
+        Ok::<_, ModuleError>(Arc::new(store))
     })?;
     // Production composition opens configured route peers synchronously. Run
     // these connections outside the async worker because dropping a runtime
@@ -993,14 +997,18 @@ where
     }
 }
 
-fn initialize_store(hello_ack: &ModuleHelloAckBody) -> Result<PlexusStore, ModuleError> {
+fn initialize_store(
+    hello_ack: &ModuleHelloAckBody,
+) -> Result<(PlexusStore, Option<PathBuf>), ModuleError> {
     let value = hello_ack.storage.as_ref().ok_or_else(|| {
         ModuleError::Message("subc HELLO_ACK omitted the storage descriptor".to_string())
     })?;
     let descriptor: StorageDescriptor = serde_json::from_value(value.clone())
         .map_err(|error| ModuleError::Message(format!("invalid storage descriptor: {error}")))?;
-    PlexusStore::open(&descriptor)
-        .map_err(|error| ModuleError::Message(format!("open plexus store: {error}")))
+    let data_directory = engram_catalog::data_directory(&descriptor);
+    let store = PlexusStore::open(&descriptor)
+        .map_err(|error| ModuleError::Message(format!("open plexus store: {error}")))?;
+    Ok((store, data_directory))
 }
 
 fn ingest_catalog(store: &PlexusStore) -> Result<(), ModuleError> {
