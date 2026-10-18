@@ -756,7 +756,6 @@ impl ConnectorFixture {
                 "compare_database_schema".to_string(),
                 "list_slow_queries".to_string(),
                 "explain_sql_statement".to_string(),
-                "get_connection_string".to_string(),
                 "search".to_string(),
                 "fetch".to_string(),
                 "create_branch".to_string(),
@@ -916,7 +915,7 @@ impl ConnectorFixture {
                 "observe".to_string(),
                 "extract".to_string(),
             ],
-            read_action: "navigate".to_string(),
+            read_action: "observe".to_string(),
             read_args: json!({
                 "url": "https://example.com",
                 "domain_allowlist": "example.com"
