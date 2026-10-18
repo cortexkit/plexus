@@ -18,8 +18,10 @@
 
 pub mod backend;
 pub mod cache;
+pub mod capability;
 mod code_lookup;
 pub mod limiter;
+pub mod providers;
 pub mod query;
 
 use std::sync::Arc;
