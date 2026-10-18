@@ -11871,3 +11871,463 @@ select = "expected"
 expect_red = ["event_envelope::tests::ci_job_runner_name_is_null_when_missing_or_empty"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "catalog-known-credential-action"
+guards = "Known credential-returning tools cannot enter a reviewed manifest"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''if matches!(action.name.as_str(), "get_connection_string") {'''
+new = '''if false && matches!(action.name.as_str(), "get_connection_string") { /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::reviewed_catalog_rejects_credential_returning_actions"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-filter-schema-path"
+guards = "Resource filters must resolve to reviewed schema properties"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''.is_some_and(|schema| schema_filter_path(schema, path).is_some())'''
+new = '''.is_some_and(|_| true) /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::resource_filter_paths_must_resolve_in_a_reviewed_schema"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-sorted-head-order"
+guards = "A page-size constant alone is not reviewed sort order"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''if !declared_ordering {'''
+new = '''if false && !declared_ordering { /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::sorted_head_page_size_alone_is_not_reviewed_ordering"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-reconciliation-bounds"
+guards = "Reconciliation declarations need fields and a bounded positive timeout"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''if !reconciliation.valid() {'''
+new = '''if false && !reconciliation.valid() { /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::reconciliation_requires_nonempty_fields_and_bounded_timeout"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-poll-read-risk"
+guards = "Poll shapes cannot be declared on writes"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''if action.risk != Risk::Read
+'''
+new = '''if false && action.risk != Risk::Read /* NON-VACUITY BREAK */
+'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::poll_shapes_must_be_readable_implemented_and_named"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-header-name"
+guards = "Credential header names are validated before dispatch"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''if reqwest::header::HeaderName::from_bytes(binding.key.as_bytes()).is_err()'''
+new = '''if false && reqwest::header::HeaderName::from_bytes(binding.key.as_bytes()).is_err() /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::credentials_require_valid_unique_headers_and_primary_roles"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-action-selector-name"
+guards = "Action names cannot collide with wildcard selectors"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''.all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))'''
+new = '''.all(|_| true) /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::wildcard_and_ambiguous_action_names_are_refused"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-tail-host-labels"
+guards = "Credentialless redirect hosts cannot be single-label suffixes"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''host.split('.').count() < 2'''
+new = '''host.split('.').count() < 1 /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::credentialless_tail_refuses_ip_and_single_label_hosts"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-tail-host-ip"
+guards = "Credentialless redirect hosts cannot be IP literals"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''host.parse::<std::net::IpAddr>().is_ok()'''
+new = '''false /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::credentialless_tail_refuses_ip_and_single_label_hosts"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-content-hash-normalized"
+guards = "Equivalent typed manifests have the same content hash"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''let normalized = serde_json::to_value(&manifest)'''
+new = '''let normalized = serde_json::to_value(&value) /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::manifest_hash_normalizes_aliases_and_defaults_without_rounding_integers"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-explicit-ask-first"
+guards = "The seed path honors explicit read ask-first declarations"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''explicit || recipients || asks_first(risk, declared)'''
+new = '''false /* NON-VACUITY BREAK */ || recipients || asks_first(risk, declared)'''
+test_file = "crates/plexus-core/tests/it/github_catalog.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_catalog::manifest_seed_honors_explicit_read_ask_first"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-existing-policy-refresh"
+guards = "Reviewed risk changes reach existing rows while preserving operator decisions"
+file = "crates/plexus-core/src/storage.rs"
+old = '''UPDATE catalog_actions SET risk=?4, severity=?5, ask_first=?6,'''
+new = '''UPDATE catalog_actions SET risk=risk /* NON-VACUITY BREAK */, severity=?5, ask_first=?6,'''
+test_file = "crates/plexus-core/tests/it/github_catalog.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_catalog::manifest_reingest_updates_policy_without_overwriting_review_decisions"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "reconciliation-transient-not-sent"
+guards = "Transient not-sent read-backs remain retryable"
+file = "crates/plexus-core/src/reconciliation.rs"
+old = '''if retryability != Retryability::Terminal {'''
+new = '''if false && retryability != Retryability::Terminal { /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/reconciliation.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["reconciliation::tests::transient_not_sent_read_back_remains_retryable"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "reconciliation-missing-original-field"
+guards = "Missing original correlation values prevent useless vendor reads"
+file = "crates/plexus-core/src/reconciliation.rs"
+old = '''.any(|field| record.args.get(field).is_none())'''
+new = '''.any(|_| false) /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/tests/it/write_reconciliation.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["write_reconciliation::missing_correlation_arguments_do_not_dispatch_a_read_back"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "reconciliation-sweep-budget"
+guards = "A reconciliation backlog sends at most eight read-backs per pass"
+file = "crates/plexus-core/src/reconciliation.rs"
+old = '''pending.into_iter().take(8)'''
+new = '''pending.into_iter().take(1000) /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/tests/it/write_reconciliation.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["write_reconciliation::reconciliation_sweep_caps_vendor_reads_per_pass"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "reconciliation-class-lookup-retry"
+guards = "A catalog read error cannot permanently discard an uncertain write"
+file = "crates/plexus-core/src/reconciliation.rs"
+old = '''let lookup_failed = lookup.is_err();'''
+new = '''let lookup_failed = false; /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/tests/it/write_reconciliation.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["write_reconciliation::catalog_lookup_failure_after_an_unknown_write_keeps_it_queued"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "reconciliation-expired-backoff"
+guards = "Expired reconciliation completion retries honor backoff then terminate"
+file = "crates/plexus-core/src/storage.rs"
+old = '''WHERE next_attempt_at_ms<=?1 ORDER BY expires_at_ms,principal,request_id LIMIT 1000'''
+new = '''WHERE next_attempt_at_ms<=?1 OR expires_at_ms<=?1 /* NON-VACUITY BREAK */ ORDER BY expires_at_ms,principal,request_id LIMIT 1000'''
+test_file = "crates/plexus-core/tests/it/write_reconciliation.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["write_reconciliation::expired_reconciliation_waits_for_backoff_then_settles"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "import-source-revocations"
+guards = "Cross-directory imports apply source-side revocations"
+file = "crates/plexus-core/src/import_store.rs"
+old = '''revocations.extend(crate::grant_journal::read(&source_journal)?);'''
+new = '''let _ = crate::grant_journal::read(&source_journal)?; /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/import_store.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["import_store::tests::cross_directory_import_carries_source_and_destination_revocations"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-test-endpoint-retained"
+guards = "Test endpoints persist across probe and freshness reloads"
+file = "crates/plexus-core/src/catalog.rs"
+old = '''overrides.get(&key).cloned()'''
+new = '''None::<String> /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/catalog.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["catalog::tests::test_endpoint_override_survives_connection_reload"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-reconciliation-timeout-limit"
+guards = "catalog reconciliation timeout limit"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''(1..=MAX_RECONCILIATION_TIMEOUT_S).contains(&self.timeout_s)'''
+new = '''(1..=u64::MAX).contains(&self.timeout_s) /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::reconciliation_requires_nonempty_fields_and_bounded_timeout"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-poll-item-kind"
+guards = "catalog poll item kind"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''|| poll.item_kind.trim().is_empty()'''
+new = '''|| false /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::poll_shapes_must_be_readable_implemented_and_named"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-poll-implemented-strategy"
+guards = "catalog poll implemented strategy"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''|| poll.cursor_kind == CursorKind::SnapshotDiff'''
+new = '''|| false /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::poll_shapes_must_be_readable_implemented_and_named"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-credential-required"
+guards = "catalog credential required"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''if !binding.required || !primary_role {'''
+new = '''if !primary_role { /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::credentials_require_valid_unique_headers_and_primary_roles"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-credential-primary-role"
+guards = "catalog credential primary role"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''if !binding.required || !primary_role {'''
+new = '''if !binding.required { /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::credentials_require_valid_unique_headers_and_primary_roles"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "reconciliation-completion-store-retry"
+guards = "reconciliation completion store retry"
+file = "crates/plexus-core/src/reconciliation.rs"
+old = '''return ReconcileResult::Retrying {
+                reason: "completion_store_failed".into(),
+            };'''
+new = '''let _ = ReconcileResult::Retrying {
+                reason: "completion_store_failed".into(),
+            }; /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/tests/it/write_reconciliation.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["write_reconciliation::reconciliation_completion_failure_backs_off_without_a_false_terminal_audit"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "scratch-pid-before-digit-label"
+guards = "scratch pid before digit label"
+file = "crates/plexus-core/src/test_scratch.rs"
+old = '''std::process::id(),
+        sanitize(label),'''
+new = '''sanitize(label),
+        std::process::id(), /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/test_scratch.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["test_scratch::tests::scratch_names_keep_the_pid_as_the_first_numeric_token"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-live-schema-compatibility"
+guards = "catalog live schema compatibility"
+file = "catalog/github.jsonc"
+old = '''{ "name": "get_me", "risk": "read" },'''
+new = '''{ "name": "get_me", "risk": "read", "input_schema": {"type":"object","properties":{"changed":{"type":"string"}}} }, // NON-VACUITY BREAK'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::live_connected_catalog_schema_hashes_remain_unchanged"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-stateful-navigation-risk"
+guards = "catalog stateful navigation risk"
+file = "catalog/browserbase.jsonc"
+old = '''{ "name": "navigate", "risk": "write" },'''
+new = '''{ "name": "navigate", "risk": "read" }, // NON-VACUITY BREAK'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::shipped_credential_and_risk_boundaries_are_reviewed"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-rollout-mutation-ids"
+guards = "catalog rollout mutation ids"
+file = "docs/rollout/github-events-poll-mode.md"
+old = '''`key-collision-dedup`'''
+new = '''`missing-control`<!-- NON-VACUITY BREAK -->'''
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::rollout_mutation_controls_exist_in_the_catalogue"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-failed-refresh-closed"
+guards = "catalog failed refresh closed"
+file = "crates/plexus-core/src/catalog.rs"
+old = '''self.mark_degraded_id(principal, connection_id);
+                Err(CatalogError::StaleWrite)'''
+new = '''self.mark_degraded_id(principal, connection_id);
+                Ok(Freshness::AlreadyFresh) /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/catalog.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["catalog::tests::failed_freshness_refresh_never_reports_fresh"]
+build_timeout_s = 3600
+timeout_s = 120

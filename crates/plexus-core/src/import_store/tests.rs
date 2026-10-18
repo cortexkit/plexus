@@ -653,6 +653,38 @@ fn journal_import_reapplies_revocation() {
 }
 
 #[test]
+fn cross_directory_import_carries_source_and_destination_revocations() {
+    let f = Fixture::new();
+    write_revocation(&f, "g");
+    let destination = crate::test_scratch::Scratch::directory("import-revocations");
+    let journal = destination.join(crate::grant_journal::NAME);
+    crate::grant_journal::ensure(&journal).unwrap();
+    crate::grant_journal::append(
+        &journal,
+        &crate::grant_journal::Revocation {
+            principal: "direct".into(),
+            grant_id: "destination-only".into(),
+            revoked_at_ms: 2,
+        },
+    )
+    .unwrap();
+    let to = destination.join("store.db");
+    import_store(&f.from, &to).unwrap();
+    let conn = Connection::open(&to).unwrap();
+    assert_eq!(scalar::<u64>(&conn, "SELECT count(*) FROM grants"), 0);
+    let entries = crate::grant_journal::read(&journal).unwrap();
+    assert!(entries.iter().any(|entry| entry.grant_id == "g"));
+    assert!(entries
+        .iter()
+        .any(|entry| entry.grant_id == "destination-only"));
+    assert_eq!(
+        crate::grant_journal::read(&journal_path(&f)).unwrap().len(),
+        1,
+        "source journal is not modified"
+    );
+}
+
+#[test]
 fn journal_malformed_import_leaves_target_untouched() {
     let f = Fixture::new();
     write_revocation(&f, "g");

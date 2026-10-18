@@ -27,9 +27,9 @@
     }
   ],
   "resource_filters": {
-    "required": ["org", "project"],
-    "optional": ["environment", "status"],
-    "write_enabling": ["project"]
+    "required": [],
+    "optional": [],
+    "write_enabling": []
   },
   "actions_baseline": [
     { "name": "search_issues", "risk": "read" },
@@ -37,33 +37,15 @@
     { "name": "get_event", "risk": "read" },
     {
       "name": "comment_issue",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["issue_id", "body_hash", "time_window"],
-        "read_back_action": "get_issue",
-        "timeout_s": 120
-      },
-      "idempotency": "none"
+      "risk": "write"
     },
     {
       "name": "assign_issue",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["issue_id", "assignee"],
-        "read_back_action": "get_issue",
-        "timeout_s": 60
-      },
-      "idempotency": "natural"
+      "risk": "write"
     },
     {
       "name": "resolve_issue",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["issue_id", "target_status"],
-        "read_back_action": "get_issue",
-        "timeout_s": 60
-      },
-      "idempotency": "natural"
+      "risk": "write"
     }
   ],
   "defaults": {

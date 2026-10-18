@@ -8,4 +8,4 @@ license = "MIT"
 repository = "https://github.com/cortexkit/plexus"
 
 [dependencies]
-rquickjs = { version = "0.12.2", features = ["macro"] }
+rquickjs = { version = "0.12.2" }

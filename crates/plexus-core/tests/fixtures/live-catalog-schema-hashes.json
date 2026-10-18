@@ -1,0 +1,86 @@
+{
+  "github": {
+    "get_me": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "get_team_members": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "get_teams": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "search_repositories": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "get_file_contents": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "search_code": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "search_commits": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "get_commit": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "list_branches": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "list_commits": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "list_releases": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "get_latest_release": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "get_release_by_tag": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "get_tag": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "list_tags": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "list_repository_collaborators": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "list_issues": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "search_issues": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "issue_read": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "get_label": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "list_issue_fields": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "list_issue_types": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "list_pull_requests": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "pull_request_read": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "search_pull_requests": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "search_users": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "run_secret_scanning": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+  },
+  "github_rest": {
+    "github.pull_request.get": "sha256:63e718fd050d8c0b3fdd0b1be2cdd4fb263699ba4c19cc9685d8739dca7ee05f",
+    "mark_pull_request_ready": "sha256:06f3ee64f022bf645a2dfa2616b9db998e1173e941aa0b3f25b0e5d592792dff",
+    "convert_pull_request_to_draft": "sha256:06f3ee64f022bf645a2dfa2616b9db998e1173e941aa0b3f25b0e5d592792dff",
+    "add_reaction": "sha256:407db56b5bb8cabe81402f3cf3e2ebe8259750e26b3be96cec971d3e779ef0fe",
+    "add_issue_comment": "sha256:0bfe8b67cac7d58dc0553d792910e84d5c867b4ae449f4e65dbc699c3ad99308",
+    "update_issue_comment": "sha256:2239743c938bf35d5a7bceb91250e82fde20b66d8938775db449b1c031d84f14",
+    "list_issue_reactions": "sha256:af288a397c1756bfc5c0176338fcb2ee79f688df9f220be8b0127985c11f86ca",
+    "list_issue_comments": "sha256:f20b92e8c95b07e2c8ff8dcda697fb84e13aecb9fcd3ec91a8ac41e6614c192d",
+    "get_issue_comment": "sha256:d90c371a23cc55514d6e0de780c95f892f1653e5aed994e52247f329087b66ee",
+    "github.issue.get": "sha256:10ff06db74ce9ca4a0c8d8d0b83206c79ce0905cd57208c123901b3e33038917",
+    "github.issue_comment.get": "sha256:d90c371a23cc55514d6e0de780c95f892f1653e5aed994e52247f329087b66ee",
+    "github.issue_comments.list": "sha256:f20b92e8c95b07e2c8ff8dcda697fb84e13aecb9fcd3ec91a8ac41e6614c192d",
+    "github.issue_timeline.list": "sha256:97522ac30896668cafa9786afa5fba83e67624acf84fd282d76efec74d986c80",
+    "github.issue.search": "sha256:7343546d0725d94504854e8f479f08d67e46810d2131f1dfea7ada99813387c8",
+    "add_pr_review": "sha256:ad80c3d78a2bd11095cf78f03819a5a3f79f2a14ec4c489f0f21490e88cdcdff",
+    "close_issue": "sha256:9aea5ae87299da6bbaeedbb6fc0aca80136c1e87f9ba14ced25c1bb966a0b49c",
+    "reopen_issue": "sha256:d55eaf71733c3bdf7f0111864db3fa4b14d5c94134e038110456dd4bcb5885e6",
+    "create_issue": "sha256:e8eafcf7c9f91b5d12f759f2899981057a149fe5d014e9648c29cdd8aa6050d6",
+    "create_pull_request": "sha256:d6cbce2fa866ae64eab45100d3c37299c19266a134b59a43a76a49edc0e19400",
+    "edit_issue": "sha256:76380f0ad3f21c0dec659a66ac32a9bbe363e6233b9a117db771054af735ddef",
+    "add_issue_labels": "sha256:da020bd7f89c7fe760246172f8ec51db822a8c35c644b6bce0a90b1d97255edb",
+    "remove_issue_label": "sha256:e7784c8ed02c51f1d79738b81c2c72e74d3c309703fb813a671631fe641e2fc1",
+    "add_issue_assignees": "sha256:6eda1394bdefeab72c4038a735f897aae795ccae1d7a764a8a6391332588f16f",
+    "remove_issue_assignees": "sha256:6eda1394bdefeab72c4038a735f897aae795ccae1d7a764a8a6391332588f16f"
+  },
+  "github_actions": {
+    "get_job": "sha256:ff27d1ba019b1bb0a4ed352675f11843b6cb7ca366e6d80bd91b56fd2f0af447",
+    "github.actions.job_log": "sha256:e284ffd72307632c0acdde7574ad5975c7bcb329522880c2934a2f13aa3a4581",
+    "list_workflow_runs": "sha256:723dccdc68f2ba1f45fe83e2e3b70096e6e39a997cb297600a6b0b08ec49f106",
+    "get_workflow_run": "sha256:fe58b3b966e4728795bd5acecab3b8b26fc211e67a43e20c6371b7362e4d0101",
+    "list_jobs_for_workflow_run_attempt": "sha256:0620259436699e5d753e733660e15135b81a9dd2b69e05b649bb67a3b2234808",
+    "get_repository": "sha256:e68c7d899a711f25f17272073b622c881ad83ff9f0c365b66e4cb256875ea1fe",
+    "list_workflow_run_artifacts": "sha256:f4a6bca99fb6cbf54476ed0ca38583a430d60aac75e4bebef31e5278a1ab6222",
+    "github.actions.artifact_file": "sha256:4e9f0baa920ec462887e06cfc2dc3f7addb84bdf1338dbf7dc8f8eb60b657fce",
+    "get_workflow_run_metadata": "sha256:b1eed046b2b5ca94a4da5d1e6941f8db8816ca7089329ac864dab9e56fb1f1a9",
+    "list_workflow_runs_for_workflow": "sha256:79d51b6d4416bf391de59e16f939b58d70cf8c8a7da9d7a02b57b52d6fbf4a83"
+  },
+  "exa": {
+    "web_search_exa": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "web_fetch_exa": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+  },
+  "exa_rest": {
+    "search": "sha256:3db73b617f6c2f4df13aa4f00c612a6fefba52e5c6c9b6d5a5c3b803d5531881",
+    "get_contents": "sha256:fcbbf59c097767ac803cbf728999e23c0d9458ff80db130c018fca3eb24667d4",
+    "find_similar": "sha256:02205b38681976705f6fc0c95619c7b3ec7c56ae78d992f0e91dbff7163e5ac4"
+  },
+  "deepwiki": {
+    "read_wiki_structure": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "read_wiki_contents": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf",
+    "ask_question": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+  },
+  "grep_app": {
+    "searchGitHub": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
+  }
+}

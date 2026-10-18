@@ -74,7 +74,6 @@ pub(crate) fn envelope(
     context: &EnvelopeContext,
 ) -> Result<String, EventKeyError> {
     let event_kind = GithubEventKind::parse(event_name)?;
-    let kind = event_kind.as_str();
     let action = match &context.source {
         EnvelopeSource::Webhook(action) => json!(action),
         EnvelopeSource::Poll if matches!(event_kind, GithubEventKind::Release) => {
@@ -88,7 +87,7 @@ pub(crate) fn envelope(
             "updated"
         }),
     };
-    let mut body = json!({"event_key":event_key,"kind":kind,"repo":repo.to_ascii_lowercase(),
+    let mut body = json!({"event_key":event_key,"kind":event_kind.as_str(),"repo":repo.to_ascii_lowercase(),
         "action":action,"actor_logins":null,"actor_unknown":null});
     let fields: &[(&str, &str)] = match event_kind {
         GithubEventKind::Issue | GithubEventKind::PullRequest => &[
@@ -119,7 +118,7 @@ pub(crate) fn envelope(
     for &(target, source) in fields {
         body[target] = item[source].clone();
     }
-    if kind == "ci_run" {
+    if matches!(event_kind, GithubEventKind::CiRun) {
         body["run_id"] = item["id"].clone();
         // Workflow runs lack completed_at; updated_at is their completion time
         // only once GitHub marks the run completed. Jobs use their own field.
@@ -129,8 +128,8 @@ pub(crate) fn envelope(
             Value::Null
         };
     }
-    if matches!(kind, "ci_run" | "ci_job") {
-        let ci = if kind == "ci_run" {
+    if matches!(event_kind, GithubEventKind::CiRun | GithubEventKind::CiJob) {
+        let ci = if matches!(event_kind, GithubEventKind::CiRun) {
             CiRunAttribution::from_run(item)
         } else {
             context.ci_run.clone().unwrap_or_default()
@@ -140,7 +139,7 @@ pub(crate) fn envelope(
         body["event"] = json!(ci.event);
         body["head_repo_is_fork"] = json!(ci.head_repo_is_fork);
     }
-    if kind == "ci_job" {
+    if matches!(event_kind, GithubEventKind::CiJob) {
         body["workflow_name"] = item["workflow_name"]
             .as_str()
             .filter(|name| !name.is_empty())
@@ -164,7 +163,10 @@ pub(crate) fn envelope(
             }
         }
     }
-    if matches!(kind, "issue" | "pull_request") {
+    if matches!(
+        event_kind,
+        GithubEventKind::Issue | GithubEventKind::PullRequest
+    ) {
         body["state"] = item["state"]
             .as_str()
             .map(|state| json!(state.to_lowercase()))
@@ -179,7 +181,11 @@ pub(crate) fn envelope(
                         json!(format!(
                             "https://github.com/{}/{}/{number}",
                             repo.to_ascii_lowercase(),
-                            if kind == "issue" { "issues" } else { "pull" }
+                            if matches!(event_kind, GithubEventKind::Issue) {
+                                "issues"
+                            } else {
+                                "pull"
+                            }
                         ))
                     })
                     .unwrap_or(Value::Null)
@@ -216,7 +222,7 @@ pub(crate) fn envelope(
             })
             .cloned()
             .unwrap_or(Value::Null);
-        if kind == "pull_request" {
+        if matches!(event_kind, GithubEventKind::PullRequest) {
             body["draft"] = item["draft"].clone();
             body["merged"] = item["merged"].clone();
             body["head_ref"] = item.pointer("/head/ref").cloned().unwrap_or(Value::Null);

@@ -109,7 +109,7 @@ fn last_page_bot_comment_is_newest_for_facade_and_prefrontal() {
             .all(|r| r.action == "github.issue_comments.list"
                 && r.args["method"] == "GET"
                 && r.args["per_page"] == PER_PAGE));
-        assert!(clock.get() < plexus_core::github::config::claim_lease_seconds(None) * 1000);
+        assert!(clock.get() < plexus_core::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS * 1000);
     }
 }
 
@@ -178,7 +178,7 @@ fn fixed_clock_expires_before_a_slow_edit_last_walk_can_dispatch() {
     assert!(matches!(result, Err(WalkError::LeaseExpired)));
     assert_eq!(
         clock.get(),
-        plexus_core::github::config::claim_lease_seconds(None) * 1000
+        plexus_core::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS * 1000
     );
     assert!(!may_dispatch(&[ListRead::IssueComments], &[]));
 }

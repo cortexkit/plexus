@@ -104,6 +104,107 @@ fn installed_catalog() -> (Arc<PlexusStore>, plexus_core::IngestedManifest) {
     (store, ingested)
 }
 
+#[test]
+fn manifest_reingest_updates_policy_without_overwriting_review_decisions() {
+    let (store, original) = installed_catalog();
+    let before = store
+        .catalog_action("direct", "github-connection", "github.issue.get")
+        .unwrap()
+        .unwrap();
+    store
+        .quarantine_action(
+            "direct",
+            "github-connection",
+            "github.issue.get",
+            "operator_review",
+        )
+        .unwrap();
+    let mut value = original.json.clone();
+    let actions = value["actions_baseline"].as_array_mut().unwrap();
+    let action = actions
+        .iter_mut()
+        .find(|a| a["name"] == "github.issue.get")
+        .unwrap();
+    action["risk"] = json!("destructive");
+    action["ask_first"] = json!(true);
+    action["reconciliation"] = json!({"correlation_fields":["owner"],"read_back_action":"list_issue_comments","timeout_s":60});
+    let tightened = ingest_value(value).unwrap();
+    store
+        .upsert_manifest(CATALOG_PRINCIPAL, &tightened)
+        .unwrap();
+    let after = store
+        .catalog_action("direct", "github-connection", "github.issue.get")
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.risk, "destructive");
+    assert!(after.ask_first);
+    assert_eq!(after.status, "quarantined");
+    assert_eq!(after.quarantine_reason.as_deref(), Some("operator_review"));
+    assert_eq!(after.schema_hash, before.schema_hash);
+    assert!(after.reconciliation.is_some());
+    assert!(after.generation > before.generation);
+    let generation = after.generation;
+    store
+        .upsert_manifest(CATALOG_PRINCIPAL, &tightened)
+        .unwrap();
+    assert_eq!(
+        store
+            .catalog_action("direct", "github-connection", "github.issue.get")
+            .unwrap()
+            .unwrap()
+            .generation,
+        generation
+    );
+    let mut withdrawn = tightened.json;
+    withdrawn["actions_baseline"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|a| a["name"] == "github.issue.get")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("reconciliation");
+    store
+        .upsert_manifest(CATALOG_PRINCIPAL, &ingest_value(withdrawn).unwrap())
+        .unwrap();
+    assert!(store
+        .catalog_action("direct", "github-connection", "github.issue.get")
+        .unwrap()
+        .unwrap()
+        .reconciliation
+        .is_none());
+}
+
+#[test]
+fn manifest_seed_honors_explicit_read_ask_first() {
+    let store = store();
+    let mut value = github_manifest().json;
+    let action = value["actions_baseline"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|a| a["name"] == "github.issue.get")
+        .unwrap();
+    action["ask_first"] = json!(true);
+    store
+        .upsert_manifest(CATALOG_PRINCIPAL, &ingest_value(value).unwrap())
+        .unwrap();
+    store
+        .insert_connection("direct", "seed", "github_rest", "active", &json!({}))
+        .unwrap();
+    store
+        .seed_catalog_from_manifest("direct", "seed", "github_rest")
+        .unwrap();
+    assert!(
+        store
+            .catalog_action("direct", "seed", "github.issue.get")
+            .unwrap()
+            .unwrap()
+            .ask_first
+    );
+}
+
 struct ReviewedSeams(Arc<PlexusStore>);
 impl GovernanceSeams for ReviewedSeams {
     fn resolve_invoke(&self, _: &AuthorizationRequest) -> Result<(), ResolverDenial> {

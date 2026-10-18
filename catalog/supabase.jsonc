@@ -28,9 +28,9 @@
     }
   ],
   "resource_filters": {
-    "required": ["project_id"],
-    "optional": ["organization_id", "branch_id"],
-    "write_enabling": ["project_id"]
+    "required": [],
+    "optional": [],
+    "write_enabling": []
   },
   // Tool names confirmed from Supabase's hosted MCP documentation. The vendor
   // also offers `https://mcp.supabase.com/mcp?read_only=true`; a future
@@ -55,23 +55,11 @@
     { "name": "get_project", "risk": "read" },
     {
       "name": "apply_migration",
-      "risk": "destructive",
-      "reconciliation": {
-        "correlation_fields": ["project_id", "name", "time_window"],
-        "read_back_action": "list_migrations",
-        "timeout_s": 180
-      },
-      "idempotency": "none"
+      "risk": "destructive"
     },
     {
       "name": "deploy_edge_function",
-      "risk": "write",
-      "reconciliation": {
-        "correlation_fields": ["project_id", "function_slug", "time_window"],
-        "read_back_action": "get_edge_function",
-        "timeout_s": 180
-      },
-      "idempotency": "none"
+      "risk": "write"
     }
   ],
   "defaults": {

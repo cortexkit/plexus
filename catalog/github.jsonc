@@ -32,7 +32,7 @@
   ],
   "resource_filters": {
     "required": [],
-    "optional": ["owner", "repo"],
+    "optional": [],
     "write_enabling": []
   },
   "actions_baseline": [
