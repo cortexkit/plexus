@@ -13132,7 +13132,7 @@ mod github_read_frame_tests {
                 json!(["o/x"]),
                 json!({"terms":"bug"}),
                 json!({"items":[{"repository":{"full_name":"o/x"}},{"repository":{"full_name":"o/unbound"}}]}),
-                json!({"items":[{"repository":{"full_name":"o/x"}}]}),
+                json!({"items":[{"repository":{"full_name":"o/x"}}],"total_count":1,"incomplete":true,"incomplete_results":true}),
             ),
         ] {
             let (runtime, _store, transport, _scratch) = imported_runtime();
