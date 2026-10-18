@@ -77,9 +77,12 @@ pub fn parse(flow_id: &str, reply: Value) -> Result<Answer, Value> {
     Ok(answer)
 }
 
+type AudienceLookup = Mutex<Option<Result<Answer, Value>>>;
+
 pub struct FlowAudiences {
     peer: Option<Arc<SubcPrefrontalRoutePeer>>,
-    cache: Mutex<HashMap<String, (Instant, Answer)>>,
+    cache: Mutex<HashMap<String, (Instant, Answer, Instant)>>,
+    lookups: Mutex<HashMap<String, std::sync::Weak<AudienceLookup>>>,
     #[cfg(any(test, feature = "test-support"))]
     global_fixture: bool,
 }
@@ -89,6 +92,7 @@ impl FlowAudiences {
         Self {
             peer: peer.map(Arc::new),
             cache: Mutex::new(HashMap::new()),
+            lookups: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             global_fixture: false,
         }
@@ -102,18 +106,57 @@ impl FlowAudiences {
         }
     }
 
-    pub fn lookup(&self, flow_id: &str) -> Result<Answer, Value> {
+    fn cached(&self, flow_id: &str) -> Result<Option<Answer>, Value> {
         let now = Instant::now();
-        {
-            let mut cache = self
-                .cache
-                .lock()
-                .map_err(|_| unavailable("cache lock poisoned"))?;
-            cache.retain(|_, (at, _)| now.duration_since(*at) < Duration::from_secs(30));
-            if let Some((_, answer)) = cache.get(flow_id) {
-                return Ok(answer.clone());
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| unavailable("cache lock poisoned"))?;
+        if let Some((at, answer, used)) = cache.get_mut(flow_id) {
+            if now.duration_since(*at) < Duration::from_secs(30) {
+                *used = now;
+                return Ok(Some(answer.clone()));
             }
         }
+        cache.remove(flow_id);
+        Ok(None)
+    }
+
+    pub fn lookup(&self, flow_id: &str) -> Result<Answer, Value> {
+        if let Some(answer) = self.cached(flow_id)? {
+            return Ok(answer);
+        }
+        let lookup = {
+            let mut lookups = self
+                .lookups
+                .lock()
+                .map_err(|_| unavailable("lookup lock poisoned"))?;
+            lookups.retain(|_, lookup| lookup.strong_count() > 0);
+            match lookups.get(flow_id).and_then(std::sync::Weak::upgrade) {
+                Some(lookup) => lookup,
+                None => {
+                    let lookup = Arc::new(Mutex::new(None));
+                    lookups.insert(flow_id.into(), Arc::downgrade(&lookup));
+                    lookup
+                }
+            }
+        };
+        // Serialize only misses for this flow; unrelated flows can resolve in parallel.
+        let mut result = lookup
+            .lock()
+            .map_err(|_| unavailable("lookup lock poisoned"))?;
+        if let Some(answer) = result.as_ref() {
+            return answer.clone();
+        }
+        let answer = match self.cached(flow_id)? {
+            Some(answer) => Ok(answer),
+            None => self.fetch(flow_id),
+        };
+        *result = Some(answer.clone());
+        answer
+    }
+
+    fn fetch(&self, flow_id: &str) -> Result<Answer, Value> {
         #[cfg(any(test, feature = "test-support"))]
         if self.global_fixture {
             return parse(
@@ -136,10 +179,17 @@ impl FlowAudiences {
             .cache
             .lock()
             .map_err(|_| unavailable("cache lock poisoned"))?;
+        let now = Instant::now();
         if cache.len() >= 1024 {
-            cache.clear();
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (_, _, used))| *used)
+                .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest);
+            }
         }
-        cache.insert(flow_id.into(), (now, answer.clone()));
+        cache.insert(flow_id.into(), (now, answer.clone(), now));
         Ok(answer)
     }
 
@@ -149,7 +199,9 @@ impl FlowAudiences {
         scope: Option<&CallScope>,
     ) -> Result<Option<Audience>, Value> {
         let Some(scope) = scope.filter(|scope| {
-            principal == "reserved:basal" && scope.flow_id.is_some() && scope.agent_id.is_none()
+            principal == principal::BASAL_PRINCIPAL
+                && scope.flow_id.is_some()
+                && scope.agent_id.is_none()
         }) else {
             return Ok(None);
         };
@@ -171,11 +223,13 @@ pub fn repository_allowed(store: &PlexusStore, audience: &Audience, repository: 
     let Audience::Workspace { project_ids, .. } = audience else {
         return true;
     };
-    store
-        .entorhinal_repository_project(repository)
-        .ok()
-        .flatten()
-        .is_some_and(|project| project_ids.contains(&project))
+    match store.entorhinal_repository_project(repository) {
+        Ok(project) => project.is_some_and(|project| project_ids.contains(&project)),
+        Err(error) => {
+            eprintln!(warn governance: "flow audience repository lookup failed: {error}");
+            false
+        }
+    }
 }
 
 fn excludes(repository: &str) -> Value {
@@ -229,7 +283,7 @@ pub(crate) fn check_call(
             let connection = args.get("connection").and_then(Value::as_str).unwrap_or("");
             let connection = state
                 .store()
-                .connection_for_invoke("reserved:basal", connection)
+                .connection_for_invoke(principal::BASAL_PRINCIPAL, connection)
                 .map_err(|_| unavailable("connection lookup failed"))?;
             if connection.is_some_and(|connection| {
                 matches!(

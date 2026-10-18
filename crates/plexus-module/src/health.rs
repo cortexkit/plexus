@@ -8,7 +8,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use subc_protocol::session::{HealthStatus, ModuleControlResponse};
 
-const HEARTBEAT_STALE_MS: u64 = 2_000;
 /// Healthy passes normally finish in well under a second, with occasional
 /// outliers of a few seconds, so three full subscription cadences
 /// leave orders of magnitude for vendor jitter while still surfacing a total-
@@ -72,7 +71,6 @@ pub struct HealthState {
     /// `Instant` does not advance while this host is suspended, so subtracting
     /// this stamp from the current awake clock excludes every sleep without a
     /// wake-specific reset that repeated suspensions could keep advancing.
-    last_heartbeat_awake_ms: AtomicU64,
     /// Whether the trigger scheduler task is still running.
     ///
     /// The scheduler runs on its own task precisely so a slow vendor cannot
@@ -248,7 +246,6 @@ impl HealthState {
             publish_error: std::sync::Mutex::new(None),
             started_at_ms: now,
             last_heartbeat_ms: AtomicU64::new(now),
-            last_heartbeat_awake_ms: AtomicU64::new(now),
             scheduler_alive: AtomicBool::new(true),
             connections_observed: AtomicBool::new(false),
             connections_total: AtomicU64::new(0),
@@ -299,31 +296,7 @@ impl HealthState {
     }
 
     pub fn stamp_heartbeat(&self) {
-        self.stamp_heartbeat_at(now_ms(), self.awake_ms());
-    }
-
-    fn stamp_heartbeat_at(&self, wall_ms: u64, awake_ms: u64) {
-        self.last_heartbeat_ms.store(wall_ms, Ordering::Relaxed);
-        self.last_heartbeat_awake_ms
-            .store(awake_ms, Ordering::Release);
-    }
-
-    /// Push both views of the dispatch heartbeat into the past, so a test can
-    /// reach the stale branch without sleeping through the real threshold.
-    #[cfg(test)]
-    pub(crate) fn backdate_heartbeat(&self, by_ms: u64) {
-        self.last_heartbeat_ms
-            .store(now_ms().saturating_sub(by_ms), Ordering::Relaxed);
-        self.last_heartbeat_awake_ms
-            .store(self.awake_ms().saturating_sub(by_ms), Ordering::Release);
-    }
-
-    /// Read the awake-clock heartbeat reference exactly as stored. A stamp the
-    /// clock can never reach would hold every later age at zero and permanently
-    /// disarm the only witness to a wedged dispatch loop.
-    #[cfg(test)]
-    pub(crate) fn heartbeat_awake_stamp_ms(&self) -> u64 {
-        self.last_heartbeat_awake_ms.load(Ordering::Acquire)
+        self.last_heartbeat_ms.store(now_ms(), Ordering::Relaxed);
     }
 
     /// Record what the health probe saw, so an operator can confirm a claim
@@ -562,7 +535,7 @@ impl HealthState {
         }
         eprintln!(info health:
             "host was suspended for {suspended_ms}ms ({:.1} minutes); \
-             scheduler stall and dispatch heartbeat verdicts measure awake time",
+             scheduler stall verdicts measure awake time",
             suspended_ms as f64 / MILLIS_PER_MINUTE
         );
         Some(suspended_ms)
@@ -639,8 +612,6 @@ impl HealthState {
         awake_now_ms: u64,
         recoveries: Option<TransportPanicRecoveries>,
     ) -> ModuleControlResponse {
-        let heartbeat_awake_age_ms =
-            awake_now_ms.saturating_sub(self.last_heartbeat_awake_ms.load(Ordering::Acquire));
         let heartbeat_wall_age_ms =
             now.saturating_sub(self.last_heartbeat_ms.load(Ordering::Relaxed));
         let lifetime_ms = now.saturating_sub(self.started_at_ms);
@@ -681,19 +652,10 @@ impl HealthState {
             .unwrap_or_default();
         let panic_recovery_age_ms = self.note_panic_recoveries(recoveries, awake_now_ms);
         let seen_panic_recoveries = self.transport_panic_recoveries_seen.load(Ordering::Acquire);
-        // Independent dispatch, task-liveness, and useful-progress facts can
-        // each degrade the module. A live scheduler is not necessarily a useful
-        // one: it may keep ticking while every due poll fails.
+        // Task liveness and useful progress are independent facts. A live
+        // scheduler may keep ticking while every due poll fails.
         let (status, detail) = if let Some(message) = self.relay.degraded_message() {
             (HealthStatus::Degraded, Some(message.into()))
-        } else if heartbeat_awake_age_ms > HEARTBEAT_STALE_MS {
-            (
-                HealthStatus::Degraded,
-                Some(format!(
-                    "dispatch heartbeat stale for {heartbeat_awake_age_ms}ms \
-                     (threshold {HEARTBEAT_STALE_MS}ms awake time)"
-                )),
-            )
         } else if !scheduler_alive {
             (
                 HealthStatus::Degraded,
@@ -795,7 +757,6 @@ impl HealthState {
             metrics: Some(json!({
                 "githubPolling": self.relay.polling_status(),
                 "heartbeatAgeMs": heartbeat_wall_age_ms,
-                "heartbeatThresholdMs": HEARTBEAT_STALE_MS,
                 "moduleLifetimeMs": lifetime_ms,
                 "schedulerAlive": scheduler_alive,
                 "schedulerPassAgeMs": scheduler_pass_age_ms,
@@ -1615,11 +1576,9 @@ mod tests {
         );
     }
 
-    /// A twelve-minute host sleep, shorter than the fifteen-minute scheduler
-    /// threshold but much longer than the dispatch threshold.
+    /// A twelve-minute host sleep, shorter than the fifteen-minute scheduler threshold.
     const SUSPENDED_MS: u64 = 720_000;
-    /// A pass slow enough to dwarf the dispatch threshold, as one slow vendor
-    /// can cause.
+    /// A slow vendor can keep one pass busy for over a minute.
     const LONG_PASS_MS: u64 = 99_578;
 
     /// Repeated sleeps cannot keep resetting a wedged poller's stall window.
@@ -1658,7 +1617,7 @@ mod tests {
         }
 
         let awake_ms = health.awake_ms_at(monotonic_ms);
-        health.stamp_heartbeat_at(wall_ms, awake_ms);
+        health.last_heartbeat_ms.store(wall_ms, Ordering::Relaxed);
         assert_eq!(
             status_of(&health.report_at(wall_ms, awake_ms)),
             HealthStatus::Ok,
@@ -1675,7 +1634,7 @@ mod tests {
         );
 
         let awake_ms = health.awake_ms_at(monotonic_ms);
-        health.stamp_heartbeat_at(wall_ms, awake_ms);
+        health.last_heartbeat_ms.store(wall_ms, Ordering::Relaxed);
         let report = health.report_at(wall_ms, awake_ms);
         assert_eq!(
             status_of(&report),
@@ -1703,7 +1662,7 @@ mod tests {
         health.stamp_scheduler_subscription_count(2, 300);
         health.stamp_scheduler_outcomes_at(1, 1, wall_ms, awake_ms);
         health.stamp_scheduler_outcomes_at(6, 0, wall_ms, awake_ms);
-        health.stamp_heartbeat_at(wall_ms, awake_ms);
+        health.last_heartbeat_ms.store(wall_ms, Ordering::Relaxed);
         health
             .last_scheduler_pass_ms
             .store(wall_ms, Ordering::Relaxed);
@@ -1763,77 +1722,6 @@ mod tests {
         );
     }
 
-    /// Repeated sleeps cannot keep a dead dispatch loop healthy either.
-    /// Three awake gaps remain below the heartbeat threshold despite much more
-    /// wall time passing; the fourth crosses the threshold without any wake
-    /// resetting the reference.
-    #[test]
-    fn a_dead_dispatch_loop_after_a_wake_still_degrades_on_the_heartbeat() {
-        const SHORT_SLEEP_MS: u64 = HOST_SUSPENSION_MIN_MS + 1_000;
-
-        let health = HealthState::new();
-        let awake_gap_ms = HEARTBEAT_STALE_MS / 4 + 1;
-        let mut wall_ms = now_ms();
-        let mut monotonic_ms = 10_000;
-        let heartbeat_awake_ms = health.awake_ms_at(monotonic_ms);
-        health.seed_clock_sample(wall_ms, monotonic_ms);
-        health.stamp_heartbeat_at(wall_ms, heartbeat_awake_ms);
-
-        for wake in 1..=3 {
-            wall_ms += awake_gap_ms + SHORT_SLEEP_MS;
-            monotonic_ms += awake_gap_ms;
-            assert_eq!(
-                health.note_host_suspension_at(wall_ms, monotonic_ms),
-                Some(SHORT_SLEEP_MS),
-                "short dispatch suspension {wake} must be claimed"
-            );
-        }
-        let awake_ms = health.awake_ms_at(monotonic_ms);
-        assert_eq!(
-            status_of(&health.report_at(wall_ms, awake_ms)),
-            HealthStatus::Ok,
-            "three awake gaps remain below the heartbeat threshold"
-        );
-
-        wall_ms += awake_gap_ms + SHORT_SLEEP_MS;
-        monotonic_ms += awake_gap_ms;
-        assert_eq!(
-            health.note_host_suspension_at(wall_ms, monotonic_ms),
-            Some(SHORT_SLEEP_MS)
-        );
-        let report = health.report_at(wall_ms, health.awake_ms_at(monotonic_ms));
-        assert_eq!(
-            status_of(&report),
-            HealthStatus::Degraded,
-            "a dead dispatch loop must degrade after one threshold of total awake time"
-        );
-        assert!(
-            detail_of(&report)
-                .unwrap_or_default()
-                .contains("dispatch heartbeat stale"),
-            "the detail must name the dispatch heartbeat"
-        );
-    }
-
-    /// The old wake-stamp fence is replaced by this direct awake-stamp fence.
-    /// The dispatch loop, not the detector, writes the verdict reference, and it
-    /// must write the observed monotonic instant rather than an unreachable one
-    /// that would pin the age at zero forever.
-    #[test]
-    fn a_dispatch_heartbeat_stamps_the_current_awake_instant() {
-        let health = HealthState::new();
-        let wall_ms = now_ms();
-        let awake_ms = health.awake_ms_at(10_000);
-
-        health.stamp_heartbeat_at(wall_ms, awake_ms);
-
-        assert_eq!(
-            health.heartbeat_awake_stamp_ms(),
-            awake_ms,
-            "the awake clock must be able to reach every heartbeat reference"
-        );
-    }
-
     /// The old post-wake stall-baseline fence is replaced by the corresponding
     /// completion-stamp fence. A completion is the only event that resets the
     /// direct awake-time stall measurement.
@@ -1849,35 +1737,6 @@ mod tests {
             health.scheduler_success_awake_stamp_ms(),
             awake_ms,
             "the awake clock must be able to reach every completion reference"
-        );
-    }
-
-    /// An ordinary stale heartbeat on a host that never slept degrades exactly
-    /// as it did before suspension handling existed.
-    #[test]
-    fn a_stale_heartbeat_with_no_suspension_still_degrades() {
-        let health = HealthState::new();
-        health.stamp_heartbeat();
-        assert_eq!(status_of(&health.report()), HealthStatus::Ok);
-
-        health.backdate_heartbeat(HEARTBEAT_STALE_MS + 1);
-        assert_eq!(
-            health.note_host_suspension(),
-            None,
-            "an awake host advances both clocks together and must register no suspension"
-        );
-
-        let report = health.report();
-        assert_eq!(
-            status_of(&report),
-            HealthStatus::Degraded,
-            "a dispatch loop silent past the awake threshold must degrade"
-        );
-        assert!(
-            detail_of(&report)
-                .unwrap_or_default()
-                .contains("dispatch heartbeat stale"),
-            "the detail must name the dispatch heartbeat"
         );
     }
 
@@ -1924,10 +1783,7 @@ mod tests {
         let wall_ms = now_ms();
         let awake_ms = health.awake_ms_at(10_000);
         let report_at = |awake_ms: u64, recoveries: TransportPanicRecoveries| {
-            // A fresh heartbeat at each instant, so only the recovery verdict
-            // can degrade the report.
             let wall_ms = wall_ms + (awake_ms - health.awake_ms_at(10_000));
-            health.stamp_heartbeat_at(wall_ms, awake_ms);
             health.report_with_transports_at(wall_ms, awake_ms, Some(recoveries))
         };
         let metrics_of = |report: ModuleControlResponse| match report {

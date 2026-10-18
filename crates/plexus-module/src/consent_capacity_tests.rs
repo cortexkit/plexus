@@ -124,7 +124,7 @@ fn held_body(index: usize) -> Value {
         "op":"call", "connection":"conn-held", "action":"search", "args":{"query":format!("held query {index}")}
     }})
 }
-async fn wait_until(label: &str, ready: impl Fn() -> bool) {
+async fn wait_until(label: &str, mut ready: impl FnMut() -> bool) {
     // Filling 32 consent slots includes serialized durable writes. This is a
     // fixture rendezvous, not the execution-capacity property checked below.
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -424,4 +424,98 @@ async fn newly_filed_consent_waits_yield_slots_for_search_and_bot_write() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recalled_consent_waits_yield_slots_for_search_and_bot_write() {
     parked_calls_do_not_starve_work(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_consent_request_keeps_approval_without_dispatching() {
+    let mut fixture = crate::withdraw_tests::Fixture::new("expired-capacity");
+    let source =
+        subc_jsonc::jsonc_to_json(include_str!("../../../catalog/exa_rest.jsonc")).unwrap();
+    let manifest = plexus_core::ingest_value(serde_json::from_str(&source).unwrap()).unwrap();
+    let db = rusqlite::Connection::open(fixture.path.path()).unwrap();
+    db.execute("INSERT INTO app_manifests (principal,key,schema_version,content_hash,manifest_json,ingested_at_ms) VALUES ('system','exa_rest',1,'fixture',?1,1)", [serde_json::to_string(&manifest.manifest).unwrap()]).unwrap();
+    let cards = Arc::new(Cards::default());
+    cards.parking.store(true, Ordering::SeqCst);
+    let _release = ReleaseOnDrop(cards.clone());
+    fixture.cards = Arc::new(ConsentCards::new(cards.clone()));
+    let scope = CallScope::from_stamp(&crate::consent_test_support::worker_stamp("worker-7", 4));
+    let mut runtime = fixture.runtime();
+    runtime.engine = runtime.engine.with_scope_reader(Arc::new(LiveScopes {
+        held: scope.clone(),
+        bot: scope.clone(),
+        cards: cards.clone(),
+        rechecks_after_answer: AtomicUsize::new(0),
+    }));
+    let state = Arc::new(ModuleState {
+        health: Arc::new(health::HealthState::new()),
+        runtime,
+    });
+    let routes = Arc::new(RouteBindings::new());
+    routes
+        .insert_scoped(
+            1,
+            1,
+            Principal::Reserved {
+                module_id: "aft".into(),
+            },
+            Some(scope),
+        )
+        .unwrap();
+    let budget =
+        request_execution::RequestBudget::until(std::time::Instant::now() + Duration::from_secs(7));
+    let deadline = budget.deadline;
+    let permit = routes.blocking.clone().acquire_owned().await.unwrap();
+    let (writer, mut rx) = mpsc::channel(1);
+    let state_worker = state.clone();
+    let routes_worker = routes.clone();
+    let handle = tokio::runtime::Handle::current();
+    let task = tokio::task::spawn_blocking(move || {
+        let _slot = request_execution::RequestSlot::enter(
+            routes_worker.blocking.clone(),
+            permit,
+            budget.clone(),
+        );
+        handle
+            .block_on(handle_tool_request_with_budget(
+                request(1, 1, held_body(999)),
+                &writer,
+                &state_worker,
+                &routes_worker,
+                budget,
+            ))
+            .unwrap();
+    });
+    wait_until("consent call parked", || {
+        if let Ok(reply) = rx.try_recv() {
+            panic!(
+                "request returned before consent wait: {}",
+                String::from_utf8_lossy(&reply.body)
+            );
+        }
+        cards.waiting.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+    cards.approve_all();
+    let reply =
+        crate::bounded::recv_within(rx.recv(), Duration::from_secs(5), "expired consent reply")
+            .await;
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["error"]["code"], "request_deadline_exceeded", "{body}");
+    assert_eq!(body["error"]["transmission"], "not_sent");
+    task.await.unwrap();
+    assert!(fixture.transport.requests().is_empty());
+    let rows = fixture.store.list_action_requests("direct").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, "approved");
+    let (writer, mut rx) = mpsc::channel(1);
+    handle_tool_request(request(1, 2, held_body(999)), &writer, &state, &routes)
+        .await
+        .unwrap();
+    let reply =
+        crate::bounded::recv_within(rx.recv(), Duration::from_secs(5), "recalled approved reply")
+            .await;
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["result"]["transmission"], "completed", "{body}");
+    assert_eq!(fixture.transport.requests().len(), 1);
 }

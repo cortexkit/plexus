@@ -153,6 +153,7 @@ impl Fixture {
         routes
             .insert_scoped(2, 1, Principal::Direct, Some(recipient_worker_scope()))
             .unwrap();
+        routes.insert(3, 1, Principal::Direct).unwrap();
         let fixture = Self {
             scratch,
             state,
@@ -184,7 +185,7 @@ impl Fixture {
             PROTOCOL_VERSION,
             FrameType::Request,
             wire::control_flags(),
-            2,
+            if body.get("method").is_some() { 3 } else { 2 },
             1,
             8,
             serde_json::to_vec(&body).unwrap(),
@@ -422,7 +423,7 @@ async fn recipients_management_preview_apply_remove_and_direct_boundary() {
     assert_eq!(f.transport.requests().len(), 1);
     f.routes
         .insert(
-            2,
+            3,
             1,
             Principal::Reserved {
                 module_id: "aft".into(),

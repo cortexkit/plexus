@@ -88,8 +88,7 @@ pub const DEFAULT_MODULE_ID: &str = "plexus";
 const AUDIT_RETENTION_DAYS_ENV: &str = "PLEXUS_AUDIT_RETENTION_DAYS";
 const HELLO_CORRELATION: u64 = 1;
 const EGRESS_BUFFER: usize = 64;
-/// Idle re-stamp cadence for the dispatch heartbeat; half the 2s staleness
-/// threshold in `health.rs` so an idle loop always re-stamps well inside it.
+/// Refresh the diagnostic heartbeat age even while the dispatcher is idle.
 const IDLE_HEARTBEAT_WAKE: std::time::Duration = std::time::Duration::from_millis(1_000);
 /// How often the trigger scheduler wakes to look for due subscriptions.
 ///
@@ -123,6 +122,8 @@ const HEALTH_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 /// scope the route was opened under when the bind carried one.
 #[derive(Clone)]
 struct RouteBinding {
+    last_used: std::time::Instant,
+    admission: Arc<tokio::sync::Semaphore>,
     principal: Principal,
     scope: Option<CallScope>,
     mode: CallMode,
@@ -133,12 +134,20 @@ struct RouteBinding {
 // requests do not occupy blocking threads, and controls acquire neither permit.
 const MAX_IN_FLIGHT_REQUESTS: usize = 256;
 const MAX_BLOCKING_REQUESTS: usize = 32;
+// One caller may retain a quarter of admission, leaving room for other modules.
+const MAX_PRINCIPAL_REQUESTS: usize = 64;
+const MAX_ROUTE_BINDINGS: usize = 4096;
+const ROUTE_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_PROBE_SCRIPT_BYTES: usize = 64 * 1024;
+const MAX_PROBE_ACTIONS: usize = 100;
 
 #[derive(Clone)]
 pub struct RouteBindings {
     inner: Arc<RwLock<HashMap<(u16, u32), RouteBinding>>>,
     in_flight: Arc<tokio::sync::Semaphore>,
     blocking: Arc<tokio::sync::Semaphore>,
+    principals: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Semaphore>>>>,
 }
 
 impl Default for RouteBindings {
@@ -147,6 +156,7 @@ impl Default for RouteBindings {
             inner: Arc::default(),
             in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
             blocking: Arc::new(tokio::sync::Semaphore::new(MAX_BLOCKING_REQUESTS)),
+            principals: Arc::default(),
         }
     }
 }
@@ -189,9 +199,31 @@ impl RouteBindings {
             .inner
             .write()
             .map_err(|_| ModuleError::Message("route binding state was poisoned".to_string()))?;
+        let now = std::time::Instant::now();
+        routes.retain(|_, binding| now.duration_since(binding.last_used) < ROUTE_IDLE_TTL);
+        if routes.len() >= MAX_ROUTE_BINDINGS && !routes.contains_key(&(channel, epoch)) {
+            return Err(ModuleError::RouteCapacity);
+        }
+        let admission = {
+            let mut principals = self.principals.lock().map_err(|_| {
+                ModuleError::Message("principal capacity state was poisoned".into())
+            })?;
+            principals.retain(|_, semaphore| semaphore.strong_count() > 0);
+            let key = principal::principal_key(&principal);
+            match principals.get(&key).and_then(std::sync::Weak::upgrade) {
+                Some(semaphore) => semaphore,
+                None => {
+                    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_PRINCIPAL_REQUESTS));
+                    principals.insert(key, Arc::downgrade(&semaphore));
+                    semaphore
+                }
+            }
+        };
         routes.insert(
             (channel, epoch),
             RouteBinding {
+                last_used: now,
+                admission,
                 principal,
                 scope,
                 mode,
@@ -200,14 +232,10 @@ impl RouteBindings {
         Ok(())
     }
 
+    #[cfg(test)]
     fn get(&self, channel: u16, epoch: u32) -> Result<Option<Principal>, ModuleError> {
-        let routes = self
-            .inner
-            .read()
-            .map_err(|_| ModuleError::Message("route binding state was poisoned".to_string()))?;
-        Ok(routes
-            .get(&(channel, epoch))
-            .map(|binding| binding.principal.clone()))
+        self.binding(channel, epoch)
+            .map(|binding| binding.map(|binding| binding.principal))
     }
 
     /// The whole binding on `(channel, epoch)`: principal, daemon scope and
@@ -215,11 +243,20 @@ impl RouteBindings {
     /// principal reads them together here, because separate reads could
     /// straddle a re-bind and pair one bind's principal with another's scope.
     fn binding(&self, channel: u16, epoch: u32) -> Result<Option<RouteBinding>, ModuleError> {
-        let routes = self
+        let mut routes = self
             .inner
-            .read()
+            .write()
             .map_err(|_| ModuleError::Message("route binding state was poisoned".to_string()))?;
-        Ok(routes.get(&(channel, epoch)).cloned())
+        if routes
+            .get(&(channel, epoch))
+            .is_some_and(|binding| binding.last_used.elapsed() >= ROUTE_IDLE_TTL)
+        {
+            routes.remove(&(channel, epoch));
+        }
+        Ok(routes.get_mut(&(channel, epoch)).map(|binding| {
+            binding.last_used = std::time::Instant::now();
+            binding.clone()
+        }))
     }
 
     fn remove(&self, channel: u16, epoch: u32) -> Result<(), ModuleError> {
@@ -629,6 +666,14 @@ where
     }
 }
 
+fn connector_gate_transition(gate: &Value) -> (Value, Value, Value) {
+    (
+        gate["state"].clone(),
+        gate["epoch"].clone(),
+        gate["holder_name"].clone(),
+    )
+}
+
 fn spawn_trigger_scheduler(
     state: Arc<ModuleState>,
     mut stop: mpsc::Receiver<()>,
@@ -673,7 +718,7 @@ fn spawn_trigger_scheduler(
                     // two clock reads and an atomic load, writing only on the
                     // rare tick that follows a wake.
                     let gate = state.runtime.connector_home.status();
-                    let transition = (gate["state"].clone(), gate["epoch"].clone(), gate["holder"].clone());
+                    let transition = connector_gate_transition(&gate);
                     if last_gate_state.as_ref() != Some(&transition) {
                         eprintln!(info scheduler: "connector home scheduler gate: {gate}");
                         last_gate_state = Some(transition);
@@ -909,8 +954,9 @@ async fn expect_hello_ack<R>(reader: &mut R) -> Result<ModuleHelloAckBody, Modul
 where
     R: AsyncRead + Unpin,
 {
-    let frame = read_frame(reader)
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(reader))
         .await
+        .map_err(|_| ModuleError::Message("HELLO_ACK timeout".into()))?
         .map_err(|error| ModuleError::Message(error.to_string()))?
         .ok_or_else(|| ModuleError::Message("connection closed before HELLO_ACK".to_string()))?;
     match frame.header.ty {
@@ -1200,7 +1246,53 @@ async fn handle_frame(
             Ok(true)
         }
         FrameType::Request => {
-            let Ok(permit) = route_bindings.in_flight.clone().try_acquire_owned() else {
+            let budget = request_execution::RequestBudget::new();
+            if frame.body.len() > MAX_REQUEST_BYTES {
+                send_tool_error(
+                    writer,
+                    frame.header.ver,
+                    frame.header.channel,
+                    frame.header.epoch,
+                    frame.header.corr,
+                    "invalid_request",
+                    "request body exceeds the 1 MiB limit",
+                )
+                .await?;
+                return Ok(true);
+            }
+            let binding = match route_bindings.binding(frame.header.channel, frame.header.epoch) {
+                Ok(Some(binding)) => binding,
+                Ok(None) => {
+                    send_tool_error(
+                        writer,
+                        frame.header.ver,
+                        frame.header.channel,
+                        frame.header.epoch,
+                        frame.header.corr,
+                        "route_not_bound",
+                        "plexus tools require an accepted route.bind",
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+                Err(error) => {
+                    eprintln!(error wire: "request on channel {} epoch {} correlation {} failed before its reply was sent: {error}", frame.header.channel, frame.header.epoch, frame.header.corr);
+                    send_tool_error(
+                        writer,
+                        frame.header.ver,
+                        frame.header.channel,
+                        frame.header.epoch,
+                        frame.header.corr,
+                        "internal_error",
+                        "plexus failed while serving this request; the module log names the cause",
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+            };
+            let principal_permit = binding.admission.try_acquire_owned();
+            let permit = route_bindings.in_flight.clone().try_acquire_owned();
+            let (Ok(permit), Ok(principal_permit)) = (permit, principal_permit) else {
                 let response = Frame::build_with_version(
                     frame.header.ver, FrameType::Error, wire::control_flags(),
                     frame.header.channel, frame.header.epoch, frame.header.corr,
@@ -1216,33 +1308,77 @@ async fn handle_frame(
             let route_bindings = Arc::clone(route_bindings);
             tokio::spawn(async move {
                 let _permit = permit;
-                let blocking = route_bindings
-                    .blocking
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .expect("request semaphore is never closed");
+                let _principal_permit = principal_permit;
+                let coordinates = (
+                    frame.header.ver,
+                    frame.header.channel,
+                    frame.header.epoch,
+                    frame.header.corr,
+                );
+                let queue_deadline = tokio::time::Instant::from_std(budget.deadline)
+                    .min(tokio::time::Instant::now() + std::time::Duration::from_secs(5));
+                let Ok(Ok(blocking)) = tokio::time::timeout_at(
+                    queue_deadline,
+                    route_bindings.blocking.clone().acquire_owned(),
+                )
+                .await
+                else {
+                    let _ = send_tool_error(
+                        &writer,
+                        coordinates.0,
+                        coordinates.1,
+                        coordinates.2,
+                        coordinates.3,
+                        "resource_exhausted",
+                        "request expired while waiting for work capacity; nothing was sent",
+                    )
+                    .await;
+                    return;
+                };
+                let failure_writer = writer.clone();
                 // All synchronous route/store/vendor work, including denial and
                 // agent resolution, runs on the blocking pool. The async sends
                 // can still await writer capacity without occupying a worker.
                 let runtime = tokio::runtime::Handle::current();
-                if let Err(error) = tokio::task::spawn_blocking(move || {
+                let worker_result = tokio::task::spawn_blocking(move || {
                     let _blocking = request_execution::RequestSlot::enter(
                         route_bindings.blocking.clone(),
                         blocking,
+                        budget.clone(),
                     );
                     runtime.block_on(async {
-                        serve_tool_request(frame, &writer, &state, &route_bindings).await;
+                        serve_tool_request(frame, &writer, &state, &route_bindings, budget).await;
                     })
                 })
-                .await
-                {
-                    eprintln!(warn wire: "request worker failed: {error}");
-                }
+                .await;
+                answer_worker_failure(worker_result, coordinates, &failure_writer).await;
             });
             Ok(true)
         }
         _ => Ok(true),
+    }
+}
+
+async fn answer_worker_failure(
+    result: Result<(), tokio::task::JoinError>,
+    coordinates: (u8, u16, u32, u64),
+    writer: &mpsc::Sender<Frame>,
+) {
+    if let Err(error) = result {
+        eprintln!(warn wire: "request worker failed: {error}");
+        if let Err(error) = send_tool_error(
+            writer,
+            coordinates.0,
+            coordinates.1,
+            coordinates.2,
+            coordinates.3,
+            "internal_error",
+            "request worker failed; the module log names the cause",
+        )
+        .await
+        {
+            eprintln!(error wire: "could not send request worker failure: {error}");
+        }
     }
 }
 
@@ -1259,12 +1395,15 @@ async fn serve_tool_request(
     writer: &mpsc::Sender<Frame>,
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
+    budget: Arc<request_execution::RequestBudget>,
 ) {
     let version = frame.header.ver;
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
     let correlation = frame.header.corr;
-    let Err(error) = handle_tool_request(frame, writer, state, route_bindings).await else {
+    let Err(error) =
+        handle_tool_request_with_budget(frame, writer, state, route_bindings, budget).await
+    else {
         return;
     };
     eprintln!(error wire:
@@ -1298,7 +1437,7 @@ fn warn_audit_failed(response: &mut Value, what: &str, error: &dyn std::fmt::Dis
             "warning".into(),
             json!({
                 "code": "audit_append_failed",
-                "message": format!("{what} took effect, but its audit row could not be written: {error}"),
+                "message": format!("{what} took effect, but its audit row could not be written; the module log names the cause"),
             }),
         );
     }
@@ -1310,6 +1449,17 @@ async fn handle_control_request(
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
 ) -> Result<(), ModuleError> {
+    if frame.body.len() > MAX_REQUEST_BYTES {
+        let response = wire::build_error_frame(
+            frame.header.ver,
+            0,
+            0,
+            frame.header.corr,
+            "invalid_request",
+            "control request body exceeds the 1 MiB limit",
+        )?;
+        return send(writer, response).await;
+    }
     let request: ModuleControlRequest = match serde_json::from_slice(&frame.body) {
         Ok(request) => request,
         Err(error) => {
@@ -1367,14 +1517,10 @@ async fn handle_control_request(
             // Accepted binds are logged too. Logging only refusals would make an
             // ABSENT line ambiguous between "never arrived" and "arrived and was
             // fine", and the first of those is a real diagnosis.
-            let bind_label = match &principal {
-                Some(subc_protocol::Principal::Direct) => "direct".to_string(),
-                Some(subc_protocol::Principal::Reserved { module_id }) => {
-                    format!("reserved:{module_id}")
-                }
-                Some(subc_protocol::Principal::Unverified) => "unverified".to_string(),
-                None => "absent".to_string(),
-            };
+            let bind_label = principal
+                .as_ref()
+                .map(principal::principal_key)
+                .unwrap_or_else(|| "absent".into());
             eprintln!(info wire:
                 "route bind from principal '{bind_label}' on channel {route_channel}: {}",
                 if trust.is_first_party() {
@@ -1411,7 +1557,21 @@ async fn handle_control_request(
                     scope.owner_authorized
                 );
             }
-            route_bindings.insert_mode(route_channel, epoch, accepted, scope, mode)?;
+            match route_bindings.insert_mode(route_channel, epoch, accepted, scope, mode) {
+                Ok(()) => {}
+                Err(ModuleError::RouteCapacity) => {
+                    let response = wire::build_error_frame(
+                        frame.header.ver,
+                        0,
+                        0,
+                        frame.header.corr,
+                        "resource_exhausted",
+                        "route binding capacity exhausted",
+                    )?;
+                    return send(writer, response).await;
+                }
+                Err(error) => return Err(error),
+            }
             ModuleControlResponse::RouteBindAck {}
         }
         ModuleControlRequest::HealthCheck {} => {
@@ -1419,12 +1579,6 @@ async fn handle_control_request(
             // seconds to answer. A probe makes sequential blocking vendor calls
             // across every connection, so it runs on the scheduler task and this
             // path reports the last observed state instead.
-            //
-            // Honest rather than a mask: reaching this line proves the loop
-            // handled a control frame. The failure this heartbeat exists to
-            // catch is a handler that never returns, and that case never gets
-            // here at all.
-            state.health.stamp_heartbeat();
             connector_home_health(state)
         }
     };
@@ -1450,11 +1604,7 @@ async fn send_principal_denied(
 ) -> Result<(), ModuleError> {
     let label = principal
         .as_ref()
-        .map(|value| match value {
-            Principal::Direct => "direct".to_string(),
-            Principal::Reserved { module_id } => format!("reserved:{module_id}"),
-            Principal::Unverified => "unverified".to_string(),
-        })
+        .map(principal::principal_key)
         .unwrap_or_else(|| "absent".to_string());
     let frame = wire::build_error_frame(
         version,
@@ -1600,7 +1750,7 @@ async fn handle_management_request(
         )
         .await;
     }
-    let Some(principal) = route_bindings.get(channel, epoch)? else {
+    let Some(binding) = route_bindings.binding(channel, epoch)? else {
         return send_tool_error(
             writer,
             version,
@@ -1612,10 +1762,14 @@ async fn handle_management_request(
         )
         .await;
     };
-    if !matches!(principal, Principal::Direct) {
+    let principal = binding.principal;
+    if !matches!(principal, Principal::Direct)
+        || binding.mode != CallMode::Classic
+        || binding.scope.is_some()
+    {
         let mut response = tool_error(
             "operator_authority_required",
-            "plexus management operations require a direct (non-module) principal",
+            "plexus management operations require an unscoped Classic direct principal",
         );
         if matches!(
             method,
@@ -1630,7 +1784,7 @@ async fn handle_management_request(
                 None,
                 params.get("app_handle_id").and_then(Value::as_str),
                 method,
-                &format!("gh-{correlation}"),
+                &fresh_request_id(),
                 Some("operator_authority_required"),
             ) {
                 warn_audit_failed(&mut response, "github control refusal", &error);
@@ -1687,7 +1841,10 @@ async fn handle_management_request(
                         Err(code) => json!({"error":{"code":code}}),
                     }
                 }
-                (Err(_), _) => json!({"error":{"code":"inventory_invalid"}}),
+                (Err(error), _) => {
+                    eprintln!(warn wire: "GitHub inventory could not be decoded: {error}");
+                    json!({"error":{"code":"inventory_invalid"}})
+                }
                 (_, None) => json!({"error":{"code":"handle_credential_unresolvable"}}),
             }
         }
@@ -1720,7 +1877,7 @@ async fn handle_management_request(
         manifest::GITHUB_GRANT_OP => github_handle_grant(state, &principal_key, params),
         manifest::GITHUB_BIND_OP => github_handle_bind(state, &principal_key, params),
         manifest::GITHUB_UNBIND_OP => {
-            github_handle_unbind(state, &principal_key, params, &format!("gh-{correlation}"))
+            github_handle_unbind(state, &principal_key, params, &fresh_request_id())
         }
         manifest::ADMIN_ISSUE_TICKET_OP => ceremony::issue_ticket(state, &principal_key, params),
         manifest::ADMIN_REBIND_CREDENTIAL_OP => {
@@ -1757,7 +1914,7 @@ async fn handle_management_request(
             None,
             params.get("app_handle_id").and_then(Value::as_str),
             method,
-            &format!("gh-{correlation}"),
+            &fresh_request_id(),
             response.pointer("/error/code").and_then(Value::as_str),
         ) {
             warn_audit_failed(&mut response, method, &error);
@@ -1952,15 +2109,44 @@ fn github_handle_refusal(code: &str, app_handle_id: &str) -> Value {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 async fn handle_tool_request(
     frame: Frame,
     writer: &mpsc::Sender<Frame>,
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
 ) -> Result<(), ModuleError> {
+    handle_tool_request_with_budget(
+        frame,
+        writer,
+        state,
+        route_bindings,
+        request_execution::RequestBudget::new(),
+    )
+    .await
+}
+
+async fn handle_tool_request_with_budget(
+    frame: Frame,
+    writer: &mpsc::Sender<Frame>,
+    state: &Arc<ModuleState>,
+    route_bindings: &Arc<RouteBindings>,
+    budget: Arc<request_execution::RequestBudget>,
+) -> Result<(), ModuleError> {
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
     let correlation = frame.header.corr;
+    if budget.expired() {
+        return send_tool_response(
+            writer,
+            frame.header.ver,
+            channel,
+            epoch,
+            correlation,
+            request_expired_reply(),
+        )
+        .await;
+    }
     // Record entry to the body handler before its validation and authority
     // gates. Saturated requests are refused earlier by handle_frame, so an
     // absent entry log can also mean admission capacity was exhausted.
@@ -1969,6 +2155,18 @@ async fn handle_tool_request(
         "tool frame received on channel {channel} epoch {epoch} ({} bytes)",
         frame.body.len()
     );
+    if frame.body.len() > MAX_REQUEST_BYTES {
+        return send_tool_error(
+            writer,
+            frame.header.ver,
+            channel,
+            epoch,
+            correlation,
+            "invalid_request",
+            "request body exceeds the 1 MiB limit",
+        )
+        .await;
+    }
     let value: Value = match serde_json::from_slice(&frame.body) {
         Ok(value) => value,
         Err(error) => {
@@ -1999,6 +2197,23 @@ async fn handle_tool_request(
             .await;
         }
     };
+    if object.contains_key("method") {
+        if let Some(field) = object
+            .get("params")
+            .and_then(Value::as_object)
+            .and_then(retired_identity_field)
+        {
+            return send_tool_response(
+                writer,
+                frame.header.ver,
+                channel,
+                epoch,
+                correlation,
+                retired_identity_refusal(field),
+            )
+            .await;
+        }
+    }
     // Management-surface calls arrive on the same route frame type as tool calls
     // but carry {method, params} rather than {name, arguments}.
     if object.get("method").and_then(Value::as_str) == Some(grants_would_ask::METHOD) {
@@ -2063,20 +2278,9 @@ async fn handle_tool_request(
         .await;
     }
     let tool = object.get("name").and_then(Value::as_str);
-    let reply = if tool == Some(manifest::EVENTS_GET_TOOL)
-        || (tool == Some(manifest::EVENTS_TOOL)
-            && object
-                .get("arguments")
-                .and_then(|args| args.get("op"))
-                .and_then(Value::as_str)
-                == Some("get"))
-    {
-        // Stored bodies can be large: SQLite and byte hashing belong on the
-        // blocking pool, not on a Tokio worker running the wire dispatcher.
-        blocking_section(|| facade_tool_reply(&frame, object, state, route_bindings))?
-    } else {
-        blocking_section(|| facade_tool_reply(&frame, object, state, route_bindings))?
-    };
+    let reply = blocking_section(|| {
+        facade_tool_reply_with_budget(&frame, object, state, route_bindings, budget)
+    })?;
     if tool.is_some_and(tool_provider::is_metadata_op) {
         // Role metadata is not an MCP tool result: consumers decode the role's
         // answer directly, and refusals are terminal ERROR frames.
@@ -2129,7 +2333,7 @@ mod permissions;
 // stamp would use them with no flow attached, outside the flow rules
 // (`consent_unavailable` would not apply, so an ask_first action could file a
 // consent card), and with no owning flow on the audit row.
-const ADMITTED_FLOW_CARRIERS: &[&str] = &["reserved:basal"];
+const ADMITTED_FLOW_CARRIERS: &[&str] = &[principal::BASAL_PRINCIPAL];
 
 /// Serve one facade tool call (a `{name, arguments}` request naming one of
 /// the tools in `manifest`, as opposed to a `{method, params}` management
@@ -2137,13 +2341,30 @@ const ADMITTED_FLOW_CARRIERS: &[&str] = &["reserved:basal"];
 /// `{"result": ...}` or `{"error": ...}`. The caller sends it, adding the MCP
 /// `CallToolResult` fields in one place, so every early refusal below returns
 /// its body rather than sending a frame of its own.
+#[cfg(test)]
 fn facade_tool_reply(
     frame: &Frame,
     object: &serde_json::Map<String, Value>,
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
 ) -> Result<Value, ModuleError> {
-    let reply = facade_tool_reply_inner(frame, object, state, route_bindings)?;
+    facade_tool_reply_with_budget(
+        frame,
+        object,
+        state,
+        route_bindings,
+        request_execution::RequestBudget::new(),
+    )
+}
+
+fn facade_tool_reply_with_budget(
+    frame: &Frame,
+    object: &serde_json::Map<String, Value>,
+    state: &Arc<ModuleState>,
+    route_bindings: &Arc<RouteBindings>,
+    budget: Arc<request_execution::RequestBudget>,
+) -> Result<Value, ModuleError> {
+    let reply = facade_tool_reply_inner(frame, object, state, route_bindings, budget)?;
     let name = object.get("name").and_then(Value::as_str).unwrap_or("");
     if let Some(error) = reply.get("error") {
         if tool_provider::is_metadata_op(name)
@@ -2203,11 +2424,11 @@ fn facade_tool_reply_inner(
     object: &serde_json::Map<String, Value>,
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
+    budget: Arc<request_execution::RequestBudget>,
 ) -> Result<Value, ModuleError> {
-    let held_deadline = std::time::Instant::now() + plexus_core::consent_card::HELD_CALL_BUDGET;
+    let held_deadline = budget.deadline;
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
-    let correlation = frame.header.corr;
     let name = match object.get("name").and_then(Value::as_str) {
         Some(name) => name,
         None => {
@@ -2230,16 +2451,8 @@ fn facade_tool_reply_inner(
     // Retired identity tokens are undeclared on every tool, even if their
     // value is null or contains secrets. Refuse the field before any handler
     // can read credentials, send a request or silently discard it.
-    if let Some(field) = ["assertion", "agent_assertion"]
-        .into_iter()
-        .find(|field| arguments.contains_key(*field))
-    {
-        return Ok(json!({"error": {
-            "code": "argument_undeclared",
-            "field": field,
-            "message": format!("argument_undeclared{{field: {field}}}"),
-            "transmission": "not_sent"
-        }}));
+    if let Some(field) = retired_identity_field(arguments) {
+        return Ok(retired_identity_refusal(field));
     }
     // Broca, the model runner, copies the preset name from the session's plan
     // ("worker", "reader" or "head") onto every request it sends a provider, the
@@ -2324,6 +2537,7 @@ fn facade_tool_reply_inner(
         principal,
         scope: route_scope,
         mode,
+        ..
     }) = route_bindings.binding(channel, epoch)?
     else {
         // THE CHANNEL AND EPOCH ARE PRINTED because this refusal can follow a
@@ -2452,14 +2666,19 @@ fn facade_tool_reply_inner(
         None
     };
     if name == manifest::EVENTS_GET_TOOL
-        && arguments
-            .keys()
-            .any(|key| !matches!(key.as_str(), "event_key" | "event_name" | "version"))
+        || (name == manifest::EVENTS_TOOL
+            && arguments.get("op").and_then(Value::as_str) == Some("get"))
     {
-        return Ok(tool_error(
-            "invalid_request",
-            "events_get accepts only event_key, event_name and version",
-        ));
+        let invalid_key = arguments.keys().any(|key| {
+            !matches!(key.as_str(), "event_key" | "event_name" | "version")
+                && !(name == manifest::EVENTS_TOOL && key == "op")
+        });
+        if invalid_key {
+            return Ok(tool_error(
+                "invalid_request",
+                "event reads accept only event_key, event_name and version",
+            ));
+        }
     }
     let op = arguments.get("op").and_then(Value::as_str);
     if name == manifest::EVENTS_TOOL
@@ -2525,7 +2744,7 @@ fn facade_tool_reply_inner(
                 None,
                 None,
                 "github.bindings.read",
-                &format!("gh-{correlation}"),
+                &fresh_request_id(),
                 response.pointer("/error/code").and_then(Value::as_str),
             ) {
                 warn_audit_failed(&mut response, "github.bindings.read", &error);
@@ -2561,7 +2780,7 @@ fn facade_tool_reply_inner(
                         denial_response(&denial)
                     }
                     Err(plexus_core::github::reads::ReadError::Dispatch(outcome)) => {
-                        json!({"error":{"code":"read_dispatch_failed","outcome":format!("{outcome:?}")}})
+                        github_read_failure(outcome)
                     }
                     Err(plexus_core::github::reads::ReadError::InvalidResponse) => {
                         json!({"error":{"code":"read_response_invalid"}})
@@ -2599,8 +2818,8 @@ fn facade_tool_reply_inner(
                         .unwrap_or(""),
                 ),
             };
-            let request_id = format!("gh-{correlation}");
-            let owner = format!("{channel}-{correlation}");
+            let request_id = fresh_request_id();
+            let owner = request_id.clone();
             let now = plexus_core::now_ms();
             blocking_section(|| {
                 plexus_core::github::facade::bot_request_scoped(
@@ -2875,7 +3094,27 @@ fn facade_tool_reply_inner(
                 .store()
                 .list_catalog_actions(&principal_key, connection_id)
             {
-                Ok(actions) => json!({"result": {"actions": actions}}),
+                Ok(actions) => {
+                    let actions = if op == Some("inspect") {
+                        let Some(action) = arguments
+                            .get("action")
+                            .and_then(Value::as_str)
+                            .filter(|action| !action.is_empty())
+                        else {
+                            return Ok(tool_error(
+                                "invalid_request",
+                                "catalog inspect requires action",
+                            ));
+                        };
+                        actions
+                            .into_iter()
+                            .filter(|row| row.name == action)
+                            .collect::<Vec<_>>()
+                    } else {
+                        actions
+                    };
+                    json!({"result": {"actions": actions}})
+                }
                 Err(error) => {
                     crate::wire::store_failure("catalog read", "catalog could not be read", &error)
                 }
@@ -2926,12 +3165,20 @@ fn facade_tool_reply_inner(
             // Authorization first: the freshness check `dispatch_checked`
             // runs before sending may contact the vendor, so it never runs for
             // a caller the engine refused.
-            blocking_section(
-                || match state.runtime.engine.invoke_held(request, held_deadline) {
-                    Ok(outcome) => dispatch_response(outcome),
-                    Err(denial) => denial_response(&denial),
-                },
-            )
+            let home = state.runtime.connector_home.clone();
+            let guard_budget = budget.clone();
+            let engine = state
+                .runtime
+                .engine
+                .clone()
+                .with_connector_home_guard(Arc::new(move || {
+                    home.refusal()
+                        .or_else(|| guard_budget.expired().then(request_expired_reply))
+                }));
+            blocking_section(|| match engine.invoke_held(request, held_deadline) {
+                Ok(outcome) => dispatch_response(outcome),
+                Err(denial) => denial_response(&denial),
+            })
         }
         (manifest::INVOKE_TOOL, _) => {
             // Name the whole shape rather than only the missing op. A caller who
@@ -2982,7 +3229,27 @@ fn facade_tool_reply_inner(
                 arguments,
             )
         }),
-        (manifest::REQUESTS_TOOL, Some("list" | "inspect")) => {
+        (manifest::REQUESTS_TOOL, Some("inspect")) => {
+            let Some(id) = arguments
+                .get("request_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+            else {
+                return Ok(tool_error(
+                    "invalid_request",
+                    "requests inspect requires request_id",
+                ));
+            };
+            match state.store().list_action_requests(&principal_key) {
+                Ok(requests) => {
+                    json!({"result":{"requests":requests.into_iter().filter(|request| request.request_id == id).collect::<Vec<_>>(),"reconciliations":[]}})
+                }
+                Err(error) => {
+                    wire::store_failure("request inspected", "request could not be read", &error)
+                }
+            }
+        }
+        (manifest::REQUESTS_TOOL, Some("list")) => {
             match state
                 .store()
                 .list_action_requests(&principal_key)
@@ -3080,6 +3347,14 @@ fn facade_tool_reply_inner(
                 .get("script_source")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            if script_source.len() > MAX_PROBE_SCRIPT_BYTES
+                || actions.is_some_and(|items| items.len() > MAX_PROBE_ACTIONS)
+            {
+                return Ok(tool_error(
+                    "invalid_request",
+                    "probe script exceeds 64 KiB or actions exceed 100",
+                ));
+            }
             let rearm = arguments
                 .get("rearm")
                 .and_then(Value::as_str)
@@ -3216,11 +3491,7 @@ fn facade_tool_reply_inner(
             audience.as_ref(),
         ),
         (manifest::EVENTS_TOOL, Some("resume")) => {
-            let Some(subscription_id) = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str)
-            else {
+            let Some(subscription_id) = subscription_id_arg(arguments) else {
                 return Ok(
                     json!({"error": {"code": "invalid_request", "message": "resume requires subscription_id"}}),
                 );
@@ -3241,11 +3512,40 @@ fn facade_tool_reply_inner(
             }
         }
         (manifest::EVENTS_TOOL, Some("list")) => {
+            let limit = match arguments.get("limit") {
+                None => None,
+                Some(value) => match value.as_u64().filter(|size| (1..=1000).contains(size)) {
+                    Some(size) => Some(size as usize),
+                    None => {
+                        return Ok(tool_error(
+                            "invalid_request",
+                            "limit must be an integer from 1 to 1000",
+                        ))
+                    }
+                },
+            };
+            let after = match arguments.get("after") {
+                None => None,
+                Some(value) => match (
+                    value.get("created_at_ms").and_then(Value::as_i64),
+                    value.get("event_id").and_then(Value::as_str),
+                ) {
+                    (Some(at), Some(id))
+                        if !id.is_empty()
+                            && value.as_object().is_some_and(|cursor| cursor.len() == 2) =>
+                    {
+                        Some((at, id))
+                    }
+                    _ => {
+                        return Ok(tool_error(
+                            "invalid_request",
+                            "after requires only created_at_ms and event_id",
+                        ))
+                    }
+                },
+            };
             let connection_id = arguments.get("connection").and_then(Value::as_str);
-            let subscription_id = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str);
+            let subscription_id = subscription_id_arg(arguments);
             // The principal is the ONE fact a consumer cannot observe about its
             // own call, and it decides everything this op returns.
             //
@@ -3272,11 +3572,13 @@ fn facade_tool_reply_inner(
             // expired, and a caller-wide scalar would hide that failure.
             let now = plexus_core::now_ms();
             match (
-                state.store().list_events_with_consume_authority(
+                state.store().list_events_page_with_consume_authority(
                     &principal_key,
                     connection_id,
                     subscription_id,
                     now,
+                    limit,
+                    after,
                 ),
                 state.store().list_subscriptions_including_granted(
                     &principal_key,
@@ -3285,13 +3587,18 @@ fn facade_tool_reply_inner(
                     now,
                 ),
             ) {
-                (Ok(listing), Ok(subscriptions)) => json!({"result": {
-                    "events": listing.events,
-                    "subscriptions": subscriptions,
-                    "events_consume_authority": {
-                        "grants": listing.consume_authority
+                (Ok((listing, has_more)), Ok(subscriptions)) => {
+                    let next_after = has_more.then(|| listing.events.last().map(|event| json!({"created_at_ms":event.created_at_ms,"event_id":event.event_id}))).flatten();
+                    let mut reply = json!({"result": {
+                        "events": listing.events,
+                        "subscriptions": subscriptions,
+                        "events_consume_authority": {"grants": listing.consume_authority}
+                    }});
+                    if let Some(cursor) = next_after {
+                        reply["result"]["next_after"] = cursor;
                     }
-                }}),
+                    reply
+                }
                 // Each failed read is logged with its cause; the reply stays
                 // the same generic store_failure.
                 (Err(error), _) => {
@@ -3323,11 +3630,11 @@ fn facade_tool_reply_inner(
             let mut event_ids = event_ids;
             event_ids.sort();
             event_ids.dedup();
-            match state.store().ack_events_including_granted(
-                &principal_key,
-                &event_ids,
-                plexus_core::now_ms(),
-            ) {
+            let ack_now = plexus_core::now_ms();
+            match state
+                .store()
+                .ack_events_including_granted(&principal_key, &event_ids, ack_now)
+            {
                 // Report the count AND which ids did not land. A consumer acks
                 // what it has delivered, so an id that acks nothing means the
                 // two sides disagree about what exists: a wrong id, another
@@ -3354,11 +3661,7 @@ fn facade_tool_reply_inner(
             }
         }
         (manifest::EVENTS_TOOL, Some("unsubscribe")) => {
-            let Some(subscription_id) = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str)
-            else {
+            let Some(subscription_id) = subscription_id_arg(arguments) else {
                 return Ok(
                     json!({"error": {"code": "invalid_request", "message": "unsubscribe requires subscription_id"}}),
                 );
@@ -3376,11 +3679,7 @@ fn facade_tool_reply_inner(
             }
         }
         (manifest::EVENTS_TOOL, Some("set_project")) => {
-            let Some(subscription_id) = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str)
-            else {
+            let Some(subscription_id) = subscription_id_arg(arguments) else {
                 return Ok(
                     json!({"error": {"code": "invalid_request", "message": "set_project requires subscription_id"}}),
                 );
@@ -3431,11 +3730,7 @@ fn facade_tool_reply_inner(
             // Prefer `subscription_id` over its `subscription` alias, as the
             // other operations do. Calls supplying both fields must act on the
             // same subscription regardless of the operation.
-            let subscription_id = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty());
+            let subscription_id = subscription_id_arg(arguments).filter(|value| !value.is_empty());
             if subscription_id.is_none() {
                 missing.push("subscription_id".to_string());
             }
@@ -3520,11 +3815,7 @@ fn facade_tool_reply_inner(
             }
         }
         (manifest::EVENTS_TOOL, Some("set_actor_source")) => {
-            let Some(subscription_id) = arguments
-                .get("subscription_id")
-                .or_else(|| arguments.get("subscription"))
-                .and_then(Value::as_str)
-            else {
+            let Some(subscription_id) = subscription_id_arg(arguments) else {
                 return Ok(
                     json!({"error": {"code": "invalid_request", "message": "set_actor_source requires subscription_id"}}),
                 );
@@ -3586,6 +3877,13 @@ fn facade_tool_reply_inner(
 /// `unacked` list would falsely claim that the call acknowledged every named
 /// event. Include the count already acknowledged because those changes have
 /// committed even though the follow-up read failed.
+fn subscription_id_arg(arguments: &serde_json::Map<String, Value>) -> Option<&str> {
+    arguments
+        .get("subscription_id")
+        .or_else(|| arguments.get("subscription"))
+        .and_then(Value::as_str)
+}
+
 fn partial_ack_reply<E: std::fmt::Display>(acked: usize, unacked: Result<Vec<String>, E>) -> Value {
     match unacked {
         Ok(unacked) => json!({"result": {"acked": acked, "unacked": unacked}}),
@@ -3608,9 +3906,9 @@ fn event_get_reply(
     route_scope: Option<&CallScope>,
     audience: Option<&flow_audience::Audience>,
 ) -> Value {
-    let is_basal_flow = principal_key == "reserved:basal"
+    let is_basal_flow = principal_key == principal::BASAL_PRINCIPAL
         && route_scope.is_some_and(|scope| scope.flow_id.is_some());
-    let is_prefrontal_core = principal_key == "reserved:prefrontal-core";
+    let is_prefrontal_core = principal_key == plexus_core::github::PREFRONTAL_PRINCIPAL;
     if !is_basal_flow && !is_prefrontal_core {
         return tool_error(
             "events_get_carrier_refused",
@@ -3745,11 +4043,14 @@ fn connector_home_health(state: &ModuleState) -> ModuleControlResponse {
         }
         if let Some(metrics) = metrics {
             metrics["connectorHome"] = state.runtime.connector_home.status();
-            if let Ok(cached) = state.health.store_metrics.lock() {
-                if let Some(cached) = cached.as_object() {
-                    for (key, value) in cached {
-                        metrics[key] = value.clone();
-                    }
+            let cached = state
+                .health
+                .store_metrics
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(cached) = cached.as_object() {
+                for (key, value) in cached {
+                    metrics[key] = value.clone();
                 }
             }
             metrics["lastPublishError"] = json!(state.health.last_publish_error());
@@ -3770,25 +4071,33 @@ fn refresh_store_health(state: &ModuleState, principals: &[String]) {
         }
         Err(error) => eprintln!(warn health: "outbox health read failed: {error}"),
     }
-    let (_, stored_cadence) = effective_ci_cadence_from_store(
+    let stored_cadence = effective_ci_cadence_from_store(
         state.store(),
         principals,
         plexus_core::scheduler::RelayPollingHealth::slow_polling(state.health.relay.as_ref()),
     );
-    metrics["effectiveCiCadenceS"] =
-        json!(stored_cadence
-            .unwrap_or_else(|| state.store().ci_quota_cadence_s().unwrap_or(i64::MAX)));
-    if let Ok(mut cached) = state.health.store_metrics.lock() {
-        *cached = metrics;
+    match stored_cadence
+        .map(Ok)
+        .unwrap_or_else(|| state.store().ci_quota_cadence_s())
+    {
+        Ok(cadence) => metrics["effectiveCiCadenceS"] = json!(cadence),
+        Err(error) => {
+            eprintln!(warn health: "CI quota cadence read failed: {error}");
+            metrics["effectiveCiCadenceS"] = Value::Null;
+        }
     }
+    *state
+        .health
+        .store_metrics
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = metrics;
 }
 
 fn effective_ci_cadence_from_store(
     store: &PlexusStore,
     principals: &[String],
     relay_slow: bool,
-) -> (i64, Option<i64>) {
-    let mut r_count = 0i64;
+) -> Option<i64> {
     let mut stored_cadence: Option<i64> = None;
     let mut cadences = plexus_core::scheduler::PollingCadences::new(store, relay_slow);
     for principal in principals {
@@ -3796,7 +4105,6 @@ fn effective_ci_cadence_from_store(
             Ok(subs) => {
                 for sub in subs {
                     if sub.status == "active" && sub.cursor_kind.as_str() == "ci_runs" {
-                        r_count += 1;
                         // The CI cadence reported is the shortest among active
                         // CI-run watches, since that watch is due soonest.
                         let cadence = cadences.effective_cadence_s(&sub);
@@ -3807,7 +4115,7 @@ fn effective_ci_cadence_from_store(
             Err(error) => eprintln!(warn health: "CI cadence read failed for {principal}: {error}"),
         }
     }
-    (r_count, stored_cadence)
+    stored_cadence
 }
 
 #[cfg(test)]
@@ -3901,6 +4209,41 @@ fn health_probe_principals(state: &ModuleState) -> Vec<String> {
     principals
 }
 
+fn fresh_request_id() -> String {
+    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = NONCE.get_or_init(|| {
+        use std::io::Read;
+        let mut bytes = [0u8; 16];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(&mut bytes))
+            .expect("request identity requires operating-system randomness");
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    });
+    format!(
+        "gh-{nonce}-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+fn request_expired_reply() -> Value {
+    json!({"error":{"code":"request_deadline_exceeded", "transmission":"not_sent", "message":"request deadline passed; recall the approved call to retry"}})
+}
+
+fn retired_identity_field(arguments: &serde_json::Map<String, Value>) -> Option<&'static str> {
+    ["assertion", "agent_assertion"]
+        .into_iter()
+        .find(|field| arguments.contains_key(*field))
+}
+
+fn retired_identity_refusal(field: &str) -> Value {
+    json!({"error":{"code":"argument_undeclared", "field":field,
+        "message":format!("argument_undeclared{{field: {field}}}"), "transmission":"not_sent"}})
+}
+
 fn contains_secret_input(value: &serde_json::Map<String, Value>) -> bool {
     value
         .iter()
@@ -3929,6 +4272,10 @@ fn denial_response(denial: &plexus_core::Denial) -> Value {
         return json!({"error": {"code": code, "message": code, "elicitation_id": elicitation_id}});
     }
     if let plexus_core::Denial::ConnectorHomeNotHeld { state } = denial {
+        if state.pointer("/error/code").and_then(Value::as_str) == Some("request_deadline_exceeded")
+        {
+            return state.clone();
+        }
         return json!({"error":{"code":"connector_home_not_held", "message":format!("connector home not held: {state}"),"connectorHome":state,"transmission":"not_sent"}});
     }
     let mut response = json!({
@@ -3938,6 +4285,10 @@ fn denial_response(denial: &plexus_core::Denial) -> Value {
             "message": "governance denied the connector operation"
         }
     });
+    if matches!(denial, plexus_core::Denial::NeedsDecisionPlane(_)) {
+        response["error"]["message"] =
+            json!("S3/S4 execution is not active: no production decision plane is configured.");
+    }
     if let plexus_core::Denial::GrantRefusal(refusal) = denial {
         response["error"]["detail"] = json!(refusal.detail());
     }
@@ -3973,6 +4324,17 @@ fn denial_response(denial: &plexus_core::Denial) -> Value {
         response["error"]["limit"] = json!(limit);
     }
     response
+}
+
+fn github_read_failure(outcome: TransportOutcome) -> Value {
+    let (transmission, code) = match outcome {
+        TransportOutcome::Completed { .. } => ("completed", None),
+        TransportOutcome::VendorFailed { code, .. } => ("failed", Some(code)),
+        TransportOutcome::OutcomeUnknown => ("unknown", None),
+        TransportOutcome::NotSent { code, .. } => ("not_sent", Some(code)),
+    };
+    json!({"error":{"code":"read_dispatch_failed", "outcome":{"transmission":transmission,"code":code,
+        "message":"GitHub read dispatch did not complete"}}})
 }
 
 fn dispatch_response(outcome: DispatchOutcome) -> Value {
@@ -4330,8 +4692,9 @@ fn diagnostic_label(value: &str) -> String {
     label
 }
 
-/// Render search replies as validated content/v1 results. Other tools keep the
-/// MCP fields and legacy facade envelope they already serve.
+/// Full envelopes remain JSON text for relays. Large events/catalog listings
+/// keep their full legacy result but summarize text and omit structuredContent.
+/// Other tools keep the MCP fields and legacy facade envelope they already serve.
 ///
 /// Model-facing callers, such as Broca routing a model's tool call here, read
 /// only `content[].text`, `structuredContent` and `isError`; relays that
@@ -4373,21 +4736,31 @@ fn with_call_tool_result_with_repo(
     if let Some(tool @ (manifest::WEB_SEARCH_TOOL | manifest::CODE_SEARCH_TOOL)) = tool {
         return search_content_result(tool, reply, code_search_repo);
     }
-    let original = reply.clone();
+    let listing = matches!(tool, Some(manifest::EVENTS_TOOL | manifest::CATALOG_TOOL))
+        && ["events", "actions", "apps"]
+            .into_iter()
+            .any(|key| reply["result"][key].is_array());
+    let bounded_listing = listing && !json_fits(&reply, 64 * 1024);
+    let text = if let Some(error) = reply.get("error") {
+        if error.get("detail").is_some() {
+            pretty_json(&reply)
+        } else {
+            refusal_text(error)
+        }
+    } else if bounded_listing {
+        json!({"result":{"summary":"Listing is large; read result for full data or request an events page.",
+            "next_after":reply["result"]["next_after"]}}).to_string()
+    } else {
+        pretty_json(&reply)
+    };
     let Some(fields) = reply.as_object_mut() else {
         return reply;
     };
-    if let Some(error) = fields.get("error") {
-        let text = if error.get("detail").is_some() {
-            pretty_json(&original)
-        } else {
-            refusal_text(error)
-        };
+    if fields.contains_key("error") {
         fields.insert("content".to_string(), text_content(text));
         fields.insert("isError".to_string(), Value::Bool(true));
     } else if let Some(result) = fields.get("result") {
-        let text = pretty_json(&original);
-        let structured = result.is_object().then(|| result.clone());
+        let structured = (!bounded_listing && result.is_object()).then(|| result.clone());
         fields.insert("content".to_string(), text_content(text));
         fields.insert("isError".to_string(), Value::Bool(false));
         if let Some(structured) = structured {
@@ -4395,6 +4768,23 @@ fn with_call_tool_result_with_repo(
         }
     }
     reply
+}
+
+fn json_fits(value: &Value, limit: usize) -> bool {
+    struct BoundedSize(usize);
+    impl std::io::Write for BoundedSize {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.0 {
+                return Err(std::io::Error::other("JSON size limit"));
+            }
+            self.0 -= bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(BoundedSize(limit), value).is_ok()
 }
 
 #[cfg(test)]
@@ -4644,6 +5034,7 @@ fn parse_subc_arg(args: impl IntoIterator<Item = OsString>) -> Result<PathBuf, M
 
 #[derive(Debug)]
 pub enum ModuleError {
+    RouteCapacity,
     Message(String),
     Json(serde_json::Error),
 }
@@ -4665,6 +5056,7 @@ fn assert_bind_ack(frame: &Frame) {
 impl std::fmt::Display for ModuleError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RouteCapacity => write!(formatter, "route binding capacity exhausted"),
             Self::Message(message) => write!(formatter, "{message}"),
             Self::Json(error) => write!(formatter, "json: {error}"),
         }
@@ -9651,6 +10043,70 @@ mod events_get_tests {
         serde_json::from_slice(&frame.body).unwrap()
     }
 
+    #[tokio::test]
+    async fn event_pages_preserve_full_listing_and_stable_ties() {
+        let (_scratch, store, path) = test_store("event_pages");
+        seed_test_events(&path, &store);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("UPDATE trigger_events SET created_at_ms=123", [])
+            .unwrap();
+        for principal in [
+            Principal::Direct,
+            Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+        ] {
+            let full = execute_tool_call(
+                store.clone(),
+                principal.clone(),
+                None,
+                manifest::EVENTS_TOOL,
+                json!({"op":"list"}),
+            )
+            .await;
+            let first = execute_tool_call(
+                store.clone(),
+                principal.clone(),
+                None,
+                manifest::EVENTS_TOOL,
+                json!({"op":"list","limit":1}),
+            )
+            .await;
+            assert_eq!(first["result"]["events"].as_array().unwrap().len(), 1);
+            let mut collected = first["result"]["events"].as_array().unwrap().clone();
+            if full["result"]["events"].as_array().unwrap().len() > 1 {
+                assert!(first["result"]["next_after"].is_object());
+                let second = execute_tool_call(
+                    store.clone(),
+                    principal.clone(),
+                    None,
+                    manifest::EVENTS_TOOL,
+                    json!({"op":"list","limit":1,"after":first["result"]["next_after"]}),
+                )
+                .await;
+                collected.extend(second["result"]["events"].as_array().unwrap().clone());
+                assert!(second["result"].get("next_after").is_none());
+            } else {
+                assert!(first["result"].get("next_after").is_none());
+            }
+            assert_eq!(json!(collected), full["result"]["events"]);
+            assert_eq!(
+                first["result"]["events_consume_authority"],
+                full["result"]["events_consume_authority"]
+            );
+            assert!(full["result"].get("next_after").is_none());
+        }
+        let invalid = execute_tool_call(
+            store,
+            Principal::Direct,
+            None,
+            manifest::EVENTS_TOOL,
+            json!({"op":"list","limit":1001}),
+        )
+        .await;
+        assert_eq!(invalid["error"]["code"], "invalid_request");
+    }
+
     fn basal_flow_scope(agent_id: Option<&str>) -> CallScope {
         CallScope {
             owner: "basal".to_string(),
@@ -12053,9 +12509,6 @@ mod health_handler_tests {
             health: Arc::clone(&health),
             runtime: runtime_for_test(Arc::clone(&store)),
         });
-        // A successful response must re-stamp the heartbeat rather than report
-        // the stale value this fixture starts with.
-        health.backdate_heartbeat(5_000);
         let frame = Frame::build(
             FrameType::Request,
             wire::control_flags(),
@@ -12087,19 +12540,13 @@ mod health_handler_tests {
         else {
             panic!("expected a health check response");
         };
-        let metrics = metrics.expect("health report includes metrics");
         assert_eq!(
             status,
             HealthStatus::Ok,
-            "the handler must return a fresh heartbeat; detail={detail:?}"
+            "health check reports cached state; detail={detail:?}"
         );
-        assert!(
-            metrics
-                .get("heartbeatAgeMs")
-                .and_then(serde_json::Value::as_u64)
-                .is_some_and(|age| age < 2_000),
-            "the response must include a heartbeat within the freshness threshold: {metrics}"
-        );
+        let metrics = metrics.expect("health report includes metrics");
+
         assert!(
             metrics.get("schedulerAlive").is_some(),
             "the response must carry the regular health metrics: {metrics}"

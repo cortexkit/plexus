@@ -5656,10 +5656,8 @@ impl PlexusStore {
             .map(|listing| listing.events)
     }
 
-    /// The granted event read plus the caller's own `events_consume` grant state.
-    ///
-    /// Both projections are derived from one grant-table read. Expired grants do
-    /// not widen `events`, but remain in `consume_authority` with their deadline.
+    /// Return visible unacked events and the caller's consume-authority projection.
+    /// Without a page size the historical full listing is preserved.
     pub fn list_events_with_consume_authority(
         &self,
         principal: &str,
@@ -5667,15 +5665,32 @@ impl PlexusStore {
         subscription_id: Option<&str>,
         now_ms: i64,
     ) -> Result<EventsIncludingGranted, StoreError> {
-        let mut events = self.list_events(principal, connection_id, subscription_id)?;
-        // Two live grants from one owner can cover the same event; it is still
-        // one event and is delivered once.
-        let mut delivered: BTreeSet<String> =
-            events.iter().map(|event| event.event_id.clone()).collect();
+        self.list_events_page_with_consume_authority(
+            principal,
+            connection_id,
+            subscription_id,
+            now_ms,
+            None,
+            None,
+        )
+        .map(|(listing, _)| listing)
+    }
+
+    /// Page after the exclusive `(created_at_ms, event_id)` boundary. The extra
+    /// row detects continuation without loading the rest of the payloads.
+    pub fn list_events_page_with_consume_authority(
+        &self,
+        principal: &str,
+        connection_id: Option<&str>,
+        subscription_id: Option<&str>,
+        now_ms: i64,
+        limit: Option<usize>,
+        after: Option<(i64, &str)>,
+    ) -> Result<(EventsIncludingGranted, bool), StoreError> {
+        let grants = self.events_consume_connections(principal, now_ms)?;
         let mut consume_authority = Vec::new();
-        for grant in self.events_consume_connections(principal, now_ms)? {
-            // A caller narrowing by connection must not receive events or
-            // authority records from some other connection.
+        let mut live = Vec::new();
+        for grant in grants {
             if connection_id.is_some_and(|requested| requested != grant.connection_id) {
                 continue;
             }
@@ -5685,54 +5700,65 @@ impl PlexusStore {
                 authority_expires_at_ms: grant.expires_at,
                 authority_state: grant.authority_state.to_string(),
             });
-            if grant.authority_state != "live" {
-                continue;
-            }
-            // Self-grants add no events and would duplicate every owned row, but
-            // their authority remains caller-visible in the projection above.
-            if grant.owner == principal {
-                continue;
-            }
-            let owned_by_grantor =
-                self.list_events(&grant.owner, Some(&grant.connection_id), subscription_id)?;
-            let subscriptions = self.inner.with_read(|conn| {
-                let mut query=conn.prepare("SELECT subscription_id,action FROM trigger_subscriptions WHERE principal=?1 AND connection_id=?2 AND (?3 IS NULL OR subscription_id=?3)")?;
-                let rows=query.query_map(rusqlite::params![grant.owner,grant.connection_id,subscription_id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<std::collections::BTreeMap<_,_>>>()?;
-                Ok(rows)
-            })?;
-            for event in owned_by_grantor {
-                // Selector filtering is per EVENT, resolved through the
-                // subscription that produced it, because one connection can carry
-                // subscriptions for several actions and the grant names actions
-                // rather than connections. An empty selector list names no
-                // actions, so it cannot admit an event.
-                let action = subscriptions
-                    .get(&event.subscription_id)
-                    .map(String::as_str);
-                let permitted = action.is_some_and(|action| {
-                    grant
-                        .selectors
-                        .iter()
-                        .any(|selector| selector == action || selector == "*")
-                });
-                // An event whose subscription cannot be resolved is REFUSED
-                // rather than passed through: without it there is no way to know
-                // which action produced the row, so admitting it would hand a
-                // narrowly-scoped grantee a payload the grant may not cover.
-                if permitted && delivered.insert(event.event_id.clone()) {
-                    events.push(event);
-                }
+            if grant.authority_state == "live" && grant.owner != principal {
+                live.push(serde_json::json!({"owner":grant.owner, "connection":grant.connection_id, "selectors":grant.selectors}));
             }
         }
-        events.sort_by(|left, right| {
-            left.created_at_ms
-                .cmp(&right.created_at_ms)
-                .then_with(|| left.event_id.cmp(&right.event_id))
-        });
-        Ok(EventsIncludingGranted {
-            events,
-            consume_authority,
-        })
+        // SQL receives the same grant snapshot used by the authority projection.
+        // Filter by subscription action before SQLite reads or parses payloads;
+        // EXISTS also makes overlapping grants deliver each event only once.
+        let live_json = serde_json::Value::Array(live).to_string();
+        let sql_limit = limit.map(|size| size.min(1000) as i64 + 1).unwrap_or(-1);
+        let mut events = self.inner.with_read(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT e.event_id, e.principal, e.connection_id, e.subscription_id,
+                        e.vendor_event_id, e.payload_hash, e.payload, e.kind,
+                        e.gap_from_ms, e.gap_to_ms, e.gap_reason, e.observed_at_ms,
+                        e.acked_at_ms, e.created_at_ms, e.item_kind, e.activity_at_ms,
+                        e.actor_logins, e.actor_unknown_reason,
+                        EXISTS(SELECT 1 FROM trigger_subscriptions s
+                               WHERE s.subscription_id=e.subscription_id AND s.principal=e.principal
+                                 AND s.actor_source_json IS NOT NULL)
+                 FROM trigger_events e
+                 WHERE e.acked_at_ms IS NULL
+                   AND (?2 IS NULL OR e.connection_id=?2)
+                   AND (?3 IS NULL OR e.subscription_id=?3)
+                   AND (?5 IS NULL OR (e.created_at_ms,e.event_id) > (?5,?6))
+                   AND (e.principal=?1 OR EXISTS (
+                       SELECT 1 FROM json_each(?4) g
+                       JOIN trigger_subscriptions s ON s.subscription_id=e.subscription_id
+                            AND s.principal=e.principal
+                       JOIN json_each(g.value, '$.selectors') selector
+                       WHERE json_extract(g.value,'$.owner')=e.principal
+                         AND json_extract(g.value,'$.connection')=e.connection_id
+                         AND (selector.value='*' OR selector.value=s.action)))
+                 ORDER BY e.created_at_ms,e.event_id LIMIT ?7",
+            )?;
+            let rows = statement.query_map(
+                rusqlite::params![
+                    principal,
+                    connection_id,
+                    subscription_id,
+                    live_json,
+                    after.map(|cursor| cursor.0),
+                    after.map(|cursor| cursor.1),
+                    sql_limit
+                ],
+                map_trigger_event_row,
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        let has_more = limit.is_some_and(|size| events.len() > size.min(1000));
+        if let Some(size) = limit {
+            events.truncate(size.min(1000));
+        }
+        Ok((
+            EventsIncludingGranted {
+                events,
+                consume_authority,
+            },
+            has_more,
+        ))
     }
 
     /// Which of `event_ids` are NOT acked for this principal, read AFTER an ack
