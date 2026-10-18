@@ -8858,7 +8858,6 @@ fn prune_ceremony_history_on_conn(
     conn.execute("DELETE FROM consent_call_keys WHERE (principal,request_id) IN (SELECT principal,request_id FROM action_requests WHERE status IN ('consumed','denied','expired','cancelled') AND settled_at_ms<?1 ORDER BY settled_at_ms LIMIT 1000)",[cutoff])?;
     conn.execute("DELETE FROM action_requests WHERE (principal,request_id) IN (SELECT principal,request_id FROM action_requests WHERE status IN ('consumed','denied','expired','cancelled') AND settled_at_ms<?1 ORDER BY settled_at_ms LIMIT 1000)",[cutoff])?;
     conn.execute("DELETE FROM binding_tickets WHERE (principal,ticket_id) IN (SELECT principal,ticket_id FROM binding_tickets WHERE status IN ('consumed','expired','revoked') AND settled_at_ms<?1 ORDER BY settled_at_ms LIMIT 1000)",[now.saturating_sub(AUDIT_MILLIS_PER_DAY)])?;
-    conn.execute("DELETE FROM github_bot_receipt WHERE (agent_id,request_nonce) IN (SELECT agent_id,request_nonce FROM github_bot_receipt WHERE state IN ('outcome_unknown','pending','pending_approval') AND updated_at<?1 ORDER BY updated_at LIMIT 1000)",[cutoff])?;
     Ok(())
 }
 
