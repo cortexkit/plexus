@@ -1922,7 +1922,7 @@ old = """Err(ReadFailure::Vanished) => {
                             gone = true;
                             break;
                         }
-                        Err(ReadFailure::Cycle(cycle)) => return cycle,"""
+                        Err(ReadFailure::Cycle(cycle)) => return Err(cycle),"""
 new = """Err(ReadFailure::Vanished) => {
                             gone = true;
                             break;

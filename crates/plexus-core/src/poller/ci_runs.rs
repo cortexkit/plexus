@@ -62,13 +62,21 @@ struct RunMetadata {
     repository_id: i64,
 }
 
-struct CiDiscovery<'a> {
+struct CiCycle<'a> {
     base: &'a Value,
     from: i64,
     floor: i64,
     now: i64,
     used: &'a mut usize,
     gaps: &'a mut Vec<PollGapInput<'static>>,
+}
+
+struct CiProgress {
+    events: Vec<CiEvent>,
+    examined: usize,
+    dropped: Vec<(String, DropReason)>,
+    vanished: u64,
+    expired: u64,
 }
 
 struct CiEvent {
@@ -253,9 +261,9 @@ where
         principal: &str,
         sub: &TriggerSubscription,
         cursor: &mut CiCursor,
-        window: CiDiscovery<'_>,
+        window: CiCycle<'_>,
     ) -> Result<Vec<Value>, PollCycle> {
-        let CiDiscovery {
+        let CiCycle {
             base,
             from,
             floor,
@@ -409,6 +417,324 @@ where
         Ok(())
     }
 
+    fn process_ci_attempts(
+        &self,
+        principal: &str,
+        sub: &TriggerSubscription,
+        cursor: &mut CiCursor,
+        repo_name: &str,
+        cycle: CiCycle<'_>,
+    ) -> Result<CiProgress, PollCycle> {
+        let CiCycle {
+            base,
+            floor,
+            now,
+            used: used_counter,
+            gaps,
+            ..
+        } = cycle;
+        let mut used = *used_counter;
+        let invalid = || self.ci_vendor_failure(principal, sub, RESPONSE_SHAPE_INVALID.into());
+        let mut order = Vec::with_capacity(cursor.open.len());
+        for (key, attempt) in &cursor.open {
+            let Some(created) = iso8601::parse_to_millis(&attempt.created_at) else {
+                return Err(invalid());
+            };
+            order.push((key.clone(), attempt.last_checked_ms, created));
+        }
+        order.sort_by(|(ak, checked_a, created_a), (bk, checked_b, created_b)| {
+            (checked_a, created_a, ak).cmp(&(checked_b, created_b, bk))
+        });
+        let mut events = Vec::new();
+        // Count completed runs/jobs, plus one run for each attempt that finished
+        // before this watch was created; such attempts' jobs are never read.
+        // Those attempts, and completed items older than event retention, are
+        // dropped as `OlderThanWatermark`: the drop-ledger reason for an item
+        // below the oldest time this watch may report. Discovery rows and
+        // unfinished objects only track later work; they are not delivery items.
+        let mut examined = 0usize;
+        let mut dropped: Vec<(String, DropReason)> = Vec::new();
+        let (mut vanished, mut expired) = (0, 0);
+        for (position, (key, _, created)) in order.into_iter().enumerate() {
+            if created < floor {
+                cursor.open.remove(&key);
+                expired += 1;
+                gaps.push(PollGapInput {
+                    from_ms: created,
+                    to_ms: floor,
+                    reason: "ci_runs_attempt_expired",
+                });
+                continue;
+            }
+            // A run read without its first jobs page cannot progress an attempt.
+            // Untouched attempts keep their rank; partially read skips rotate.
+            if REQUEST_CAP - used < 2 {
+                continue;
+            }
+            let attempt = cursor.open[&key].clone();
+            let mut args = base.clone();
+            args["run_id"] = json!(attempt.run.run_id);
+            args["attempt_number"] = json!(attempt.run.run_attempt);
+            let run = match self.ci_read(
+                principal,
+                sub,
+                RUN_READ,
+                &cursor.pinned[RUN_READ],
+                args.clone(),
+                &mut used,
+                true,
+            ) {
+                Ok(body) => body,
+                Err(ReadFailure::Vanished) => {
+                    cursor.open.remove(&key);
+                    vanished += 1;
+                    continue;
+                }
+                Err(ReadFailure::Cycle(cycle)) => return Err(cycle),
+            };
+            // The per-attempt endpoint must not silently serve a newer rerun.
+            if metadata(&run).is_none_or(|meta| {
+                meta.run_id != attempt.run.run_id
+                    || meta.run_attempt != attempt.run.run_attempt
+                    || meta.repository_id != attempt.run.repository_id
+            }) {
+                return Err(invalid());
+            }
+            // Jobs carry the run's actor, event and fork status in their v2
+            // envelope. Take them from this run read; no extra request.
+            let run_attribution = crate::event_envelope::CiRunAttribution::from_run(&run);
+            // A replacement watch must keep following attempts still in flight
+            // when it was created. Only completed attempts can be historical;
+            // use the same updated_at completion time as the run envelope.
+            if run["status"] == "completed" {
+                let Some(completed) = timestamp(&run, "updated_at") else {
+                    return Err(invalid());
+                };
+                if completed < sub.created_at_ms {
+                    examined += 1;
+                    dropped.push((
+                        format!("run:{}:{}", attempt.run.run_id, attempt.run.run_attempt),
+                        DropReason::OlderThanWatermark,
+                    ));
+                    cursor.open.remove(&key);
+                    continue;
+                }
+            }
+            args["page"] = json!(1);
+            let first = match self.ci_read(
+                principal,
+                sub,
+                JOBS_READ,
+                &cursor.pinned[JOBS_READ],
+                args.clone(),
+                &mut used,
+                true,
+            ) {
+                Ok(body) => body,
+                Err(ReadFailure::Vanished) => {
+                    cursor.open.remove(&key);
+                    vanished += 1;
+                    continue;
+                }
+                Err(ReadFailure::Cycle(cycle)) => return Err(cycle),
+            };
+            let Some((count, mut jobs)) = page(first, "jobs") else {
+                return Err(invalid());
+            };
+            let pages = count.div_ceil(CI_PAGE_SIZE).max(1);
+            let oversized = count > 500;
+            if !oversized && pages - 1 > (REQUEST_CAP - used) as u64 {
+                cursor
+                    .open
+                    .get_mut(&key)
+                    .expect("open attempt")
+                    .last_checked_ms = now;
+                continue;
+            }
+            if !oversized {
+                let mut gone = false;
+                for number in 2..=pages {
+                    args["page"] = json!(number);
+                    let body = match self.ci_read(
+                        principal,
+                        sub,
+                        JOBS_READ,
+                        &cursor.pinned[JOBS_READ],
+                        args.clone(),
+                        &mut used,
+                        true,
+                    ) {
+                        Ok(body) => body,
+                        Err(ReadFailure::Vanished) => {
+                            gone = true;
+                            break;
+                        }
+                        Err(ReadFailure::Cycle(cycle)) => return Err(cycle),
+                    };
+                    let Some((page_count, next)) = page(body, "jobs") else {
+                        return Err(invalid());
+                    };
+                    if page_count != count {
+                        return Err(invalid());
+                    }
+                    jobs.extend(next);
+                }
+                if gone {
+                    cursor.open.remove(&key);
+                    vanished += 1;
+                    continue;
+                }
+                if jobs.len() as u64 != count {
+                    return Err(invalid());
+                }
+                for job in jobs {
+                    if completed_conclusion(&job).is_none() {
+                        continue;
+                    }
+                    examined += 1;
+                    match ci_event(
+                        job,
+                        &attempt.run,
+                        Some(&run_attribution),
+                        false,
+                        floor,
+                        repo_name,
+                        sub.project_id.clone(),
+                    ) {
+                        Ok(CiItem::Event(event)) => events.push(*event),
+                        Ok(CiItem::BelowAgeFloor(id)) => {
+                            dropped.push((id, DropReason::OlderThanWatermark))
+                        }
+                        Err(()) => return Err(invalid()),
+                    }
+                }
+            }
+            if completed_conclusion(&run).is_some() {
+                if oversized {
+                    let Some(updated) = timestamp(&run, "updated_at") else {
+                        return Err(invalid());
+                    };
+                    gaps.push(PollGapInput {
+                        from_ms: created,
+                        to_ms: updated,
+                        reason: "ci_attempt_too_large",
+                    });
+                }
+                examined += 1;
+                match ci_event(
+                    run,
+                    &attempt.run,
+                    None,
+                    true,
+                    floor,
+                    repo_name,
+                    sub.project_id.clone(),
+                ) {
+                    Ok(CiItem::Event(event)) => events.push(*event),
+                    Ok(CiItem::BelowAgeFloor(id)) => {
+                        dropped.push((id, DropReason::OlderThanWatermark))
+                    }
+                    Err(()) => return Err(invalid()),
+                }
+                cursor.open.remove(&key);
+            } else {
+                cursor
+                    .open
+                    .get_mut(&key)
+                    .expect("open attempt")
+                    .last_checked_ms = now.saturating_add(position as i64 + 1);
+            }
+        }
+        *used_counter = used;
+        Ok(CiProgress {
+            events,
+            examined,
+            dropped,
+            vanished,
+            expired,
+        })
+    }
+
+    fn commit_ci_progress(
+        &self,
+        principal: &str,
+        sub: &TriggerSubscription,
+        cursor: CiCursor,
+        progress: CiProgress,
+        cycle: CiCycle<'_>,
+    ) -> PollCycle {
+        let CiCycle { now, gaps, .. } = cycle;
+        let CiProgress {
+            events,
+            examined,
+            dropped,
+            vanished,
+            expired,
+        } = progress;
+        let store = self.engine.store();
+        let cursor = serde_json::to_value(cursor).expect("serializable CI cursor");
+        let inputs = events
+            .iter()
+            .map(|event| KeyedPollEventInput {
+                event: PollEventInput {
+                    vendor_event_id: &event.vendor_id,
+                    payload: &event.payload,
+                    observed_at_ms: now,
+                    item_kind: Some(event.item_kind),
+                    activity_at_ms: Some(event.activity_at_ms),
+                    actor: &ActorAttribution::NotEnriched,
+                },
+                identity: Some(KeyedEventIdentity {
+                    event_key: &event.key,
+                    event_name: event.event_name,
+                    repo_id: event.repo_id,
+                    change: None,
+                    headers: &event.headers,
+                }),
+                delivery_id: None,
+                envelope_context: crate::event_envelope::EnvelopeContext {
+                    ci_run: event.ci_run.clone(),
+                    ..Default::default()
+                },
+            })
+            .collect::<Vec<_>>();
+        match store.commit_keyed_poll_success(
+            principal,
+            &sub.connection_id,
+            &sub.subscription_id,
+            &cursor,
+            &inputs,
+            now,
+            gaps,
+        ) {
+            Ok(outcomes) => {
+                RUNS_VANISHED.fetch_add(vanished, Ordering::Relaxed);
+                RUNS_EXPIRED.fetch_add(expired, Ordering::Relaxed);
+                accounting::record_ledger(
+                    &sub.subscription_id,
+                    examined,
+                    events.iter().map(|event| event.vendor_id.as_str()),
+                    dropped,
+                    &outcomes,
+                );
+                let inserted = outcomes
+                    .iter()
+                    .filter(|o| matches!(o, TriggerEventInsertOutcome::Inserted { .. }))
+                    .count();
+                PollCycle::Completed {
+                    inserted,
+                    duplicates: outcomes.len() - inserted,
+                }
+            }
+            Err(crate::storage::PollCommitError::Inactive) => PollCycle::NotEligible {
+                reason: SUBSCRIPTION_NOT_ACTIVE.into(),
+            },
+            Err(error) => PollCycle::StoreFailed {
+                reason: error.to_string(),
+            },
+        }
+    }
+
     pub(super) fn poll_ci_runs(&self, principal: &str, sub: &TriggerSubscription) -> PollCycle {
         self.poll_ci_runs_at(principal, sub, now_ms())
     }
@@ -524,7 +850,7 @@ where
             principal,
             sub,
             &mut cursor,
-            CiDiscovery {
+            CiCycle {
                 base: &base,
                 from,
                 floor,
@@ -550,278 +876,38 @@ where
                 reason: "ci_runs_open_limit",
             });
         }
-        let mut order = Vec::with_capacity(cursor.open.len());
-        for (key, attempt) in &cursor.open {
-            let Some(created) = iso8601::parse_to_millis(&attempt.created_at) else {
-                return invalid();
-            };
-            order.push((key.clone(), attempt.last_checked_ms, created));
-        }
-        order.sort_by(|(ak, checked_a, created_a), (bk, checked_b, created_b)| {
-            (checked_a, created_a, ak).cmp(&(checked_b, created_b, bk))
-        });
-        let mut events = Vec::new();
-        // Count completed runs/jobs, plus one run for each attempt that finished
-        // before this watch was created; such attempts' jobs are never read.
-        // Those attempts, and completed items older than event retention, are
-        // dropped as `OlderThanWatermark`: the drop-ledger reason for an item
-        // below the oldest time this watch may report. Discovery rows and
-        // unfinished objects only track later work; they are not delivery items.
-        let mut examined = 0usize;
-        let mut dropped: Vec<(String, DropReason)> = Vec::new();
-        let (mut vanished, mut expired) = (0, 0);
-        for (position, (key, _, created)) in order.into_iter().enumerate() {
-            if created < floor {
-                cursor.open.remove(&key);
-                expired += 1;
-                gaps.push(PollGapInput {
-                    from_ms: created,
-                    to_ms: floor,
-                    reason: "ci_runs_attempt_expired",
-                });
-                continue;
-            }
-            // A run read without its first jobs page cannot progress an attempt.
-            // Untouched attempts keep their rank; partially read skips rotate.
-            if REQUEST_CAP - used < 2 {
-                continue;
-            }
-            let attempt = cursor.open[&key].clone();
-            let mut args = base.clone();
-            args["run_id"] = json!(attempt.run.run_id);
-            args["attempt_number"] = json!(attempt.run.run_attempt);
-            let run = match self.ci_read(
-                principal,
-                sub,
-                RUN_READ,
-                &cursor.pinned[RUN_READ],
-                args.clone(),
-                &mut used,
-                true,
-            ) {
-                Ok(body) => body,
-                Err(ReadFailure::Vanished) => {
-                    cursor.open.remove(&key);
-                    vanished += 1;
-                    continue;
-                }
-                Err(ReadFailure::Cycle(cycle)) => return cycle,
-            };
-            // The per-attempt endpoint must not silently serve a newer rerun.
-            if metadata(&run).is_none_or(|meta| {
-                meta.run_id != attempt.run.run_id
-                    || meta.run_attempt != attempt.run.run_attempt
-                    || meta.repository_id != attempt.run.repository_id
-            }) {
-                return invalid();
-            }
-            // Jobs carry the run's actor, event and fork status in their v2
-            // envelope. Take them from this run read; no extra request.
-            let run_attribution = crate::event_envelope::CiRunAttribution::from_run(&run);
-            // A replacement watch must keep following attempts still in flight
-            // when it was created. Only completed attempts can be historical;
-            // use the same updated_at completion time as the run envelope.
-            if run["status"] == "completed" {
-                let Some(completed) = timestamp(&run, "updated_at") else {
-                    return invalid();
-                };
-                if completed < sub.created_at_ms {
-                    examined += 1;
-                    dropped.push((
-                        format!("run:{}:{}", attempt.run.run_id, attempt.run.run_attempt),
-                        DropReason::OlderThanWatermark,
-                    ));
-                    cursor.open.remove(&key);
-                    continue;
-                }
-            }
-            args["page"] = json!(1);
-            let first = match self.ci_read(
-                principal,
-                sub,
-                JOBS_READ,
-                &cursor.pinned[JOBS_READ],
-                args.clone(),
-                &mut used,
-                true,
-            ) {
-                Ok(body) => body,
-                Err(ReadFailure::Vanished) => {
-                    cursor.open.remove(&key);
-                    vanished += 1;
-                    continue;
-                }
-                Err(ReadFailure::Cycle(cycle)) => return cycle,
-            };
-            let Some((count, mut jobs)) = page(first, "jobs") else {
-                return invalid();
-            };
-            let pages = count.div_ceil(CI_PAGE_SIZE).max(1);
-            let oversized = count > 500;
-            if !oversized && pages - 1 > (REQUEST_CAP - used) as u64 {
-                cursor
-                    .open
-                    .get_mut(&key)
-                    .expect("open attempt")
-                    .last_checked_ms = now;
-                continue;
-            }
-            if !oversized {
-                let mut gone = false;
-                for number in 2..=pages {
-                    args["page"] = json!(number);
-                    let body = match self.ci_read(
-                        principal,
-                        sub,
-                        JOBS_READ,
-                        &cursor.pinned[JOBS_READ],
-                        args.clone(),
-                        &mut used,
-                        true,
-                    ) {
-                        Ok(body) => body,
-                        Err(ReadFailure::Vanished) => {
-                            gone = true;
-                            break;
-                        }
-                        Err(ReadFailure::Cycle(cycle)) => return cycle,
-                    };
-                    let Some((page_count, next)) = page(body, "jobs") else {
-                        return invalid();
-                    };
-                    if page_count != count {
-                        return invalid();
-                    }
-                    jobs.extend(next);
-                }
-                if gone {
-                    cursor.open.remove(&key);
-                    vanished += 1;
-                    continue;
-                }
-                if jobs.len() as u64 != count {
-                    return invalid();
-                }
-                for job in jobs {
-                    if completed_conclusion(&job).is_none() {
-                        continue;
-                    }
-                    examined += 1;
-                    match ci_event(
-                        job,
-                        &attempt.run,
-                        Some(&run_attribution),
-                        false,
-                        floor,
-                        &repo_name,
-                        sub.project_id.clone(),
-                    ) {
-                        Ok(CiItem::Event(event)) => events.push(*event),
-                        Ok(CiItem::BelowAgeFloor(id)) => {
-                            dropped.push((id, DropReason::OlderThanWatermark))
-                        }
-                        Err(()) => return invalid(),
-                    }
-                }
-            }
-            if completed_conclusion(&run).is_some() {
-                if oversized {
-                    let Some(updated) = timestamp(&run, "updated_at") else {
-                        return invalid();
-                    };
-                    gaps.push(PollGapInput {
-                        from_ms: created,
-                        to_ms: updated,
-                        reason: "ci_attempt_too_large",
-                    });
-                }
-                examined += 1;
-                match ci_event(
-                    run,
-                    &attempt.run,
-                    None,
-                    true,
-                    floor,
-                    &repo_name,
-                    sub.project_id.clone(),
-                ) {
-                    Ok(CiItem::Event(event)) => events.push(*event),
-                    Ok(CiItem::BelowAgeFloor(id)) => {
-                        dropped.push((id, DropReason::OlderThanWatermark))
-                    }
-                    Err(()) => return invalid(),
-                }
-                cursor.open.remove(&key);
-            } else {
-                cursor
-                    .open
-                    .get_mut(&key)
-                    .expect("open attempt")
-                    .last_checked_ms = now.saturating_add(position as i64 + 1);
-            }
-        }
-        cursor.scanned_through_ms = Some(now);
-        let cursor = serde_json::to_value(cursor).expect("serializable CI cursor");
-        let inputs = events
-            .iter()
-            .map(|event| KeyedPollEventInput {
-                event: PollEventInput {
-                    vendor_event_id: &event.vendor_id,
-                    payload: &event.payload,
-                    observed_at_ms: now,
-                    item_kind: Some(event.item_kind),
-                    activity_at_ms: Some(event.activity_at_ms),
-                    actor: &ActorAttribution::NotEnriched,
-                },
-                identity: Some(KeyedEventIdentity {
-                    event_key: &event.key,
-                    event_name: event.event_name,
-                    repo_id: event.repo_id,
-                    change: None,
-                    headers: &event.headers,
-                }),
-                delivery_id: None,
-                envelope_context: crate::event_envelope::EnvelopeContext {
-                    ci_run: event.ci_run.clone(),
-                    ..Default::default()
-                },
-            })
-            .collect::<Vec<_>>();
-        match store.commit_keyed_poll_success(
+        let progress = match self.process_ci_attempts(
             principal,
-            &sub.connection_id,
-            &sub.subscription_id,
-            &cursor,
-            &inputs,
-            now,
-            &gaps,
+            sub,
+            &mut cursor,
+            &repo_name,
+            CiCycle {
+                base: &base,
+                from,
+                floor,
+                now,
+                used: &mut used,
+                gaps: &mut gaps,
+            },
         ) {
-            Ok(outcomes) => {
-                RUNS_VANISHED.fetch_add(vanished, Ordering::Relaxed);
-                RUNS_EXPIRED.fetch_add(expired, Ordering::Relaxed);
-                accounting::record_ledger(
-                    &sub.subscription_id,
-                    examined,
-                    events.iter().map(|event| event.vendor_id.as_str()),
-                    dropped,
-                    &outcomes,
-                );
-                let inserted = outcomes
-                    .iter()
-                    .filter(|o| matches!(o, TriggerEventInsertOutcome::Inserted { .. }))
-                    .count();
-                PollCycle::Completed {
-                    inserted,
-                    duplicates: outcomes.len() - inserted,
-                }
-            }
-            Err(crate::storage::PollCommitError::Inactive) => PollCycle::NotEligible {
-                reason: SUBSCRIPTION_NOT_ACTIVE.into(),
+            Ok(progress) => progress,
+            Err(cycle) => return cycle,
+        };
+        cursor.scanned_through_ms = Some(now);
+        self.commit_ci_progress(
+            principal,
+            sub,
+            cursor,
+            progress,
+            CiCycle {
+                base: &base,
+                from,
+                floor,
+                now,
+                used: &mut used,
+                gaps: &mut gaps,
             },
-            Err(error) => PollCycle::StoreFailed {
-                reason: error.to_string(),
-            },
-        }
+        )
     }
 }
 
