@@ -1127,6 +1127,7 @@ fn reconciliation_statuses(
         .store()
         .list_write_reconciliations("direct")
         .unwrap()
+        .0
         .into_iter()
         .map(|row| (row.request_id, row.status, row.reason))
         .collect();

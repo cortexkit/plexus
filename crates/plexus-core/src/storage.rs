@@ -8,7 +8,6 @@
 //! active reservation behind.
 
 use std::collections::BTreeSet;
-use std::io::Read;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,6 +40,7 @@ fn epoch_from_sql(stored: i64) -> u64 {
 /// Milliseconds in one policy day.
 pub const AUDIT_MILLIS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
 /// Recent audit evidence cannot be deleted inside this floor, even by retention.
+/// The SQL floor in migrations 26 and 40 is frozen; changing it needs a new migration.
 pub const AUDIT_DELETE_FLOOR_DAYS: i64 = 7;
 /// Safe deployment-wide retention policy when no environment override is stated.
 pub const DEFAULT_AUDIT_RETENTION_DAYS: i64 = 30;
@@ -50,8 +50,22 @@ pub const AUDIT_RETENTION_BATCH_ROWS: usize = 1_000;
 pub(crate) const RESERVATION_RETENTION_MS: i64 = AUDIT_MILLIS_PER_DAY;
 /// Reservation pruning shares the audit pass's transaction-size bound.
 const RESERVATION_RETENTION_BATCH_ROWS: usize = AUDIT_RETENTION_BATCH_ROWS;
+const CEREMONY_RETENTION_BATCH_ROWS: i64 = AUDIT_RETENTION_BATCH_ROWS as i64;
+const RECONCILIATION_BATCH_ROWS: i64 = 1_000;
+const SUBSCRIPTION_EVENTS_PREDICATE: &str = "principal = ?1 AND subscription_id = ?2";
 const BINDING_TICKET_TTL_MS: i64 = 60_000;
 const MAX_DIAGNOSTIC_ACTION_CHARS: usize = 80;
+/// Maximum ids processed under one acknowledgement transaction, not a request cap.
+pub const MAX_EVENT_ACK_IDS: usize = 500;
+const EVENT_ACK_AUTHORITY: &str = "(principal=?1 OR EXISTS (
+    SELECT 1 FROM grants g JOIN trigger_subscriptions s
+    ON s.subscription_id=trigger_events.subscription_id
+    AND s.principal=trigger_events.principal AND s.connection_id=trigger_events.connection_id
+    JOIN json_each(g.action_selectors) selector
+    WHERE g.principal=trigger_events.principal AND g.connection_id=trigger_events.connection_id
+    AND g.grantee_principal=?1 AND g.grantee_principal<>'*' AND g.authority_kind='events_consume'
+    AND (g.expires_at IS NULL OR g.expires_at>?3)
+    AND (selector.value=s.action OR selector.value='*')))";
 
 /// The connector schema, beginning with the complete fresh-store schema.
 ///
@@ -1215,8 +1229,9 @@ const GITHUB_HANDLE_CONNECTION_PREFIX: &str = "github-handle-";
 /// table's row.
 ///
 /// Deliberately absent:
-/// - `audit_journal` and `grant_revocations`: the audit trail stays
-///   append-only at runtime and ages out through audit retention.
+/// - `audit_journal`: append-only at runtime, with bounded age-based retention.
+/// - `grant_revocations`: immutable evidence kept indefinitely at runtime;
+///   migration 40 was a one-time exception for eligible revoked connections.
 /// - `github_app_handle`: a connection it references is refused instead.
 ///
 /// The schema test `every_connection_keyed_table_is_deleted_or_deliberately_kept`
@@ -1240,6 +1255,11 @@ pub(crate) const CONNECTION_KEYED_TABLES: &[(&str, &str)] = &[
     ("catalog_actions", "principal = ?1 AND connection_id = ?2"),
     ("grants", "principal = ?1 AND connection_id = ?2"),
     ("policies", "principal = ?1 AND connection_id = ?2"),
+    (
+        "consent_call_keys",
+        "(principal, request_id) IN (SELECT principal, request_id FROM action_requests
+                                    WHERE principal = ?1 AND connection_id = ?2)",
+    ),
     ("action_requests", "principal = ?1 AND connection_id = ?2"),
     ("reservations", "principal = ?1 AND connection_id = ?2"),
     ("binding_tickets", "principal = ?1 AND connection_id = ?2"),
@@ -1654,19 +1674,10 @@ pub struct TriggerSubscription {
     pub created_at_ms: i64,
     /// When the authority behind this watch lapses.
     ///
-    /// A subscription row carries no expiry of its own: it polls until the POLL
-    /// GRANT authorizing it expires, and every poll grant expires by design --
-    /// minting one without a deadline is refused, precisely so a background
-    /// reader cannot run forever unattended. That makes lapse the NORMAL end of
-    /// a watch rather than a fault, and it arrives silently: the subscription
-    /// stays `active`, the next poll is refused, and the failure surfaces as a
-    /// feed that stopped rather than as an expiry anyone was warned about.
-    ///
-    /// Reported here so a consumer can warn BEFORE that happens. `None` means no
-    /// grant matched the action at all; a value in the past means the grant that
-    /// matched has already lapsed, which is why the field is not silently
-    /// cleared on expiry -- "expired two days ago" is the actionable reading and
-    /// an absent value cannot express it.
+    /// A watch's poll grant may expire or remain live until revoked. Report a
+    /// configured deadline even after it lapses so consumers can explain a feed
+    /// that stopped. `None` means either no matching grant or an unexpiring grant;
+    /// inspect `authority_state` to distinguish those cases.
     pub authority_expires_at_ms: Option<i64>,
     /// Whether that authority currently authorizes this subscription's action:
     /// `live`, `expired`, or `absent`.
@@ -2258,8 +2269,8 @@ impl GrantRecord {
 /// The reverse order produces a genuinely misleading denial: a connection
 /// watching two actions, where one poll grant lapses, would report the
 /// surviving grant's selector mismatch and send an operator hunting a scope
-/// problem when the fix is to renew. That configuration is ordinary rather
-/// than exotic, and every poll grant expires by design.
+/// problem when the fix is to renew. Poll grants may have a deadline or remain
+/// live until revoked; this fallback explains the ones that do expire.
 ///
 /// None of this changes WHETHER the request is refused. All three fallbacks
 /// are refusals; the ordering only decides which reason the caller reports.
@@ -2511,6 +2522,7 @@ pub struct RequestScope {
 }
 
 impl RequestScope {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn from_call_scope(scope: &CallScope) -> Self {
         Self {
             owner: scope.owner.clone(),
@@ -2859,18 +2871,28 @@ fn race_point(point: &'static str) {
     let _ = point;
 }
 
-const DUE_SUBSCRIPTIONS_SELECT: &str =
-    "SELECT subscription_id, principal, connection_id, action, cadence_s,
-    cursor_kind, cursor_state, fixed_args, schema_hash, status, suspended_reason,
-    last_polled_at_ms, last_success_at_ms, consecutive_vendor_failures, generation, created_at_ms,
-    project_id, deliver_to, actor_source_json FROM trigger_subscriptions
+macro_rules! trigger_subscription_columns {
+    () => {
+        "subscription_id, principal, connection_id, action, cadence_s,
+         cursor_kind, cursor_state, fixed_args, schema_hash, status, suspended_reason,
+         last_polled_at_ms, last_success_at_ms, consecutive_vendor_failures, generation,
+         created_at_ms, project_id, deliver_to, actor_source_json"
+    };
+}
+const TRIGGER_SUBSCRIPTION_COLUMNS: &str = trigger_subscription_columns!();
+const DUE_SUBSCRIPTIONS_SELECT: &str = concat!(
+    "SELECT ", trigger_subscription_columns!(), " FROM trigger_subscriptions
     WHERE principal = ?1 AND status = 'active'
-    AND (last_polled_at_ms IS NULL OR (?2 - last_polled_at_ms) >= cadence_s * 1000)
-    ORDER BY created_at_ms, subscription_id";
+    AND (last_polled_at_ms IS NULL OR last_polled_at_ms > ?2 OR (?2 - last_polled_at_ms) >= cadence_s * 1000)
+    ORDER BY created_at_ms, subscription_id");
+
+type ManifestCache =
+    std::collections::BTreeMap<(String, String), (String, std::sync::Arc<AppManifest>)>;
 
 /// Lease-guarded store for the plexus domain.
 pub struct PlexusStore {
     inner: SqliteStore,
+    manifest_cache: std::sync::Mutex<ManifestCache>,
     grant_journal: Option<PathBuf>,
     outbox_ready: tokio::sync::Notify,
     /// Run values from recent `workflow_run` webhooks, for later job webhooks.
@@ -2950,6 +2972,7 @@ impl PlexusStore {
             grant_journal,
             outbox_ready: tokio::sync::Notify::new(),
             ci_runs: Default::default(),
+            manifest_cache: Default::default(),
         })
     }
 
@@ -3041,7 +3064,7 @@ impl PlexusStore {
                        WHERE grant.principal = connection.principal
                          AND grant.connection_id = connection.connection_id
                          AND grant.authority_kind = 'invoke'
-                         AND (grant.grantee_principal = ?1 OR grant.grantee_principal = '*')
+                         AND grant.grantee_principal = ?1 AND grant.grantee_principal <> '*'
                    )
                  ORDER BY connection.principal
                  LIMIT 2",
@@ -3060,6 +3083,7 @@ impl PlexusStore {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn create_connection(
         &self,
         principal: &str,
@@ -3075,6 +3099,7 @@ impl PlexusStore {
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_connection(
         &self,
         principal: &str,
@@ -3117,10 +3142,10 @@ impl PlexusStore {
         let Some(connection) = self.connection(principal, connection_id)? else {
             return Ok(ConfigureOutcome::ConnectionNotFound);
         };
-        let Some(document) = self.manifest_json(CATALOG_PRINCIPAL, &connection.app_key)? else {
+        let Some(document) = self.parsed_manifest(CATALOG_PRINCIPAL, &connection.app_key)? else {
             return Ok(ConfigureOutcome::ManifestMissing);
         };
-        let manifest: crate::manifest::AppManifest = match serde_json::from_value(document) {
+        let manifest = match document {
             Ok(manifest) => manifest,
             Err(error) => return Err(StoreError::Backend(error.to_string())),
         };
@@ -3390,9 +3415,10 @@ impl PlexusStore {
 
     /// Delete a connection on an operator's instruction, with every row keyed
     /// by it ([`CONNECTION_KEYED_TABLES`]) except its audit rows and grant
-    /// revocation snapshots. Those stay append-only at runtime and age out
-    /// through audit retention, so no operator command can erase the audit
-    /// trail. An audit row naming the deleted connection is written in the
+    /// revocation snapshots. This runtime operator delete leaves both in place;
+    /// audit retention ages out audit rows, not revocation snapshots. Migration 40
+    /// was a historical exception that purged both for eligible revoked connections.
+    /// An audit row naming the deleted connection is written in the
     /// same transaction, so the delete and its record commit or roll back
     /// together.
     ///
@@ -3512,6 +3538,7 @@ impl PlexusStore {
     /// on the action is suspended in this same fenced transaction, so the
     /// catalog cannot expose a quarantined action while its subscription remains
     /// active.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn quarantine_action(
         &self,
         principal: &str,
@@ -3641,6 +3668,7 @@ impl PlexusStore {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn upsert_catalog_action(&self, input: &CatalogActionInput) -> Result<(), StoreError> {
         let schema = serde_json::to_string(&input.schema)
             .map_err(|error| StoreError::Backend(error.to_string()))?;
@@ -3716,6 +3744,7 @@ impl PlexusStore {
     /// are quarantined until a reviewer explicitly reactivates them. The
     /// catalog write and any trigger suspension happen in one fenced
     /// transaction, so a refresh cannot leave a risky action pollable.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn refresh_catalog_action(&self, input: CatalogActionInput) -> Result<(), StoreError> {
         self.inner
             .with_conn_fenced(|conn| refresh_catalog_action_on_conn(conn, input, now_ms()))
@@ -3729,17 +3758,22 @@ impl PlexusStore {
         connection_id: &str,
         actions: &[CatalogActionInput],
     ) -> Result<(), StoreError> {
-        self.inner.with_conn_fenced(|conn| {
+        if actions
+            .iter()
+            .any(|input| input.principal != principal || input.connection_id != connection_id)
+        {
+            return Err(StoreError::Backend(
+                "catalog observation refused: scope mismatch".into(),
+            ));
+        }
+        let accepted = self.inner.with_conn_fenced(|conn| {
             let mut statement = conn.prepare("SELECT name FROM catalog_actions WHERE principal=?1 AND connection_id=?2 AND status <> 'disabled'")?;
             let existing: Vec<String> = statement.query_map((principal, connection_id), |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
             if actions.is_empty() && !existing.is_empty() {
-                return Err(rusqlite::Error::InvalidParameterName("empty catalog observation".into()));
+                return Ok(false);
             }
             let now = now_ms();
             for input in actions {
-                if input.principal != principal || input.connection_id != connection_id {
-                    return Err(rusqlite::Error::InvalidParameterName("catalog observation scope mismatch".into()));
-                }
                 refresh_catalog_action_on_conn(conn, input.clone(), now)?;
             }
             for name in existing {
@@ -3747,8 +3781,14 @@ impl PlexusStore {
                     disable_catalog_action_on_conn(conn, principal, connection_id, &name, now)?;
                 }
             }
-            Ok(())
-        })
+            Ok(true)
+        })?;
+        if !accepted {
+            return Err(StoreError::Backend(
+                "catalog observation refused: empty observation".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn list_catalog_actions(
@@ -3795,6 +3835,7 @@ impl PlexusStore {
     /// Disable an action missing from a successful catalog refresh and consume
     /// any reservation that was approved against it. Any trigger on the action
     /// is suspended in this same fenced transaction.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn disable_catalog_action(
         &self,
         principal: &str,
@@ -3862,7 +3903,7 @@ impl PlexusStore {
                 ),
                 (principal, connection_id, action),
                 |row| {
-                    let reviewed_schema: Option<String> = row.get(13)?;
+                    let reviewed_schema: Option<String> = row.get(14)?;
                     Ok(CatalogActionReview {
                         action: map_catalog_action_row(row)?,
                         reviewed_schema: reviewed_schema
@@ -3887,11 +3928,10 @@ impl PlexusStore {
         let Some(connection) = self.connection(principal, connection_id)? else {
             return Ok(None);
         };
-        let Some(document) = self.manifest_json(CATALOG_PRINCIPAL, &connection.app_key)? else {
+        let Some(document) = self.parsed_manifest(CATALOG_PRINCIPAL, &connection.app_key)? else {
             return Ok(None);
         };
-        let manifest: AppManifest = serde_json::from_value(document)
-            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let manifest = document.map_err(StoreError::Backend)?;
         Ok(manifest
             .actions_baseline
             .iter()
@@ -3917,11 +3957,10 @@ impl PlexusStore {
         let Some(connection) = self.connection(principal, connection_id)? else {
             return Ok(None);
         };
-        let Some(document) = self.manifest_json(CATALOG_PRINCIPAL, &connection.app_key)? else {
+        let Some(document) = self.parsed_manifest(CATALOG_PRINCIPAL, &connection.app_key)? else {
             return Ok(None);
         };
-        let manifest: AppManifest = serde_json::from_value(document)
-            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let manifest = document.map_err(StoreError::Backend)?;
         Ok(manifest
             .actions_baseline
             .iter()
@@ -4007,11 +4046,13 @@ impl PlexusStore {
                 .unwrap_or_else(|| catalog_action.status.clone());
             return Ok(Err(SubscriptionRefusal::ActionUnavailable(reason)));
         }
-        let Some(document) = self.manifest_json(CATALOG_PRINCIPAL, &connection.app_key)? else {
+        let Some(document) = self.parsed_manifest(CATALOG_PRINCIPAL, &connection.app_key)? else {
             return Ok(Err(SubscriptionRefusal::ManifestMissing));
         };
-        let manifest: AppManifest = serde_json::from_value(document)
-            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let manifest = match document {
+            Ok(manifest) => manifest,
+            Err(error) => return Ok(Err(SubscriptionRefusal::ManifestInvalid(error))),
+        };
         let Some(baseline) = manifest
             .actions_baseline
             .iter()
@@ -4112,6 +4153,8 @@ impl PlexusStore {
             return Ok(Err(SubscriptionRefusal::PollGrantRequired));
         };
         let authorizing_expiry = authorizing.expires_at;
+        let cursor_value = cursor_state.clone();
+        let fixed_value = fixed_args.clone();
         let cursor_state = serde_json::to_string(cursor_state)
             .map_err(|error| StoreError::Backend(error.to_string()))?;
         let fixed_args = serde_json::to_string(fixed_args)
@@ -4126,43 +4169,13 @@ impl PlexusStore {
             // Check the facts they established again here, where nothing can
             // change before the insert commits.
             let refusal = self.inner.with_conn_fenced(|conn| {
-                let status: Option<String> = conn
-                    .query_row(
-                        "SELECT status FROM connections WHERE principal = ?1 AND connection_id = ?2",
-                        (principal, connection_id),
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                match status {
-                    None => return Ok(Some(SubscriptionRefusal::ConnectionNotFound)),
-                    Some(status) if status != "active" => {
-                        return Ok(Some(SubscriptionRefusal::ConnectionInactive(status)))
-                    }
-                    Some(_) => {}
-                }
-                let action_row: Option<(String, String, Option<String>, String)> = conn
-                    .query_row(
-                        "SELECT risk, status, quarantine_reason, schema_hash FROM catalog_actions
-                         WHERE principal = ?1 AND connection_id = ?2 AND name = ?3",
-                        (principal, connection_id, action),
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                    )
-                    .optional()?;
-                let Some((risk, status, quarantine_reason, schema_hash)) = action_row else {
-                    return Ok(Some(SubscriptionRefusal::ActionNotFound));
-                };
-                if risk != "read" {
-                    return Ok(Some(SubscriptionRefusal::ActionRiskNotRead));
-                }
-                if status != "active" {
-                    return Ok(Some(SubscriptionRefusal::ActionUnavailable(
-                        quarantine_reason.unwrap_or(status),
-                    )));
-                }
-                if schema_hash != catalog_action.schema_hash {
-                    return Ok(Some(SubscriptionRefusal::ActionUnavailable(
-                        "schema_changed".to_string(),
-                    )));
+                if let Some(refusal) = recheck_watch_preconditions(
+                    conn,
+                    principal,
+                    connection_id,
+                    &[(action, Some(catalog_action.schema_hash.as_str()))],
+                )? {
+                    return Ok(Some(refusal));
                 }
                 let grant_live: bool = conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM grants
@@ -4206,10 +4219,8 @@ impl PlexusStore {
             action: action.to_string(),
             cadence_s,
             cursor_kind,
-            cursor_state: serde_json::from_str(&cursor_state)
-                .map_err(|error| StoreError::Backend(error.to_string()))?,
-            fixed_args: serde_json::from_str(&fixed_args)
-                .map_err(|error| StoreError::Backend(error.to_string()))?,
+            cursor_state: cursor_value,
+            fixed_args: fixed_value,
             schema_hash: catalog_action.schema_hash,
             status: "active".to_string(),
             suspended_reason: None,
@@ -4386,23 +4397,17 @@ impl PlexusStore {
         let created_at_ms = now_ms();
         race_point("probe_insert");
         let refusal = self.inner.with_conn_fenced(|conn| {
-            let status: Option<String> = conn.query_row("SELECT status FROM connections WHERE principal=?1 AND connection_id=?2", (owner, connection_id), |row| row.get(0)).optional()?;
-            match status {
-                None => return Ok(Some(SubscriptionRefusal::ConnectionNotFound)),
-                Some(status) if status != "active" => return Ok(Some(SubscriptionRefusal::ConnectionInactive(status))),
-                _ => {}
+            let pins: Vec<_> = pinned_actions.iter().map(|(action, hash)| (action.as_str(), Some(hash.as_str()))).collect();
+            if let Some(refusal) = recheck_watch_preconditions(conn, owner, connection_id, &pins)? {
+                return Ok(Some(refusal));
             }
             let mut grants = conn.prepare("SELECT action_selectors FROM grants WHERE principal=?1 AND connection_id=?2 AND grantee_principal=?3 AND authority_kind='poll' AND (expires_at IS NULL OR expires_at>?4)")?;
             let selectors: Vec<Vec<String>> = grants.query_map(rusqlite::params![owner,connection_id,registrant,now_ms()], |row| parse_string_list(&row.get::<_, String>(0)?))?.collect::<rusqlite::Result<_>>()?;
-            for (action, pinned_hash) in &pinned_actions {
+            for action in pinned_actions.keys() {
                 if !selectors.iter().flatten().any(|selector| selector == action || selector == "*") {
                     return Ok(Some(SubscriptionRefusal::PollGrantRequired));
                 }
-                let row: Option<(String,String,Option<String>,String)> = conn.query_row("SELECT risk,status,quarantine_reason,schema_hash FROM catalog_actions WHERE principal=?1 AND connection_id=?2 AND name=?3", (owner,connection_id,action), |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
-                let Some((risk,status,reason,hash)) = row else { return Ok(Some(SubscriptionRefusal::ActionNotFound)); };
-                if risk != "read" { return Ok(Some(SubscriptionRefusal::ActionRiskNotRead)); }
-                if status != "active" { return Ok(Some(SubscriptionRefusal::ActionUnavailable(reason.unwrap_or(status)))); }
-                if &hash != pinned_hash { return Ok(Some(SubscriptionRefusal::ActionUnavailable("schema_changed".into()))); }
+
             }
             conn.execute(
                 "INSERT INTO trigger_subscriptions
@@ -4449,10 +4454,8 @@ impl PlexusStore {
             action: PROBE_SUBSCRIPTION_ACTION.to_string(),
             cadence_s: request.cadence_s,
             cursor_kind: "probe".to_string(),
-            cursor_state: serde_json::from_str(&cursor_state)
-                .map_err(|error| StoreError::Backend(error.to_string()))?,
-            fixed_args: serde_json::from_str(&fixed_args_json)
-                .map_err(|error| StoreError::Backend(error.to_string()))?,
+            cursor_state: request.cursor_state.clone(),
+            fixed_args: request.fixed_args.clone(),
             schema_hash,
             status: "active".to_string(),
             suspended_reason: None,
@@ -4613,11 +4616,8 @@ impl PlexusStore {
     /// so a caller naming an unknown subscription learns it did nothing instead
     /// of assuming success.
     ///
-    /// The generation counter is NOT advanced. It fences authority and dispatch
-    /// staleness -- a reservation holding a snapshot must abort if the authority
-    /// behind it moved -- and a routing label affects neither. Bumping it would
-    /// invalidate in-flight reservations for a change that cannot alter whether a
-    /// call is permitted.
+    /// Routing metadata leaves the subscription change counter unchanged.
+    /// This counter is not part of governance's reservation snapshot.
     pub fn set_subscription_project(
         &self,
         principal: &str,
@@ -4650,9 +4650,8 @@ impl PlexusStore {
     /// Scoped to the caller's principal like every other write here, so one
     /// principal cannot re-route another's watch. Returns whether a row changed.
     ///
-    /// The generation counter is NOT advanced. It fences authority and dispatch
-    /// staleness, while a delivery label changes neither; advancing it would abort
-    /// in-flight reservations for a change that cannot alter permission.
+    /// Delivery metadata leaves the subscription change counter unchanged.
+    /// This counter is not a reservation fence.
     pub fn set_subscription_deliver_to(
         &self,
         principal: &str,
@@ -4684,11 +4683,9 @@ impl PlexusStore {
     /// whether the named subscription row exists, matching
     /// [`Self::set_subscription_project`].
     ///
-    /// The generation counter is NOT advanced. Enrichment is authorized
-    /// independently at poll time against the actor source's connection and
-    /// action, so this binding cannot alter whether the watched poll itself is
-    /// permitted. Bumping generation would invalidate an in-flight watch
-    /// reservation for a separately governed follow-up read.
+    /// The subscription change counter is not advanced for enrichment metadata.
+    /// Actor reads are authorized independently against the source connection;
+    /// this counter is not used to fence governance reservations.
     pub fn set_subscription_actor_source(
         &self,
         principal: &str,
@@ -4737,13 +4734,10 @@ impl PlexusStore {
     ) -> Result<Option<TriggerSubscription>, StoreError> {
         let mut found = self.inner.with_read(|conn| {
             conn.query_row(
-                "SELECT subscription_id, principal, connection_id, action, cadence_s,
-                        cursor_kind, cursor_state, fixed_args, schema_hash, status, suspended_reason,
-                        last_polled_at_ms, last_success_at_ms,
-                        consecutive_vendor_failures, generation, created_at_ms,
-                              project_id, deliver_to, actor_source_json
-                       FROM trigger_subscriptions
-                 WHERE principal = ?1 AND subscription_id = ?2",
+                &format!(
+                    "SELECT {TRIGGER_SUBSCRIPTION_COLUMNS} FROM trigger_subscriptions
+                  WHERE principal = ?1 AND subscription_id = ?2"
+                ),
                 (principal, subscription_id),
                 |row| map_trigger_subscription_row(row, now_ms()),
             )
@@ -4791,21 +4785,15 @@ impl PlexusStore {
     ) -> Result<Vec<TriggerSubscription>, StoreError> {
         let now = now_ms();
         let mut subscriptions = self.inner.with_read(|conn| {
-            let mut statement = conn.prepare(
-                "SELECT subscription_id, principal, connection_id, action, cadence_s,
-                        cursor_kind, cursor_state, fixed_args, schema_hash, status, suspended_reason,
-                        last_polled_at_ms, last_success_at_ms,
-                        consecutive_vendor_failures, generation, created_at_ms,
-                              project_id, deliver_to, actor_source_json
-                       FROM trigger_subscriptions
-                 WHERE principal = ?1
-                   AND (?2 IS NULL OR connection_id = ?2)
-                   AND (?3 IS NULL OR subscription_id = ?3)
-                     ORDER BY created_at_ms, subscription_id",
-            )?;
-            let rows = statement.query_map((principal, connection_id, subscription_id), |row| {
-                map_trigger_subscription_row(row, now)
-            })?;
+            let mut sql = format!("SELECT {TRIGGER_SUBSCRIPTION_COLUMNS} FROM trigger_subscriptions WHERE principal=?1");
+            if connection_id.is_some() { sql.push_str(" AND connection_id=?2"); }
+            if subscription_id.is_some() { sql.push_str(" AND subscription_id=?3"); }
+            sql.push_str(" ORDER BY created_at_ms,subscription_id");
+            let mut statement = conn.prepare(&sql)?;
+            statement.raw_bind_parameter(1, principal)?;
+            if let Some(connection) = connection_id { statement.raw_bind_parameter(2, connection)?; }
+            if let Some(subscription) = subscription_id { statement.raw_bind_parameter(3, subscription)?; }
+            let rows = statement.raw_query().mapped(|row| map_trigger_subscription_row(row, now));
             let subscriptions: Vec<TriggerSubscription> = rows.collect::<rusqlite::Result<_>>()?;
             Ok(subscriptions)
         })?;
@@ -4823,20 +4811,9 @@ impl PlexusStore {
         Ok(subscriptions)
     }
 
-    /// [`Self::list_subscriptions`] widened by any `events_consume` grants this
-    /// caller holds.
-    ///
-    /// A consumer needs these rows to do anything with the events beside them. An
-    /// event names its subscription and nothing else -- WHICH repository it came
-    /// from lives in the subscription`s `fixed_args`, and the project it routes to
-    /// lives in `project_id`. So granting events without subscriptions delivers
-    /// payloads a consumer cannot attribute, which is the shape this method
-    /// exists to fix: a grantee could otherwise see every event and no
-    /// subscriptions.
-    ///
-    /// Rows contain cadence, cursor, status and grant metadata, but no credential
-    /// material. The caller's own rows do not need consume-grant discovery;
-    /// their poll grants and probe details are loaded in batches.
+    /// List owned and granted watches, filtering selectors before decoding rows.
+    /// Probe metadata and poll authority are loaded once for the selected lanes,
+    /// rather than once per overlapping consume grant.
     pub fn list_subscriptions_including_granted(
         &self,
         principal: &str,
@@ -4844,42 +4821,57 @@ impl PlexusStore {
         subscription_id: Option<&str>,
         now_ms_value: i64,
     ) -> Result<Vec<TriggerSubscription>, StoreError> {
-        let mut subscriptions =
-            self.list_subscriptions(principal, connection_id, subscription_id)?;
-        // Two live grants from one owner can cover the same watch; it is still
-        // one watch and is listed once.
-        let mut listed: BTreeSet<String> = subscriptions
+        let mut subscriptions = self.inner.with_read(|conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT {TRIGGER_SUBSCRIPTION_COLUMNS} FROM trigger_subscriptions
+                 WHERE (?2 IS NULL OR connection_id=?2) AND (?3 IS NULL OR subscription_id=?3)
+                 AND (principal=?1 OR EXISTS (
+                    SELECT 1 FROM grants g, json_each(g.action_selectors) selector
+                    WHERE g.principal=trigger_subscriptions.principal
+                    AND g.connection_id=trigger_subscriptions.connection_id
+                    AND g.grantee_principal=?1 AND g.grantee_principal<>'*'
+                    AND g.authority_kind='events_consume' AND (g.expires_at IS NULL OR g.expires_at>?4)
+                    AND (selector.value=trigger_subscriptions.action OR selector.value='*')))
+                 ORDER BY created_at_ms,subscription_id"
+            ))?;
+            let rows = statement.query_map(rusqlite::params![principal, connection_id, subscription_id, now_ms_value],
+                |row| map_trigger_subscription_row(row, now_ms_value))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        self.attach_probe_fields(&mut subscriptions)?;
+        let lanes: BTreeSet<_> = subscriptions
             .iter()
-            .map(|subscription| subscription.subscription_id.clone())
+            .map(|sub| (&sub.principal, &sub.connection_id))
             .collect();
-        for grant in self.events_consume_connections(principal, now_ms_value)? {
-            if connection_id.is_some_and(|requested| requested != grant.connection_id) {
-                continue;
+        let lanes = serde_json::to_string(&lanes)
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let grants = self.inner.with_read(|conn| {
+            let mut query = conn.prepare(
+                "SELECT grant_id,principal,connection_id,grantee_principal,risk_ceiling,
+                 action_selectors,authority_kind,expires_at,generation FROM grants
+                 WHERE authority_kind='poll' AND grantee_principal<>'*'
+                 AND (principal,connection_id) IN (SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?1))
+                 ORDER BY grant_id"
+            )?;
+            let rows = query.query_map([lanes], |row| map_grant_row(row, now_ms_value))?;
+            let mut owners: std::collections::BTreeMap<String, PollGrants> = Default::default();
+            for row in rows {
+                let row = row?;
+                owners.entry(row.principal.clone()).or_default()
+                    .entry((row.connection_id.clone(), row.grantee_principal.clone())).or_default().push(row);
             }
-            if grant.authority_state != "live" || grant.owner == principal {
-                continue;
-            }
-            for subscription in
-                self.list_subscriptions(&grant.owner, Some(&grant.connection_id), subscription_id)?
-            {
-                // Filtered on the grant`s action selectors, exactly as the event
-                // read is: a consumer named for one action must not learn the
-                // configuration of another action`s watches on the same
-                // connection.
-                let permitted = grant
-                    .selectors
-                    .iter()
-                    .any(|selector| *selector == subscription.action || selector == "*");
-                if permitted && listed.insert(subscription.subscription_id.clone()) {
-                    subscriptions.push(subscription);
-                }
-            }
+            Ok(owners)
+        })?;
+        let empty = PollGrants::new();
+        for sub in &mut subscriptions {
+            let (expiry, state) = subscription_authority_from_grants(
+                sub,
+                grants.get(&sub.principal).unwrap_or(&empty),
+                now_ms_value,
+            );
+            sub.authority_expires_at_ms = expiry;
+            sub.authority_state = state.into();
         }
-        subscriptions.sort_by(|left, right| {
-            left.created_at_ms
-                .cmp(&right.created_at_ms)
-                .then_with(|| left.subscription_id.cmp(&right.subscription_id))
-        });
         Ok(subscriptions)
     }
 
@@ -4972,86 +4964,74 @@ impl PlexusStore {
         })
     }
 
-    /// Resume a circuit-breaker-suspended subscription without replacing its cursor.
-    ///
-    /// A circuit breaker is an operational pause, so resuming it only clears the
-    /// failure streak that would immediately trip it again. Reconciliation and
-    /// authorization suspensions are safety decisions instead; their reasons are
-    /// deliberately refused here rather than treated as interchangeable states.
+    /// Resume an operational pause without replacing the vendor cursor.
+    /// Catalog, schema, connection and grant checks share the write snapshot;
+    /// reconciliation and authorization suspensions still require review.
     pub fn resume(
         &self,
         principal: &str,
         subscription_id: &str,
     ) -> Result<Result<TriggerSubscription, SubscriptionResumeRefusal>, StoreError> {
-        let Some(subscription) = self.subscription(principal, subscription_id)? else {
-            return Ok(Err(SubscriptionResumeRefusal::SubscriptionNotFound));
-        };
-
-        if subscription.status == "retired" {
-            return Ok(Err(SubscriptionResumeRefusal::SubscriptionRetired));
-        }
-        if subscription.status == "suspended"
-            && subscription.suspended_reason.as_deref() != Some(CIRCUIT_BREAKER_SUSPENSION_REASON)
-        {
-            return Ok(Err(SubscriptionResumeRefusal::SuspensionNotResumable(
-                subscription.suspended_reason,
-            )));
-        }
-
-        // The same live poll grant that admits a new subscription is required to
-        // reactivate one. A revoked or expired grant must not regain a background
-        // vendor call merely because its old row still exists.
-        let (_, authority_state) = self.subscription_authority(&subscription, now_ms())?;
-        if authority_state != "live" {
-            return Ok(Err(SubscriptionResumeRefusal::PollGrantRequired));
-        }
-
-        // Retrying a completed resume is a no-op: do not clear bookkeeping or
-        // advance generation for a subscription that was already active.
-        if subscription.status == "active" {
-            return Ok(Ok(subscription));
-        }
-
-        let changed = self.inner.with_conn_fenced(|conn| {
-            Ok(conn.execute(
-                "UPDATE trigger_subscriptions
-                 SET status = 'active', consecutive_vendor_failures = 0,
-                     suspended_reason = NULL, generation = generation + 1
-                 WHERE subscription_id = ?1 AND principal = ?2
-                   AND status = 'suspended'
-                   AND suspended_reason = ?3",
-                (
-                    subscription_id,
-                    principal,
-                    CIRCUIT_BREAKER_SUSPENSION_REASON,
-                ),
-            )? != 0)
-        })?;
-        if !changed {
-            // Another actor may have resumed or re-suspended the row after the
-            // read above. Re-read it so the reply describes the durable state,
-            // never an assumed successful write.
-            let Some(current) = self.subscription(principal, subscription_id)? else {
+        self.inner.with_conn_fenced(|conn| {
+            let now = now_ms();
+            let Some(mut subscription) = conn.query_row(
+                &format!("SELECT {TRIGGER_SUBSCRIPTION_COLUMNS} FROM trigger_subscriptions
+                          WHERE principal=?1 AND subscription_id=?2"),
+                (principal, subscription_id), |row| map_trigger_subscription_row(row, now),
+            ).optional()? else {
                 return Ok(Err(SubscriptionResumeRefusal::SubscriptionNotFound));
             };
-            if current.status == "active" {
-                return Ok(Ok(current));
-            }
-            if current.status == "retired" {
+            if subscription.status == "retired" {
                 return Ok(Err(SubscriptionResumeRefusal::SubscriptionRetired));
             }
-            return Ok(Err(SubscriptionResumeRefusal::SuspensionNotResumable(
-                current.suspended_reason,
-            )));
-        }
-
-        // This row was selected and updated under the caller's principal, so it
-        // must still be present; returning a store error is safer than inventing
-        // a success reply if storage ever violates that invariant.
-        let resumed = self
-            .subscription(principal, subscription_id)?
-            .ok_or_else(|| StoreError::Backend("resumed subscription disappeared".to_string()))?;
-        Ok(Ok(resumed))
+            let resumable = subscription.suspended_reason.as_deref().is_some_and(|reason| {
+                reason == CIRCUIT_BREAKER_SUSPENSION_REASON
+                    || reason == "response_shape_invalid"
+                    || reason.starts_with("response_shape_invalid:")
+            });
+            if subscription.status != "active" && !resumable {
+                return Ok(Err(SubscriptionResumeRefusal::SuspensionNotResumable(subscription.suspended_reason)));
+            }
+            if subscription.cursor_kind == "probe" {
+                let probe = conn.query_row(
+                    "SELECT subscription_id,name,actions,script_source,return_schema,rearm,registered_by
+                     FROM probe_subscriptions WHERE subscription_id=?1",
+                    [subscription_id], map_probe_subscription_row,
+                )?;
+                subscription.name = Some(probe.name);
+                subscription.registered_by = Some(probe.registered_by);
+                subscription.rearm = Some(probe.rearm);
+                subscription.actions = Some(probe.actions);
+            }
+            let actions = if let Some(actions) = &subscription.actions {
+                actions.iter().map(|action| (action.as_str(), None)).collect::<Vec<_>>()
+            } else {
+                vec![(subscription.action.as_str(), Some(subscription.schema_hash.as_str()))]
+            };
+            if let Some(refusal) = recheck_watch_preconditions(conn, principal, &subscription.connection_id, &actions)? {
+                return Ok(Err(SubscriptionResumeRefusal::SuspensionNotResumable(Some(refusal.to_string()))));
+            }
+            let grants = poll_grants_on_conn(conn, principal, Some(&subscription.connection_id), now)?;
+            let (expiry, state) = subscription_authority_from_grants(&subscription, &grants, now);
+            if state != "live" {
+                return Ok(Err(SubscriptionResumeRefusal::PollGrantRequired));
+            }
+            subscription.authority_expires_at_ms = expiry;
+            subscription.authority_state = state.to_string();
+            if subscription.status == "suspended" {
+                conn.execute(
+                    "UPDATE trigger_subscriptions SET status='active', consecutive_vendor_failures=0,
+                         suspended_reason=NULL, generation=generation+1
+                     WHERE principal=?1 AND subscription_id=?2",
+                    (principal, subscription_id),
+                )?;
+                subscription.status = "active".into();
+                subscription.suspended_reason = None;
+                subscription.consecutive_vendor_failures = 0;
+                subscription.generation += 1;
+            }
+            Ok(Ok(subscription))
+        })
     }
 
     pub fn unsubscribe(&self, principal: &str, subscription_id: &str) -> Result<bool, StoreError> {
@@ -5079,18 +5059,20 @@ impl PlexusStore {
         self.inner.with_conn_fenced(|conn| {
             event_outbox::count_dropped(
                 conn,
-                "subscription_id = ?1 AND ?2 IS NOT NULL",
-                (subscription_id, principal),
+                SUBSCRIPTION_EVENTS_PREDICATE,
+                (owner.as_str(), subscription_id),
                 "dropped_on_unsubscribe",
             )?;
             conn.execute(
-                "DELETE FROM event_outbox WHERE event_id IN
-                (SELECT event_id FROM trigger_events WHERE subscription_id = ?1)",
-                [subscription_id],
+                &format!(
+                    "DELETE FROM event_outbox WHERE event_id IN
+                (SELECT event_id FROM trigger_events WHERE {SUBSCRIPTION_EVENTS_PREDICATE})"
+                ),
+                (owner.as_str(), subscription_id),
             )?;
             conn.execute(
-                "DELETE FROM trigger_events WHERE subscription_id = ?1",
-                [subscription_id],
+                &format!("DELETE FROM trigger_events WHERE {SUBSCRIPTION_EVENTS_PREDICATE}"),
+                (owner.as_str(), subscription_id),
             )?;
             conn.execute(
                 "DELETE FROM probe_subscriptions WHERE subscription_id = ?1",
@@ -5131,6 +5113,7 @@ impl PlexusStore {
     /// principal's cursor makes their poller skip the window it jumped over,
     /// and nothing downstream can tell the difference between "no events" and
     /// "we stopped looking".
+    #[cfg(any(test, feature = "test-support"))]
     pub fn record_poll_success(
         &self,
         principal: &str,
@@ -5170,13 +5153,10 @@ impl PlexusStore {
         })
     }
 
-    /// Read the latest prior observation for one vendor item across all content
-    /// versions in this subscription's dedupe lane.
-    ///
-    /// Actor enrichment uses this timestamp as its exclusive lower bound. A
-    /// missing row means first observation; a store error stays distinguishable
-    /// from absence so the poller cannot turn an unreadable history into an
-    /// unbounded comment window and fabricate a complete-looking actor set.
+    /// Read the latest prior vendor activity time across an item's content versions.
+    /// Host observation times cannot bound a vendor timeline when clocks differ.
+    /// If any prior version lacks vendor time, fail instead of treating the item
+    /// as unseen: an unbounded actor window could misattribute historical actions.
     pub(crate) fn previous_event_observed_at(
         &self,
         principal: &str,
@@ -5184,16 +5164,22 @@ impl PlexusStore {
         subscription_id: &str,
         vendor_event_id: &str,
     ) -> Result<Option<i64>, StoreError> {
-        self.inner.with_read(|conn| {
+        let (activity, missing): (Option<i64>, bool) = self.inner.with_read(|conn| {
             conn.query_row(
-                "SELECT MAX(observed_at_ms) FROM trigger_events
+                "SELECT MAX(activity_at_ms), COUNT(*) > COUNT(activity_at_ms) FROM trigger_events
                  WHERE principal = ?1 AND connection_id = ?2
                    AND subscription_id = ?3 AND vendor_event_id = ?4
                    AND kind = 'event'",
                 (principal, connection_id, subscription_id, vendor_event_id),
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-        })
+        })?;
+        if missing {
+            return Err(StoreError::Backend(
+                "prior event vendor activity time unavailable".into(),
+            ));
+        }
+        Ok(activity)
     }
 
     /// Identify candidate payloads already stored in this subscription's event lane.
@@ -5683,6 +5669,7 @@ impl PlexusStore {
     /// grant lookup at all. Folding the grant check in would put a second query
     /// on a path that never needs it, and would make the plain owner read depend
     /// on the grants table being readable.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn list_events_including_granted(
         &self,
         principal: &str,
@@ -5773,71 +5760,39 @@ impl PlexusStore {
         })
     }
 
-    /// Which of `event_ids` are NOT acked for this principal, read AFTER an ack
-    /// has run: unknown ids and ids belonging to another principal.
-    ///
-    /// Exists so a caller can be told WHICH ids did not take effect rather than
-    /// only how many did. A consumer acks what it has already delivered, so an
-    /// id that acks nothing means the two sides disagree about what exists --
-    /// and a bare count leaves that indistinguishable from success unless the
-    /// caller compares it against its own request length.
-    ///
-    /// An id that was ALREADY acked before this call is deliberately absent from
-    /// the result. It acked zero rows, so it lowers the count, but the caller's
-    /// goal for it is satisfied: the event is acked and will not redeliver.
-    /// Listing it would report a problem with no remedy, and repeated acks are
-    /// the normal consequence of a consumer retrying after an ambiguous reply.
-    ///
-    /// Unknown and foreign ids are not distinguished from each other, because
-    /// separating them would confirm the existence of an event id to a caller
-    /// who cannot see it, and both have the same remedy: stop expecting that id
-    /// to be pending.
-    ///
-    /// An event the caller acked through a live `events_consume` grant counts
-    /// as acked for the caller too: it is on the caller's read surface, and the
-    /// caller's ack is what cleared it.
+    /// Resolve acknowledgement results at the same authority timestamp as the ack.
+    /// Unknown and foreign ids are deliberately indistinguishable.
+    pub fn unacked_of_at(
+        &self,
+        principal: &str,
+        event_ids: &[String],
+        now: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut pending = Vec::new();
+        for chunk in event_ids.chunks(MAX_EVENT_ACK_IDS) {
+            let ids = serde_json::to_string(chunk)
+                .map_err(|error| StoreError::Backend(error.to_string()))?;
+            let mut rows = self.inner.with_read(|conn| {
+                let mut query = conn.prepare(&format!(
+                    "SELECT wanted.value FROM json_each(?2) wanted WHERE NOT EXISTS (
+                        SELECT 1 FROM trigger_events WHERE event_id=wanted.value
+                        AND acked_at_ms IS NOT NULL AND {EVENT_ACK_AUTHORITY}) ORDER BY wanted.key"
+                ))?;
+                let rows =
+                    query.query_map(rusqlite::params![principal, ids, now], |row| row.get(0))?;
+                rows.collect::<rusqlite::Result<Vec<String>>>()
+            })?;
+            pending.append(&mut rows);
+        }
+        Ok(pending)
+    }
+
     pub fn unacked_of(
         &self,
         principal: &str,
         event_ids: &[String],
     ) -> Result<Vec<String>, StoreError> {
-        let granted: Vec<EventsConsumeGrant> = self
-            .events_consume_connections(principal, now_ms())?
-            .into_iter()
-            .filter(|grant| grant.authority_state == "live" && grant.owner != principal)
-            .collect();
-        self.inner.with_read(|conn| {
-            let mut pending = Vec::new();
-            for event_id in event_ids {
-                let acked: Option<(String, String, Option<String>)> = conn
-                    .query_row(
-                        "SELECT e.principal, e.connection_id, s.action
-                         FROM trigger_events e
-                         LEFT JOIN trigger_subscriptions s ON s.subscription_id = e.subscription_id
-                         WHERE e.event_id = ?1 AND e.acked_at_ms IS NOT NULL",
-                        [event_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .optional()?;
-                let visible = acked.is_some_and(|(owner, connection_id, action)| {
-                    owner == principal
-                        || granted.iter().any(|grant| {
-                            grant.owner == owner
-                                && grant.connection_id == connection_id
-                                && action.as_deref().is_some_and(|action| {
-                                    grant
-                                        .selectors
-                                        .iter()
-                                        .any(|selector| selector == action || selector == "*")
-                                })
-                        })
-                });
-                if !visible {
-                    pending.push(event_id.clone());
-                }
-            }
-            Ok(pending)
-        })
+        self.unacked_of_at(principal, event_ids, now_ms())
     }
 
     /// Acknowledge events this principal owns.
@@ -5846,6 +5801,7 @@ impl PlexusStore {
     /// through [`Self::ack_events_including_granted`], which resolves the owner
     /// first -- keeping the owner path free of any grant lookup, the same split
     /// as `list_events`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn ack_events(&self, principal: &str, event_ids: &[String]) -> Result<usize, StoreError> {
         let now = now_ms();
         self.inner.with_conn_fenced(|conn| {
@@ -5866,31 +5822,33 @@ impl PlexusStore {
     }
 
     /// Acknowledge owned events or events admitted by a current consume grant.
-    /// The shared acknowledgement retains the payload and drains the owner's
-    /// unacked view too. Resolve only the requested ids, not the whole lane.
+    /// Pull events are a shared work queue, not a per-consumer broadcast: an ack
+    /// drains the owner and every overlapping grantee's unacked view. Payloads
+    /// remain available to retention and outbox delivery, which ignore pull acks.
+    /// Chunks commit independently so a large backlog cannot monopolize the writer;
+    /// partial failure is safe to retry because acknowledgement is idempotent.
     pub fn ack_events_including_granted(
         &self,
         principal: &str,
         event_ids: &[String],
         now_ms_value: i64,
     ) -> Result<usize, StoreError> {
-        self.inner.with_conn_fenced(|conn| {
-            let mut query=conn.prepare(
-                "UPDATE trigger_events SET acked_at_ms=?3 WHERE event_id=?2 AND acked_at_ms IS NULL
-                AND (principal=?1 OR EXISTS (
-                    SELECT 1 FROM grants g JOIN trigger_subscriptions s
-                    ON s.subscription_id=trigger_events.subscription_id
-                    AND s.principal=trigger_events.principal AND s.connection_id=trigger_events.connection_id
-                    JOIN json_each(g.action_selectors) selector
-                    WHERE g.principal=trigger_events.principal AND g.connection_id=trigger_events.connection_id
-                    AND g.grantee_principal=?1 AND g.grantee_principal<>'*' AND g.authority_kind='events_consume'
-                    AND (g.expires_at IS NULL OR g.expires_at>?3)
-                    AND (selector.value=s.action OR selector.value='*')))"
-            )?;
-            let mut acked=0;
-            for id in event_ids { acked+=query.execute(rusqlite::params![principal,id,now_ms_value])?; }
-            Ok(acked)
-        })
+        let mut acked = 0;
+        for chunk in event_ids.chunks(MAX_EVENT_ACK_IDS) {
+            let ids = serde_json::to_string(chunk)
+                .map_err(|error| StoreError::Backend(error.to_string()))?;
+            acked += self.inner.with_conn_fenced(|conn| {
+                conn.execute(
+                    &format!(
+                        "UPDATE trigger_events SET acked_at_ms=?3
+                     WHERE event_id IN (SELECT value FROM json_each(?2))
+                     AND acked_at_ms IS NULL AND {EVENT_ACK_AUTHORITY}"
+                    ),
+                    rusqlite::params![principal, ids, now_ms_value],
+                )
+            })?;
+        }
+        Ok(acked)
     }
 
     /// Prune by age and count, but keep rows with unpublished outbox markers,
@@ -5934,6 +5892,7 @@ impl PlexusStore {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_grant(&self, input: &GrantInput) -> Result<(), StoreError> {
         self.inner
             .with_conn_fenced(|conn| insert_grant_on_conn(conn, input))
@@ -6105,6 +6064,7 @@ impl PlexusStore {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn insert_policy(&self, input: &PolicyInput) -> Result<(), StoreError> {
         self.inner
             .with_conn_fenced(|conn| insert_policy_on_conn(conn, input))
@@ -6512,9 +6472,11 @@ impl PlexusStore {
                 map_action_request_row,
             )?;
             let rows=rows.collect::<rusqlite::Result<Vec<_>>>()?;
-            for row in &rows {
-                conn.execute("UPDATE action_requests SET scope_checked_at_ms=?3 WHERE principal=?1 AND request_id=?2",rusqlite::params![row.principal,row.request_id,now_ms().max(1)])?;
-            }
+                let updated_at = now_ms().max(1);
+                let mut update = conn.prepare_cached("UPDATE action_requests SET scope_checked_at_ms=?3 WHERE principal=?1 AND request_id=?2")?;
+                for row in &rows {
+                    update.execute(rusqlite::params![row.principal,row.request_id,updated_at])?;
+                }
             Ok(rows)
         })
     }
@@ -6553,22 +6515,6 @@ impl PlexusStore {
                 "UPDATE action_requests SET status = 'consumed', scope_outcome = ?1
                  WHERE principal = ?2 AND request_id = ?3 AND status = 'approved'",
                 rusqlite::params![format!("not_run:{reason}"), principal, request_id],
-            )?;
-            Ok(())
-        })
-    }
-
-    pub fn set_action_request_reconciliation_status(
-        &self,
-        principal: &str,
-        request_id: &str,
-        status: &str,
-    ) -> Result<(), StoreError> {
-        self.inner.with_conn_fenced(|conn| {
-            conn.execute(
-                "UPDATE action_requests SET reconciliation_status = ?1
-                 WHERE principal = ?2 AND request_id = ?3",
-                rusqlite::params![status, principal, request_id],
             )?;
             Ok(())
         })
@@ -6688,26 +6634,6 @@ impl PlexusStore {
         })
     }
 
-    /// The request whose consent card is `elicitation_id`, whichever principal
-    /// it belongs to.
-    pub fn action_request_by_elicitation_id(
-        &self,
-        elicitation_id: &str,
-    ) -> Result<Option<ActionRequestRecord>, StoreError> {
-        self.inner.with_read(|conn| {
-            conn.query_row(
-                &format!(
-                    "SELECT {ACTION_REQUEST_COLUMNS}
-                     FROM action_requests WHERE elicitation_id = ?1
-                     ORDER BY created_at_ms LIMIT 1"
-                ),
-                [elicitation_id],
-                map_action_request_row,
-            )
-            .optional()
-        })
-    }
-
     /// The request with id `request_id`, whichever principal it belongs to.
     /// A consent card echoes this id as its opaque `requester_ref`.
     pub fn action_request_by_id(
@@ -6725,28 +6651,6 @@ impl PlexusStore {
                 map_action_request_row,
             )
             .optional()
-        })
-    }
-
-    /// How an approved request's send settled (`completed`, `failed`,
-    /// `not_sent` or `unknown`), copied from its dispatch audit row. `None`
-    /// while the send has not settled, and for a request never sent (one
-    /// whose status never became `consumed`).
-    pub fn action_request_settled_outcome(
-        &self,
-        principal: &str,
-        request_id: &str,
-    ) -> Result<Option<String>, StoreError> {
-        self.inner.with_read(|conn| {
-            Ok(conn
-                .query_row(
-                    "SELECT settled_outcome FROM action_requests
-                     WHERE principal = ?1 AND request_id = ?2",
-                    (principal, request_id),
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()?
-                .flatten())
         })
     }
 
@@ -7127,6 +7031,7 @@ impl PlexusStore {
     /// wider than the one already recorded) surface as a store error; the
     /// operator ceremony uses [`Self::issue_binding_ticket`], which reports
     /// them by name.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn create_binding_ticket_bounded(
         &self,
         principal: &str,
@@ -7254,6 +7159,13 @@ impl PlexusStore {
                     }
                 }
             }
+            // The pending binding belongs only to the newest ticket. Superseded
+            // tickets must not pair their ceiling with that newer credential.
+            conn.execute(
+                "UPDATE binding_tickets SET status='expired', settled_at_ms=?3
+                 WHERE principal=?1 AND connection_id=?2 AND status='issued'",
+                (principal, connection_id, now),
+            )?;
             conn.execute(
                 "UPDATE connections SET credential_binding = ?1, updated_at_ms = ?2,
                         generation = generation + 1
@@ -7308,7 +7220,7 @@ impl PlexusStore {
                 requested_risk.to_string(),
             )));
         };
-        let Some(document) = self.manifest_json(CATALOG_PRINCIPAL, app_key)? else {
+        let Some(document) = self.parsed_manifest(CATALOG_PRINCIPAL, app_key)? else {
             return Ok(Err(CeremonyRefusal::UnknownApp(app_key.to_string())));
         };
         // A retired manifest is refused here, at the FIRST link of the authority
@@ -7320,8 +7232,7 @@ impl PlexusStore {
         if self.manifest_is_retired(app_key)? {
             return Ok(Err(CeremonyRefusal::RetiredApp(app_key.to_string())));
         }
-        let manifest: crate::manifest::AppManifest = serde_json::from_value(document)
-            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let manifest = document.map_err(StoreError::Backend)?;
         let declared: Vec<String> = manifest
             .actions_baseline
             .iter()
@@ -7360,10 +7271,10 @@ impl PlexusStore {
     /// makes a vendor look credentialed rather than credential-free — the
     /// direction that fails closed.
     pub fn manifest_requires_no_credential(&self, app_key: &str) -> Result<bool, StoreError> {
-        let Some(document) = self.manifest_json(CATALOG_PRINCIPAL, app_key)? else {
+        let Some(document) = self.parsed_manifest(CATALOG_PRINCIPAL, app_key)? else {
             return Ok(false);
         };
-        let manifest: crate::manifest::AppManifest = match serde_json::from_value(document) {
+        let manifest = match document {
             Ok(manifest) => manifest,
             Err(_) => return Ok(false),
         };
@@ -7375,6 +7286,7 @@ impl PlexusStore {
 
     /// The ceiling recorded on a connection, or `CeilingAbsent` when the
     /// connection predates ceilings (fail closed: nothing may be minted).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn connection_ceiling(
         &self,
         principal: &str,
@@ -7953,13 +7865,17 @@ impl PlexusStore {
             if changed == 0 {
                 return Ok(false);
             }
-            conn.execute(
-                "INSERT INTO audit_journal (ts, principal, actor, acting_principal, connection_id, action, risk, severity,
-                     decision, reason_code, gate, args_redaction_summary, outcome)
-                 VALUES (?1, ?2, 'operator', ?2, ?3, 'rebind_credential', NULL, NULL, 'allow',
-                     'ceremony_rebind_credential', 'operator_ceremony', '{}', 'applied')",
-                rusqlite::params![now_ms(), principal, connection_id],
-            )?;
+            let fingerprint = crate::fingerprint::fingerprint(credential_id.as_bytes());
+            let mut record = AuditRecord::ceremony(
+                principal,
+                None,
+                Some(connection_id),
+                "rebind_credential",
+                "read",
+                Some(&fingerprint),
+            );
+            record.outcome = Some("applied".into());
+            append_audit_on_conn(conn, &record, None, None, None, None)?;
             Ok(true)
         })
     }
@@ -8007,97 +7923,24 @@ impl PlexusStore {
         scope: Option<&CallScope>,
         relay_origin: Option<&RelayOrigin>,
     ) -> Result<(), StoreError> {
-        let now = now_ms();
-        let scope_epoch = scope.map(|scope| epoch_to_sql(scope.scope_epoch));
         self.inner.with_conn_fenced(|conn| {
-            conn.execute(
-                "INSERT INTO audit_journal (
-                    ts, principal, actor, acting_principal, agent_id, agent_handle,
-                    connection_id, app_key, action, risk, severity, decision, reason_code, gate,
-                    args_redaction_summary, outcome, latency_ms, request_id,
-                    credential_fingerprint, provider_account_fingerprint, attempt_no,
-                    vendor_request_id, idempotency_key_fingerprint, response_class,
-                    reconciliation_of, app_handle_id, query_text, result_count,
-                    scope_owner, scope_ref, scope_epoch, scope_kind, scope_parent,
-                    scope_parent_state, scope_delegates, scope_owner_authorized,
-                    origin_carrier, origin_call_key, scope_flow_id
-                ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
-                    ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34,
-                    ?35, ?36, ?37, ?38, ?39
-                )",
-                rusqlite::params![
-                    now,
-                    record.principal,
-                    record.actor,
-                    record.acting_principal,
-                    record.agent_id,
-                    record.agent_handle,
-                    record.connection_id,
-                    record.app_key,
-                    record.action,
-                    record.risk,
-                    record.severity,
-                    record.decision,
-                    record.reason_code,
-                    record.gate,
-                    record.args_redaction_summary,
-                    record.outcome,
-                    record.latency_ms,
-                    record.request_id,
-                    record.credential_fingerprint,
-                    record.provider_account_fingerprint,
-                    record.attempt_no,
-                    record.vendor_request_id,
-                    record.idempotency_key_fingerprint,
-                    record.response_class,
-                    record.reconciliation_of,
-                    record.app_handle_id,
-                    query_text,
-                    result_count,
-                    scope.map(|scope| scope.owner.as_str()),
-                    scope.map(|scope| scope.scope_ref.as_str()),
-                    scope_epoch,
-                    scope.and_then(|scope| scope.kind.as_deref()),
-                    scope.and_then(|scope| scope.parent.as_deref()),
-                    scope.and_then(|scope| scope.parent_state.as_deref()),
-                    scope.map(|scope| scope.delegates),
-                    scope.map(|scope| scope.owner_authorized),
-                    relay_origin.map(|origin| origin.carrier.as_str()),
-                    relay_origin.map(|origin| origin.call_key.as_str()),
-                    scope.and_then(|scope| scope.flow_id.as_deref()),
-                ],
-            )?;
-            // A settled send of a claimed approval also settles the approval
-            // request: its outcome is copied there, in this transaction, so a
-            // later withdrawal reads it even after retention deletes this row.
-            // Only the first settled row counts, as the withdrawal fallback
-            // (the earliest dispatch row with an outcome) also reads it.
-            if let (Some("dispatch"), Some(outcome), Some(request_id)) = (
-                record.gate.as_deref(),
-                record.outcome.as_deref(),
-                record.request_id.as_deref(),
-            ) {
-                conn.execute(
-                    "UPDATE action_requests SET settled_outcome = ?3
-                     WHERE principal = ?1 AND claimed_request_id = ?2
-                       AND status = 'consumed' AND settled_outcome IS NULL",
-                    rusqlite::params![record.principal, request_id, outcome],
-                )?;
-            }
-            Ok(())
+            append_audit_on_conn(conn, record, query_text, result_count, scope, relay_origin)
         })
     }
 
-    /// Remove one bounded batch of settled reservations older than one day.
-    ///
-    /// `reserved` rows are excluded even after their TTL. Only the claim path may
-    /// consume an in-flight fence and classify it as dispatched, expired, or
-    /// invalidated. Ordering and bounding keep each scheduler tick predictable.
+    /// Remove one bounded batch of old reservations and expire abandoned fences.
+    /// A reservation past its TTL can never dispatch; classifying it as expired
+    /// lets normal retention reclaim it without touching any live fence.
     pub fn prune_reservations(&self, now_ms: i64) -> Result<usize, StoreError> {
         let cutoff = now_ms.saturating_sub(RESERVATION_RETENTION_MS);
         self.inner.with_conn_fenced(|conn| {
+            conn.execute(
+                "UPDATE reservations SET status='expired' WHERE (principal,reservation_id) IN (
+                    SELECT principal,reservation_id FROM reservations
+                    WHERE status='reserved' AND expires_at<=?1
+                    ORDER BY created_at_ms,principal,reservation_id LIMIT ?2)",
+                rusqlite::params![now_ms, RESERVATION_RETENTION_BATCH_ROWS as i64],
+            )?;
             conn.execute(
                 "DELETE FROM reservations
                  WHERE (principal, reservation_id) IN (
@@ -8138,6 +7981,17 @@ impl PlexusStore {
             )?;
             Ok(())
         })
+    }
+
+    /// Expire and prune ceremony history independently of audit deletion.
+    /// The scheduler can report this pass separately when audit retention fails.
+    pub fn prune_ceremony_history(
+        &self,
+        now: i64,
+        retention_window_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .with_conn_fenced(|conn| prune_ceremony_history_on_conn(conn, now, retention_window_ms))
     }
 
     /// Remove one bounded batch of audit rows older than the configured window.
@@ -8318,8 +8172,62 @@ impl PlexusStore {
         })
     }
 
-    /// Read back one stored manifest document without exposing any connection
-    /// credential or handle column.
+    /// Return the reviewed catalog manifest, checking its stored content hash even
+    /// on a cache hit. The hash, rather than a per-action generation, also detects
+    /// manifest replacement by another writer or by a rollback.
+    pub fn cached_manifest(
+        &self,
+        app_key: &str,
+    ) -> Result<std::sync::Arc<AppManifest>, StoreError> {
+        self.parsed_manifest(CATALOG_PRINCIPAL, app_key)?
+            .ok_or_else(|| StoreError::Backend(format!("manifest missing: {app_key}")))?
+            .map_err(StoreError::Backend)
+    }
+
+    /// Preserve JSON errors separately from storage failures for watch refusals.
+    fn parsed_manifest(
+        &self,
+        principal: &str,
+        key: &str,
+    ) -> Result<Option<Result<std::sync::Arc<AppManifest>, String>>, StoreError> {
+        let hash: Option<String> = self.inner.with_read(|conn| {
+            conn.query_row(
+                "SELECT content_hash FROM app_manifests WHERE principal=?1 AND key=?2",
+                (principal, key),
+                |row| row.get(0),
+            )
+            .optional()
+        })?;
+        let Some(hash) = hash else {
+            return Ok(None);
+        };
+        let mut cache = self
+            .manifest_cache
+            .lock()
+            .map_err(|_| StoreError::Backend("manifest cache poisoned".into()))?;
+        let cache_key = (principal.to_owned(), key.to_owned());
+        if let Some((cached_hash, manifest)) = cache.get(&cache_key) {
+            if cached_hash == &hash {
+                return Ok(Some(Ok(manifest.clone())));
+            }
+        }
+        // Re-read hash and document together on a miss; the row may have changed
+        // since the cheap hash lookup, and that newer document needs its own key.
+        let row: Option<(String, String)> = self.inner.with_read(|conn| {
+            conn.query_row("SELECT content_hash,manifest_json FROM app_manifests WHERE principal=?1 AND key=?2",
+                (principal, key), |row| Ok((row.get(0)?,row.get(1)?))).optional()
+        })?;
+        let Some((hash, json)) = row else {
+            return Ok(None);
+        };
+        let manifest = match serde_json::from_str::<AppManifest>(&json) {
+            Ok(manifest) => std::sync::Arc::new(manifest),
+            Err(error) => return Ok(Some(Err(error.to_string()))),
+        };
+        cache.insert(cache_key, (hash, manifest.clone()));
+        Ok(Some(Ok(manifest)))
+    }
+
     pub fn manifest_json(&self, principal: &str, key: &str) -> Result<Option<Value>, StoreError> {
         self.inner.with_read(|conn| {
             let json: Option<String> = conn
@@ -8915,18 +8823,107 @@ fn disable_catalog_action_on_conn(
     Ok(changed != 0)
 }
 
+fn append_audit_on_conn(
+    conn: &Connection,
+    record: &AuditRecord,
+    query_text: Option<&str>,
+    result_count: Option<i64>,
+    scope: Option<&CallScope>,
+    relay_origin: Option<&RelayOrigin>,
+) -> rusqlite::Result<()> {
+    let now = now_ms();
+    let scope_epoch = scope.map(|scope| epoch_to_sql(scope.scope_epoch));
+    conn.execute(
+        "INSERT INTO audit_journal (
+            ts, principal, actor, acting_principal, agent_id, agent_handle,
+            connection_id, app_key, action, risk, severity, decision, reason_code, gate,
+            args_redaction_summary, outcome, latency_ms, request_id,
+            credential_fingerprint, provider_account_fingerprint, attempt_no,
+            vendor_request_id, idempotency_key_fingerprint, response_class,
+            reconciliation_of, app_handle_id, query_text, result_count,
+            scope_owner, scope_ref, scope_epoch, scope_kind, scope_parent,
+            scope_parent_state, scope_delegates, scope_owner_authorized,
+            origin_carrier, origin_call_key, scope_flow_id
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+            ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
+            ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34,
+            ?35, ?36, ?37, ?38, ?39
+        )",
+        rusqlite::params![
+            now,
+            record.principal,
+            record.actor,
+            record.acting_principal,
+            record.agent_id,
+            record.agent_handle,
+            record.connection_id,
+            record.app_key,
+            record.action,
+            record.risk,
+            record.severity,
+            record.decision,
+            record.reason_code,
+            record.gate,
+            record.args_redaction_summary,
+            record.outcome,
+            record.latency_ms,
+            record.request_id,
+            record.credential_fingerprint,
+            record.provider_account_fingerprint,
+            record.attempt_no,
+            record.vendor_request_id,
+            record.idempotency_key_fingerprint,
+            record.response_class,
+            record.reconciliation_of,
+            record.app_handle_id,
+            query_text,
+            result_count,
+            scope.map(|scope| scope.owner.as_str()),
+            scope.map(|scope| scope.scope_ref.as_str()),
+            scope_epoch,
+            scope.and_then(|scope| scope.kind.as_deref()),
+            scope.and_then(|scope| scope.parent.as_deref()),
+            scope.and_then(|scope| scope.parent_state.as_deref()),
+            scope.map(|scope| scope.delegates),
+            scope.map(|scope| scope.owner_authorized),
+            relay_origin.map(|origin| origin.carrier.as_str()),
+            relay_origin.map(|origin| origin.call_key.as_str()),
+            scope.and_then(|scope| scope.flow_id.as_deref()),
+        ],
+    )?;
+    // A settled send of a claimed approval also settles the approval
+    // request: its outcome is copied there, in this transaction, so a
+    // later withdrawal reads it even after retention deletes this row.
+    // Only the first settled row counts, as the withdrawal fallback
+    // (the earliest dispatch row with an outcome) also reads it.
+    if let (Some("dispatch"), Some(outcome), Some(request_id)) = (
+        record.gate.as_deref(),
+        record.outcome.as_deref(),
+        record.request_id.as_deref(),
+    ) {
+        conn.execute(
+            "UPDATE action_requests SET settled_outcome = ?3
+             WHERE principal = ?1 AND claimed_request_id = ?2
+               AND status = 'consumed' AND settled_outcome IS NULL",
+            rusqlite::params![record.principal, request_id, outcome],
+        )?;
+    }
+    Ok(())
+}
+
 fn prune_ceremony_history_on_conn(
     conn: &rusqlite::Connection,
     now: i64,
     retention: i64,
 ) -> rusqlite::Result<()> {
     let cutoff = now.saturating_sub(retention);
-    conn.execute("UPDATE action_requests SET status='expired' WHERE (principal,request_id) IN (SELECT principal,request_id FROM action_requests WHERE status IN ('pending','approved') AND expires_at<=?1 ORDER BY expires_at LIMIT 1000)",[now])?;
-    conn.execute("UPDATE binding_tickets SET status='expired' WHERE (principal,ticket_id) IN (SELECT principal,ticket_id FROM binding_tickets WHERE status='issued' AND expires_at<=?1 ORDER BY expires_at LIMIT 1000)",[now])?;
-    conn.execute("DELETE FROM consent_call_keys WHERE (principal,request_id) IN (SELECT principal,request_id FROM action_requests WHERE status IN ('consumed','denied','expired','cancelled') AND settled_at_ms<?1 ORDER BY settled_at_ms LIMIT 1000)",[cutoff])?;
-    conn.execute("DELETE FROM action_requests WHERE (principal,request_id) IN (SELECT principal,request_id FROM action_requests WHERE status IN ('consumed','denied','expired','cancelled') AND settled_at_ms<?1 ORDER BY settled_at_ms LIMIT 1000)",[cutoff])?;
-    conn.execute("DELETE FROM binding_tickets WHERE (principal,ticket_id) IN (SELECT principal,ticket_id FROM binding_tickets WHERE status IN ('consumed','expired','revoked') AND settled_at_ms<?1 ORDER BY settled_at_ms LIMIT 1000)",[now.saturating_sub(AUDIT_MILLIS_PER_DAY)])?;
-    conn.execute("DELETE FROM github_bot_receipt WHERE (agent_id,request_nonce) IN (SELECT agent_id,request_nonce FROM github_bot_receipt WHERE state IN ('outcome_unknown','pending','pending_approval') AND updated_at<?1 ORDER BY updated_at LIMIT 1000)",[cutoff])?;
+    conn.execute("UPDATE action_requests SET status='expired' WHERE (principal,request_id) IN (SELECT principal,request_id FROM action_requests WHERE status IN ('pending','approved') AND expires_at<=?1 ORDER BY expires_at LIMIT ?2)",(now, CEREMONY_RETENTION_BATCH_ROWS))?;
+    conn.execute("UPDATE binding_tickets SET status='expired' WHERE (principal,ticket_id) IN (SELECT principal,ticket_id FROM binding_tickets WHERE status='issued' AND expires_at<=?1 ORDER BY expires_at LIMIT ?2)",(now, CEREMONY_RETENTION_BATCH_ROWS))?;
+    conn.execute("DELETE FROM consent_call_keys WHERE (principal,request_id) IN (SELECT principal,request_id FROM action_requests WHERE status IN ('consumed','denied','expired','cancelled') AND settled_at_ms<?1 ORDER BY settled_at_ms LIMIT ?2)",(cutoff, CEREMONY_RETENTION_BATCH_ROWS))?;
+    conn.execute("DELETE FROM action_requests WHERE (principal,request_id) IN (SELECT principal,request_id FROM action_requests WHERE status IN ('consumed','denied','expired','cancelled') AND settled_at_ms<?1 ORDER BY settled_at_ms LIMIT ?2)",(cutoff, CEREMONY_RETENTION_BATCH_ROWS))?;
+    conn.execute("DELETE FROM binding_tickets WHERE (principal,ticket_id) IN (SELECT principal,ticket_id FROM binding_tickets WHERE status IN ('consumed','expired','revoked') AND settled_at_ms<?1 ORDER BY settled_at_ms LIMIT ?2)",(now.saturating_sub(AUDIT_MILLIS_PER_DAY), CEREMONY_RETENTION_BATCH_ROWS))?;
+    conn.execute("DELETE FROM github_bot_receipt WHERE (agent_id,request_nonce) IN (SELECT agent_id,request_nonce FROM github_bot_receipt WHERE state IN ('outcome_unknown','pending','pending_approval') AND updated_at<?1 ORDER BY updated_at LIMIT ?2)",(cutoff, CEREMONY_RETENTION_BATCH_ROWS))?;
     Ok(())
 }
 
@@ -9340,19 +9337,25 @@ fn suspend_subscriptions_for_action(
 ) -> rusqlite::Result<()> {
     let subscriptions = {
         let mut statement = conn.prepare(
-            "SELECT subscription_id, schema_hash, last_success_at_ms, created_at_ms
+            "SELECT subscription_id, CASE WHEN cursor_kind='probe' THEN ?4 ELSE schema_hash END,
+                    last_success_at_ms, created_at_ms
              FROM trigger_subscriptions
-             WHERE principal = ?1 AND connection_id = ?2 AND action = ?3
-               AND status = 'active'",
+              WHERE principal = ?1 AND connection_id = ?2
+                AND status = 'active'
+                AND (action = ?3 OR (cursor_kind = 'probe' AND EXISTS (
+                    SELECT 1 FROM probe_subscriptions p, json_each(p.actions) a
+                    WHERE p.subscription_id = trigger_subscriptions.subscription_id AND a.value = ?3)))",
         )?;
-        let rows = statement.query_map((principal, connection_id, action), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?;
+        let current_hash = action_schema_hash(conn, principal, connection_id, action)?;
+        let rows =
+            statement.query_map((principal, connection_id, action, current_hash), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
@@ -9405,6 +9408,55 @@ fn action_schema_hash(
         (principal, connection_id, action),
         |row| row.get(0),
     )
+}
+
+/// Validate connection status and read-only action availability in the writer
+/// snapshot, treating a retired app as disabled without rewriting its actions.
+/// A scripted probe may call several vendor actions and pins its own return
+/// schema, so only an ordinary single-action watch has a vendor-schema pin.
+fn recheck_watch_preconditions(
+    conn: &Connection,
+    principal: &str,
+    connection_id: &str,
+    actions: &[(&str, Option<&str>)],
+) -> rusqlite::Result<Option<SubscriptionRefusal>> {
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM connections WHERE principal=?1 AND connection_id=?2",
+            (principal, connection_id),
+            |row| row.get(0),
+        )
+        .optional()?;
+    match status {
+        None => return Ok(Some(SubscriptionRefusal::ConnectionNotFound)),
+        Some(status) if status != "active" => {
+            return Ok(Some(SubscriptionRefusal::ConnectionInactive(status)))
+        }
+        _ => {}
+    }
+    for (action, pin) in actions {
+        let row = conn.query_row(
+            &format!("SELECT {CATALOG_ACTION_COLUMNS} FROM catalog_actions WHERE principal=?1 AND connection_id=?2 AND name=?3"),
+            (principal, connection_id, action), map_catalog_action_row,
+        ).optional()?;
+        let Some(row) = row else {
+            return Ok(Some(SubscriptionRefusal::ActionNotFound));
+        };
+        if row.risk != "read" {
+            return Ok(Some(SubscriptionRefusal::ActionRiskNotRead));
+        }
+        if row.status != "active" {
+            return Ok(Some(SubscriptionRefusal::ActionUnavailable(
+                row.quarantine_reason.unwrap_or(row.status),
+            )));
+        }
+        if pin.is_some_and(|pin| pin != row.schema_hash) {
+            return Ok(Some(SubscriptionRefusal::ActionUnavailable(
+                "schema_changed".into(),
+            )));
+        }
+    }
+    Ok(None)
 }
 
 fn map_probe_subscription_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeSubscription> {
@@ -9765,7 +9817,7 @@ fn insert_gap_row_with_payload(
             subscription_id,
             payload_hash,
             payload,
-            gap_from_ms,
+            gap_from_ms.min(gap_to_ms),
             gap_to_ms,
             reason,
             observed_at_ms,
@@ -9782,18 +9834,8 @@ fn insert_gap_row_with_payload(
 /// order silently mis-assigns fields of the same type rather than failing.
 const CATALOG_ACTION_COLUMNS: &str = concat!(
     "connection_id, principal, name, title, schema_json, schema_hash,
-            risk, severity, ",
-    // While the catalog marks the connection's app retired, report its actions
-    // as disabled with reason `app_retired`. Authorization then refuses calls
-    // without rewriting the stored action status. If a later manifest restores
-    // the app to the catalog, reads expose that stored status again.
-    "CASE WHEN ",
-    app_retired_predicate!(),
-    " THEN 'disabled' ELSE status END,
-            CASE WHEN ",
-    app_retired_predicate!(),
-    " THEN 'app_retired' ELSE quarantine_reason END,
-            reconciliation_json, ask_first, generation"
+     risk, severity, status, quarantine_reason, reconciliation_json, ask_first, generation, ",
+    app_retired_predicate!()
 );
 
 fn map_connection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRecord> {
@@ -9823,6 +9865,8 @@ fn map_connection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRec
 fn map_catalog_action_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogAction> {
     let schema: String = row.get(4)?;
     let reconciliation: Option<String> = row.get(10)?;
+    // Retirement is projected once without rewriting the reviewed action row.
+    let retired: bool = row.get(13)?;
     Ok(CatalogAction {
         connection_id: row.get(0)?,
         principal: row.get(1)?,
@@ -9832,8 +9876,16 @@ fn map_catalog_action_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogAc
         schema_hash: row.get(5)?,
         risk: row.get(6)?,
         severity: row.get(7)?,
-        status: row.get(8)?,
-        quarantine_reason: row.get(9)?,
+        status: if retired {
+            "disabled".into()
+        } else {
+            row.get(8)?
+        },
+        quarantine_reason: if retired {
+            Some("app_retired".into())
+        } else {
+            row.get(9)?
+        },
         reconciliation: reconciliation
             .as_deref()
             .map(parse_json_column)
@@ -10196,7 +10248,7 @@ pub(crate) fn is_reference_binding(value: &[u8]) -> bool {
 /// occurred could guess such an ID and gain the authority it represents.
 pub(crate) fn new_id(prefix: &str) -> String {
     new_id_from(prefix, |bytes| {
-        std::fs::File::open("/dev/urandom")?.read_exact(bytes)
+        getrandom::fill(bytes).map_err(|error| std::io::Error::other(error.to_string()))
     })
 }
 
@@ -10277,9 +10329,9 @@ impl PlexusStore {
         now: i64,
     ) -> Result<Vec<crate::reconciliation::PendingWriteReconciliation>, StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            let mut stmt = conn.prepare("SELECT principal,request_id,record_json,expires_at_ms FROM pending_write_reconciliations WHERE next_attempt_at_ms<=?1 OR expires_at_ms<=?1 ORDER BY expires_at_ms,principal,request_id LIMIT 1000")?;
+            let mut stmt = conn.prepare("SELECT principal,request_id,record_json,expires_at_ms FROM pending_write_reconciliations WHERE next_attempt_at_ms<=?1 OR expires_at_ms<=?1 ORDER BY expires_at_ms,principal,request_id LIMIT ?2")?;
             let rows = stmt
-                .query_map([now], |row| {
+                .query_map((now, RECONCILIATION_BATCH_ROWS), |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -10345,18 +10397,20 @@ impl PlexusStore {
         })
     }
 
-    /// Owners can inspect their connections' results; callers can inspect only
-    /// their own results, including after revocation. No vendor payload is exposed.
+    /// Owners see their connections' results; callers see only their own results.
+    /// The flag reports additional rows beyond this bounded diagnostic snapshot.
     pub fn list_write_reconciliations(
         &self,
         principal: &str,
-    ) -> Result<Vec<crate::reconciliation::WriteReconciliationStatus>, StoreError> {
+    ) -> Result<(Vec<crate::reconciliation::WriteReconciliationStatus>, bool), StoreError> {
         self.inner.with_read(|conn| {
-            let mut stmt = conn.prepare("SELECT request_id,connection_id,action,status,reason FROM write_reconciliation_results WHERE principal=?1 OR acting_principal=?1 ORDER BY updated_at_ms DESC LIMIT 1000")?;
-            let rows = stmt.query_map([principal], |row| Ok(crate::reconciliation::WriteReconciliationStatus {
+            let mut stmt = conn.prepare("SELECT request_id,connection_id,action,status,reason FROM write_reconciliation_results WHERE principal=?1 OR acting_principal=?1 ORDER BY updated_at_ms DESC,request_id LIMIT ?2")?;
+            let mut rows: Vec<_> = stmt.query_map((principal, RECONCILIATION_BATCH_ROWS + 1), |row| Ok(crate::reconciliation::WriteReconciliationStatus {
                 request_id: row.get(0)?, connection_id: row.get(1)?, action: row.get(2)?, status: row.get(3)?, reason: row.get(4)?,
-            }))?.collect();
-            rows
+            }))?.collect::<rusqlite::Result<_>>()?;
+            let truncated = rows.len() > RECONCILIATION_BATCH_ROWS as usize;
+            rows.truncate(RECONCILIATION_BATCH_ROWS as usize);
+            Ok((rows, truncated))
         })
     }
 
@@ -10377,8 +10431,8 @@ impl PlexusStore {
         retention_window_ms: i64,
     ) -> Result<usize, StoreError> {
         self.inner.with_conn_fenced(|conn| conn.execute("DELETE FROM write_reconciliation_results WHERE (principal,request_id) IN
-            (SELECT principal,request_id FROM write_reconciliation_results WHERE status!='pending' AND updated_at_ms < ?1 ORDER BY updated_at_ms LIMIT 1000)",
-            [now.saturating_sub(retention_window_ms)]))
+            (SELECT principal,request_id FROM write_reconciliation_results WHERE status!='pending' AND updated_at_ms < ?1 ORDER BY updated_at_ms LIMIT ?2)",
+            (now.saturating_sub(retention_window_ms), RECONCILIATION_BATCH_ROWS)))
     }
 }
 
@@ -10397,6 +10451,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TRIGGER_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    include!("storage_api_tests.rs");
 
     fn empty_schema() -> Connection {
         let connection = Connection::open_in_memory().expect("open sqlite memory");
@@ -10673,6 +10729,7 @@ mod tests {
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
             ci_runs: Default::default(),
+            manifest_cache: Default::default(),
         };
         let live = store
             .matching_grant(
@@ -10987,6 +11044,7 @@ mod tests {
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
             ci_runs: Default::default(),
+            manifest_cache: Default::default(),
         };
         let served = store
             .list_events("direct", None, None)
@@ -11068,6 +11126,7 @@ mod tests {
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
             ci_runs: Default::default(),
+            manifest_cache: Default::default(),
         };
         let record = AuditRecord::ceremony("direct", None, None, "test", "read", None);
         store.append_audit(&record).unwrap();
@@ -11182,6 +11241,7 @@ mod tests {
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
             ci_runs: Default::default(),
+            manifest_cache: Default::default(),
         };
         let scope = CallScope {
             owner: "reserved:prefrontal-core".into(),
@@ -15001,6 +15061,16 @@ mod tests {
                 now - RESERVATION_RETENTION_MS - 1,
             )
             .expect("insert old non-terminal reservation");
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE reservations SET expires_at=?1 WHERE reservation_id='old-reserved'",
+                    [now + 60_000],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
 
         assert_eq!(
             store.prune_reservations(now).expect("run retention"),

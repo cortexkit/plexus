@@ -911,7 +911,8 @@ fn swept_uncertain_facade_effect_records_argument_free_disposition_with_original
     );
     let dispositions = store
         .list_write_reconciliations(plexus_core::github::AFT_PRINCIPAL)
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(dispositions.len(), 1);
     assert_eq!(dispositions[0].request_id, *id);
     assert_eq!(dispositions[0].status, "unreconcilable");
@@ -977,7 +978,8 @@ fn swept_receipt_with_future_reconciliation_class_never_queues_empty_args() {
     store.sweep_github_receipts(now + 121_000, 100).unwrap();
     let results = store
         .list_write_reconciliations(plexus_core::github::AFT_PRINCIPAL)
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, "unreconcilable");
     assert_eq!(
@@ -1699,7 +1701,8 @@ fn expired_retry_records_unknown_disposition_before_any_sweep_and_never_resends(
     assert!(transport.requests().is_empty());
     let result = store
         .list_write_reconciliations(plexus_core::github::AFT_PRINCIPAL)
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].request_id, original_request_id);
     assert_eq!(result[0].status, "unreconcilable");

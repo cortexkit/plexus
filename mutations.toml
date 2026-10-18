@@ -4752,8 +4752,8 @@ timeout_s = 120
 id = "reconciliation-result-retention-configured"
 guards = "Settled reconciliation results age out with the configured audit retention"
 file = "crates/plexus-core/src/storage.rs"
-old = "[now.saturating_sub(retention_window_ms)]"
-new = "[now.saturating_sub(retention_window_ms.max(DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY))] /* NON-VACUITY BREAK */"
+old = "(now.saturating_sub(retention_window_ms), RECONCILIATION_BATCH_ROWS)"
+new = "(now.saturating_sub(retention_window_ms.max(DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY)), RECONCILIATION_BATCH_ROWS) /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/tests/decision_plane.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -4880,8 +4880,8 @@ timeout_s = 120
 id = "unacked-of-counts-granted-acks"
 guards = "An event the caller acked through a live consume grant is not reported back as unacked"
 file = "crates/plexus-core/src/storage.rs"
-old = "|| granted.iter().any(|grant| {"
-new = "|| false && granted.iter().any(|grant| { /* NON-VACUITY BREAK */"
+old = "AND acked_at_ms IS NOT NULL AND {EVENT_ACK_AUTHORITY}) ORDER BY wanted.key"
+new = "AND acked_at_ms IS NOT NULL AND principal=?1 AND {EVENT_ACK_AUTHORITY}) /* NON-VACUITY BREAK */ ORDER BY wanted.key"
 test_file = "crates/plexus-core/src/storage.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -6265,8 +6265,8 @@ timeout_s = 120
 id = "probe-union-expiry"
 guards = "Probe deadline covers every declared action"
 file = "crates/plexus-core/src/storage.rs"
-old = "subscription.authority_expires_at_ms = expiry;"
-new = "subscription.authority_expires_at_ms = None; /* NON-VACUITY BREAK */"
+old = "let (expiry, state) = self.subscription_authority(&subscription, now_ms())?;\n        subscription.authority_expires_at_ms = expiry;"
+new = "let (expiry, state) = self.subscription_authority(&subscription, now_ms())?;\n        subscription.authority_expires_at_ms = None; /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -6327,8 +6327,8 @@ timeout_s = 120
 
 [[control]]
 id = "retired-resume"
-guards = "Both resume reads name the retired terminal state"
-edits = [{ file = "crates/plexus-core/src/storage.rs", old = "if subscription.status == \"retired\" {", new = "if false && subscription.status == \"retired\" { /* NON-VACUITY BREAK */" }, { file = "crates/plexus-core/src/storage.rs", old = "if current.status == \"retired\" {", new = "if false && current.status == \"retired\" { /* NON-VACUITY BREAK */" }]
+guards = "Resume names the retired terminal state in its fenced snapshot"
+edits = [{ file = "crates/plexus-core/src/storage.rs", old = "if subscription.status == \"retired\" {", new = "if false && subscription.status == \"retired\" { /* NON-VACUITY BREAK */" }]
 test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -6855,8 +6855,8 @@ timeout_s = 120
 id = "catalog-observation-atomic"
 guards = "A failure in observation N rolls back all earlier catalog changes"
 file = "crates/plexus-core/src/storage.rs"
-old = "pub fn reconcile_catalog_actions(\n        &self,\n        principal: &str,\n        connection_id: &str,\n        actions: &[CatalogActionInput],\n    ) -> Result<(), StoreError> {\n        self.inner.with_conn_fenced(|conn| {"
-new = "pub fn reconcile_catalog_actions(\n        &self,\n        principal: &str,\n        connection_id: &str,\n        actions: &[CatalogActionInput],\n    ) -> Result<(), StoreError> {\n        self.inner.with_conn(|conn| { /* NON-VACUITY BREAK */"
+old = "let accepted = self.inner.with_conn_fenced(|conn| {"
+new = "let accepted = self.inner.with_conn(|conn| { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -12068,5 +12068,335 @@ package = "plexus-core"
 target = "--test decision_plane"
 select = "expected"
 expect_red = ["a_failed_allow_verdict_write_refuses_before_reservation_or_dispatch"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-delete-consent-children"
+guards = "Connection deletion removes approval aliases before their parent"
+file = "crates/plexus-core/src/storage.rs"
+old = "\"consent_call_keys\",\n        \"(principal, request_id) IN"
+new = "\"consent_call_keys\",\n        \"/* NON-VACUITY BREAK */ 0 AND (principal, request_id) IN"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::connection_delete_removes_consent_alias_children"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-resume-schema-pin"
+guards = "Resume refuses a watch whose vendor schema pin changed"
+file = "crates/plexus-core/src/storage.rs"
+old = "if pin.is_some_and(|pin| pin != row.schema_hash) {"
+new = "if false && pin.is_some_and(|pin| pin != row.schema_hash) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::resume_rechecks_catalog_pin_connection_and_grant_under_the_fence"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-resume-response-shape"
+guards = "Operators may retry response-shape pauses without replacing cursors"
+file = "crates/plexus-core/src/storage.rs"
+old = "|| reason == \"response_shape_invalid\""
+new = "|| false /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::resume_reports_live_authority_and_accepts_response_shape_pauses"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-resume-live-projection"
+guards = "Resume reports the grant authority it just checked"
+file = "crates/plexus-core/src/storage.rs"
+old = "subscription.authority_state = state.to_string();\n            if subscription.status == \"suspended\" {"
+new = "subscription.authority_state = \"absent\".into(); /* NON-VACUITY BREAK */\n            if subscription.status == \"suspended\" {"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::resume_reports_live_authority_and_accepts_response_shape_pauses"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-watch-retired-app"
+guards = "The transactional watch recheck projects app retirement"
+file = "crates/plexus-core/src/storage.rs"
+old = "let retired: bool = row.get(13)?;"
+new = "let retired: bool = false; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::subscription_insert_rechecks_retirement_in_the_transaction"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-expired-unclaimed-fences"
+guards = "Expired abandoned reservations are reclaimable without touching live fences"
+file = "crates/plexus-core/src/storage.rs"
+old = "WHERE status='reserved' AND expires_at<=?1"
+new = "WHERE status='reserved' AND 0 /* NON-VACUITY BREAK */ AND expires_at<=?1"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::expired_unclaimed_reservations_are_reclaimed_but_live_fences_survive"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-backwards-clock-due"
+guards = "A backward clock step cannot stall every watch"
+file = "crates/plexus-core/src/storage.rs"
+old = "OR last_polled_at_ms > ?2 OR"
+new = "OR (0 AND last_polled_at_ms > ?2) /* NON-VACUITY BREAK */ OR"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::backwards_clock_steps_do_not_stall_watches_or_reverse_gap_bounds"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-ordered-gap-bounds"
+guards = "Coverage gap intervals remain ordered after clock regression"
+file = "crates/plexus-core/src/storage.rs"
+old = "gap_from_ms.min(gap_to_ms),"
+new = "gap_from_ms, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::backwards_clock_steps_do_not_stall_watches_or_reverse_gap_bounds"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-vendor-activity-bound"
+guards = "Actor enrichment bounds vendor timelines with vendor activity time"
+file = "crates/plexus-core/src/storage.rs"
+old = "SELECT MAX(activity_at_ms),"
+new = "SELECT MAX(observed_at_ms), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::prior_activity_bound_uses_vendor_time_not_host_observation_time"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-probe-action-suspension"
+guards = "Catalog unavailability suspends probes declaring the affected action"
+file = "crates/plexus-core/src/storage.rs"
+old = "OR (cursor_kind = 'probe' AND EXISTS ("
+new = "OR (0 /* NON-VACUITY BREAK */ AND cursor_kind = 'probe' AND EXISTS ("
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::catalog_changes_suspend_probes_that_declare_the_action"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-ticket-binding-pair"
+guards = "An older ticket cannot activate the pending binding of a newer ticket"
+file = "crates/plexus-core/src/storage.rs"
+old = "UPDATE binding_tickets SET status='expired', settled_at_ms=?3\n                 WHERE principal=?1 AND connection_id=?2 AND status='issued'"
+new = "UPDATE binding_tickets SET status='expired', settled_at_ms=?3\n                 WHERE 0 /* NON-VACUITY BREAK */ AND principal=?1 AND connection_id=?2 AND status='issued'"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::a_new_binding_ticket_invalidates_the_previous_pending_binding"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-rebind-reference-evidence"
+guards = "Rebinding a credential records its safe reference fingerprint atomically"
+file = "crates/plexus-core/src/storage.rs"
+old = "Some(&fingerprint),"
+new = "None, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::credential_rebind_records_only_the_reference_fingerprint"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-manifest-cache-revision"
+guards = "A typed manifest cache cannot return an older content hash"
+file = "crates/plexus-core/src/storage.rs"
+old = "if cached_hash == &hash {"
+new = "if true || cached_hash == &hash { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::typed_manifest_cache_reuses_current_content_and_reloads_new_hashes"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-ack-chunk-bound"
+guards = "Large acknowledgement requests release the writer between idempotent chunks"
+file = "crates/plexus-core/src/storage.rs"
+old = "let mut acked = 0;\n        for chunk in event_ids.chunks(MAX_EVENT_ACK_IDS) {"
+new = "let mut acked = 0;\n        for chunk in event_ids.chunks(usize::MAX) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::event_ack_chunks_commit_before_a_later_chunk_fails_and_retry_safely"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-unacked-authority-time"
+guards = "Ack reporting evaluates grants at the same authority timestamp as the update"
+file = "crates/plexus-core/src/storage.rs"
+old = "rusqlite::params![principal, ids, now],"
+new = "rusqlite::params![principal, ids, now + 10], /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::unacked_results_reuse_the_ack_authority_timestamp"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-unsubscribe-index"
+guards = "Unsubscribe event scans use the owner and subscription index prefix"
+file = "crates/plexus-core/src/storage.rs"
+old = "const SUBSCRIPTION_EVENTS_PREDICATE: &str = \"principal = ?1 AND subscription_id = ?2\";"
+new = "const SUBSCRIPTION_EVENTS_PREDICATE: &str = \"?1 IS NOT NULL AND subscription_id = ?2\"; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::unsubscribe_event_queries_use_the_owner_subscription_index"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-reconciliation-truncation"
+guards = "Bounded reconciliation diagnostics report additional rows honestly"
+file = "crates/plexus-core/src/storage.rs"
+old = "let truncated = rows.len() > RECONCILIATION_BATCH_ROWS as usize;"
+new = "let truncated = false; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::reconciliation_listing_reports_truncation_and_keeps_principal_scope"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-id-os-entropy"
+guards = "New ids consume operating system entropy rather than repeat a fixed value"
+file = "crates/plexus-core/src/storage.rs"
+old = "getrandom::fill(bytes).map_err(|error| std::io::Error::other(error.to_string()))"
+new = "{ bytes.fill(0); Ok(()) } /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::random_ids_from_consecutive_calls_are_distinct"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-delete-fk-inventory"
+guards = "Connection deletion accounts for foreign-key descendants without connection_id columns"
+file = "crates/plexus-core/src/storage.rs"
+old = "        \"consent_call_keys\","
+new = "        \"action_requests\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/connection_delete_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::connection_delete_tests::every_connection_keyed_table_is_deleted_or_deliberately_kept"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-wildcard-invoke-visibility"
+guards = "Only explicitly named invoke grantees can resolve an owner's connection"
+file = "crates/plexus-core/src/storage.rs"
+old = "AND grant.grantee_principal = ?1 AND grant.grantee_principal <> '*'"
+new = "AND (grant.grantee_principal = ?1 OR grant.grantee_principal = '*') /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::wildcard_grantees_do_not_make_a_connection_invoke_visible"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-approval-batch-time"
+guards = "Scoped approvals checked in one scheduler batch share one rotation timestamp"
+file = "crates/plexus-core/src/storage.rs"
+old = "update.execute(rusqlite::params![row.principal,row.request_id,updated_at])?;"
+new = "update.execute(rusqlite::params![row.principal,row.request_id,updated_at + row.args_snapshot[\"value\"].as_i64().unwrap_or(0)])?; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::waiting_approval_batches_share_a_timestamp_and_rotate_together"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store-missing-vendor-activity"
+guards = "Missing activity on an existing event cannot widen actor enrichment to a first-observation window"
+file = "crates/plexus-core/src/storage.rs"
+old = "if missing {"
+new = "if false && missing { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage_api_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::missing_prior_vendor_activity_is_unknown_not_a_first_observation"]
 build_timeout_s = 3600
 timeout_s = 120

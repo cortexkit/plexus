@@ -1062,7 +1062,7 @@ fn direct_reconciliation_finish_updates_intent_and_reenqueue_reuses_result() {
         "re-enqueue must reuse a previously terminal result row"
     );
     assert_eq!(
-        store.list_write_reconciliations("owner").unwrap()[0].status,
+        store.list_write_reconciliations("owner").unwrap().0[0].status,
         "pending"
     );
 }

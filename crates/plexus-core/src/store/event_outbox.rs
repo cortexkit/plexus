@@ -2146,6 +2146,7 @@ mod tests {
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
             ci_runs: Default::default(),
+            manifest_cache: Default::default(),
         };
         let start = std::time::Instant::now();
         for _ in 0..100 {

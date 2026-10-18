@@ -3000,8 +3000,8 @@ fn facade_tool_reply_inner(
                         .list_write_reconciliations(&principal_key)
                         .map(|reconciliations| (requests, reconciliations))
                 }) {
-                Ok((requests, reconciliations)) => {
-                    json!({"result": {"requests": requests, "reconciliations": reconciliations}})
+                Ok((requests, (reconciliations, reconciliations_truncated))) => {
+                    json!({"result": {"requests": requests, "reconciliations": reconciliations, "reconciliations_truncated": reconciliations_truncated}})
                 }
                 Err(error) => crate::wire::store_failure(
                     "requests read",
