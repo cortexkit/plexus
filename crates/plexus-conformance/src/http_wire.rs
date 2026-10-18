@@ -536,9 +536,16 @@ mod tests {
 
         let mut unterminated = b"POST / HTTP/1.1\r\nX-Flood: ".to_vec();
         unterminated.extend_from_slice(&vec![b'x'; size]);
-        let error =
-            read_back(unterminated).expect_err("headers that never end must not be buffered whole");
-        assert!(error.contains("exceeds"), "{error}");
+        let error = read_back(unterminated).expect_err("an unterminated request must be refused");
+        // The reader also refuses a request whose sender hangs up before the
+        // headers end ("incomplete HTTP request"), and this sender does hang
+        // up once it has written everything. So an error alone does not show
+        // the cap fired: only a size refusal shows the flood was cut off
+        // instead of being buffered until the sender gave up.
+        assert!(
+            error.contains("exceeds"),
+            "headers that never end must not be buffered whole: {error}"
+        );
     }
 
     /// A transient accept error does not stop a stub: the next connection is

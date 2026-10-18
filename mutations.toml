@@ -8105,16 +8105,17 @@ build_timeout_s = 3600
 
 [[control]]
 id = "queued-403-negative-control"
-guards = "The queued-report negative assertion waits for a known 401 after the 403, so an incorrect 403 report cannot arrive after the assertion"
+guards = "The queued-report negative assertion waits for a barrier report queued after both the 403 and the 401, so a wrongful report for the 403 cannot arrive after the assertion"
 file = "crates/plexus-core/src/github/credential.rs"
 old = "if status == 401 {"
-new = "if status == 403 { self.source.report_scoped_auth_failure(reference, status); } /* NON-VACUITY BREAK */\n        if status == 401 {"
+new = "if status == 403 { self.source.report_scoped_auth_failure(reference, 401); } /* NON-VACUITY BREAK */\n        if status == 401 {"
 test_file = "crates/plexus-core/tests/it/github_credential.rs"
 runner = "cargo"
 package = "plexus-core"
 target = "--test it"
 select = "expected"
 expect_red = ["github_credential::vendor_401_invalidates_and_reports_once_but_403_does_not"]
+expect_message = "only the 401 may be reported to the vault, never the 403"
 build_timeout_s = 3600
 
 [[control]]

@@ -32,11 +32,14 @@ struct Peer {
 }
 
 impl Peer {
-    fn wait_for_401_report(&self) {
+    /// Wait until a 401 report for `credential_id` has reached this peer.
+    fn wait_for_401_report(&self, credential_id: &str) {
         let calls = self.calls.lock().unwrap();
         let has_401 = |calls: &Vec<(String, Value)>| {
             calls.iter().any(|(operation, params)| {
-                operation == "credential.report_auth_failure" && params["provider_status"] == 401
+                operation == "credential.report_auth_failure"
+                    && params["provider_status"] == 401
+                    && params["credential_id"] == credential_id
             })
         };
         let (calls, _) = self
@@ -66,14 +69,28 @@ impl CkcredRoutePeer for Peer {
 }
 
 fn setup() -> (Arc<Peer>, HandleCredentialPreparer<Peer>, Arc<AtomicI64>) {
+    let (peer, preparer, now, _) = setup_with_source();
+    (peer, preparer, now)
+}
+
+/// Like [`setup`], but also hands back a clone of the credential source. A
+/// clone shares the preparer's auth-failure report queue, so a report sent
+/// through it is delivered after every report the preparer queued earlier.
+fn setup_with_source() -> (
+    Arc<Peer>,
+    HandleCredentialPreparer<Peer>,
+    Arc<AtomicI64>,
+    CkcredCredentialSource<Peer>,
+) {
     let peer = Arc::new(Peer::default());
     let now = Arc::new(AtomicI64::new(0));
     let clock = Arc::clone(&now);
+    let source = CkcredCredentialSource::new(Arc::clone(&peer));
     let preparer = HandleCredentialPreparer::new(
-        CkcredCredentialSource::new(Arc::clone(&peer)),
+        source.clone(),
         Arc::new(move || clock.load(Ordering::SeqCst)),
     );
-    (peer, preparer, now)
+    (peer, preparer, now, source)
 }
 
 #[test]
@@ -152,7 +169,7 @@ fn rotation_changes_bearer_without_connection_remint() {
 
 #[test]
 fn vendor_401_invalidates_and_reports_once_but_403_does_not() {
-    let (peer, preparer, _) = setup();
+    let (peer, preparer, _, source) = setup_with_source();
     preparer.prepare("handle", 1, "github_app:one").unwrap();
     preparer.vendor_status("handle", 1, "github_app:one", 403);
     preparer.prepare("handle", 1, "github_app:one").unwrap();
@@ -167,16 +184,25 @@ fn vendor_401_invalidates_and_reports_once_but_403_does_not() {
     );
     preparer.vendor_status("handle", 1, "github_app:one", 401);
     preparer.prepare("handle", 1, "github_app:one").unwrap();
-    // The queue is ordered: once the known 401 is observed, any erroneous 403
-    // report queued before it must also be visible to the report-count check.
-    peer.wait_for_401_report();
+    // Reports reach the vault from one background thread, in queue order. The
+    // source only ever sends status 401, so a wrongful report for the 403
+    // would look exactly like the real 401's report (same credential, status
+    // 401). Waiting for "a 401 report" could then wake on the wrongful one
+    // before the real one arrives, and the count below would read 1 and pass.
+    // Queue a report for a different credential after both, and wait for that
+    // one: when it has arrived, everything queued before it has arrived too.
+    const BARRIER_ID: &str = "github_app:report-barrier";
+    source.report_scoped_auth_failure(BARRIER_ID, 401);
+    peer.wait_for_401_report(BARRIER_ID);
     let calls = peer.calls.lock().unwrap();
     assert_eq!(
         calls
             .iter()
-            .filter(|(name, _)| name == "credential.report_auth_failure")
+            .filter(|(name, params)| name == "credential.report_auth_failure"
+                && params["credential_id"] == "github_app:one")
             .count(),
-        1
+        1,
+        "only the 401 may be reported to the vault, never the 403"
     );
     assert_eq!(
         calls
@@ -256,7 +282,7 @@ fn store_backed_seam_reads_scoped_token_from_handle_row_not_caller() {
         .prepare_handle_credential(&connection, &handle)
         .is_err());
     seams.handle_auth_failure(&connection, &handle);
-    peer.wait_for_401_report();
+    peer.wait_for_401_report("github_app:one");
     assert_eq!(
         peer.calls
             .lock()
