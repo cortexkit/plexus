@@ -1,17 +1,10 @@
 //! Per-connector fixture description for the conformance runner.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
 use crate::stub_server::StubTool;
-
-/// How the fixture obtains credentials for the binding ceremony.
-#[derive(Debug, Clone)]
-pub enum CredentialMode {
-    /// In-process stub keyed by handle fingerprint.
-    Stub { payload: Vec<u8> },
-}
 
 /// Where the transport should send vendor traffic.
 #[derive(Debug, Clone)]
@@ -43,7 +36,7 @@ pub enum WritePath {
 pub struct ConnectorFixture {
     pub name: String,
     pub manifest_path: PathBuf,
-    pub credential_mode: CredentialMode,
+    pub stub_payload: Vec<u8>,
     pub transport_target: TransportTarget,
     pub expected_actions: Vec<String>,
     pub read_action: String,
@@ -83,7 +76,7 @@ fixture_registry! {
     "github" => github, github_stub_tool;
     "tavily" => tavily, default_stub_tool;
     "context7" => context7, default_stub_tool;
-    "firecrawl" => firecrawl, firecrawl_stub_tool;
+    "firecrawl" => firecrawl, default_stub_tool;
     "huggingface" => huggingface, default_stub_tool;
     "deepwiki" => deepwiki, default_stub_tool;
     "restdemo" => restdemo, default_stub_tool;
@@ -100,15 +93,33 @@ fn default_stub_tool(name: &str) -> StubTool {
 }
 
 impl ConnectorFixture {
+    fn defaults() -> Self {
+        Self {
+            name: String::new(),
+            manifest_path: PathBuf::new(),
+            stub_payload: Vec::new(),
+            transport_target: TransportTarget::InProcessStub,
+            expected_actions: Vec::new(),
+            read_action: String::new(),
+            read_args: json!({}),
+            write_action: None,
+            write_path: WritePath::None,
+            principal: "direct".into(),
+            canary_handle: Vec::new(),
+            resource_filters: json!({}),
+            write_args: json!({}),
+            denied_resource_args: json!({}),
+            resource_filter_action: None,
+        }
+    }
+
     /// Synthetic full-surface fixture used for CI end-to-end green.
     pub fn stub() -> Self {
-        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/stub.jsonc");
+        let manifest_path = PathBuf::from("fixtures/stub.jsonc");
         Self {
             name: "stub".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"stub-vendor-token".to_vec(),
-            },
+            stub_payload: b"stub-vendor-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec![
                 "read_item".to_string(),
@@ -119,7 +130,6 @@ impl ConnectorFixture {
             read_args: json!({"q": "conformance"}),
             write_action: Some("write_item".to_string()),
             write_path: WritePath::AskFirst,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-STUB-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": ["team"],
@@ -129,49 +139,39 @@ impl ConnectorFixture {
             }),
             write_args: json!({"team": "core", "title": "conformance-write"}),
             denied_resource_args: json!({"team": "forbidden", "title": "nope"}),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
     /// Real Exa catalog against an in-process stub presenting Exa's action set.
     pub fn exa() -> Self {
-        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa.jsonc");
+        let manifest_path = PathBuf::from("catalog/exa.jsonc");
         Self {
             name: "exa".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"exa-stub-token".to_vec(),
-            },
+            stub_payload: b"exa-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             // Live-verified names from https://mcp.exa.ai/mcp tools/list.
             expected_actions: vec!["web_search_exa".to_string(), "web_fetch_exa".to_string()],
             read_action: "web_search_exa".to_string(),
             read_args: json!({"query": "conformance test", "numResults": 1}),
-            write_action: None,
-            write_path: WritePath::None,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-EXA-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": [],
                 "optional": ["domain_allowlist"],
                 "write_enabling": []
             }),
-            write_args: json!({}),
-            denied_resource_args: json!({}),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
     /// Real Linear catalog against an in-process stub presenting Linear's declared actions.
     pub fn linear() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/linear.jsonc");
+        let manifest_path = PathBuf::from("catalog/linear.jsonc");
         Self {
             name: "linear".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"linear-stub-token".to_vec(),
-            },
+            stub_payload: b"linear-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec![
                 "search_issues".to_string(),
@@ -184,7 +184,6 @@ impl ConnectorFixture {
             read_args: json!({"q": "conformance"}),
             write_action: Some("create_issue".to_string()),
             write_path: WritePath::AskFirst,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-LINEAR-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": ["workspace", "team"],
@@ -205,20 +204,17 @@ impl ConnectorFixture {
                 "team": "forbidden",
                 "title": "nope"
             }),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
     /// Real Sentry catalog against an in-process stub presenting Sentry's declared actions.
     pub fn sentry() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/sentry.jsonc");
+        let manifest_path = PathBuf::from("catalog/sentry.jsonc");
         Self {
             name: "sentry".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"sentry-stub-token".to_vec(),
-            },
+            stub_payload: b"sentry-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec![
                 "search_issues".to_string(),
@@ -232,7 +228,6 @@ impl ConnectorFixture {
             read_args: json!({"q": "conformance"}),
             write_action: Some("comment_issue".to_string()),
             write_path: WritePath::AskFirst,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-SENTRY-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": ["org", "project"],
@@ -255,20 +250,17 @@ impl ConnectorFixture {
                 "issue": "PROJ-1",
                 "body": "nope"
             }),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
     /// Notion catalog (tier S3 floor): writes escalate to NeedsDecisionPlane.
     pub fn notion() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/notion.jsonc");
+        let manifest_path = PathBuf::from("catalog/notion.jsonc");
         Self {
             name: "notion".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"notion-stub-token".to_vec(),
-            },
+            stub_payload: b"notion-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec![
                 "search".to_string(),
@@ -284,7 +276,6 @@ impl ConnectorFixture {
             }),
             write_action: Some("create_page".to_string()),
             write_path: WritePath::S3Escalation,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-NOTION-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": ["workspace"],
@@ -308,19 +299,17 @@ impl ConnectorFixture {
                 "parent_allowlist": "forbidden",
                 "title": "nope"
             }),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
     /// Google Calendar catalog: read-only fixture plus calendar allowlist denial probe.
     pub fn gcal() -> Self {
-        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/gcal.jsonc");
+        let manifest_path = PathBuf::from("catalog/gcal.jsonc");
         Self {
             name: "gcal".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"gcal-stub-token".to_vec(),
-            },
+            stub_payload: b"gcal-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec![
                 "list_calendars".to_string(),
@@ -331,9 +320,6 @@ impl ConnectorFixture {
             read_args: json!({
                 "calendar_allowlist": "primary"
             }),
-            write_action: None,
-            write_path: WritePath::None,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-GCAL-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": ["calendar_allowlist"],
@@ -343,24 +329,21 @@ impl ConnectorFixture {
                     "calendar_allowlist": ["primary", "work"]
                 }
             }),
-            write_args: json!({}),
             denied_resource_args: json!({
                 "calendar_allowlist": "forbidden"
             }),
             resource_filter_action: Some("list_events".to_string()),
+            ..Self::defaults()
         }
     }
 
     /// GitHub catalog: read-only /readonly variant with owner/repo filters.
     pub fn github() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/github.jsonc");
+        let manifest_path = PathBuf::from("catalog/github.jsonc");
         Self {
             name: "github".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"github-stub-token".to_vec(),
-            },
+            stub_payload: b"github-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             // Tool names from the GitHub MCP server default-readonly toolset
             // (https://github.com/github/github-mcp-server).
@@ -395,76 +378,55 @@ impl ConnectorFixture {
             ],
             read_action: "search_repositories".to_string(),
             read_args: json!({"q": "conformance"}),
-            write_action: None,
-            write_path: WritePath::None,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-GITHUB-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": [],
                 "optional": ["owner", "repo"],
                 "write_enabling": []
             }),
-            write_args: json!({}),
-            denied_resource_args: json!({}),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
     /// Tavily catalog: read-only web search and extraction.
     pub fn tavily() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/tavily.jsonc");
+        let manifest_path = PathBuf::from("catalog/tavily.jsonc");
         Self {
             name: "tavily".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"tavily-stub-token".to_vec(),
-            },
+            stub_payload: b"tavily-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec!["tavily_search".to_string(), "tavily_extract".to_string()],
             read_action: "tavily_search".to_string(),
             read_args: json!({"query": "conformance test"}),
-            write_action: None,
-            write_path: WritePath::None,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-TAVILY-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": [],
                 "optional": [],
                 "write_enabling": []
             }),
-            write_args: json!({}),
-            denied_resource_args: json!({}),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
     /// Context7 catalog: read-only library documentation lookup.
     pub fn context7() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/context7.jsonc");
+        let manifest_path = PathBuf::from("catalog/context7.jsonc");
         Self {
             name: "context7".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"context7-stub-token".to_vec(),
-            },
+            stub_payload: b"context7-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec!["resolve-library-id".to_string(), "query-docs".to_string()],
             read_action: "resolve-library-id".to_string(),
             read_args: json!({"library": "react"}),
-            write_action: None,
-            write_path: WritePath::None,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-CONTEXT7-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": [],
                 "optional": [],
                 "write_enabling": []
             }),
-            write_args: json!({}),
-            denied_resource_args: json!({}),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
@@ -485,14 +447,11 @@ impl ConnectorFixture {
     /// serve writes (browserbase, notion), so nothing is lost by this fixture
     /// declining to invent one.
     pub fn firecrawl() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/firecrawl.jsonc");
+        let manifest_path = PathBuf::from("catalog/firecrawl.jsonc");
         Self {
             name: "firecrawl".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"firecrawl-stub-token".to_vec(),
-            },
+            stub_payload: b"firecrawl-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec![
                 "firecrawl_scrape".to_string(),
@@ -501,31 +460,23 @@ impl ConnectorFixture {
             ],
             read_action: "firecrawl_scrape".to_string(),
             read_args: json!({"url": "https://example.com"}),
-            write_action: None,
-            write_path: WritePath::None,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-FIRECRAWL-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": [],
                 "optional": [],
                 "write_enabling": []
             }),
-            write_args: json!({}),
-            denied_resource_args: json!({}),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
     /// Hugging Face catalog: read-only model/dataset/space search and repo reads.
     pub fn huggingface() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/huggingface.jsonc");
+        let manifest_path = PathBuf::from("catalog/huggingface.jsonc");
         Self {
             name: "huggingface".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"huggingface-stub-token".to_vec(),
-            },
+            stub_payload: b"huggingface-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             // Tool names confirmed from https://github.com/huggingface/hf-mcp-server
             // (ALL_BUILTIN_TOOL_IDS in tool-ids.ts), read-shaped subset only.
@@ -546,18 +497,13 @@ impl ConnectorFixture {
             ],
             read_action: "model_search".to_string(),
             read_args: json!({"query": "conformance test"}),
-            write_action: None,
-            write_path: WritePath::None,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-HUGGINGFACE-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": [],
                 "optional": [],
                 "write_enabling": []
             }),
-            write_args: json!({}),
-            denied_resource_args: json!({}),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
@@ -565,13 +511,11 @@ impl ConnectorFixture {
     /// against an in-process REST stub. Covers a GET with a path parameter, a
     /// POST with a JSON body, and an ask-first gated write.
     pub fn restdemo() -> Self {
-        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/restdemo.jsonc");
+        let manifest_path = PathBuf::from("fixtures/restdemo.jsonc");
         Self {
             name: "restdemo".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"restdemo-vendor-token".to_vec(),
-            },
+            stub_payload: b"restdemo-vendor-token".to_vec(),
             transport_target: TransportTarget::InProcessRestStub,
             expected_actions: vec![
                 "get_issue".to_string(),
@@ -582,7 +526,6 @@ impl ConnectorFixture {
             read_args: json!({"issue_id": "issue-1", "team": "core"}),
             write_action: Some("create_issue".to_string()),
             write_path: WritePath::AskFirst,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-RESTDEMO-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": ["team"],
@@ -592,7 +535,7 @@ impl ConnectorFixture {
             }),
             write_args: json!({"team": "core", "title": "conformance-write"}),
             denied_resource_args: json!({"team": "forbidden", "title": "nope"}),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
@@ -601,14 +544,11 @@ impl ConnectorFixture {
     /// has no handle to place — the one that was unreachable while the connect
     /// path demanded a credential unconditionally.
     pub fn deepwiki() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/deepwiki.jsonc");
+        let manifest_path = PathBuf::from("catalog/deepwiki.jsonc");
         Self {
             name: "deepwiki".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"deepwiki-unused-token".to_vec(),
-            },
+            stub_payload: b"deepwiki-unused-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec![
                 "read_wiki_structure".to_string(),
@@ -617,9 +557,6 @@ impl ConnectorFixture {
             ],
             read_action: "ask_question".to_string(),
             read_args: json!({"repo_allowlist": "cortexkit/plexus", "question": "conformance"}),
-            write_action: None,
-            write_path: WritePath::None,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-DEEPWIKI-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": [],
@@ -629,9 +566,9 @@ impl ConnectorFixture {
                     "repo_allowlist": ["cortexkit/plexus", "cortexkit/subconscious"]
                 }
             }),
-            write_args: json!({}),
             denied_resource_args: json!({"repo_allowlist": "forbidden/repo"}),
             resource_filter_action: Some("ask_question".to_string()),
+            ..Self::defaults()
         }
     }
 
@@ -648,14 +585,11 @@ impl ConnectorFixture {
     /// run supplies --live with an operator handle, which switches the target
     /// to the manifest endpoint.
     pub fn exa_rest() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa_rest.jsonc");
+        let manifest_path = PathBuf::from("catalog/exa_rest.jsonc");
         Self {
             name: "exa_rest".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"exa-rest-stub-token".to_vec(),
-            },
+            stub_payload: b"exa-rest-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessRestStub,
             expected_actions: vec![
                 "search".to_string(),
@@ -664,31 +598,23 @@ impl ConnectorFixture {
             ],
             read_action: "search".to_string(),
             read_args: json!({"query": "CortexKit connectors plane", "numResults": 1}),
-            write_action: None,
-            write_path: WritePath::None,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-EXA-REST-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": [],
                 "optional": [],
                 "write_enabling": []
             }),
-            write_args: json!({}),
-            denied_resource_args: json!({}),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
     /// Supabase catalog fixture covering write operations that can execute arbitrary SQL or Edge Functions.
     pub fn supabase() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/supabase.jsonc");
+        let manifest_path = PathBuf::from("catalog/supabase.jsonc");
         Self {
             name: "supabase".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"supabase-stub-token".to_vec(),
-            },
+            stub_payload: b"supabase-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec![
                 "list_tables".to_string(),
@@ -715,7 +641,6 @@ impl ConnectorFixture {
             }),
             write_action: Some("deploy_edge_function".to_string()),
             write_path: WritePath::S3Escalation,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-SUPABASE-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": ["project_id"],
@@ -731,19 +656,17 @@ impl ConnectorFixture {
                 "project_id": "forbidden-project",
                 "function_slug": "denied-probe"
             }),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
     /// Neon catalog preview fixture for write operations that can execute arbitrary SQL.
     pub fn neon() -> Self {
-        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/neon.jsonc");
+        let manifest_path = PathBuf::from("catalog/neon.jsonc");
         Self {
             name: "neon".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"neon-stub-token".to_vec(),
-            },
+            stub_payload: b"neon-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec![
                 "list_projects".to_string(),
@@ -769,7 +692,6 @@ impl ConnectorFixture {
             }),
             write_action: Some("create_branch".to_string()),
             write_path: WritePath::S3Escalation,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-NEON-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": ["project_id"],
@@ -790,7 +712,7 @@ impl ConnectorFixture {
                 "branch_id": "forbidden-branch",
                 "branch_name": "denied-probe"
             }),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
@@ -798,14 +720,11 @@ impl ConnectorFixture {
     /// connection value allowlist so its per-project scope is asserted on read
     /// calls, where required filters alone do not gate execution.
     pub fn posthog_rest() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/posthog_rest.jsonc");
+        let manifest_path = PathBuf::from("catalog/posthog_rest.jsonc");
         Self {
             name: "posthog_rest".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"posthog-rest-stub-token".to_vec(),
-            },
+            stub_payload: b"posthog-rest-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessRestStub,
             expected_actions: vec![
                 "error_tracking_issues_list".to_string(),
@@ -824,9 +743,6 @@ impl ConnectorFixture {
                 "project_id": "project-conformance",
                 "limit": 1
             }),
-            write_action: None,
-            write_path: WritePath::None,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-POSTHOG-REST-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": ["project_id"],
@@ -834,22 +750,19 @@ impl ConnectorFixture {
                 "write_enabling": [],
                 "values": { "project_id": ["project-conformance"] }
             }),
-            write_args: json!({}),
             denied_resource_args: json!({"project_id": "forbidden-project"}),
             resource_filter_action: Some("feature_flags_list".to_string()),
+            ..Self::defaults()
         }
     }
 
     /// Resend catalog fixture for an irreversible broadcast send that cannot be undone after execution.
     pub fn resend() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/resend.jsonc");
+        let manifest_path = PathBuf::from("catalog/resend.jsonc");
         Self {
             name: "resend".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"resend-stub-token".to_vec(),
-            },
+            stub_payload: b"resend-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec![
                 "list-emails".to_string(),
@@ -876,7 +789,6 @@ impl ConnectorFixture {
             read_args: json!({ "from_domain": "example.com" }),
             write_action: Some("create-broadcast".to_string()),
             write_path: WritePath::S3Escalation,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-RESEND-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": [],
@@ -892,20 +804,17 @@ impl ConnectorFixture {
                 "from_domain": "forbidden.example",
                 "subject": "Denied broadcast"
             }),
-            resource_filter_action: None,
+            ..Self::defaults()
         }
     }
 
     /// Browserbase catalog fixture where browser actions that cause side effects require user confirmation before execution.
     pub fn browserbase() -> Self {
-        let manifest_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/browserbase.jsonc");
+        let manifest_path = PathBuf::from("catalog/browserbase.jsonc");
         Self {
             name: "browserbase".to_string(),
             manifest_path,
-            credential_mode: CredentialMode::Stub {
-                payload: b"browserbase-stub-token".to_vec(),
-            },
+            stub_payload: b"browserbase-stub-token".to_vec(),
             transport_target: TransportTarget::InProcessStub,
             expected_actions: vec![
                 "start".to_string(),
@@ -922,7 +831,6 @@ impl ConnectorFixture {
             }),
             write_action: Some("act".to_string()),
             write_path: WritePath::AskFirst,
-            principal: "direct".to_string(),
             canary_handle: b"test:CANARY-HANDLE-BROWSERBASE-CONFORMANCE".to_vec(),
             resource_filters: json!({
                 "required": [],
@@ -939,6 +847,7 @@ impl ConnectorFixture {
                 "url": "https://forbidden.example"
             }),
             resource_filter_action: Some("navigate".to_string()),
+            ..Self::defaults()
         }
     }
 
@@ -973,12 +882,49 @@ impl ConnectorFixture {
             .collect()
     }
 
-    /// `tool` with its schema also declaring every argument this fixture sends
-    /// to that action. A live vendor declares the arguments its tool takes, and
-    /// governance refuses a top-level argument the discovered schema does not
-    /// declare, so a stub that left one out would refuse the fixture's own
-    /// call.
+    pub fn validate_stub_arguments(&self) -> Result<(), String> {
+        for tool in self
+            .stub_tools()
+            .into_iter()
+            .filter(|tool| !tool.inferred_schema)
+        {
+            let arguments = [
+                (Some(self.read_action.as_str()), &self.read_args),
+                (self.write_action.as_deref(), &self.write_args),
+                (
+                    self.resource_filter_action
+                        .as_deref()
+                        .or(self.write_action.as_deref()),
+                    &self.denied_resource_args,
+                ),
+            ];
+            for (_, args) in arguments
+                .into_iter()
+                .filter(|(name, _)| *name == Some(tool.name.as_str()))
+            {
+                let extras = args
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|args| args.keys())
+                    .filter(|key| tool.input_schema["properties"].get(*key).is_none())
+                    .collect::<Vec<_>>();
+                if !extras.is_empty() {
+                    return Err(format!(
+                        "fixture {} sends undeclared arguments {extras:?} to {}",
+                        self.name, tool.name
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Synthetic tools infer their properties from the fixture. Vendor-modelled
+    /// schemas stay unchanged so misspelled arguments fail before dispatch.
     fn declaring_sent_arguments(&self, mut tool: StubTool) -> StubTool {
+        if !tool.inferred_schema {
+            return tool;
+        }
         let name = tool.name.as_str();
         let mut sent = Vec::new();
         if name == self.read_action {
@@ -1005,6 +951,33 @@ impl ConnectorFixture {
     }
 
     pub fn load_manifest_source(&self) -> Result<String, String> {
+        let embedded = match self.manifest_path.to_str().unwrap_or("") {
+            "fixtures/stub.jsonc" => Some(include_str!("../fixtures/stub.jsonc")),
+            "fixtures/restdemo.jsonc" => Some(include_str!("../fixtures/restdemo.jsonc")),
+            "catalog/exa.jsonc" => Some(include_str!("../../../catalog/exa.jsonc")),
+            "catalog/linear.jsonc" => Some(include_str!("../../../catalog/linear.jsonc")),
+            "catalog/sentry.jsonc" => Some(include_str!("../../../catalog/sentry.jsonc")),
+            "catalog/notion.jsonc" => Some(include_str!("../../../catalog/notion.jsonc")),
+            "catalog/gcal.jsonc" => Some(include_str!("../../../catalog/gcal.jsonc")),
+            "catalog/github.jsonc" => Some(include_str!("../../../catalog/github.jsonc")),
+            "catalog/tavily.jsonc" => Some(include_str!("../../../catalog/tavily.jsonc")),
+            "catalog/context7.jsonc" => Some(include_str!("../../../catalog/context7.jsonc")),
+            "catalog/firecrawl.jsonc" => Some(include_str!("../../../catalog/firecrawl.jsonc")),
+            "catalog/huggingface.jsonc" => Some(include_str!("../../../catalog/huggingface.jsonc")),
+            "catalog/deepwiki.jsonc" => Some(include_str!("../../../catalog/deepwiki.jsonc")),
+            "catalog/exa_rest.jsonc" => Some(include_str!("../../../catalog/exa_rest.jsonc")),
+            "catalog/supabase.jsonc" => Some(include_str!("../../../catalog/supabase.jsonc")),
+            "catalog/neon.jsonc" => Some(include_str!("../../../catalog/neon.jsonc")),
+            "catalog/posthog_rest.jsonc" => {
+                Some(include_str!("../../../catalog/posthog_rest.jsonc"))
+            }
+            "catalog/resend.jsonc" => Some(include_str!("../../../catalog/resend.jsonc")),
+            "catalog/browserbase.jsonc" => Some(include_str!("../../../catalog/browserbase.jsonc")),
+            _ => None,
+        };
+        if let Some(source) = embedded {
+            return Ok(source.to_owned());
+        }
         std::fs::read_to_string(&self.manifest_path)
             .map_err(|error| format!("read fixture manifest: {error}"))
     }
@@ -1308,38 +1281,6 @@ fn github_stub_tool(name: &str) -> StubTool {
                 "repo": {"type": "string"}
             },
             "required": ["owner", "repo"]
-        }),
-        _ => json!({"type": "object", "properties": {}}),
-    };
-    StubTool::new(name.to_string(), schema)
-}
-
-fn firecrawl_stub_tool(name: &str) -> StubTool {
-    let schema = match name {
-        "scrape" | "map" | "crawl" | "extract" => json!({
-            "type": "object",
-            "properties": {
-                "url": {"type": "string"},
-                "domain_allowlist": {"type": "string"}
-            },
-            "required": ["url"]
-        }),
-        "search" => json!({
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "domain_allowlist": {"type": "string"}
-            },
-            "required": ["query"]
-        }),
-        "agent" | "interact" => json!({
-            "type": "object",
-            "properties": {
-                "url": {"type": "string"},
-                "action": {"type": "string"},
-                "domain_allowlist": {"type": "string"}
-            },
-            "required": ["url"]
         }),
         _ => json!({"type": "object", "properties": {}}),
     };

@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::test_scratch::Scratch;
-use plexus_core::{ingest_value, PlexusStore};
+use plexus_core::PlexusStore;
 
 /// The parameters the live ceremony will use, named once so the test cannot
 /// drift from the thing it is rehearsing.
@@ -68,10 +68,8 @@ fn store() -> (Scratch, PlexusStore) {
 /// Ingest the shipped manifest through the production parser and path.
 fn ingest_shipped(store: &PlexusStore) {
     let source = std::fs::read_to_string(catalog_path()).expect("the shipped manifest must exist");
-    let normalized = subc_jsonc::jsonc_to_json(&source).expect("shipped manifest must be JSONC");
-    let value: serde_json::Value =
-        serde_json::from_str(&normalized).expect("shipped manifest must be JSON");
-    let manifest = ingest_value(value).expect("shipped manifest must ingest");
+    let manifest =
+        plexus_conformance::drift::ingest_manifest(&source).expect("shipped manifest must ingest");
     store
         .upsert_manifest("system", &manifest)
         .expect("manifest must store");

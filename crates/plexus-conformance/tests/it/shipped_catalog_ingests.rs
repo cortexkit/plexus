@@ -108,8 +108,7 @@ fn github_actions_is_a_read_only_per_attempt_rest_catalog() {
     use serde_json::json;
 
     let source = std::fs::read_to_string(catalog_dir().join("github_actions.jsonc")).unwrap();
-    let normalized = subc_jsonc::jsonc_to_json(&source).unwrap();
-    let ingested = ingest_value(serde_json::from_str(&normalized).unwrap()).unwrap();
+    let ingested = plexus_conformance::drift::ingest_manifest(&source).unwrap();
     let manifest = ingested.manifest;
     assert_eq!(manifest.key, "github_actions");
     assert_eq!(manifest.transport.kind, TransportKind::RestApi);
@@ -231,8 +230,7 @@ fn github_actions_superseded_catalog_is_closed_and_read_only() {
     use serde_json::json;
 
     let source = std::fs::read_to_string(catalog_dir().join("github_actions.jsonc")).unwrap();
-    let normalized = subc_jsonc::jsonc_to_json(&source).unwrap();
-    let ingested = ingest_value(serde_json::from_str(&normalized).unwrap()).unwrap();
+    let ingested = plexus_conformance::drift::ingest_manifest(&source).unwrap();
     for (name, required) in [
         (
             "get_workflow_run_metadata",
@@ -268,10 +266,7 @@ fn github_actions_artifact_catalog_is_read_only_and_bounded() {
     use plexus_core::manifest::{HttpMethod, Risk};
     use serde_json::json;
     let source = std::fs::read_to_string(catalog_dir().join("github_actions.jsonc")).unwrap();
-    let normalized = subc_jsonc::jsonc_to_json(&source).unwrap();
-    let manifest = ingest_value(serde_json::from_str(&normalized).unwrap())
-        .unwrap()
-        .manifest;
+    let manifest = plexus_conformance::drift::parse_manifest(&source).unwrap();
     let action = |name: &str| {
         manifest
             .actions_baseline

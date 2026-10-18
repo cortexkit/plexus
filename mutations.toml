@@ -4140,8 +4140,8 @@ timeout_s = 300
 id = "wire-trace-redacts-every-payload-shape"
 guards = "The vault credential wire trace redacts a payload of any JSON shape, including a drifted base64 string, before writing it"
 file = "crates/plexus-conformance/src/wire_trace.rs"
-old = "                    if !entry.is_null() {"
-new = "                    if entry.is_array() { /* NON-VACUITY BREAK */"
+old = "_ => payload_marker(entry),"
+new = "_ => if entry.is_array() { payload_marker(entry) } else { entry.clone() }, /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-conformance/src/wire_trace.rs"
 runner = "cargo"
 package = "plexus-conformance"
@@ -4171,7 +4171,7 @@ timeout_s = 60
 id = "conformance-secret-scan-served-payloads"
 guards = "The conformance secret-safety step scans evidence for the payload bytes the credential source actually served, not only for the reference naming them"
 file = "crates/plexus-conformance/src/runner.rs"
-old = "    needles.extend(\n        served_payloads\n            .iter()\n            .map(|payload| zeroize::Zeroizing::new(String::from_utf8_lossy(payload).into_owned())),\n    );"
+old = "    for payload in served_payloads {\n        needles.extend(crate::evidence::secret_variants(payload));\n    }"
 new = "    let _ = served_payloads; /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-conformance/src/runner.rs"
 runner = "cargo"
@@ -9138,7 +9138,7 @@ build_timeout_s = 3600
 id = "conformance-escaped-secret-scan"
 guards = "JSON escaping does not hide a served secret from the evidence scan"
 file = "crates/plexus-conformance/src/evidence.rs"
-old = "            if surface.contains(needle) || surface.contains(escaped) {"
+old = "            if surface.contains(needle) || surface.contains(escaped) || surface.contains(double) {"
 new = "            if surface.contains(needle) { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-conformance/src/evidence.rs"
 runner = "cargo"
@@ -9326,8 +9326,8 @@ build_timeout_s = 3600
 id = "conformance-nested-request-redaction"
 guards = "Nested request handles and payloads are redacted before writing a trace"
 file = "crates/plexus-conformance/src/wire_trace.rs"
-old = "    redact_request_children(&mut redacted);"
-new = "    /* NON-VACUITY BREAK: omit request redaction */"
+old = "fn redact_request(params: &Value) -> Value {\n    redact_fields(params)\n}"
+new = "fn redact_request(params: &Value) -> Value { params.clone() /* NON-VACUITY BREAK */ }"
 test_file = "crates/plexus-conformance/src/wire_trace.rs"
 runner = "cargo"
 package = "plexus-conformance"
@@ -9475,7 +9475,7 @@ build_timeout_s = 3600
 [[control]]
 id = "conformance-http-reason-separator"
 guards = "Both stub HTTP formatters emit the status-line reason separator"
-edits = [{ file = "crates/plexus-conformance/src/http_wire.rs", old = "pub fn http_json(status: u16, body: &str) -> String {", new = "pub fn http_json(status: u16, body: &str) -> String { /* NON-VACUITY BREAK */" }, { file = "crates/plexus-conformance/src/http_wire.rs", old = "\"HTTP/1.1 {status} {crlf}Content-Type:", new = "\"HTTP/1.1 {status}{crlf}Content-Type:" }, { file = "crates/plexus-conformance/src/http_wire.rs", old = "\"HTTP/1.1 {status} {crlf}Content-Length: 0", new = "\"HTTP/1.1 {status}{crlf}Content-Length: 0" }]
+edits = [{ file = "crates/plexus-conformance/src/http_wire.rs", old = "pub(crate) fn http_json(status: u16, body: &str) -> String {", new = "pub(crate) fn http_json(status: u16, body: &str) -> String { /* NON-VACUITY BREAK */" }, { file = "crates/plexus-conformance/src/http_wire.rs", old = "\"HTTP/1.1 {status} {crlf}Content-Type:", new = "\"HTTP/1.1 {status}{crlf}Content-Type:" }, { file = "crates/plexus-conformance/src/http_wire.rs", old = "\"HTTP/1.1 {status} {crlf}Content-Length: 0", new = "\"HTTP/1.1 {status}{crlf}Content-Length: 0" }]
 test_file = "crates/plexus-conformance/src/http_wire.rs"
 runner = "cargo"
 package = "plexus-conformance"
@@ -15324,4 +15324,404 @@ runner = "command"
 command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
 test_count_pattern = "Ran {count} test"
 expect_red = ["test_public_ci.PublicCiTests.test_guest_replay_compiler_is_installed_without_pinning_host_stable"]
+timeout_s = 120
+
+[[control]]
+id = "conformance-mcp-wire-auth"
+guards = "Dropping the credential in the real MCP transport must fail a stub fixture"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "    let mut headers = build_headers(&config.credential_bindings, credential)\n        .map_err(|_| AttemptError::Local(McpRemoteError::Configuration))?;"
+new = "    let mut headers = HeaderMap::new(); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::mcp_stub_checks_the_wire_credential_name_and_arguments"]
+expect_message = "MCP wire contract failed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-mcp-wire-tool"
+guards = "Dispatching another advertised tool must fail the fixture"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "tools_call_params(request.action.clone(), request.args),"
+new = "tools_call_params(\"write_item\".to_string(), request.args), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::mcp_stub_checks_the_wire_credential_name_and_arguments"]
+expect_message = "MCP wire contract failed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-mcp-wire-arguments"
+guards = "Dropping authorized MCP arguments must fail the fixture"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "tools_call_params(request.action.clone(), request.args),"
+new = "tools_call_params(request.action.clone(), serde_json::json!({})), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::mcp_stub_checks_the_wire_credential_name_and_arguments"]
+expect_message = "MCP wire contract failed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-rest-wire-path"
+guards = "A real REST transport addressing the wrong project must fail the fixture"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "rendered.push_str(&percent_encode_component(&text));"
+new = "rendered.push_str(\"wrong-project\"); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::rest_stub_checks_the_wire_project_and_query_arguments"]
+expect_message = "REST wire contract failed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-rest-wire-query"
+guards = "A real REST transport dropping query arguments must fail the fixture"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "append_query(&mut url, &remaining);"
+new = "append_query(&mut url, &Map::new()); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::rest_stub_checks_the_wire_project_and_query_arguments"]
+expect_message = "REST wire contract failed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-ticket-manifest-gate"
+guards = "The exact ticket selectors must pass the manifest ceiling gate"
+file = "crates/plexus-conformance/src/runner.rs"
+old = ".ceiling_within_manifest(app_key, &risk.to_string(), &fixture.expected_actions)"
+new = ".ceiling_within_manifest(app_key, &risk.to_string(), &ctx.manifest.actions_baseline.iter().map(|action| action.name.clone()).collect::<Vec<_>>()) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::a_ticket_cannot_name_actions_outside_the_manifest"]
+expect_message = "manifest ceiling must refuse before discovery"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-anonymous-enrollment"
+guards = "Credential-free fixtures must use credential-free ticket enrollment"
+file = "crates/plexus-conformance/src/runner.rs"
+old = "let anonymous = ctx.manifest.auth.mode == plexus_core::manifest::AuthMode::None;"
+new = "let anonymous = false; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::anonymous_enrollment_stores_no_credential_binding"]
+expect_message = "anonymous enrollment must use the no-credential role"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-unknown-trace-fields"
+guards = "Unknown vault secret fields are redacted instead of copied to traces"
+file = "crates/plexus-conformance/src/wire_trace.rs"
+old = "_ => payload_marker(entry),"
+new = "_ => entry.clone(), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/wire_trace.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_trace::tests::unknown_secret_fields_are_redacted_without_changing_the_peer_response"]
+expect_message = "renamed secrets must not enter a trace"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-approved-write-audit"
+guards = "Approved writes require their own correlated decision and dispatch rows"
+file = "crates/plexus-conformance/src/runner.rs"
+old = "if fixture.write_path == WritePath::AskFirst {"
+new = "if false && fixture.write_path == WritePath::AskFirst { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::approved_writes_require_their_own_matching_audit_pair"]
+expect_message = "missing approved-write dispatch must fail audit completeness"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-artifact-atomic-replacement"
+guards = "Publishing an artifact must replace symlinks and detach existing readers"
+file = "crates/plexus-conformance/src/artifact.rs"
+old = "fs::rename(&temporary, path)?;"
+new = "fs::copy(&temporary, path)?; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/artifact.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["artifact::tests::publication_replaces_symlinks_and_detaches_existing_readers"]
+expect_message = "assertion `left == right` failed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-credential-endpoint-host"
+guards = "Credentialed overrides must keep HTTPS on the reviewed manifest host"
+file = "crates/plexus-conformance/src/main.rs"
+old = "(Some(actual), Some(expected)) if actual.eq_ignore_ascii_case(expected) => Ok(()),"
+new = "_ => Ok(()), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/main.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--bin plexus-conformance"
+select = "expected"
+expect_red = ["credentialed_overrides_cannot_change_host_or_downgrade_tls"]
+expect_message = "unsafe credential destination was accepted"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-evidence-stdout-opt-in"
+guards = "Sensitive evidence is not written to stdout without an explicit output request"
+file = "crates/plexus-conformance/src/main.rs"
+old = "if let Some(path) = output {"
+new = "if let Some(path) = Some(output.unwrap_or_else(|| PathBuf::from(\"-\"))) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/tests/it/stub_run.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--test it"
+select = "expected"
+expect_red = ["stub_run::no_schema_file_is_written_without_the_flag"]
+expect_message = "evidence must not default to stdout"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-binary-secret-variants"
+guards = "Binary payloads must have searchable non-lossy encoded variants"
+file = "crates/plexus-conformance/src/evidence.rs"
+old = "if bytes.is_empty() {"
+new = "if std::str::from_utf8(bytes).is_err() || bytes.is_empty() { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/evidence.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["evidence::encoded_binary_secrets_are_scanned_without_lossy_conversion"]
+expect_message = "encoded binary secret was missed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-revoke-specific-refusal"
+guards = "Only the stale-authorization refusal proves a revoked reservation was fenced"
+file = "crates/plexus-conformance/src/runner.rs"
+old = "TransportOutcome::NotSent { code, .. } if code == \"aborted_stale_authorization\" => Ok(()),"
+new = "TransportOutcome::NotSent { code, .. } if true => Ok(()), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::an_unrelated_not_sent_error_does_not_prove_revocation"]
+expect_message = "revocation must be observed by its specific refusal code"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-effective-discovery-target"
+guards = "Discovery applies the effective target rule rather than the fixture default"
+file = "crates/plexus-conformance/src/runner.rs"
+old = "            ctx.transport_target,\n            TransportTarget::InProcessStub"
+new = "            fixture.transport_target, /* NON-VACUITY BREAK */\n            TransportTarget::InProcessStub"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::endpoint_overrides_use_the_effective_discovery_rule"]
+expect_message = "effective endpoint targets allow a baseline larger"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-poll-pagination-fields"
+guards = "The vendor must serve the effective pagination cursor field"
+file = "crates/plexus-conformance/src/drift.rs"
+old = "declared.push(pagination.request_cursor_field.clone());"
+new = "let _ = pagination; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/drift.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["drift::tests::effective_cursor_and_page_parameters_must_be_served"]
+expect_message = "effective poller parameters must all be checked"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-poll-constant-values"
+guards = "Poll constants must satisfy vendor enum values inside composed schemas"
+file = "crates/plexus-conformance/src/drift.rs"
+old = ".get(\"enum\")"
+new = ".get(\"ignored_enum\") /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/drift.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["drift::tests::composed_schemas_and_constant_values_do_not_silently_pass"]
+expect_message = "a rejected constant inside a composed schema must be reported"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-drift-quarantine-parity"
+guards = "Drift must not call schemas clean when reconciliation would quarantine them"
+file = "crates/plexus-conformance/src/drift.rs"
+old = "if let Some(verdict) = compare_reviewed_schemas(manifest, discovered) {"
+new = "if let Some(verdict) = None::<DriftVerdict> { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/drift.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["drift::tests::schemas_that_reconcile_would_quarantine_are_not_clean"]
+expect_message = "a reviewed schema change must require review"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-request-deadline"
+guards = "Progress never extends the overall HTTP request deadline"
+file = "crates/plexus-conformance/src/http_wire.rs"
+old = "if Instant::now() >= deadline {"
+new = "if false && Instant::now() >= deadline { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/http_wire.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["http_wire::tests::progress_does_not_extend_the_request_deadline"]
+expect_message = "progress must not reset the overall deadline"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-modelled-schema-not-widened"
+guards = "Vendor-modelled schemas must refuse fixture typos rather than silently widening"
+file = "crates/plexus-conformance/src/fixture.rs"
+old = "if !tool.inferred_schema {"
+new = "if false && !tool.inferred_schema { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::modelled_vendor_schemas_refuse_fixture_typos"]
+expect_message = "modelled schemas must not widen to accept fixture arguments"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-poll-seeded-schema-pin"
+guards = "Poll test setup must pin the actual discovered schema"
+file = "crates/plexus-conformance/tests/it/shipped_poll_shape.rs"
+old = "jcs_sha256(&schema).expect(\"test JSON is JCS-compatible\")"
+new = "jcs_sha256(&json!({\"type\":\"object\"})).expect(\"test JSON is JCS-compatible\") /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/tests/it/shipped_poll_shape.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--test it"
+select = "expected"
+expect_red = ["shipped_poll_shape::the_shipped_github_poll_shape_reads_a_real_vendor_response"]
+expect_message = "catalog pin must hash the actual seeded schema"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-monotonic-duration"
+guards = "Step durations are measured from a monotonic start"
+file = "crates/plexus-conformance/src/evidence.rs"
+old = "u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)"
+new = "0 /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/evidence.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["evidence::elapsed_time_is_measured_from_a_monotonic_start"]
+expect_message = "duration must come from the monotonic clock"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-resource-probe-summary"
+guards = "Evidence names a skipped resource probe instead of claiming it ran"
+file = "crates/plexus-conformance/src/runner.rs"
+old = "if resource_probe.is_some() {"
+new = "if true { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/src/runner.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--lib"
+select = "expected"
+expect_red = ["runner::tests::skipped_resource_probes_are_not_reported_as_exercised"]
+expect_message = "evidence must name skipped probes"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-schema-output-opt-in"
+guards = "A run without schema-out must not publish an unsolicited schema artifact"
+file = "crates/plexus-conformance/src/runner.rs"
+old = "let schema_note = match options.schema_out.as_ref() {"
+new = "let default_schema = PathBuf::from(\"schema.json\"); /* NON-VACUITY BREAK */\n        let schema_note = match options.schema_out.as_ref().or(Some(&default_schema)) {"
+test_file = "crates/plexus-conformance/tests/it/stub_run.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--test it"
+select = "expected"
+expect_red = ["stub_run::no_schema_file_is_written_without_the_flag"]
+expect_message = "a schema artifact appeared without the flag"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "conformance-scratch-error-not-panic"
+guards = "An unusable temporary directory is a normal CLI error, never a scratch constructor panic"
+file = "crates/plexus-conformance/src/runner.rs"
+old = "let path = Scratch::database().map_err(|error| format!(\"create store directory: {error}\"))?;"
+new = "let path = Scratch::database().expect(\"create store directory\"); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-conformance/tests/it/stub_run.rs"
+runner = "cargo"
+package = "plexus-conformance"
+target = "--test it"
+select = "expected"
+expect_red = ["stub_run::an_unusable_temp_directory_is_a_reported_error_not_a_panic"]
+expect_message = "scratch failures must be normal CLI errors, not panics"
+build_timeout_s = 3600
 timeout_s = 120
