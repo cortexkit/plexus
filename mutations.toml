@@ -404,8 +404,8 @@ build_timeout_s = 3600
 id = "github-read-flow-scope-required"
 guards = "github_read goes through the same flow-scope check as other tools; unscoped Basal cannot use its broad grants"
 file = "crates/plexus-module/src/lib.rs"
-old = "if (mode == CallMode::Flow || ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str()))\n        && !route_scope"
-new = "if (mode == CallMode::Flow || ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str()))\n        && name != manifest::GITHUB_READ_TOOL /* NON-VACUITY BREAK */\n        && !route_scope"
+old = "&& (mode == CallMode::Flow || ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str()))\n        && !route_scope"
+new = "&& (mode == CallMode::Flow || ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str()))\n        && name != manifest::GITHUB_READ_TOOL /* NON-VACUITY BREAK */\n        && !route_scope"
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -729,8 +729,8 @@ build_timeout_s = 3600
 id = "flow-scope-required"
 guards = "The admitted flow carrier must present a flow scope"
 file = "crates/plexus-module/src/lib.rs"
-old = "if (mode == CallMode::Flow || ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str()))\n        && !route_scope"
-new = "if false\n        && !route_scope /* NON-VACUITY BREAK */"
+old = "&& (mode == CallMode::Flow || ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str()))\n        && !route_scope"
+new = "&& false\n        && !route_scope /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/web_search_tests.rs"
 package = "plexus-module"
 target = "--lib"
@@ -2078,8 +2078,8 @@ timeout_s = 60
 id = "basal-flow-required"
 guards = "Basal without a daemon-stamped flow scope is refused before event lookup"
 file = "crates/plexus-module/src/lib.rs"
-old = 'if (mode == CallMode::Flow || ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str()))'
-new = 'if false /* NON-VACUITY BREAK */'
+old = '&& (mode == CallMode::Flow || ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str()))'
+new = '&& false /* NON-VACUITY BREAK */'
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
 package = "plexus-module"
