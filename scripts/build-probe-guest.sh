@@ -17,6 +17,20 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 guest_root="$repo_root/crates/plexus-probe/guest"
 destination="$repo_root/crates/plexus-probe/assets/plexus-probe-guest.wasm"
+check_only=false
+case "${1:-}" in
+  '') ;;
+  --check) check_only=true ;;
+  *) echo "usage: scripts/build-probe-guest.sh [--check]" >&2; exit 2 ;;
+esac
+if [ "$#" -gt 1 ]; then echo "build-probe-guest: unexpected arguments" >&2; exit 2; fi
+# Only the embedded guest is compiler-pinned. The host workspace deliberately
+# tracks stable, but byte comparison needs the compiler used for this asset.
+export RUSTUP_TOOLCHAIN=1.99.0
+if [ "$(rustc --version)" != 'rustc 1.99.0 (b940084d7 2026-09-28)' ]; then
+  echo "build-probe-guest: requires Rust 1.99.0 (b940084d7 2026-09-28)" >&2
+  exit 2
+fi
 
 # The SDK version rquickjs-sys 0.12.2 is written against (its build.rs pins
 # WASI_SDK_VERSION_MAJOR = 24, MINOR = 0). Change both together.
@@ -63,7 +77,7 @@ sdk_cache="$guest_root/target/wasi-sdk"
 archive="$sdk_cache/wasi-sdk-$wasi_sdk_version-$wasi_sdk_platform.tar.gz"
 sdk_dir="$sdk_cache/wasi-sdk-$wasi_sdk_version-$wasi_sdk_platform"
 mkdir -p "$sdk_cache"
-if [ ! -f "$archive" ] && [ -n "${WASI_SDK_ARCHIVE:-}" ]; then
+if [ -n "${WASI_SDK_ARCHIVE:-}" ]; then
   cp "$WASI_SDK_ARCHIVE" "$archive.partial"
   mv "$archive.partial" "$archive"
 fi
@@ -83,11 +97,16 @@ if [ "$actual_sha256" != "$wasi_sdk_sha256" ]; then
   echo "  delete $archive to download it again" >&2
   exit 1
 fi
-if [ ! -x "$sdk_dir/bin/clang" ]; then
-  rm -rf "$sdk_dir"
-  mkdir -p "$sdk_dir"
-  tar -xzf "$archive" -C "$sdk_dir" --strip-components 1
+# A compiler left by a failed extraction is not evidence of a complete SDK.
+# Extract the verified archive afresh and publish only a complete tree.
+extracted="$(mktemp -d "$sdk_cache/extract.XXXXXX")"
+trap 'rm -rf "$extracted"' EXIT
+tar -xzf "$archive" -C "$extracted" --strip-components 1
+if [ ! -x "$extracted/bin/clang" ] || [ ! -d "$extracted/share/wasi-sysroot" ]; then
+  echo "build-probe-guest: incomplete WASI SDK archive" >&2; exit 1
 fi
+rm -rf "$sdk_dir"
+mv "$extracted" "$sdk_dir"
 echo "==> WASI SDK $wasi_sdk_version ($wasi_sdk_platform) sha256 $actual_sha256"
 
 # Asked of cargo rather than assumed: CARGO_TARGET_DIR (set on shared build
@@ -102,13 +121,15 @@ path_maps=("$repo_root=/plexus" "$target_dir=/plexus-target" "$cargo_home=/cargo
 # rquickjs-sys overwrites generic CFLAGS with its sysroot. cc also consumes
 # target-specific flags, so add the C path mappings there instead.
 export CFLAGS_wasm32_wasip1="${CFLAGS_wasm32_wasip1:-}"
+export CC_SHELL_ESCAPED_FLAGS=1
+if [ -z "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
+  CARGO_ENCODED_RUSTFLAGS="$(python3 -c 'import os,shlex; print("\x1f".join(shlex.split(os.environ.get("RUSTFLAGS", ""))))')"
+  export CARGO_ENCODED_RUSTFLAGS
+fi
 for path_map in "${path_maps[@]}"; do
-  if [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
-    export CARGO_ENCODED_RUSTFLAGS="$CARGO_ENCODED_RUSTFLAGS"$'\x1f'"--remap-path-prefix=$path_map"
-  else
-    export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$path_map"
-  fi
-  export CFLAGS_wasm32_wasip1="$CFLAGS_wasm32_wasip1 -ffile-prefix-map=$path_map"
+  export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS:+$CARGO_ENCODED_RUSTFLAGS$'\x1f'}--remap-path-prefix=$path_map"
+  c_flag="$(python3 -c 'import shlex,sys; print(shlex.quote("-ffile-prefix-map=" + sys.argv[1]))' "$path_map")"
+  export CFLAGS_wasm32_wasip1="$CFLAGS_wasm32_wasip1 $c_flag"
 done
 
 WASI_SDK="$sdk_dir" cargo build \
@@ -117,6 +138,14 @@ WASI_SDK="$sdk_dir" cargo build \
   --release \
   --target wasm32-wasip1
 artifact="$target_dir/wasm32-wasip1/release/plexus-probe-guest.wasm"
+if "$check_only"; then
+  if ! cmp "$artifact" "$destination"; then
+    echo "build-probe-guest: embedded guest differs from the pinned source rebuild" >&2
+    exit 1
+  fi
+  echo "==> embedded guest matches pinned source rebuild: sha256 $(sha256_of "$artifact")"
+  exit 0
+fi
 mkdir -p "$(dirname "$destination")"
 install -m 0644 "$artifact" "$destination"
 echo "==> $destination sha256 $(sha256_of "$destination")"

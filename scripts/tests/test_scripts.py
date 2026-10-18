@@ -92,6 +92,18 @@ class WorkflowGatesTests(Scratch):
     def gates(self, *args):
         return run(["python3", "-B", GATES, *args])
 
+    def test_plain_scalar_continuations_cannot_hide_a_ref_gate(self):
+        path = self.tmp / "ci.yml"
+        for condition in ["github.ref == 'refs/heads/main'", "github.event_name == 'push'"]:
+            with self.subTest(condition=condition):
+                path.write_text(workflow("[main, 'train/**']",
+                    "      - if: success() &&\n          " + condition + "\n        run: true\n"))
+                if "github.ref" in condition:
+                    self.assertIn("ref|", self.gates(path).stdout)
+                result = self.gates("--preconditions", path)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("path-dependent condition", result.stdout)
+
     def test_a_single_star_does_not_admit_a_nested_train(self):
         # GitHub's `*` stops at `/`, so `train/*` never matches train/a/b.
         # fnmatch's `*` also matches `/`, so a gate using it reports a match for

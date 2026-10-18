@@ -46,12 +46,14 @@ require_github_repository() (
         return 1
     fi
 
+    checked_slugs=" "
     check_repository() {
         label="$1"
         slug="$(github_repository_slug "$2")" || {
             echo "repository guard: refusing — $label is not a supported GitHub repository URL: $2 (expected ID $expected_id)." >&2
             return 1
         }
+        case "$checked_slugs" in *" $slug "*) return 0 ;; esac
         resolved_id="$("$gh_cli" api "repos/$slug" --hostname github.com --jq '.id' 2>/dev/null)" || {
             echo "repository guard: refusing — cannot resolve $label repository $slug (expected ID $expected_id). Check network access and gh authentication; nothing was verified." >&2
             return 1
@@ -66,6 +68,7 @@ require_github_repository() (
             echo "  A clone of the old private history belongs to cortexkit/plexus-private; update its origin and push URLs, not the expected ID." >&2
             return 1
         fi
+        checked_slugs="$checked_slugs$slug "
     }
 
     origin_url="$(git -C "$root" remote get-url origin 2>/dev/null)" || {

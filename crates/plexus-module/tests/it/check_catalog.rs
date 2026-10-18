@@ -129,6 +129,11 @@ fn staging_refuses_catalog_before_signing_or_publication() {
         )
         .unwrap();
     }
+    fs::write(
+        root.join("scripts/lib/verify-build-commit.sh"),
+        "#!/bin/sh\nexit 0\n",
+    )
+    .unwrap();
     let candidate = ckdev_binary(env!("CARGO_BIN_EXE_ck-plexus"));
     fs::copy(&candidate, root.join("target/release/ck-plexus")).unwrap();
     fs::write(
@@ -150,7 +155,7 @@ fn staging_refuses_catalog_before_signing_or_publication() {
             "git",
             "case \"$*\" in *--porcelain*) ;; *) echo fixture-revision ;; esac",
         ),
-        ("strings", "echo fixture-revision"),
+        ("uname", "echo Darwin"),
         (
             "cp",
             "printf '%s\\n' \"$2\" > \"$HOME/catalog-copy-path\"; exec /bin/cp \"$@\"",

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Refuse to push a commit to main unless CI has already gone green on that exact
 # sha.
 #
@@ -19,15 +19,22 @@
 #
 # Deliberate bypass remains `git push --no-verify`, which is an explicit act
 # rather than an accident.
+# Installation is opt-in: run scripts/install-hooks.sh in each new clone.
+# The train independently checks CI even when this optional hook is not installed.
 
 set -eu
+if [ -z "${BASH_VERSION:-}" ]; then exec /bin/bash "$0" "$@"; fi
 
 # Check identity for every ref, including train/* branches, tags and deletions.
 # If a private repository is renamed and a public repository takes its old name,
 # green CI from the old history must not authorize a push to the new repository.
 repo_root="$(git rev-parse --show-toplevel)"
 . "$repo_root/scripts/lib/repository-identity.sh"
-repo_slug="$(require_github_repository "$repo_root" gh "${2:-}")" || exit 1
+if ! . "$repo_root/scripts/lib/operator-gh.sh"; then
+    echo "repository guard: refusing — gh is required to resolve origin's repository ID; nothing was verified." >&2
+    exit 1
+fi
+repo_slug="$(require_github_repository "$repo_root" "$OPERATOR_GH" "${2:-}")" || exit 1
 
 remote_ref_is_main=0
 sha=""
@@ -44,7 +51,7 @@ done
 
 [ "$remote_ref_is_main" -eq 1 ] || exit 0
 
-if ! command -v gh >/dev/null 2>&1; then
+if ! command -v "$OPERATOR_GH" >/dev/null 2>&1; then
     echo "pre-push: refusing — gh is required to check CI on $sha and is not on PATH." >&2
     echo "  This hook cannot tell a green commit from a red one without it, and" >&2
     echo "  'could not check' must not read as 'checked and fine'." >&2
@@ -61,9 +68,9 @@ fi
 #
 # Socket Security is excluded: it is a third-party app, not our gate, and its
 # verdict is not what "main is green" means here.
-if ! checks="$(gh api "repos/$repo_slug/commits/$sha/check-runs" \
+if ! checks="$("$OPERATOR_GH" api "repos/$repo_slug/commits/$sha/check-runs" \
         --hostname github.com \
-        --jq '[.check_runs[] | select(.app.slug != "socket-security")]
+        --jq '[.check_runs[] | select(.app.slug == "github-actions")]
               | group_by(.name)
               | map(sort_by(.started_at) | last)
               | .[] | "\(.name)\t\(.conclusion // "pending")"' 2>/dev/null)"; then
@@ -96,6 +103,12 @@ while IFS="$tab" read -r check_name conclusion; do
 done <<EOF
 $checks
 EOF
+
+# A third-party green check cannot substitute for this repository's test job.
+if [ "$tested" -ne 1 ]; then
+    echo "pre-push: refusing — Test (ubuntu) did not succeed; no check is green enough to land $sha (not every check is green)." >&2
+    exit 1
+fi
 
 if [ -z "$checks" ]; then
     echo "pre-push: refusing — no CI run exists for $sha." >&2

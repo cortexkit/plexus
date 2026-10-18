@@ -4342,8 +4342,8 @@ build_timeout_s = 3600
 id = "probe-guest-string-bounds-before-allocation"
 guards = "A guest-supplied string length is checked against guest memory before any host allocation, so a guest cannot choose a 2 GiB host allocation"
 file = "crates/plexus-probe/src/sandbox.rs"
-old = "    let memory = guest_memory(caller, &action)?;\n    let data = memory.data(&*caller);"
-new = "    let _ = std::hint::black_box(vec![0_u8; length]); /* NON-VACUITY BREAK */\n    let memory = guest_memory(caller, &action)?;\n    let data = memory.data(&*caller);"
+old = '    let limit = if label == "action name" {'
+new = '    let _ = std::hint::black_box(Vec::<u8>::with_capacity(length)); /* NON-VACUITY BREAK */ let limit = if label == "action name" {'
 test_file = "crates/plexus-probe/src/sandbox.rs"
 runner = "cargo"
 package = "plexus-probe"
@@ -9760,7 +9760,7 @@ runner = "cargo"
 package = "plexus-probe"
 target = "--lib"
 select = "expected"
-expect_red = ["schema::struct_field_names_and_diagnostics_are_bounded"]
+expect_red = ["schema::field_name_tests::struct_field_names_and_diagnostics_are_bounded"]
 expect_message = "struct field names must be bounded and nonempty"
 build_timeout_s = 3600
 
@@ -9882,7 +9882,7 @@ runner = "cargo"
 package = "plexus-probe"
 target = "--lib"
 select = "expected"
-expect_red = ["schema::struct_field_names_and_diagnostics_are_bounded"]
+expect_red = ["schema::field_name_tests::struct_field_names_and_diagnostics_are_bounded"]
 expect_message = "unexpected-field diagnostics must be bounded"
 build_timeout_s = 3600
 
@@ -11871,3 +11871,352 @@ select = "expected"
 expect_red = ["event_envelope::tests::ci_job_runner_name_is_null_when_missing_or_empty"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "probe-action-failure-stops-dispatch"
+guards = "A caught bridge failure cannot spend another vendor read"
+file = "crates/plexus-probe/src/sandbox.rs"
+old = '            return Err(wasmtime::Error::msg("probe action failed"));'
+new = '            -1 /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-probe/src/sandbox.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["sandbox::tests::a_caught_action_failure_stops_further_vendor_reads"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-host-input-byte-caps"
+guards = "Guest action names and JSON arguments are bounded before copying or parsing"
+file = "crates/plexus-probe/src/sandbox.rs"
+old = '    if length > limit {'
+new = '    if false && length > limit { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-probe/src/sandbox.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["sandbox::tests::oversized_invoke_inputs_never_reach_the_dispatcher"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-source-byte-cap"
+guards = "Oversize source is refused before guest serialization and execution"
+file = "crates/plexus-probe/src/sandbox.rs"
+old = '        if source.len() > MAX_SOURCE_BYTES {'
+new = '        if false && source.len() > MAX_SOURCE_BYTES { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-probe/src/sandbox.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["sandbox::tests::oversized_source_is_refused_before_guest_execution"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-return-declaration-closed-units"
+guards = "Boolean and numeric return declarations reject unknown fields"
+file = "crates/plexus-probe/src/schema.rs"
+old = '''#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ReturnDeclaration {'''
+new = '''#[serde(tag = "kind", rename_all = "snake_case")] /* NON-VACUITY BREAK */
+enum ReturnDeclaration {'''
+test_file = "crates/plexus-probe/src/schema.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["schema::tests::unit_schema_kinds_reject_unknown_fields"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-scalar-declaration-closed-units"
+guards = "Boolean and numeric struct-field declarations reject unknown fields"
+file = "crates/plexus-probe/src/schema.rs"
+old = '''#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ScalarDeclaration {'''
+new = '''#[serde(tag = "kind", rename_all = "snake_case")] /* NON-VACUITY BREAK */
+enum ScalarDeclaration {'''
+test_file = "crates/plexus-probe/src/schema.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["schema::tests::unit_schema_kinds_reject_unknown_fields"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-recovered-memory-return"
+guards = "A denied growth does not overwrite a successfully returned value"
+file = "crates/plexus-probe/src/sandbox.rs"
+old = '        if store.data().clock.timed_out {'
+new = '        if store.data().limits.memory_denied { return Err(ProbeError::MemoryLimit { limit_bytes: MEMORY_LIMIT_BYTES }); } /* NON-VACUITY BREAK */ if store.data().clock.timed_out {'
+test_file = "crates/plexus-probe/src/sandbox.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["sandbox::tests::a_recovered_allocation_failure_does_not_override_a_returned_value"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-no-host-wall-clock"
+guards = "Guest Math.random does not reveal host time through its seed"
+file = "crates/plexus-probe/src/sandbox.rs"
+old = '        .wall_clock(FixedClock)'
+new = '        /* NON-VACUITY BREAK: ambient host clock */'
+test_file = "crates/plexus-probe/src/sandbox.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["sandbox::tests::wasi_clock_and_random_imports_are_deterministic"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-trap-cause-diagnostic"
+guards = "Sandbox diagnostics retain Wasmtime's underlying trap cause"
+file = "crates/plexus-probe/src/sandbox.rs"
+old = '        message: format!("{error:#}"),'
+new = '        message: error.to_string(), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-probe/src/sandbox.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["sandbox::tests::sandbox_diagnostics_preserve_the_trap_cause"]
+build_timeout_s = 3600
+
+[[control]]
+id = "admin-expiry-future"
+guards = "A grant or policy cannot be born expired through the CLI"
+file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+old = '    if i128::from(expires) <= now.as_millis() as i128 {'
+new = '    if false && i128::from(expires) <= now.as_millis() as i128 { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--bin ck-plexus-admin"
+select = "expected"
+expect_red = ["tests::expiry_must_be_a_future_epoch_millisecond_timestamp"]
+build_timeout_s = 3600
+
+[[control]]
+id = "admin-consume-explicit-grantee"
+guards = "An events_consume grant must explicitly name its grantee"
+file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+old = '    if kind == "events_consume" {'
+new = '    if false && kind == "events_consume" { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--bin ck-plexus-admin"
+select = "expected"
+expect_red = ["tests::consume_grants_require_an_explicit_grantee"]
+build_timeout_s = 3600
+
+[[control]]
+id = "admin-import-bare-flags"
+guards = "Offline import refuses flags it does not consume before touching stores"
+file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+old = '        if let Some(flag) = flags.bare.first() {'
+new = '        if let Some(flag) = flags.bare.iter().find(|_| false) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--bin ck-plexus-admin"
+select = "expected"
+expect_red = ["tests::import_store_refuses_unconsumed_bare_flags_before_opening_a_store"]
+build_timeout_s = 3600
+
+[[control]]
+id = "admin-ticket-preflight"
+guards = "Invalid ticket flags are refused before reading the daemon catalog"
+file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+old = '        validate_ticket_flags(&flags)?;'
+new = '        /* NON-VACUITY BREAK: skip local ticket validation */'
+test_file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--bin ck-plexus-admin"
+select = "expected"
+expect_red = ["tests::ticket_flags_are_validated_before_catalog_contact"]
+build_timeout_s = 3600
+
+[[control]]
+id = "workflow-plain-condition-continuation"
+guards = "Plain multiline Actions conditions cannot hide a ref or event gate"
+file = "scripts/lib/workflow-gates.py"
+old = '                continuation = self.block_scalar(">", indent)'
+new = '                continuation = "" # NON-VACUITY BREAK'
+test_file = "scripts/tests/test_scripts.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["test_scripts.WorkflowGatesTests.test_plain_scalar_continuations_cannot_hide_a_ref_gate"]
+timeout_s = 120
+
+[[control]]
+id = "script-provenance-clean-exact"
+guards = "Dirty build identities cannot pass as the clean HEAD commit"
+file = "scripts/lib/verify-build-commit.sh"
+old = 'if not match or match[1] != sys.argv[2]:'
+new = 'if not match or not match[1].startswith(sys.argv[2]): # NON-VACUITY BREAK'
+test_file = "scripts/tests/test_operator_workflows.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["test_operator_workflows.OperatorWorkflowTests.test_provenance_requires_the_exact_clean_reported_commit"]
+timeout_s = 120
+
+[[control]]
+id = "ci-conformance-catalogue-exit"
+guards = "A failing fixture catalogue producer cannot publish partial success"
+file = ".github/workflows/ci.yml"
+old = '          fixture_list="$("$harness" list)"'
+new = '          fixture_list="$("$harness" list || true)" # NON-VACUITY BREAK'
+test_file = "scripts/tests/test_operator_workflows.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["test_operator_workflows.OperatorWorkflowTests.test_conformance_list_failure_cannot_be_hidden_by_partial_output"]
+timeout_s = 120
+
+[[control]]
+id = "prepush-required-test-job"
+guards = "An unrelated green check cannot authorize a main push"
+file = ".githooks/pre-push"
+old = 'if [ "$tested" -ne 1 ]; then'
+new = 'if false; then # NON-VACUITY BREAK'
+test_file = "scripts/tests/test_repository_identity.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["test_repository_identity.RepositoryIdentityTests.test_unrelated_green_check_cannot_substitute_for_the_test_job"]
+timeout_s = 120
+
+[[control]]
+id = "rehearsal-source-must-exist"
+guards = "A mistyped rehearsal source path cannot create a database"
+file = "crates/plexus-core/examples/migration_rehearsal.rs"
+old = '    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)'
+new = '    rusqlite::Connection::open(path) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/examples/migration_rehearsal.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--example migration_rehearsal"
+select = "expected"
+expect_red = ["tests::a_mistyped_source_path_is_never_created"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-no-host-monotonic-clock"
+guards = "The WASI monotonic clock cannot expose host time"
+file = "crates/plexus-probe/src/sandbox.rs"
+old = '        .monotonic_clock(FixedClock)'
+new = '        /* NON-VACUITY BREAK: ambient monotonic clock */'
+test_file = "crates/plexus-probe/src/sandbox.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["sandbox::tests::wasi_clock_and_random_imports_are_deterministic"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-no-host-entropy"
+guards = "The WASI random import returns a deterministic stream, not host entropy"
+file = "crates/plexus-probe/src/sandbox.rs"
+old = '        .secure_random(Deterministic::new(vec![7]))'
+new = '        /* NON-VACUITY BREAK: ambient host entropy */'
+test_file = "crates/plexus-probe/src/sandbox.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["sandbox::tests::wasi_clock_and_random_imports_are_deterministic"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-invalid-field-diagnostic"
+guards = "Invalid schema diagnostics identify the bounded offending field"
+file = "crates/plexus-probe/src/schema.rs"
+old = '                            field: field_preview(name),'
+new = '                            field: String::new(), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-probe/src/schema.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["schema::field_name_tests::invalid_schema_diagnostic_names_the_bounded_field"]
+build_timeout_s = 3600
+
+[[control]]
+id = "watch-nonempty-success"
+guards = "An all-skipped unsuccessful workflow is not green"
+file = "scripts/watch-ci.sh"
+old = '    if [ -z "$GATING_BAD" ] && [ "$SUCCESS_COUNT" -gt 0 ]; then'
+new = '    if [ -z "$GATING_BAD" ]; then # NON-VACUITY BREAK'
+test_file = "scripts/tests/test_operator_workflows.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["test_operator_workflows.OperatorWorkflowTests.test_a_failed_run_with_only_skipped_jobs_is_not_green"]
+timeout_s = 120
+
+[[control]]
+id = "admin-malformed-result-refused"
+guards = "A null management result cannot be reported as success"
+file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+old = '        .filter(|value| value.is_object())'
+new = '        .filter(|_| true) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--bin ck-plexus-admin"
+select = "expected"
+expect_red = ["tests::malformed_management_replies_are_not_success"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-production-env-isolation"
+guards = "Enabling inherited environment in the production WASI builder is detected"
+file = "crates/plexus-probe/src/sandbox.rs"
+old = '        .arg("plexus-probe-guest")'
+new = '        .inherit_env().arg("plexus-probe-guest") /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-probe/src/sandbox.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["sandbox::tests::isolated_wasi_has_no_environment_or_preopened_directories"]
+build_timeout_s = 3600
+
+[[control]]
+id = "probe-production-directory-isolation"
+guards = "Enabling a preopen in the production WASI builder is detected"
+file = "crates/plexus-probe/src/sandbox.rs"
+old = '    match policy {'
+new = '    builder.preopened_dir(".", ".", wasmtime_wasi::DirPerms::READ, wasmtime_wasi::FilePerms::READ).map_err(sandbox_error)?; /* NON-VACUITY BREAK */ match policy {'
+test_file = "crates/plexus-probe/src/sandbox.rs"
+runner = "cargo"
+package = "plexus-probe"
+target = "--lib"
+select = "expected"
+expect_red = ["sandbox::tests::isolated_wasi_has_no_environment_or_preopened_directories"]
+build_timeout_s = 3600
+
+[[control]]
+id = "admin-submitted-outcome-distinct-exit"
+guards = "Post-submission failures have a distinct exit code and cannot invite blind retries"
+file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+old = 'const EXIT_UNKNOWN: u8 = 3;'
+new = 'const EXIT_UNKNOWN: u8 = 2; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--bin ck-plexus-admin"
+select = "expected"
+expect_red = ["tests::post_submission_failures_warn_against_blind_retries"]
+build_timeout_s = 3600

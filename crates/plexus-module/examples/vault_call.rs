@@ -13,21 +13,16 @@
 //! token's rotation.
 //!
 //! Usage:
-//!   cargo run -p plexus-module --example vault_call -- <connection-file> <method> '<params json>'
+//!   cargo run -p plexus-module --example vault_call -- <connection-file> <method> --params-stdin < params.json
 //!
 //! e.g.
-//!   vault_call conn.json credential.get '{"handle":"ckh_..."}'
-//!   vault_call conn.json credential.report_auth_failure \
-//!       '{"handle":"ckh_...","provider_status":401,"record_version":7}'
+//!   vault_call conn.json credential.get --params-stdin < owner-only-params.json
+//! Credential parameters are read from stdin, never from process arguments or
+//! shell history. Keep any input file owner-only.
 
-use std::time::Duration;
+use std::{io::Read, time::Duration};
 
-use subc_control::{ClientControlRequest, ClientControlResponse};
-use subc_protocol::{
-    BindIdentity, Flags, Frame, FrameType, Priority, RouteTarget, PROTOCOL_VERSION,
-};
-use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
-use tokio::net::TcpStream;
+use subc_protocol::{BindIdentity, RouteTarget};
 use tokio::time::timeout;
 
 /// The vault registers `ManagementSurface` only; a `ToolProvider` target is
@@ -82,32 +77,32 @@ async fn main() {
     let (Some(connection_path), Some(method), Some(params)) =
         (args.next(), args.next(), args.next())
     else {
-        eprintln!("usage: vault_call [--module <id>] <connection-file> <method> '<params json>'");
+        eprintln!("usage: vault_call [--module <id>] <connection-file> <method> --params-stdin < params.json");
         std::process::exit(2);
     };
-    let params: serde_json::Value = match serde_json::from_str(&params) {
+    if params != "--params-stdin" || args.next().is_some() {
+        eprintln!("credential parameters must be supplied with --params-stdin, never on argv");
+        std::process::exit(2);
+    }
+    let params = match read_params(std::io::stdin().lock()) {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("params argument is not valid JSON: {error}");
+            eprintln!("cannot read params JSON from stdin: {error}");
             std::process::exit(2);
         }
     };
     let body = serde_json::json!({ "method": method, "params": params });
 
-    let connection =
-        connection_file::read(&connection_path).expect("read the daemon connection file");
-    let endpoint = connection
-        .endpoints
-        .first()
-        .expect("the daemon publishes at least one endpoint");
-    let mut stream = TcpStream::connect(format!("{}:{}", endpoint.host, endpoint.port))
-        .await
-        .expect("connect to the daemon");
-    authenticate_client(&mut stream, &connection, DEADLINE)
-        .await
-        .expect("authenticate to the daemon");
-
-    let (channel, epoch) = open_route(&mut stream, &module_id).await;
+    let consumer = timeout(
+        DEADLINE,
+        subc_client_rs::SubcConsumer::connect(
+            std::path::Path::new(&connection_path),
+            subc_client_rs::ConsumerOptions::default(),
+        ),
+    )
+    .await
+    .expect("daemon connection deadline")
+    .expect("connect to the daemon");
 
     // Millisecond timestamps let an operator compare request latency with
     // the corresponding service log without printing credential bodies.
@@ -116,32 +111,37 @@ async fn main() {
         .expect("clock")
         .as_millis();
 
-    let frame = Frame::build_with_version(
-        PROTOCOL_VERSION,
-        FrameType::Request,
-        Flags::new(false, Priority::Interactive, false),
-        channel,
-        epoch,
-        1,
-        serde_json::to_vec(&body).expect("serialize the vault call"),
+    let reply = timeout(
+        DEADLINE,
+        consumer.call(
+            RouteTarget::ManagementSurface { module_id },
+            BindIdentity::new("/tmp", "vault-call", "operator"),
+            serde_json::to_vec(&body).expect("serialize the vault call"),
+            subc_client_rs::CallOptions::default(),
+        ),
     )
-    .expect("build the vault call");
-    write_frame(&mut stream, &frame)
-        .await
-        .expect("write the vault frame");
-
-    let reply = timeout(DEADLINE, read_frame(&mut stream))
-        .await
-        .expect("vault reply deadline")
-        .expect("read the vault reply")
-        .expect("daemon connection remains open");
+    .await
+    .expect("vault reply deadline")
+    .expect("vault call failed");
 
     let received_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_millis();
 
-    print_vault_reply(sent_at_ms, received_at_ms, &reply.body);
+    print_vault_reply(sent_at_ms, received_at_ms, &reply);
+}
+
+fn read_params(input: impl Read) -> Result<serde_json::Value, String> {
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    input
+        .take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > 64 * 1024 {
+        return Err("params exceed 64 KiB".to_owned());
+    }
+    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
 /// Keep only recognized, non-secret metadata. Unknown field names are not
@@ -193,50 +193,6 @@ fn redact_payload(value: &mut serde_json::Value) {
         safe.insert("redacted_fields".into(), serde_json::json!(omitted));
     }
     *value = serde_json::Value::Object(safe);
-}
-
-async fn open_route(stream: &mut TcpStream, module_id: &str) -> (u16, u32) {
-    let request = ClientControlRequest::RouteOpen {
-        scope: None,
-        role_versions: None,
-        target: RouteTarget::ManagementSurface {
-            module_id: module_id.to_string(),
-        },
-        identity: BindIdentity::new("/tmp", "vault-call".to_string(), "operator".to_string()),
-        consumer_identity: None,
-        consumer_capabilities: None,
-        admission_facts: None,
-    };
-    let frame = Frame::build_with_version(
-        PROTOCOL_VERSION,
-        FrameType::Request,
-        Flags::new(false, Priority::Interactive, false),
-        0,
-        0,
-        1,
-        serde_json::to_vec(&request).expect("serialize route open"),
-    )
-    .expect("build route open");
-    write_frame(stream, &frame).await.expect("write route open");
-    let reply = timeout(DEADLINE, read_frame(stream))
-        .await
-        .expect("route open deadline")
-        .expect("read route open reply")
-        .expect("daemon connection remains open");
-    match serde_json::from_slice::<ClientControlResponse>(&reply.body) {
-        Ok(ClientControlResponse::RouteOpen {
-            route_channel,
-            route_epoch,
-        }) => (route_channel, route_epoch),
-        other => {
-            eprintln!(
-                "route open refused: {}",
-                String::from_utf8_lossy(&reply.body)
-            );
-            eprintln!("parsed: {other:?}");
-            std::process::exit(1);
-        }
-    }
 }
 
 #[cfg(test)]

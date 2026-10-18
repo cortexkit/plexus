@@ -192,7 +192,10 @@ class _Reader:
             elif value.startswith("[") and value.endswith("]"):
                 mapping[key] = _flow_sequence(value)
             elif value:
-                mapping[key] = _scalar(value)
+                # Plain scalars may continue on indented lines without a `>`.
+                # Losing a continuation would hide part of an Actions condition.
+                continuation = self.block_scalar(">", indent)
+                mapping[key] = _scalar(" ".join(part for part in (value, continuation) if part))
             elif self.at_end() or self.indent(self.i) <= indent:
                 mapping[key] = None
             else:

@@ -20,7 +20,8 @@ concurrency:
   # The nightly schedule runs the full catalogue with --broad on main. A group
   # shared with main pushes would let a push cancel that audit before it finishes.
   group: ci-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Main's full verification is independent of the train run and must finish.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -94,6 +95,24 @@ jobs:
           components: clippy, rustfmt
           targets: wasm32-wasip1
 
+      - name: Rust compiler identity
+        id: rust-identity
+        run: echo "version=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # Cache only public compiler inputs and build artifacts, never credentials,
+      # Cargo configuration or the whole home directory. Fork caches are scoped
+      # to their PR ref by Actions and cannot overwrite the default branch cache.
+      - name: Cache Rust build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git/db
+            plexus/target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-identity.outputs.version }}-${{ hashFiles('plexus/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-identity.outputs.version }}-${{ hashFiles('plexus/Cargo.lock') }}-
+
       - name: Install pinned nats-server
         run: |
           set -euo pipefail
@@ -153,7 +172,9 @@ jobs:
           set -euo pipefail
           build_result="$(cargo build --locked -p plexus-conformance --bin plexus-conformance --message-format=json)"
           harness="$(printf '%s\n' "$build_result" | python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin]; paths=[r["executable"] for r in rows if r.get("reason")=="compiler-artifact" and r.get("target",{}).get("name")=="plexus-conformance" and r.get("executable")]; assert len(paths)==1, paths; print(paths[0])')"
-          mapfile -t fixtures < <("$harness" list)
+          fixture_list="$("$harness" list)"
+          mapfile -t fixtures <<< "$fixture_list"
+          if [ -z "$fixture_list" ]; then fixtures=(); fi
           if [ "${#fixtures[@]}" -eq 0 ]; then
             echo "::error::plexus-conformance list returned no fixtures"
             exit 1
@@ -176,6 +197,21 @@ jobs:
             echo "::error::failed fixtures: ${failed[*]}"
             exit 1
           fi
+
+  guest:
+    name: Embedded probe guest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable action, explicit guest compiler
+        with:
+          toolchain: '1.99.0'
+          targets: wasm32-wasip1
+      - name: Rebuild and compare embedded guest
+        run: bash scripts/build-probe-guest.sh --check
 
   mutations:
     name: Mutation proofs (${{ matrix.shard }}/4)
@@ -210,6 +246,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: wasm32-wasip1
+
+      - name: Rust compiler identity
+        id: rust-identity
+        run: echo "version=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # Restore the Test job's cache, but never save mutant build artifacts.
+      - name: Restore Rust build
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git/db
+            plexus/target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-identity.outputs.version }}-${{ hashFiles('plexus/Cargo.lock') }}-${{ github.sha }}
 
       - name: Install pinned nats-server
         run: |
@@ -262,6 +312,9 @@ jobs:
               rows = json.load(report)
           print('Mutation verdicts:', dict(collections.Counter(r['outcome'] for r in rows)))
           print('Selected controls:', len(rows))
+          if not rows:
+              print('refusing: allocated mutation shard ran no controls', file=sys.stderr)
+              sys.exit(1)
           findings = [r for r in rows if r['outcome'] not in ('CAUGHT', 'HUB')]
           for row in findings:
               print('Mutation finding:', row['id'], row['outcome'], row.get('reason'))

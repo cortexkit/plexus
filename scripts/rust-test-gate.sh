@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ck-plexus Rust test gate.
 #
-# Run from the repo root after any code change. The first phase is a static
-# source check and the second is `cargo fmt --all -- --check`, so an unformatted
-# commit fails the gate.
+# Run from the repo root after any code change. Static source/dependency and
+# operator-script checks precede formatting, clippy and the Rust test suites.
+# An unformatted commit fails before compilation.
 # Serialize cargo invocations (never parallel cargo): concurrent workspace
 # builds on a shared machine saturate it.
 set -euo pipefail
@@ -20,7 +20,7 @@ run_phase() {
   echo "    ok ($((SECONDS - started))s)"
 }
 
-# Phase 1: refuse a raw `std::env::temp_dir()` anywhere under crates/.
+# Refuse a raw `std::env::temp_dir()` anywhere under crates/.
 #
 # Test scratch written straight into the shared temp directory is what filled it
 # with 63,131 plexus entries — three files per SQLite store, none of them ever
@@ -619,7 +619,7 @@ fi
 run_phase "cargo fmt (workspace members) -- --check" \
   cargo fmt "${FMT_MEMBERS[@]}" -- --check
 
-# Phase 3: clippy with warnings as errors, across all targets.
+# Clippy with warnings as errors, across all targets.
 # `--locked` makes a stale or absent Cargo.lock a FAILURE rather than a silent
 # re-resolve. Without it the committed lock is advisory: cargo quietly updates
 # it and the run proceeds against a dependency set nobody chose, which is the
@@ -628,6 +628,11 @@ run_phase "cargo fmt (workspace members) -- --check" \
 run_phase "cargo clippy --workspace --all-targets --locked --quiet -- -D warnings" \
   cargo clippy --workspace --all-targets --locked --quiet -- -D warnings
 
-# Phase 4: compile + all tests (lib, bins, integration).
+# Compile and run library, binary and integration tests.
 run_phase "cargo test --workspace --locked --quiet" \
   cargo test --workspace --locked --quiet
+
+# Example diagnostics carry their own credential-redaction contract; Cargo's
+# default test selection compiles examples but does not run their unit tests.
+run_phase "cargo test --workspace --examples --locked --quiet" \
+  cargo test --workspace --examples --locked --quiet
