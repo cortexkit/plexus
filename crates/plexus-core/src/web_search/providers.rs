@@ -42,8 +42,15 @@ pub const PROVIDER_NAMES: &[ProviderName] = &[
     rest_provider!("firecrawl"),
     rest_provider!("jina"),
     rest_provider!("kagi"),
-    rest_provider!("kimi"),
-    rest_provider!("ollama"),
+    ProviderName {
+        // Search uses the Kimi Code Console key, not a Moonshot platform key.
+        credential: VaultCredential::Required("apikey:kimi-for-coding"),
+        ..rest_provider!("kimi")
+    },
+    ProviderName {
+        credential: VaultCredential::Required("apikey:ollama-cloud"),
+        ..rest_provider!("ollama")
+    },
     rest_provider!("parallel"),
     rest_provider!("perplexity"),
     rest_provider!("synthetic"),
@@ -105,16 +112,25 @@ mod tests {
                 format!("catalog/{}_rest.jsonc", provider.name)
             );
             assert_eq!(provider.action, "search");
-            if provider.name == "searxng" {
-                assert_eq!(
+            match provider.name {
+                "kimi" => assert_eq!(
+                    provider.credential,
+                    VaultCredential::Required("apikey:kimi-for-coding")
+                ),
+                "ollama" => assert_eq!(
+                    provider.credential,
+                    VaultCredential::Required("apikey:ollama-cloud")
+                ),
+                "searxng" => assert_eq!(
                     provider.credential,
                     VaultCredential::Optional("apikey:searxng")
-                );
-            } else {
-                let VaultCredential::Required(name) = provider.credential else {
-                    panic!("only SearXNG permits no credential")
-                };
-                assert_eq!(name, format!("apikey:{}", provider.name));
+                ),
+                _ => {
+                    let VaultCredential::Required(name) = provider.credential else {
+                        panic!("only SearXNG permits no credential")
+                    };
+                    assert_eq!(name, format!("apikey:{}", provider.name));
+                }
             }
             assert_eq!(provider_named(provider.name), Some(provider));
         }
