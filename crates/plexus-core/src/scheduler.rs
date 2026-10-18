@@ -77,6 +77,9 @@ const BACKOFF_BASE: i64 = 2;
 /// job is to keep the final pre-suspension attempts from being spaced far apart
 /// when the subscription's own cadence is long (a 5-minute cadence at four
 /// failures would otherwise wait 80 minutes).
+/// The subscription's own cadence is always a floor. Cadences at or above
+/// one hour therefore keep that base interval even after failures; retry jitter
+/// may add up to ten percent to spread watches on the same vendor.
 const BACKOFF_CEILING_S: i64 = 3600;
 
 /// Consecutive vendor failures at which the circuit breaker trips.
@@ -97,6 +100,8 @@ const CIRCUIT_BREAKER_FAILURES: i64 = 5;
 /// Most approvals waiting on a daemon scope that one pass retries. Each retry
 /// is one `scope.describe` round trip; the rest wait for the next pass.
 const WAITING_APPROVAL_RETRIES_PER_PASS: usize = 16;
+const POLL_PASS_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How long a watch waits before its next poll after one that failed on a
 /// credential only a person can repair (sign in again, replace a revoked or
@@ -148,7 +153,7 @@ fn effective_cadence_s(
     }
 }
 
-/// Lazily read cadence inputs once per scheduling pass or health refresh, not
+/// Lazily read cadence inputs once per scheduling pass, not
 /// once per watch. Recreating this snapshot each pass observes connection and
 /// quota changes without a persistent cache or invalidation protocol.
 pub struct PollingCadences<'a> {
@@ -256,6 +261,9 @@ where
     /// with the pass time before which they are not polled.
     credential_repair_waits: Mutex<std::collections::HashMap<String, i64>>,
     relay_health: Option<Arc<dyn RelayPollingHealth>>,
+    pass_budget: std::time::Duration,
+    resume_after: Mutex<Option<(String, String)>>,
+    last_housekeeping: Mutex<Option<std::time::Instant>>,
 }
 
 /// The outcome of one subscription within a scheduling pass.
@@ -315,6 +323,9 @@ where
             ownership_resume: Default::default(),
             credential_repair_waits: Mutex::new(Default::default()),
             relay_health: None,
+            pass_budget: POLL_PASS_BUDGET,
+            resume_after: Mutex::new(None),
+            last_housekeeping: Mutex::new(None),
         }
     }
 
@@ -392,6 +403,7 @@ where
     /// that was suspended or polled, in selection order, together with the
     /// selection-failure count for this pass only, not since boot.
     pub fn run_pass_report(&self, principals: &[String], now_ms: i64) -> PassReport {
+        let deadline = std::time::Instant::now() + self.pass_budget;
         if let Some(registry) = &self.repository_registry {
             if self.ownership_throttle.due(now_ms) {
                 crate::repository_ownership::run_and_report(
@@ -409,45 +421,58 @@ where
         {
             eprintln!(warn scheduler: "write reconciliation sweep failed: {error}");
         }
-        match self
-            .store
-            .prune_audit(now_ms, self.audit_retention_window_ms)
-        {
-            Ok(removed) if removed > 0 => {
-                // Trigger-event pruning writes a marker because it can destroy an
-                // UNACKED payload. Audit rows have no unseen/seen distinction, and
-                // writing one audit marker per pruning tick would feed retention
-                // back into the table with self-referential noise. The operator log
-                // records the destructive pass without manufacturing more journal
-                // history that will itself be pruned later.
-                eprintln!(debug scheduler: "audit retention pruned {removed} row(s)");
+        let housekeeping_due = {
+            let mut last = self
+                .last_housekeeping
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if last.is_none_or(|at| at.elapsed() >= HOUSEKEEPING_INTERVAL) {
+                *last = Some(std::time::Instant::now());
+                true
+            } else {
+                false
             }
-            Ok(_) => {}
-            Err(error) => {
-                eprintln!(warn scheduler: "audit retention pass failed: {error}");
+        };
+        if housekeeping_due {
+            match self
+                .store
+                .prune_audit(now_ms, self.audit_retention_window_ms)
+            {
+                Ok(removed) if removed > 0 => {
+                    // Trigger-event pruning writes a marker because it can destroy an
+                    // UNACKED payload. Audit rows have no unseen/seen distinction, and
+                    // writing one audit marker per pruning tick would feed retention
+                    // back into the table with self-referential noise. The operator log
+                    // records the destructive pass without manufacturing more journal
+                    // history that will itself be pruned later.
+                    eprintln!(debug scheduler: "audit retention pruned {removed} row(s)");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!(warn scheduler: "audit retention pass failed: {error}");
+                }
+            }
+
+            match crate::github::sweeper::sweep_receipts(&self.store, now_ms) {
+                Ok(uncertain) if !uncertain.is_empty() => {
+                    eprintln!(warn scheduler: "receipt sweep queued {} uncertain write(s)", uncertain.len());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!(warn scheduler: "receipt sweep failed: {error}");
+                }
+            }
+
+            match self.store.prune_reservations(now_ms) {
+                Ok(removed) if removed > 0 => {
+                    eprintln!(debug scheduler: "reservation retention pruned {removed} row(s)");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!(warn scheduler: "reservation retention pass failed: {error}");
+                }
             }
         }
-
-        match crate::github::sweeper::sweep_receipts(&self.store, now_ms) {
-            Ok(uncertain) if !uncertain.is_empty() => {
-                eprintln!(warn scheduler: "receipt sweep queued {} uncertain write(s)", uncertain.len());
-            }
-            Ok(_) => {}
-            Err(error) => {
-                eprintln!(warn scheduler: "receipt sweep failed: {error}");
-            }
-        }
-
-        match self.store.prune_reservations(now_ms) {
-            Ok(removed) if removed > 0 => {
-                eprintln!(debug scheduler: "reservation retention pruned {removed} row(s)");
-            }
-            Ok(_) => {}
-            Err(error) => {
-                eprintln!(warn scheduler: "reservation retention pass failed: {error}");
-            }
-        }
-
         // Approvals held unsent because their daemon scope could not be
         // confirmed (typically the owner has not re-synced since a daemon
         // restart). Each retry asks the daemon once; the bound keeps one pass
@@ -462,64 +487,90 @@ where
         let mut outcomes = Vec::new();
         let mut selection_failures = 0;
         let mut cadences = self.polling_cadences();
+        let mut candidates = Vec::new();
         for principal in principals {
-            let candidates = match self.store.due_subscriptions(principal, now_ms) {
-                Ok(candidates) => candidates,
+            match self.store.due_subscriptions(principal, now_ms) {
+                Ok(subscriptions) => candidates.extend(
+                    subscriptions
+                        .into_iter()
+                        .map(|sub| (principal.clone(), sub)),
+                ),
                 Err(error) => {
                     eprintln!(error scheduler: "scheduler selection failed for principal {principal}: {error}");
                     selection_failures += 1;
-                    continue;
                 }
-            };
-            for subscription in candidates {
-                match self.classify_subscription(&subscription, now_ms, &mut cadences) {
-                    DueDecision::BreakerTripped => {
-                        self.credential_repair_waits
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner())
-                            .remove(&subscription.subscription_id);
-                        crate::poller::forget_subscription(&subscription.subscription_id);
-                        // Suspend with a machine-readable reason. `suspend`
-                        // records the coverage gap this creates, so the operator
-                        // sees the interval the poller stopped covering.
-                        let cycle = match self.store.suspend(
-                            principal,
-                            &subscription.subscription_id,
-                            CIRCUIT_BREAKER_SUSPENSION_REASON,
-                        ) {
-                            Ok(_) => PollCycle::Suspended {
-                                reason: CIRCUIT_BREAKER_SUSPENSION_REASON.to_string(),
-                            },
-                            Err(error) => PollCycle::StoreFailed {
-                                reason: error.to_string(),
-                            },
-                        };
-                        outcomes.push(PassOutcome {
-                            principal: principal.clone(),
-                            subscription_id: subscription.subscription_id,
-                            cycle,
-                        });
-                    }
-                    DueDecision::InBackoff => {}
+            }
+        }
+        candidates
+            .sort_by(|(pa, a), (pb, b)| (pa, &a.subscription_id).cmp(&(pb, &b.subscription_id)));
+        let previous = self
+            .resume_after
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(previous) = previous {
+            let start = candidates.partition_point(|(p, sub)| {
+                (p, &sub.subscription_id) <= (&previous.0, &previous.1)
+            });
+            if start < candidates.len() {
+                candidates.rotate_left(start);
+            }
+        }
+        for (principal, subscription) in candidates {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            *self.resume_after.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some((principal.clone(), subscription.subscription_id.clone()));
+            match self.classify_subscription(&subscription, now_ms, &mut cadences) {
+                DueDecision::BreakerTripped => {
+                    self.credential_repair_waits
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .remove(&subscription.subscription_id);
+                    crate::poller::forget_subscription(&subscription.subscription_id);
+                    // Suspend with a machine-readable reason. `suspend`
+                    // records the coverage gap this creates, so the operator
+                    // sees the interval the poller stopped covering.
+                    let cycle = match self.store.suspend(
+                        &principal,
+                        &subscription.subscription_id,
+                        CIRCUIT_BREAKER_SUSPENSION_REASON,
+                    ) {
+                        Ok(_) => PollCycle::Suspended {
+                            reason: CIRCUIT_BREAKER_SUSPENSION_REASON.to_string(),
+                        },
+                        Err(error) => PollCycle::StoreFailed {
+                            reason: error.to_string(),
+                        },
+                    };
+                    outcomes.push(PassOutcome {
+                        principal: principal.clone(),
+                        subscription_id: subscription.subscription_id,
+                        cycle,
+                    });
+                }
+                DueDecision::InBackoff => {}
 
-                    DueDecision::Poll => {
-                        let cycle = self
-                            .poller
-                            .poll_once(principal, &subscription.subscription_id);
-                        self.note_credential_repair(&subscription.subscription_id, &cycle, now_ms);
-                        outcomes.push(PassOutcome {
-                            principal: principal.clone(),
-                            subscription_id: subscription.subscription_id,
-                            cycle,
-                        });
-                    }
+                DueDecision::Poll => {
+                    let cycle = self
+                        .poller
+                        .poll_loaded(&principal, &subscription, Some(deadline));
+                    self.note_credential_repair(&subscription.subscription_id, &cycle, now_ms);
+                    outcomes.push(PassOutcome {
+                        principal: principal.clone(),
+                        subscription_id: subscription.subscription_id,
+                        cycle,
+                    });
                 }
             }
         }
         // After the polls, not beside the other housekeeping above: the sweep
         // makes one registry round trip per agent, and running it first would
         // hold this pass's polls behind that traffic once an hour.
-        self.sweep_retired_agents_if_due(now_ms);
+        if std::time::Instant::now() < deadline {
+            self.sweep_retired_agents_if_due(now_ms);
+        }
         PassReport {
             outcomes,
             selection_failures,
@@ -558,12 +609,12 @@ where
             return DueDecision::Poll;
         };
         let cadence = cadences.effective_cadence_s(subscription);
-        if now_ms.saturating_sub(last_polled)
-            < effective_interval_ms(cadence, subscription.consecutive_vendor_failures)
+        if now_ms < last_polled
+            || now_ms.saturating_sub(last_polled) >= jittered_interval_ms(subscription, cadence)
         {
-            return DueDecision::InBackoff;
+            return DueDecision::Poll;
         }
-        DueDecision::Poll
+        DueDecision::InBackoff
     }
 
     /// Whether this watch's last poll failed on a credential needing repair
@@ -649,11 +700,8 @@ fn backoff_elapsed(subscription: &TriggerSubscription, now_ms: i64) -> bool {
     let Some(last_polled_at_ms) = subscription.last_polled_at_ms else {
         return true;
     };
-    let interval = effective_interval_ms(
-        subscription.cadence_s,
-        subscription.consecutive_vendor_failures,
-    );
-    now_ms.saturating_sub(last_polled_at_ms) >= interval
+    let interval = jittered_interval_ms(subscription, subscription.cadence_s);
+    now_ms < last_polled_at_ms || now_ms.saturating_sub(last_polled_at_ms) >= interval
 }
 
 /// The wait before the next attempt for a subscription with the given cadence
@@ -664,6 +712,21 @@ fn backoff_elapsed(subscription: &TriggerSubscription, now_ms: i64) -> bool {
 /// never drops below the cadence itself: backoff only ever lengthens the wait,
 /// so even a long-cadence subscription held against the ceiling is not polled
 /// more often than it asked for.
+fn jittered_interval_ms(subscription: &TriggerSubscription, cadence_s: i64) -> i64 {
+    let interval = effective_interval_ms(cadence_s, subscription.consecutive_vendor_failures);
+    if subscription.consecutive_vendor_failures <= 0 {
+        return interval;
+    }
+    // A stable per-watch offset spreads retries without changing a healthy cadence.
+    let hash = subscription
+        .subscription_id
+        .bytes()
+        .fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    interval.saturating_add((interval / 1000).saturating_mul((hash % 101) as i64))
+}
+
 fn effective_interval_ms(cadence_s: i64, consecutive_vendor_failures: i64) -> i64 {
     let cadence_ms = cadence_s.saturating_mul(1000);
     if consecutive_vendor_failures <= 0 {
@@ -697,6 +760,104 @@ mod tests {
     use serde_json::json;
 
     static SCHEDULER_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct SlowPoll;
+    impl Transport for SlowPoll {
+        fn dispatch(
+            &self,
+            _: crate::transport::TransportRequest,
+            _: &crate::credentials::ResolvedCredential,
+        ) -> crate::transport::TransportResponse {
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            crate::transport::TransportResponse::success(json!({"items":[]}))
+        }
+    }
+
+    #[test]
+    fn pass_budget_defers_remaining_watches_and_rotates_the_next_start() {
+        let (store, _, engine) = scheduler_engine(json!({"items":[]}));
+        let ids = [
+            subscribe(&store, 30),
+            subscribe(&store, 30),
+            subscribe(&store, 30),
+        ];
+        let slow = GovernanceEngine::new(
+            store.clone(),
+            engine.credential_source().clone(),
+            Arc::new(SlowPoll),
+        );
+        let mut scheduler = Scheduler::new(slow, 86_400_000);
+        scheduler.run_pass(&[], now_ms());
+        scheduler.pass_budget = std::time::Duration::from_millis(300);
+        let now = now_ms();
+        let first = scheduler.run_pass(&principals(), now);
+        assert_eq!(
+            first.len(),
+            1,
+            "one slow poll must stop new work after the deadline"
+        );
+        let second = scheduler.run_pass(&principals(), now + 60_000);
+        assert_eq!(second.len(), 1);
+        assert_ne!(
+            first[0].subscription_id, second[0].subscription_id,
+            "the deferred watch must go before the previous slow watch"
+        );
+        assert!(ids.contains(&second[0].subscription_id));
+    }
+
+    #[test]
+    fn retention_is_throttled_between_passes() {
+        let (store, _, engine) = scheduler_engine(json!({"items":[]}));
+        let window = DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY;
+        let scheduler = Scheduler::new(engine, window);
+        let now = now_ms();
+        scheduler.run_pass(&[], now);
+        store
+            .append_audit_at_for_test("direct", now - window - 1, "expired")
+            .unwrap();
+        scheduler.run_pass(&[], now + 1_000);
+        assert_eq!(
+            store.list_audit("direct").unwrap().len(),
+            1,
+            "retention must not run on every tick"
+        );
+        *scheduler.last_housekeeping.lock().unwrap() =
+            Some(std::time::Instant::now() - HOUSEKEEPING_INTERVAL);
+        scheduler.run_pass(&[], now + 60_000);
+        assert!(store.list_audit("direct").unwrap().is_empty());
+    }
+
+    #[test]
+    fn failure_jitter_is_stable_bounded_and_spreads_watches() {
+        let (store, _, _) = scheduler_engine(json!({"items":[]}));
+        let id = subscribe(&store, 30);
+        let mut sub = stored(&store, &id);
+        sub.consecutive_vendor_failures = 1;
+        let mut intervals = HashSet::new();
+        for id in 0..50 {
+            sub.subscription_id = format!("watch-{id}");
+            let interval = jittered_interval_ms(&sub, 30);
+            assert!((60_000..=66_000).contains(&interval));
+            assert_eq!(interval, jittered_interval_ms(&sub, 30));
+            intervals.insert(interval);
+        }
+        assert!(
+            intervals.len() > 1,
+            "failed watches must not retry in lockstep"
+        );
+        sub.consecutive_vendor_failures = 0;
+        assert_eq!(jittered_interval_ms(&sub, 30), 30_000);
+        assert_eq!(
+            effective_interval_ms(7200, 4),
+            7_200_000,
+            "long cadences remain the lower bound"
+        );
+        sub.last_polled_at_ms = Some(1000);
+        assert!(
+            backoff_elapsed(&sub, 0),
+            "a future stamp must not stop polling after clock correction"
+        );
+    }
 
     #[test]
     fn credential_waits_are_bounded_at_4097_subscriptions() {
@@ -1202,9 +1363,9 @@ mod tests {
             "a failing subscription inside its backoff window must NOT be due: {due_ids:?}"
         );
 
-        // Once the backoff window (60s) elapses, the failing subscription IS due
+        // Once the largest jittered backoff window (66s) elapses, the failing subscription IS due
         // again — backoff delays, it does not stop.
-        let later = scheduler.due_now(&principals(), now - 31_000 + 60_000);
+        let later = scheduler.due_now(&principals(), now - 31_000 + 66_000);
         assert!(
             later.iter().any(|s| s.subscription_id == failing),
             "a failing subscription must become due once its backoff window elapses"
@@ -1260,7 +1421,7 @@ mod tests {
         // Control: the same subscription IS pollable once the window elapses, so
         // the empty request list above is because of backoff, not because the
         // subscription is otherwise unpollable.
-        let later_outcomes = scheduler.run_pass(&principals(), now - 31_000 + 60_000);
+        let later_outcomes = scheduler.run_pass(&principals(), now - 31_000 + 66_000);
         assert_eq!(
             later_outcomes.len(),
             1,

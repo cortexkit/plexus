@@ -13,6 +13,7 @@ const RUN_EVENT: &str = crate::event_key::GITHUB_CI_RUN_COMPLETED;
 const REQUEST_CAP: usize = 8;
 const CI_PAGE_SIZE: u64 = 100;
 const AGE_FLOOR_MS: i64 = (7 * 24 - 1) * 60 * 60 * 1000;
+const OPEN_ATTEMPT_LIMIT: usize = 4096;
 
 static CI_POLLS_DEFERRED: AtomicU64 = AtomicU64::new(0);
 static RUNS_VANISHED: AtomicU64 = AtomicU64::new(0);
@@ -59,6 +60,15 @@ struct RunMetadata {
     pull_requests: Vec<Value>,
     event: String,
     repository_id: i64,
+}
+
+struct CiDiscovery<'a> {
+    base: &'a Value,
+    from: i64,
+    floor: i64,
+    now: i64,
+    used: &'a mut usize,
+    gaps: &'a mut Vec<PollGapInput<'static>>,
 }
 
 struct CiEvent {
@@ -122,11 +132,34 @@ fn run_key(run: &Value, meta: &RunMetadata) -> Result<Option<String>, ()> {
         .transpose()
 }
 
-fn page(body: Value, field: &str) -> Option<(u64, Vec<Value>)> {
-    Some((
-        body.get("total_count")?.as_u64()?,
-        body.get(field)?.as_array()?.clone(),
-    ))
+fn page(mut body: Value, field: &str) -> Option<(u64, Vec<Value>)> {
+    let count = body.get("total_count")?.as_u64()?;
+    match body.get_mut(field)?.take() {
+        Value::Array(items) => Some((count, items)),
+        _ => None,
+    }
+}
+
+fn bound_open_attempts(cursor: &mut CiCursor) -> Result<Vec<i64>, ()> {
+    let mut oldest = cursor
+        .open
+        .iter()
+        .map(|(key, attempt)| {
+            iso8601::parse_to_millis(&attempt.created_at)
+                .map(|created| (created, key.clone()))
+                .ok_or(())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    oldest.sort();
+    let excess = cursor.open.len().saturating_sub(OPEN_ATTEMPT_LIMIT);
+    Ok(oldest
+        .into_iter()
+        .take(excess)
+        .map(|(created, key)| {
+            cursor.open.remove(&key);
+            created
+        })
+        .collect())
 }
 
 fn completed_conclusion(body: &Value) -> Option<&str> {
@@ -192,7 +225,7 @@ where
             Ok(None) => Err(ReadFailure::Cycle(self.ci_vendor_failure(
                 principal,
                 sub,
-                "response_shape_invalid".into(),
+                RESPONSE_SHAPE_INVALID.into(),
             ))),
             Err(GovernedReadFailure::VendorFailed { code, .. })
                 if allow_404 && code == "http_404" =>
@@ -213,6 +246,167 @@ where
             .unwrap_or_else(|poison| poison.into_inner())
             .get(subscription_id)
             .is_some_and(|until| now < *until)
+    }
+
+    fn discover_ci_runs(
+        &self,
+        principal: &str,
+        sub: &TriggerSubscription,
+        cursor: &mut CiCursor,
+        window: CiDiscovery<'_>,
+    ) -> Result<Vec<Value>, PollCycle> {
+        let CiDiscovery {
+            base,
+            from,
+            floor,
+            now,
+            used,
+            gaps,
+        } = window;
+        let invalid = || self.ci_vendor_failure(principal, sub, RESPONSE_SHAPE_INVALID.into());
+        let (total, mut discovered) = {
+            let mut args = base.clone();
+            args["created"] = json!(format!(">={}", iso8601::format_millis(from)));
+            args["page"] = json!(1);
+            let body = match self.ci_read(
+                principal,
+                sub,
+                &sub.action,
+                &sub.schema_hash,
+                args,
+                used,
+                false,
+            ) {
+                Ok(body) => body,
+                Err(ReadFailure::Cycle(cycle)) => return Err(cycle),
+                Err(ReadFailure::Vanished) => unreachable!(),
+            };
+            let Some((count, runs)) = page(body, "workflow_runs") else {
+                return Err(invalid());
+            };
+            (count, runs)
+        };
+        if total > discovered.len() as u64 {
+            let Some(oldest) = discovered
+                .iter()
+                .map(|run| timestamp(run, "created_at"))
+                .collect::<Option<Vec<_>>>()
+                .and_then(|times| times.into_iter().min())
+            else {
+                return Err(invalid());
+            };
+            gaps.push(PollGapInput {
+                from_ms: from,
+                to_ms: oldest,
+                reason: "ci_runs_page_cap",
+            });
+        }
+        // GitHub filters by original creation time, not rerun activity. Walk a
+        // fixed recent window one page per cycle, within the same reservation.
+        // Freeze both bounds until the rotation finishes so advancing time does
+        // not remove older runs from beneath a saved page number.
+        let rescan_from = *cursor.rescan_from_ms.get_or_insert(floor);
+        let rescan_to = *cursor.rescan_to_ms.get_or_insert(now);
+        let rescan_page = cursor.rescan_page.max(1);
+        let mut args = base.clone();
+        args["created"] = json!(format!(
+            "{}..{}",
+            iso8601::format_millis(rescan_from),
+            iso8601::format_millis(rescan_to)
+        ));
+        args["page"] = json!(rescan_page);
+        let body = match self.ci_read(
+            principal,
+            sub,
+            &sub.action,
+            &sub.schema_hash,
+            args,
+            used,
+            false,
+        ) {
+            Ok(body) => body,
+            Err(ReadFailure::Cycle(cycle)) => return Err(cycle),
+            Err(ReadFailure::Vanished) => unreachable!(),
+        };
+        let Some((rescan_count, runs)) = page(body, "workflow_runs") else {
+            return Err(invalid());
+        };
+        // GitHub's filtered list endpoint exposes at most 1,000 results. Make
+        // that coverage limit visible rather than paging beyond its contract.
+        if rescan_count > 1_000 && rescan_page == 10 {
+            gaps.push(PollGapInput {
+                from_ms: rescan_from,
+                to_ms: rescan_to,
+                reason: "ci_runs_page_cap",
+            });
+        }
+        discovered.extend(runs);
+        if rescan_page.saturating_mul(CI_PAGE_SIZE) >= rescan_count.min(1_000) {
+            cursor.rescan_page = 1;
+            cursor.rescan_from_ms = None;
+            cursor.rescan_to_ms = None;
+        } else {
+            cursor.rescan_page = rescan_page + 1;
+        }
+        Ok(discovered)
+    }
+
+    fn queue_ci_attempts(
+        &self,
+        principal: &str,
+        sub: &TriggerSubscription,
+        cursor: &mut CiCursor,
+        discovered: Vec<Value>,
+    ) -> Result<(), PollCycle> {
+        let store = self.engine.store();
+        let invalid = || self.ci_vendor_failure(principal, sub, RESPONSE_SHAPE_INVALID.into());
+        let store_failed = |error: cortexkit_store::StoreError| PollCycle::StoreFailed {
+            reason: error.to_string(),
+        };
+        for run in discovered {
+            let Some(meta) = metadata(&run) else {
+                return Err(invalid());
+            };
+            // Original creation time survives reruns. Only a completed attempt's
+            // completion time can establish that this watch never needed it.
+            if run["status"] == "completed" {
+                let Some(completed) = timestamp(&run, "updated_at") else {
+                    return Err(invalid());
+                };
+                if completed < sub.created_at_ms {
+                    continue;
+                }
+            }
+            let key = format!("{}:{}", meta.run_id, meta.run_attempt);
+            if cursor.open.contains_key(&key) {
+                continue;
+            }
+            match run_key(&run, &meta) {
+                Ok(Some(key)) => match store.canonical_event_by_key(&key) {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => {}
+                    Err(error) => return Err(store_failed(error)),
+                },
+                Ok(None) => {}
+                Err(_) => return Err(invalid()),
+            }
+            let Some(created) = run
+                .get("created_at")
+                .and_then(Value::as_str)
+                .filter(|s| iso8601::parse_to_millis(s).is_some())
+            else {
+                return Err(invalid());
+            };
+            cursor.open.insert(
+                key,
+                OpenAttempt {
+                    created_at: created.into(),
+                    last_checked_ms: 0,
+                    run: meta,
+                },
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn poll_ci_runs(&self, principal: &str, sub: &TriggerSubscription) -> PollCycle {
@@ -236,8 +430,8 @@ where
         // share a request limit over the preceding hour, and reservations never
         // receive refunds. A subscription that cannot poll must not consume
         // the allowance other subscriptions need.
-        let invalid = || self.ci_vendor_failure(principal, sub, "response_shape_invalid".into());
-        let mut cursor: CiCursor = match serde_json::from_value(sub.cursor_state.clone()) {
+        let invalid = || self.ci_vendor_failure(principal, sub, RESPONSE_SHAPE_INVALID.into());
+        let mut cursor: CiCursor = match CiCursor::deserialize(&sub.cursor_state) {
             Ok(cursor) => cursor,
             Err(_) => {
                 return self.suspend(principal, &sub.subscription_id, "cursor_state_unusable")
@@ -277,7 +471,7 @@ where
             Ok(QuotaAdmission::Reserved { .. }) => {}
             Ok(QuotaAdmission::Inactive) => {
                 return PollCycle::NotEligible {
-                    reason: "subscription_not_active".into(),
+                    reason: SUBSCRIPTION_NOT_ACTIVE.into(),
                 }
             }
             Ok(QuotaAdmission::Deferred { retry_at_ms }) => {
@@ -307,7 +501,7 @@ where
             Ok(true) => {}
             Ok(false) => {
                 return PollCycle::NotEligible {
-                    reason: "subscription_not_active".into(),
+                    reason: SUBSCRIPTION_NOT_ACTIVE.into(),
                 }
             }
             Err(error) => return store_failed(error),
@@ -326,128 +520,35 @@ where
             });
         }
         let mut used = 0;
-        let mut discovered = Vec::new();
-        let mut total = 0;
-        for number in 1..=1 {
-            let mut args = base.clone();
-            args["created"] = json!(format!(">={}", iso8601::format_millis(from)));
-            args["page"] = json!(number);
-            let body = match self.ci_read(
-                principal,
-                sub,
-                &sub.action,
-                &sub.schema_hash,
-                args,
-                &mut used,
-                false,
-            ) {
-                Ok(body) => body,
-                Err(ReadFailure::Cycle(cycle)) => return cycle,
-                Err(ReadFailure::Vanished) => unreachable!(),
-            };
-            let Some((count, runs)) = page(body, "workflow_runs") else {
-                return invalid();
-            };
-            total = total.max(count);
-            discovered.extend(runs);
-            if total <= discovered.len() as u64 {
-                break;
-            }
-        }
-        if total > discovered.len() as u64 {
-            let Some(oldest) = discovered
-                .iter()
-                .map(|run| timestamp(run, "created_at"))
-                .collect::<Option<Vec<_>>>()
-                .and_then(|times| times.into_iter().min())
-            else {
-                return invalid();
-            };
-            gaps.push(PollGapInput {
-                from_ms: from,
-                to_ms: oldest,
-                reason: "ci_runs_page_cap",
-            });
-        }
-        // GitHub filters by original creation time, not rerun activity. Walk a
-        // fixed recent window one page per cycle, within the same reservation.
-        // Freeze both bounds until the rotation finishes so advancing time does
-        // not remove older runs from beneath a saved page number.
-        let rescan_from = *cursor.rescan_from_ms.get_or_insert(floor);
-        let rescan_to = *cursor.rescan_to_ms.get_or_insert(now);
-        let rescan_page = cursor.rescan_page.max(1);
-        let mut args = base.clone();
-        args["created"] = json!(format!(
-            "{}..{}",
-            iso8601::format_millis(rescan_from),
-            iso8601::format_millis(rescan_to)
-        ));
-        args["page"] = json!(rescan_page);
-        let body = match self.ci_read(
+        let discovered = match self.discover_ci_runs(
             principal,
             sub,
-            &sub.action,
-            &sub.schema_hash,
-            args,
-            &mut used,
-            false,
+            &mut cursor,
+            CiDiscovery {
+                base: &base,
+                from,
+                floor,
+                now,
+                used: &mut used,
+                gaps: &mut gaps,
+            },
         ) {
-            Ok(body) => body,
-            Err(ReadFailure::Cycle(cycle)) => return cycle,
-            Err(ReadFailure::Vanished) => unreachable!(),
+            Ok(discovered) => discovered,
+            Err(cycle) => return cycle,
         };
-        let Some((rescan_count, runs)) = page(body, "workflow_runs") else {
-            return invalid();
+        if let Err(cycle) = self.queue_ci_attempts(principal, sub, &mut cursor, discovered) {
+            return cycle;
+        }
+        let evicted = match bound_open_attempts(&mut cursor) {
+            Ok(evicted) => evicted,
+            Err(_) => return invalid(),
         };
-        // GitHub's filtered list endpoint exposes at most 1,000 results. Make
-        // that coverage limit visible rather than paging beyond its contract.
-        if rescan_count > 1_000 && rescan_page == 10 {
+        for created in evicted {
             gaps.push(PollGapInput {
-                from_ms: rescan_from,
-                to_ms: rescan_to,
-                reason: "ci_runs_page_cap",
+                from_ms: created,
+                to_ms: now,
+                reason: "ci_runs_open_limit",
             });
-        }
-        discovered.extend(runs);
-        if rescan_page.saturating_mul(CI_PAGE_SIZE) >= rescan_count.min(1_000) {
-            cursor.rescan_page = 1;
-            cursor.rescan_from_ms = None;
-            cursor.rescan_to_ms = None;
-        } else {
-            cursor.rescan_page = rescan_page + 1;
-        }
-        for run in discovered {
-            let Some(meta) = metadata(&run) else {
-                return invalid();
-            };
-            let key = format!("{}:{}", meta.run_id, meta.run_attempt);
-            if cursor.open.contains_key(&key) {
-                continue;
-            }
-            match run_key(&run, &meta) {
-                Ok(Some(key)) => match store.canonical_event_by_key(&key) {
-                    Ok(Some(_)) => continue,
-                    Ok(None) => {}
-                    Err(error) => return store_failed(error),
-                },
-                Ok(None) => {}
-                Err(_) => return invalid(),
-            }
-            let Some(created) = run
-                .get("created_at")
-                .and_then(Value::as_str)
-                .filter(|s| iso8601::parse_to_millis(s).is_some())
-            else {
-                return invalid();
-            };
-            cursor.open.insert(
-                key,
-                OpenAttempt {
-                    created_at: created.into(),
-                    last_checked_ms: 0,
-                    run: meta,
-                },
-            );
         }
         let mut order = Vec::with_capacity(cursor.open.len());
         for (key, attempt) in &cursor.open {
@@ -715,7 +816,7 @@ where
                 }
             }
             Err(crate::storage::PollCommitError::Inactive) => PollCycle::NotEligible {
-                reason: "subscription_not_active".into(),
+                reason: SUBSCRIPTION_NOT_ACTIVE.into(),
             },
             Err(error) => PollCycle::StoreFailed {
                 reason: error.to_string(),
@@ -807,6 +908,29 @@ fn ci_event(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pending_attempt_limit_records_eviction_as_a_durable_gap() {
+        let f = Fixture::new();
+        let runs = (1..=4097)
+            .map(|id| run(id, 1, f.now - id * 1000, "in_progress", None))
+            .collect::<Vec<_>>();
+        for run in &runs {
+            f.add(run.clone(), Vec::new(), false);
+        }
+        f.open(&runs);
+        f.poll_checked(0);
+        assert!(f.cursor()["open"].as_object().unwrap().len() <= 4096);
+        assert!(
+            f.cursor()["open"].get("4097:1").is_none(),
+            "oldest attempt must be evicted first"
+        );
+        assert!(
+            f.gaps()
+                .iter()
+                .any(|gap| gap["reason"] == "ci_runs_open_limit"),
+            "eviction coverage must be durable"
+        );
+    }
     use super::*;
     use crate::credentials::{
         CredentialError, ResolvedCredential, StubCredentialSource, TransientCredentialError,
@@ -1388,7 +1512,7 @@ mod tests {
         assert_eq!(
             f.poll(0),
             PollCycle::NotEligible {
-                reason: "subscription_not_active".into()
+                reason: SUBSCRIPTION_NOT_ACTIVE.into()
             }
         );
         assert_eq!(
@@ -1937,6 +2061,7 @@ mod tests {
         assert!(f.requests().iter().all(|r| r.action != JOBS_READ));
         assert_eq!(f.poll_checked(1), 0);
         assert!(f.events().is_empty());
+        assert!(f.requests().iter().all(|r| r.action != RUN_READ), "historical completions must be filtered during discovery, before spending progress reads");
     }
 
     #[test]
@@ -3000,11 +3125,11 @@ mod tests {
         assert_eq!(
             crate::poller::poll_accounting_metrics(),
             json!({
-                "itemsExamined": 4,
+                "itemsExamined": 3,
                 "eventsInserted": 1,
                 "identityViolations": 0,
                 "droppedByReason": {
-                    "olderThanWatermark": 3,
+                    "olderThanWatermark": 2,
                     "initialBaseline": 0,
                     "unchangedObservation": 0,
                     "unchangedBoundaryReplay": 0,
