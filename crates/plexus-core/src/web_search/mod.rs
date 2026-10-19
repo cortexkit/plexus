@@ -234,7 +234,8 @@ impl WebSearchService {
         }
     }
 
-    /// Exa over REST, with no other provider available to an order.
+    /// Exa over REST. A stored provider order can dispatch to Exa only; use
+    /// [`Self::production`] for every implemented provider.
     pub fn exa() -> Self {
         Self::new(Arc::new(ExaRestBackend))
     }
@@ -253,7 +254,7 @@ impl WebSearchService {
         self.backend.name()
     }
 
-    /// The names of the providers an order can dispatch to, sorted.
+    /// The names of the providers a stored order can dispatch to, in name order.
     pub fn chain_backend_names(&self) -> Vec<&'static str> {
         self.chain_backends.keys().copied().collect()
     }
