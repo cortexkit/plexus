@@ -33,6 +33,7 @@ mod consent_test_support;
 mod engram_catalog;
 pub mod health;
 pub mod manifest;
+pub mod operator_confirmation;
 pub mod principal;
 pub mod relay;
 mod request_execution;
@@ -145,6 +146,7 @@ const MAX_PROBE_ACTIONS: usize = 100;
 
 #[derive(Clone)]
 pub struct RouteBindings {
+    control_replies: Arc<PendingControlReplies>,
     inner: Arc<RwLock<HashMap<(u16, u32), RouteBinding>>>,
     in_flight: Arc<tokio::sync::Semaphore>,
     blocking: Arc<tokio::sync::Semaphore>,
@@ -155,6 +157,7 @@ pub struct RouteBindings {
 impl Default for RouteBindings {
     fn default() -> Self {
         Self {
+            control_replies: Arc::default(),
             inner: Arc::default(),
             in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
             blocking: Arc::new(tokio::sync::Semaphore::new(MAX_BLOCKING_REQUESTS)),
@@ -270,6 +273,7 @@ impl RouteBindings {
     }
 
     fn clear(&self) {
+        self.control_replies.clear();
         self.inner
             .write()
             .unwrap_or_else(|error| error.into_inner())
@@ -500,7 +504,7 @@ where
     // `scope.describe`, sent on this module's subc connection, just before the
     // approval is sent. subc answers on channel 0, and the dispatch loop hands
     // those replies to `control_replies`.
-    let control_replies = Arc::new(PendingControlReplies::default());
+    let control_replies = Arc::clone(&route_bindings.control_replies);
     runtime.engine = runtime
         .engine
         .clone()
@@ -685,8 +689,8 @@ where
                 }
             }
         };
-        // subc's reply to a control request this module sent (today only
-        // `scope.describe`) wakes the caller waiting on its correlation id.
+        // Replies to module-originated controls, including operator confirmation,
+        // wake only the caller waiting on their correlation id.
         if frame.header.channel == 0
             && matches!(frame.header.ty, FrameType::Response | FrameType::Error)
         {
@@ -1676,34 +1680,10 @@ struct RouteFrameContext {
     correlation: u64,
 }
 
-/// Serve the privileged ceremony.
-///
-/// Authority model: only `Principal::Direct` may mint. Direct is NOT a stronger
-/// principal than `Reserved` — it is the ABSENCE of module attestation. The
-/// daemon stamps `Reserved{module_id}` for spawn-attested supervised modules and
-/// `Direct` for anything else that completes the connection handshake, so with a
-/// user-owned 0600 connection file Direct means "code running as this user".
-///
-/// WHAT THIS GATE DOES NOT EXCLUDE: it does exclude other SUPERVISED MODULES,
-/// and it is tempting to call that "the exclusion that matters, since those
-/// are the agents that would otherwise mint themselves authority".
-/// That is narrow-but-true and reads as a security property it does not have.
-/// Agents do not reach this surface as supervised modules. Attestation covers
-/// only daemon-SPAWNED processes (the nonce is env-injected at spawn), so an
-/// editor plugin or a shell command holding the connection file binds as Direct
-/// — the same principal as the operator's own CLI. Demonstrated rather than
-/// reasoned: an agent session invoked `plexus.admin.list_grants` through this
-/// gate, and `grant` sits behind the identical check.
-///
-/// So the honest scope: this gate excludes OTHER MODULES, not agents. What
-/// bounds an agent today is the narrowing chain — a minted grant cannot exceed
-/// the connection ceiling fixed at ticket issuance — not this principal check.
-/// Closing it needs an operation-bound step-up the caller cannot forge from
-/// possession of the connection file alone; the account's Ed25519 attestation is
-/// the intended shape, and this is the concrete path it would close.
-///
-/// Confinement does not close it either, unless plugin route access is addressed
-/// with it: removing an agent's shell leaves the plugin binding Direct.
+/// Serve the privileged ceremony. Direct admission excludes supervised modules,
+/// not other code running as this user. Minting or widening authority therefore
+/// also requires operation-bound confirmation from the daemon's operator UI;
+/// narrowing authority and read-only previews require no step-up.
 async fn handle_management_request(
     route: RouteFrameContext,
     method: &str,
@@ -1834,6 +1814,28 @@ async fn handle_management_request(
             return send_tool_response(writer, version, channel, epoch, correlation, refusal).await;
         }
     }
+    if let Some(summary) = operator_confirmation::summary(method, params) {
+        if let Err(refusal) =
+            operator_confirmation::confirm(&summary, route, writer, &route_bindings.control_replies)
+                .await
+        {
+            let response = operator_confirmation::audit_refusal(state, method, &refusal);
+            return send_tool_response(writer, version, channel, epoch, correlation, response)
+                .await;
+        }
+        if route_bindings.binding(channel, epoch)?.is_none() {
+            let response = operator_confirmation::audit_refusal(
+                state,
+                method,
+                &operator_confirmation::Refusal {
+                    code: "operator_confirmation_unavailable",
+                    reason: "the caller route closed while awaiting confirmation".to_string(),
+                },
+            );
+            return send_tool_response(writer, version, channel, epoch, correlation, response)
+                .await;
+        }
+    }
     let mut response = match method {
         relay::STATUS_OP => json!({"result": state.health.relay.status()}),
         manifest::ADMIN_RECIPIENTS_ADD_OP
@@ -1852,13 +1854,13 @@ async fn handle_management_request(
                     // only be built and dropped off the async worker, so it
                     // lives inside the section.
                     match blocking_section(|| {
-                        let reader = plexus_core::github::control::GithubApiReader::default();
+                        let reader = github_control_reader(state);
                         plexus_core::github::control::import(
                             state.store(),
                             &principal_key,
                             &inventory,
                             provider.as_ref(),
-                            &reader,
+                            reader.as_ref(),
                             plexus_core::storage::now_ms(),
                             params
                                 .get("dry_run")
@@ -1886,13 +1888,13 @@ async fn handle_management_request(
                     // The reader must be built and dropped inside
                     // `blocking_section`, as in the import arm above.
                     match blocking_section(|| {
-                        let reader = plexus_core::github::control::GithubApiReader::default();
+                        let reader = github_control_reader(state);
                         plexus_core::github::control::probe(
                             state.store(),
                             &principal_key,
                             id,
                             provider.as_ref(),
-                            &reader,
+                            reader.as_ref(),
                             plexus_core::storage::now_ms(),
                         )
                     }) {
@@ -1991,6 +1993,16 @@ fn github_handle_unbind(
     }
 }
 
+fn github_control_reader(
+    state: &ModuleState,
+) -> Arc<dyn plexus_core::github::control::InstallationReader + Send + Sync> {
+    state
+        .runtime
+        .github_control_reader
+        .clone()
+        .unwrap_or_else(|| Arc::new(plexus_core::github::control::GithubApiReader::default()))
+}
+
 /// Decode `github.handle.bind` parameters and run the bind against the
 /// handle's installation, read with its vault token as the probe reads it.
 /// `dry_run` defaults to true, as for the import and the grant.
@@ -2022,14 +2034,14 @@ fn github_handle_bind(state: &ModuleState, principal_key: &str, params: &Value) 
     // The reader owns a blocking HTTP client whose runtime may only be built
     // and dropped off the async worker, so it lives inside the section.
     match blocking_section(|| {
-        let reader = plexus_core::github::control::GithubApiReader::default();
+        let reader = github_control_reader(state);
         plexus_core::github::control::bind(
             state.store(),
             principal_key,
             app_handle_id,
             &repositories,
             provider.as_ref(),
-            &reader,
+            reader.as_ref(),
             plexus_core::storage::now_ms(),
             dry_run,
         )
@@ -5365,7 +5377,35 @@ pub async fn handle_scoped_tool_request_for_test(
         health: Arc::new(health::HealthState::new()),
         runtime,
     });
-    handle_tool_request(frame, writer, &state, &routes).await
+    handle_tool_request_with_confirmed_test_peer(frame, writer, &state, &routes).await
+}
+
+/// Handler fixtures explicitly approve confirmation frames with a fake daemon;
+/// confirmation refusal tests use the production handler and their own peer.
+#[cfg(any(test, feature = "test-support"))]
+async fn handle_tool_request_with_confirmed_test_peer(
+    frame: Frame,
+    writer: &mpsc::Sender<Frame>,
+    state: &Arc<ModuleState>,
+    routes: &Arc<RouteBindings>,
+) -> Result<(), ModuleError> {
+    let needs_fake_peer = serde_json::from_slice::<Value>(&frame.body)
+        .ok()
+        .is_some_and(|request| {
+            request["method"].as_str().is_some_and(|method| {
+                operator_confirmation::may_need_confirmation(method, &request["params"])
+            })
+        });
+    if needs_fake_peer {
+        let (proxy, requests) = mpsc::channel(4);
+        let (result, ()) = tokio::join!(
+            handle_tool_request(frame, &proxy, state, routes),
+            operator_confirmation::approving_test_peer(requests, writer, &routes.control_replies),
+        );
+        result
+    } else {
+        handle_tool_request(frame, writer, state, routes).await
+    }
 }
 
 #[cfg(test)]
@@ -6569,7 +6609,7 @@ mod tests {
             bindings
                 .insert(route.channel, route.epoch, principal)
                 .expect("bind principal");
-            handle_management_request(route, method, &params, &writer, state, &bindings)
+            confirmed_management_request(route, method, &params, &writer, state, &bindings)
                 .await
                 .expect("management request receives a response");
             let frame = recv_within(
@@ -6580,6 +6620,22 @@ mod tests {
             .await;
             serde_json::from_slice(&frame.body).expect("management response JSON")
         })
+    }
+
+    async fn confirmed_management_request(
+        route: RouteFrameContext,
+        method: &str,
+        params: &Value,
+        writer: &mpsc::Sender<Frame>,
+        state: &Arc<ModuleState>,
+        bindings: &Arc<RouteBindings>,
+    ) -> Result<(), ModuleError> {
+        let (proxy, requests) = mpsc::channel(4);
+        let (result, ()) = tokio::join!(
+            handle_management_request(route, method, params, &proxy, state, bindings),
+            operator_confirmation::approving_test_peer(requests, writer, &bindings.control_replies),
+        );
+        result
     }
 
     /// Create a file-backed store with two active REST connections owned by
@@ -6644,6 +6700,10 @@ mod tests {
 
     mod credential_rebind {
         include!("credential_rebind_tests.rs");
+    }
+
+    mod operator_confirmation_tests {
+        include!("operator_confirmation_tests.rs");
     }
 
     fn delete_audit_rows(path: &Path, connection_id: &str) -> i64 {
@@ -7520,7 +7580,7 @@ mod tests {
             bindings
                 .insert(route.channel, route.epoch, principal)
                 .unwrap();
-            handle_management_request(
+            confirmed_management_request(
                 route,
                 manifest::ADMIN_WIDEN_CEILING_OP,
                 &params,
@@ -7614,7 +7674,7 @@ mod tests {
                 },
             )
             .expect("bind reserved principal");
-        handle_management_request(
+        confirmed_management_request(
             route,
             manifest::GITHUB_GRANT_OP,
             &params,
@@ -7636,7 +7696,7 @@ mod tests {
         bindings
             .insert(route.channel, route.epoch, Principal::Direct)
             .expect("bind direct principal");
-        handle_management_request(
+        confirmed_management_request(
             route,
             manifest::GITHUB_GRANT_OP,
             &params,
@@ -7802,7 +7862,7 @@ mod tests {
                 },
             )
             .expect("bind reserved principal");
-        handle_management_request(
+        confirmed_management_request(
             route,
             manifest::GITHUB_BIND_OP,
             &params,
@@ -7824,7 +7884,7 @@ mod tests {
         bindings
             .insert(route.channel, route.epoch, Principal::Direct)
             .expect("bind direct principal");
-        handle_management_request(
+        confirmed_management_request(
             route,
             manifest::GITHUB_BIND_OP,
             &params,
