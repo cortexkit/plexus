@@ -11098,6 +11098,90 @@ mod events_get_tests {
     }
 
     #[tokio::test]
+    async fn review_events_get_enforces_live_agent_repository_binding() {
+        use plexus_core::storage::relay::{Event, Hello};
+        let (_scratch, store, path) = test_store("review-event-visibility");
+        seed_test_events(&path, &store);
+        rusqlite::Connection::open(&path).unwrap().execute_batch(
+            "UPDATE trigger_subscriptions SET fixed_args='{\"owner\":\"org\",\"repo\":\"repo\"}' WHERE subscription_id='issue-sub-1';
+             INSERT INTO trigger_subscriptions(subscription_id,principal,connection_id,action,cadence_s,cursor_kind,schema_hash,status,created_at_ms,fixed_args)
+             VALUES ('pr-review','direct','conn-github','list_pull_requests',300,'ordered_timestamp','hash','active',1,'{\"owner\":\"org\",\"repo\":\"repo\"}');"
+        ).unwrap();
+        let hello: Hello = serde_json::from_value(json!({"v":1,"source":"github","stream_id":"reviews","next_seq":1,"oldest_seq":1,"last_acked_seq":0})).unwrap();
+        store.relay_hello("github", &hello).unwrap();
+        seed_agent_binding(&path, "review-agent", "ORG/REPO");
+        for (seq, event_type, source, kind) in [
+            (
+                1,
+                "pull_request_review",
+                include_str!("../tests/fixtures/webhook-relay/review-submitted.json"),
+                "github_pr_review_submitted",
+            ),
+            (
+                2,
+                "pull_request_review_comment",
+                include_str!("../tests/fixtures/webhook-relay/review-comment-created.json"),
+                "github_pr_review_comment_created",
+            ),
+        ] {
+            let body: Value = serde_json::from_str(source).unwrap();
+            let event: Event = serde_json::from_value(json!({"seq":seq,"delivery_id":format!("visibility-{seq}"),"event":event_type,
+                "action":body["action"],"installation_id":42,"received_at":"2030-10-08T09:00:00.000Z","stub":null,"body":body})).unwrap();
+            store
+                .commit_relay_event("github", "reviews", &event)
+                .unwrap();
+            let row = store
+                .drain_event_outbox(10)
+                .unwrap()
+                .into_iter()
+                .find(|row| row.event_name == kind)
+                .unwrap();
+            for (agent, visible) in [
+                ("review-agent".to_owned(), true),
+                ("unbound-agent".into(), false),
+            ] {
+                let reply = execute_tool_call(
+                    store.clone(),
+                    Principal::Reserved {
+                        module_id: "basal".into(),
+                    },
+                    Some(basal_flow_scope(Some(&agent))),
+                    manifest::EVENTS_GET_TOOL,
+                    json!({"event_key":row.event_key,"event_name":kind}),
+                )
+                .await;
+                if visible {
+                    assert_eq!(reply["result"]["body"], row.body);
+                } else {
+                    assert_eq!(
+                        reply["error"]["code"], "event_not_visible",
+                        "review events must enforce the calling agent's repository binding"
+                    );
+                }
+            }
+        }
+        unbind_repo(&path, "ORG/REPO");
+        for row in store
+            .drain_event_outbox(10)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.event_name.starts_with("github_pr_review"))
+        {
+            let reply = execute_tool_call(
+                store.clone(),
+                Principal::Reserved {
+                    module_id: "basal".into(),
+                },
+                Some(basal_flow_scope(Some("review-agent"))),
+                manifest::EVENTS_GET_TOOL,
+                json!({"event_key":row.event_key,"event_name":row.event_name}),
+            )
+            .await;
+            assert_eq!(reply["error"]["code"], "event_not_visible");
+        }
+    }
+
+    #[tokio::test]
     async fn events_get_global_flow_and_core_grants() {
         let (_scratch, store, path) = test_store("events_get_global_core");
         let (issue_key, ci_key) = seed_test_events(&path, &store);

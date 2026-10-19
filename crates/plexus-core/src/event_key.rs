@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 
 pub const GITHUB_ISSUE_CHANGED: &str = "github_issue_changed";
 pub const GITHUB_PR_CHANGED: &str = "github_pr_changed";
+pub const GITHUB_PR_REVIEW_SUBMITTED: &str = "github_pr_review_submitted";
+pub const GITHUB_PR_REVIEW_COMMENT_CREATED: &str = "github_pr_review_comment_created";
 pub const GITHUB_RELEASE_PUBLISHED: &str = "github_release_published";
 pub const GITHUB_CI_JOB_FAILED: &str = "github_ci_job_failed";
 pub const GITHUB_CI_JOB_COMPLETED: &str = "github_ci_job_completed";
@@ -30,6 +32,14 @@ pub const PUBLISHED_EVENT_VERSIONS: &[u8] = &[1, 2];
 pub const V2_EVENT_KEY_HEADER: &str = "event_key";
 
 impl PublishedEvent {
+    pub fn versions(&self) -> &'static [u8] {
+        if is_review_notice(self.name) {
+            &[1]
+        } else {
+            PUBLISHED_EVENT_VERSIONS
+        }
+    }
+
     pub fn headers_for_version(&self, version: u8) -> Vec<&'static str> {
         self.headers
             .iter()
@@ -70,7 +80,24 @@ pub const PUBLISHED_EVENTS: &[PublishedEvent] = &[
         headers: &["repo", "project", "pr", "branch", "conclusion"],
         summary: "A GitHub Actions workflow run completed in a watched repository.",
     },
+    PublishedEvent {
+        name: GITHUB_PR_REVIEW_SUBMITTED,
+        headers: &["repo", "project", "pr"],
+        summary: "A review was submitted on a watched GitHub pull request.",
+    },
+    PublishedEvent {
+        name: GITHUB_PR_REVIEW_COMMENT_CREATED,
+        headers: &["repo", "project", "pr"],
+        summary: "A review comment was created on a watched GitHub pull request.",
+    },
 ];
+
+pub(crate) fn is_review_notice(kind: &str) -> bool {
+    matches!(
+        kind,
+        GITHUB_PR_REVIEW_SUBMITTED | GITHUB_PR_REVIEW_COMMENT_CREATED
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventKeyError {
@@ -129,15 +156,18 @@ impl GithubEventKind {
 /// including vendor timestamp spelling.
 /// Additional fields (action, actor, body, routing hints) have no effect.
 pub fn derive_event_key(kind: &str, fields: &Value) -> Result<String, EventKeyError> {
-    let (integers, strings): (&[&'static str], &[&'static str]) =
-        match GithubEventKind::parse(kind)? {
+    let (integers, strings): (&[&'static str], &[&'static str]) = match kind {
+        GITHUB_PR_REVIEW_SUBMITTED => (&["repo_id", "review_id"], &[]),
+        GITHUB_PR_REVIEW_COMMENT_CREATED => (&["repo_id", "comment_id"], &[]),
+        _ => match GithubEventKind::parse(kind)? {
             GithubEventKind::Issue | GithubEventKind::PullRequest => {
                 (&["repo_id", "number"], &["updated_at"])
             }
             GithubEventKind::Release => (&["repo_id", "release_id"], &[]),
             GithubEventKind::CiJob => (&["repo_id", "job_id", "run_attempt"], &["conclusion"]),
             GithubEventKind::CiRun => (&["repo_id", "run_id", "run_attempt"], &["conclusion"]),
-        };
+        },
+    };
     let mut identity = Map::new();
     identity.insert("kind".into(), Value::String(kind.into()));
     for &name in integers {

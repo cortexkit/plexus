@@ -219,6 +219,7 @@ pub(super) fn insert_marker(
     body_v1: &str,
 ) -> rusqlite::Result<()> {
     let h = identity.headers;
+    let envelope = (!crate::event_key::is_review_notice(identity.event_name)).then_some(envelope);
     // Keep an eager v1 snapshot: retention can move visibility to an overlapping
     // watch with different payload bytes, but published digests must stay valid.
     conn.execute("INSERT INTO event_outbox
@@ -226,7 +227,7 @@ pub(super) fn insert_marker(
          VALUES (?1, ?2, ?3, ?4, ?5, lower(?6), ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
         ON CONFLICT(event_key) DO NOTHING", rusqlite::params![identity.event_key, event_id,
         identity.event_name, identity.repo_id, identity.change, h.repo, h.project, h.pr, h.branch, h.conclusion, now,
-        envelope, hex::encode(sha2::Sha256::digest(envelope.as_bytes())),body_v1,hex::encode(sha2::Sha256::digest(body_v1.as_bytes()))])?;
+        envelope, envelope.map(|body| hex::encode(sha2::Sha256::digest(body.as_bytes()))),body_v1,hex::encode(sha2::Sha256::digest(body_v1.as_bytes()))])?;
     if identity.event_name.starts_with("github_ci_") {
         conn.execute(
             "INSERT INTO github_repo_id_cache (repo, repo_id, last_attempt_at_ms, resolved_at_ms)

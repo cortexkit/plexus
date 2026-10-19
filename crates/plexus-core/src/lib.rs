@@ -202,6 +202,7 @@ pub mod recipients;
 pub mod reconciliation;
 pub mod repository_ownership;
 pub mod rest_api;
+mod review_body;
 pub mod scheduler;
 pub mod scope;
 pub mod storage;

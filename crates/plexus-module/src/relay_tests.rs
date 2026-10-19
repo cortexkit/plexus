@@ -9,6 +9,8 @@ use tokio::{
 };
 use tokio_tungstenite::accept_async;
 
+include!("review_event_tests.rs");
+
 mod diagnostic_logging {
     include!("../../plexus-core/tests/support/logging.rs");
 }

@@ -126,19 +126,17 @@ fn published_event_declarations() -> Vec<EventDeclaration> {
     plexus_core::event_key::PUBLISHED_EVENTS
         .iter()
         .flat_map(|event| {
-            plexus_core::event_key::PUBLISHED_EVENT_VERSIONS
-                .iter()
-                .map(move |&version| {
-                    EventDeclaration::new(event.name, version.into())
-                        .with_headers(
-                            event
-                                .headers_for_version(version)
-                                .iter()
-                                .map(|header| (*header).to_owned())
-                                .collect(),
-                        )
-                        .with_summary(Some(event.summary.to_owned()))
-                })
+            event.versions().iter().map(move |&version| {
+                EventDeclaration::new(event.name, version.into())
+                    .with_headers(
+                        event
+                            .headers_for_version(version)
+                            .iter()
+                            .map(|header| (*header).to_owned())
+                            .collect(),
+                    )
+                    .with_summary(Some(event.summary.to_owned()))
+            })
         })
         .collect()
 }
@@ -903,7 +901,7 @@ mod tests {
             conclusion: Some("success".to_string()),
         };
         for published in plexus_core::event_key::PUBLISHED_EVENTS {
-            for version in [1, 2] {
+            for version in published.versions().iter().copied().map(u32::from) {
                 let declaration = declared
                     .iter()
                     .find(|event| event.name == published.name && event.version == version)
@@ -945,10 +943,10 @@ mod tests {
     #[test]
     fn manifest_events_pin_the_serialized_wire_json() {
         let events = build("plexus").events.expect("events are declared");
-        assert_eq!(events.len(), 12);
+        assert_eq!(events.len(), 14);
         let v1: Vec<_> = events.iter().filter(|event| event.version == 1).collect();
         let v2: Vec<_> = events.iter().filter(|event| event.version == 2).collect();
-        assert_eq!(v1.len(), 6);
+        assert_eq!(v1.len(), 8);
         assert_eq!(v2.len(), 6);
         for (one, two) in v1.iter().zip(&v2) {
             let mut expected = serde_json::to_value(one).unwrap();
@@ -961,7 +959,7 @@ mod tests {
         }
         assert_eq!(
             serde_json::to_string(&v1).expect("events serialize"),
-            r#"[{"name":"github_issue_changed","version":1,"headers":["repo","project"],"summary":"An issue changed in a watched GitHub repository."},{"name":"github_pr_changed","version":1,"headers":["repo","project","pr"],"summary":"A pull request changed in a watched GitHub repository."},{"name":"github_release_published","version":1,"headers":["repo","project"],"summary":"A release was published in a watched GitHub repository."},{"name":"github_ci_job_failed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions job failed in a watched repository."},{"name":"github_ci_job_completed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions job completed in a watched repository."},{"name":"github_ci_run_completed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions workflow run completed in a watched repository."}]"#
+            r#"[{"name":"github_issue_changed","version":1,"headers":["repo","project"],"summary":"An issue changed in a watched GitHub repository."},{"name":"github_pr_changed","version":1,"headers":["repo","project","pr"],"summary":"A pull request changed in a watched GitHub repository."},{"name":"github_release_published","version":1,"headers":["repo","project"],"summary":"A release was published in a watched GitHub repository."},{"name":"github_ci_job_failed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions job failed in a watched repository."},{"name":"github_ci_job_completed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions job completed in a watched repository."},{"name":"github_ci_run_completed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions workflow run completed in a watched repository."},{"name":"github_pr_review_submitted","version":1,"headers":["repo","project","pr"],"summary":"A review was submitted on a watched GitHub pull request."},{"name":"github_pr_review_comment_created","version":1,"headers":["repo","project","pr"],"summary":"A review comment was created on a watched GitHub pull request."}]"#
         );
     }
 
