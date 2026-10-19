@@ -285,6 +285,7 @@ pub use storage::now_ms;
 pub use storage::{
     ActionRequestRecord, ActorSource, AuditRecord, AuditRow, BindingTicket, CatalogAction,
     CatalogActionInput, CatalogActionReview, Ceiling, CeremonyRefusal, ConfigureOutcome,
+    ConnectionAdminRevokeOutcome,
     ConnectionRecord, ConnectionSummary, ConsentSettlement, DeleteConnectionOutcome,
     EventsConsumeAuthority, EventsIncludingGranted, GrantInput, GrantMintRequest, GrantRecord,
     ManifestSummary, ManifestWriteOutcome, PlexusStore, PolicyInput, PolicyRecord, PollEventInput,

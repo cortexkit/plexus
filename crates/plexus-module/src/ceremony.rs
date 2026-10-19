@@ -332,31 +332,33 @@ pub(crate) fn issue_ticket(state: &Arc<ModuleState>, principal_key: &str, params
     } else {
         "credential_reference"
     };
-    match state.store().issue_binding_ticket(
+    // The audit row is written in the issue's own transaction, so a ticket
+    // never exists without its record.
+    let fingerprint = if credential_free {
+        None
+    } else {
+        Some(plexus_core::fingerprint(&reference_bytes))
+    };
+    match state.store().issue_binding_ticket_audited(
         principal_key,
         &connection_id,
         app_key,
         ref_role,
         &reference_bytes,
         &ceiling,
-    ) {
-        Ok(Err(refusal)) => refusal_response(&refusal),
-        Ok(Ok(ticket)) => {
-            let fingerprint = if credential_free {
-                None
-            } else {
-                Some(plexus_core::fingerprint(&reference_bytes))
-            };
-            if let Err(error) = state.store().append_audit(&AuditRecord::ceremony(
+        &|_| {
+            AuditRecord::ceremony(
                 principal_key,
                 Some(app_key),
                 Some(&connection_id),
                 "issue_ticket",
                 &ceiling.risk.to_string(),
                 fingerprint.as_deref(),
-            )) {
-                eprintln!(error governance: "audit append failed: ceremony issue_ticket principal={principal_key:?} connection_id={connection_id:?}: {error}");
-            }
+            )
+        },
+    ) {
+        Ok(Err(refusal)) => refusal_response(&refusal),
+        Ok(Ok(ticket)) => {
             json!({"result": {
                 "ticket_id": ticket.ticket_id,
                 "connection_id": connection_id,
@@ -461,26 +463,29 @@ pub(crate) fn grant(state: &Arc<ModuleState>, principal_key: &str, params: &Valu
         Ok(expires_at) => expires_at,
         Err(response) => return response,
     };
-    match state.store().mint_grant_bounded(&GrantMintRequest {
-        principal: principal_key,
-        connection_id,
-        grantee_principal: grantee,
-        authority_kind,
-        requested_risk: risk,
-        requested_selectors: &selectors,
-        expires_at,
-    }) {
-        Ok(Ok(minted)) => {
-            if let Err(error) = state.store().append_audit(&AuditRecord::ceremony(
+    // The audit row is written in the mint's own transaction.
+    match state.store().mint_grant_bounded_audited(
+        &GrantMintRequest {
+            principal: principal_key,
+            connection_id,
+            grantee_principal: grantee,
+            authority_kind,
+            requested_risk: risk,
+            requested_selectors: &selectors,
+            expires_at,
+        },
+        &|minted| {
+            AuditRecord::ceremony(
                 principal_key,
                 None,
                 Some(connection_id),
                 "grant",
                 &minted.risk_ceiling,
                 None,
-            )) {
-                eprintln!(error governance: "audit append failed: ceremony grant principal={principal_key:?} connection_id={connection_id:?}: {error}");
-            }
+            )
+        },
+    ) {
+        Ok(Ok(minted)) => {
             json!({"result": {"grant": {
                 "grant_id": minted.grant_id,
                 "connection_id": minted.connection_id,
@@ -534,42 +539,30 @@ pub(crate) fn revoke_grant(state: &Arc<ModuleState>, principal_key: &str, params
     let Some(grant_id) = params.get("grant_id").and_then(Value::as_str) else {
         return json!({"error": {"code": "invalid_request", "message": "revoke_grant requires grant_id"}});
     };
-    // Read before the revoke so the audit row can name the grant's
-    // connection and ceiling; after it the row is gone. A failed read only
-    // thins the audit row, it never blocks the revoke.
-    let revoked = match state.store().grant_by_id(principal_key, grant_id) {
-        Ok(grant) => grant,
-        Err(error) => {
-            eprintln!(warn governance: "revoke_grant could not read grant {grant_id:?} for its audit row: {error}");
-            None
-        }
-    };
-    match state
-        .store()
-        .revoke_grant_as(principal_key, grant_id, principal_key)
-    {
-        Ok(removed) => {
-            if removed {
-                let mut audit = AuditRecord::ceremony(
-                    principal_key,
-                    revoked.as_ref().and_then(|grant| grant.app_key.as_deref()),
-                    revoked.as_ref().map(|grant| grant.connection_id.as_str()),
-                    "revoke_grant",
-                    revoked
-                        .as_ref()
-                        .map_or("unknown", |grant| grant.risk_ceiling.as_str()),
-                    None,
-                );
-                // The audit row has no grant column, so the grant id goes in
-                // the summary, the same way `AuditRecord::agent_retired_revocation`
-                // records it.
-                audit.args_redaction_summary = Some(format!("grant {grant_id} revoked"));
-                if let Err(error) = state.store().append_audit(&audit) {
-                    eprintln!(error governance: "audit append failed: ceremony revoke_grant principal={principal_key:?} grant_id={grant_id:?}: {error}");
-                }
-            }
-            json!({"result": {"revoked": removed}})
-        }
+    // The store reads the grant and writes the audit row naming it inside the
+    // revoke's own transaction, so the record always names what was removed
+    // and a revoke never commits without it.
+    match state.store().revoke_grant_audited(
+        principal_key,
+        grant_id,
+        principal_key,
+        &|revoked| {
+            let mut audit = AuditRecord::ceremony(
+                principal_key,
+                revoked.app_key.as_deref(),
+                Some(revoked.connection_id.as_str()),
+                "revoke_grant",
+                revoked.risk_ceiling.as_str(),
+                None,
+            );
+            // The audit row has no grant column, so the grant id goes in
+            // the summary, the same way `AuditRecord::agent_retired_revocation`
+            // records it.
+            audit.args_redaction_summary = Some(format!("grant {grant_id} revoked"));
+            audit
+        },
+    ) {
+        Ok(removed) => json!({"result": {"revoked": removed}}),
         Err(error) => {
             crate::wire::store_failure("grant revoked", "grant could not be revoked", &error)
         }
@@ -642,23 +635,24 @@ pub(crate) fn repin_action(state: &Arc<ModuleState>, principal_key: &str, params
     else {
         return json!({"error": {"code": "invalid_request", "message": "repin_action requires expected_schema_hash"}});
     };
-    match state.store().repin_reviewed_action(
+    // The audit row is written in the re-pin's own transaction.
+    match state.store().repin_reviewed_action_audited(
         principal_key,
         connection_id,
         action,
         expected_schema_hash,
-    ) {
-        Ok(Ok(reactivated)) => {
-            if let Err(error) = state.store().append_audit(&AuditRecord::ceremony(
+        &|_| {
+            AuditRecord::ceremony(
                 principal_key,
                 None,
                 Some(connection_id),
                 "repin_action",
                 "read",
                 None,
-            )) {
-                eprintln!(error governance: "audit append failed: ceremony repin_action principal={principal_key:?} connection_id={connection_id:?}: {error}");
-            }
+            )
+        },
+    ) {
+        Ok(Ok(reactivated)) => {
             json!({"result": {
                 "action": reactivated.name,
                 "status": reactivated.status,
@@ -697,14 +691,14 @@ pub(crate) fn set_policy(state: &Arc<ModuleState>, principal_key: &str, params: 
         Ok(expires_at) => expires_at,
         Err(response) => return response,
     };
-    match state.store().set_policy(
+    // The audit row is written in the policy write's own transaction.
+    match state.store().set_policy_audited(
         principal_key,
         connection_id,
         action_selector,
         effect,
         expires_at,
-    ) {
-        Ok(policy) => {
+        &|_| {
             let mut audit = AuditRecord::ceremony(
                 principal_key,
                 None,
@@ -715,11 +709,10 @@ pub(crate) fn set_policy(state: &Arc<ModuleState>, principal_key: &str, params: 
             );
             audit.risk = None;
             audit.args_redaction_summary = Some(format!("policy effect={effect}"));
-            if let Err(error) = state.store().append_audit(&audit) {
-                eprintln!(error governance: "audit append failed: ceremony set_policy principal={principal_key:?} connection_id={connection_id:?}: {error}");
-            }
-            json!({"result": {"policy": policy_json(&policy)}})
-        }
+            audit
+        },
+    ) {
+        Ok(policy) => json!({"result": {"policy": policy_json(&policy)}}),
         Err(error) => crate::wire::store_failure("policy set", "policy could not be set", &error),
     }
 }
@@ -754,44 +747,27 @@ pub(crate) fn remove_policy(
     let Some(policy_id) = params.get("policy_id").and_then(Value::as_str) else {
         return json!({"error": {"code": "invalid_request", "message": "remove_policy requires policy_id"}});
     };
-    // Read before the delete so the audit row can name the policy's
-    // connection and effect, as set_policy's row does. A failed read only
-    // thins the audit row, it never blocks the removal.
-    let removed_policy = match state.store().policy_by_id(principal_key, policy_id) {
-        Ok(policy) => policy,
-        Err(error) => {
-            eprintln!(warn governance: "remove_policy could not read policy {policy_id:?} for its audit row: {error}");
-            None
-        }
-    };
-    match state.store().remove_policy(principal_key, policy_id) {
-        Ok(removed) => {
-            if removed {
-                let mut audit = AuditRecord::ceremony(
-                    principal_key,
-                    removed_policy
-                        .as_ref()
-                        .and_then(|policy| policy.app_key.as_deref()),
-                    removed_policy
-                        .as_ref()
-                        .map(|policy| policy.connection_id.as_str()),
-                    "remove_policy",
-                    "write",
-                    None,
-                );
-                audit.risk = None;
-                audit.args_redaction_summary = Some(format!(
-                    "policy {policy_id} removed; effect={}",
-                    removed_policy
-                        .as_ref()
-                        .map_or("unknown", |p| p.effect.as_str())
-                ));
-                if let Err(error) = state.store().append_audit(&audit) {
-                    eprintln!(error governance: "audit append failed: ceremony remove_policy principal={principal_key:?} policy_id={policy_id:?}: {error}");
-                }
-            }
-            json!({"result": {"removed": removed}})
-        }
+    // The store reads the policy and writes the audit row naming it inside
+    // the delete's own transaction, as set_policy's row is written.
+    match state
+        .store()
+        .remove_policy_audited(principal_key, policy_id, &|removed| {
+            let mut audit = AuditRecord::ceremony(
+                principal_key,
+                removed.app_key.as_deref(),
+                Some(removed.connection_id.as_str()),
+                "remove_policy",
+                "write",
+                None,
+            );
+            audit.risk = None;
+            audit.args_redaction_summary = Some(format!(
+                "policy {policy_id} removed; effect={}",
+                removed.effect
+            ));
+            audit
+        }) {
+        Ok(removed) => json!({"result": {"removed": removed}}),
         Err(error) => {
             crate::wire::store_failure("policy removed", "policy could not be removed", &error)
         }
@@ -1504,6 +1480,20 @@ mod tests {
                 "repin_action" => repin_action(&fixture.state, "direct", &params),
                 _ => unreachable!(),
             };
+            assert_eq!(
+                fixture.store.list_audit("direct").unwrap().len(),
+                before + usize::from(!fail)
+            );
+            if fail {
+                // The audit row shares the change's transaction, so a refused
+                // row is a failed operation that changed nothing.
+                assert!(
+                    response.get("error").is_some(),
+                    "{operation}: an unaudited change was reported as done: {response}"
+                );
+                audit_failure_left_nothing(&fixture, operation, &params);
+                continue;
+            }
             assert!(response.get("error").is_none(), "{response}");
             match operation {
                 "issue_ticket" => {
@@ -1557,66 +1547,83 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            assert_eq!(
-                fixture.store.list_audit("direct").unwrap().len(),
-                before + usize::from(!fail)
-            );
         }
     }
 
-    #[test]
-    fn issue_ticket_audit_failure_is_loud_and_preserves_success() {
-        if !crate::audit_test::captured_by_parent(
-            "ceremony::tests::issue_ticket_audit_failure_is_loud_and_preserves_success",
-            "ceremony issue_ticket",
-        ) {
-            audit_failure_scenario("issue_ticket");
+    /// After a refused audit row, the state the operation would have changed
+    /// is exactly as the fixture left it.
+    fn audit_failure_left_nothing(fixture: &SelectorFixture, operation: &str, params: &Value) {
+        let store = &fixture.store;
+        match operation {
+            "issue_ticket" => assert_eq!(
+                fixture.ticket_count(),
+                1,
+                "issue_ticket: the unaudited ticket must not be kept"
+            ),
+            "grant" => assert!(
+                store
+                    .list_grants("direct", TEST_CONNECTION)
+                    .unwrap()
+                    .is_empty(),
+                "grant: the unaudited grant must not be kept"
+            ),
+            "revoke_grant" => assert!(
+                store
+                    .grant_by_id("direct", params["grant_id"].as_str().unwrap())
+                    .unwrap()
+                    .is_some(),
+                "revoke_grant: the grant must stay live when its revocation is unaudited"
+            ),
+            "set_policy" => assert!(
+                store.list_policies("direct", None).unwrap().is_empty(),
+                "set_policy: the unaudited policy must not be kept"
+            ),
+            "remove_policy" => assert!(
+                store
+                    .policy_by_id("direct", params["policy_id"].as_str().unwrap())
+                    .unwrap()
+                    .is_some(),
+                "remove_policy: the policy must stay when its removal is unaudited"
+            ),
+            "repin_action" => assert_eq!(
+                store
+                    .catalog_action("direct", TEST_CONNECTION, "read_item")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "quarantined",
+                "repin_action: the unaudited re-pin must not be kept"
+            ),
+            _ => unreachable!(),
         }
     }
+
+    // Each operation's audit row commits with the change it records: when the
+    // row cannot be written the operation fails and changes nothing, and when
+    // it can, exactly one row is added.
     #[test]
-    fn grant_audit_failure_is_loud_and_preserves_success() {
-        if !crate::audit_test::captured_by_parent(
-            "ceremony::tests::grant_audit_failure_is_loud_and_preserves_success",
-            "ceremony grant",
-        ) {
-            audit_failure_scenario("grant");
-        }
+    fn issue_ticket_audit_failure_rolls_back_the_ticket() {
+        audit_failure_scenario("issue_ticket");
     }
     #[test]
-    fn revoke_grant_audit_failure_is_loud_and_preserves_success() {
-        if !crate::audit_test::captured_by_parent(
-            "ceremony::tests::revoke_grant_audit_failure_is_loud_and_preserves_success",
-            "ceremony revoke_grant",
-        ) {
-            audit_failure_scenario("revoke_grant");
-        }
+    fn grant_audit_failure_rolls_back_the_grant() {
+        audit_failure_scenario("grant");
     }
     #[test]
-    fn repin_action_audit_failure_is_loud_and_preserves_success() {
-        if !crate::audit_test::captured_by_parent(
-            "ceremony::tests::repin_action_audit_failure_is_loud_and_preserves_success",
-            "ceremony repin_action",
-        ) {
-            audit_failure_scenario("repin_action");
-        }
+    fn revoke_grant_audit_failure_rolls_back_the_revocation() {
+        audit_failure_scenario("revoke_grant");
     }
     #[test]
-    fn set_policy_audit_failure_is_loud_and_preserves_success() {
-        if !crate::audit_test::captured_by_parent(
-            "ceremony::tests::set_policy_audit_failure_is_loud_and_preserves_success",
-            "ceremony set_policy",
-        ) {
-            audit_failure_scenario("set_policy");
-        }
+    fn repin_action_audit_failure_rolls_back_the_repin() {
+        audit_failure_scenario("repin_action");
     }
     #[test]
-    fn remove_policy_audit_failure_is_loud_and_preserves_success() {
-        if !crate::audit_test::captured_by_parent(
-            "ceremony::tests::remove_policy_audit_failure_is_loud_and_preserves_success",
-            "ceremony remove_policy",
-        ) {
-            audit_failure_scenario("remove_policy");
-        }
+    fn set_policy_audit_failure_rolls_back_the_policy() {
+        audit_failure_scenario("set_policy");
+    }
+    #[test]
+    fn remove_policy_audit_failure_rolls_back_the_removal() {
+        audit_failure_scenario("remove_policy");
     }
 
     /// The connection id the ticket tests issue tickets for. It does not

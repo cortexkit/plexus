@@ -65,6 +65,7 @@ use plexus_core::test_scratch::Scratch;
 use plexus_core::withdraw::{WithdrawCall, WithdrawRefusal, WITHDRAW_NOT_PERMITTED};
 use plexus_core::{
     ActorSource, AuditRecord, AuthorizationRequest, CatalogError, ConfigureOutcome,
+    ConnectionAdminRevokeOutcome,
     DispatchOutcome, EventLookupOutcome, EventReader, PlexusStore, TransportOutcome,
 };
 #[cfg(any(test, feature = "test-support"))]
@@ -1173,7 +1174,8 @@ fn ingest_catalog_from(store: &PlexusStore, directory: &Path) -> Result<(), Modu
             ))
         })?;
         let key = ingested.manifest.key.clone();
-        let outcome = store
+        // The store records a content change in the upsert's own transaction.
+        store
             .upsert_manifest("system", &ingested)
             .map_err(|error| {
                 ModuleError::Message(format!(
@@ -1181,13 +1183,6 @@ fn ingest_catalog_from(store: &PlexusStore, directory: &Path) -> Result<(), Modu
                     path.display()
                 ))
             })?;
-        if outcome.changed {
-            store
-                .append_audit(&AuditRecord::manifest_changed("system", &key))
-                .map_err(|error| {
-                    ModuleError::Message(format!("record manifest change: {error}"))
-                })?;
-        }
         reviewed.push(key);
     }
 
@@ -1201,16 +1196,10 @@ fn ingest_catalog_from(store: &PlexusStore, directory: &Path) -> Result<(), Modu
     // the directory parsed cleanly, so a store error is a real fault, and
     // serving a catalog whose withdrawals were silently skipped is the state
     // this pass exists to prevent.
-    let retired = store
+    // Each retirement's audit row is written in the retirement's transaction.
+    store
         .retire_absent_manifests("system", &reviewed)
         .map_err(|error| ModuleError::Message(format!("retire absent manifests: {error}")))?;
-    for key in &retired {
-        store
-            .append_audit(&AuditRecord::manifest_changed("system", key))
-            .map_err(|error| {
-                ModuleError::Message(format!("record manifest retirement: {error}"))
-            })?;
-    }
 
     // GitHub handle rows seeded before the seeder pinned reviewed argument
     // schemas still hold the open placeholder, which leaves the
@@ -3178,23 +3167,17 @@ fn facade_connections_configure(call: &FacadeArguments<'_>) -> Result<Value, Mod
                 json!({"error": {"code": "invalid_request", "message": "configure requires resource_filters"}}),
             );
         };
-        match state
-            .store()
-            .has_connection_admin_grant(principal_key, connection_id, principal_key)
-        {
-            Ok(false) => {
-                json!({"error": {"code": "connection_admin_required", "message": "connection administration grant required"}})
-            }
-            Err(error) => crate::wire::store_failure(
-                "connection authorization checked",
-                "connection authorization could not be checked",
-                &error,
-            ),
-            Ok(true) => match state.store().configure_connection_filters(
-                principal_key,
-                connection_id,
-                filters,
-            ) {
+        // The store checks the admin grant and writes the filters in one
+        // fenced transaction, so a grant revoked mid-request cannot be outrun.
+        match state.store().configure_connection_filters_if_admin(
+            principal_key,
+            connection_id,
+            principal_key,
+            filters,
+        ) {
+                Ok(ConfigureOutcome::AdminRequired) => {
+                    json!({"error": {"code": "connection_admin_required", "message": "connection administration grant required"}})
+                }
                 Ok(ConfigureOutcome::Configured(stored)) => {
                     json!({"result": {"resource_filters": stored}})
                 }
@@ -3237,7 +3220,6 @@ fn facade_connections_configure(call: &FacadeArguments<'_>) -> Result<Value, Mod
                     "filters could not be configured",
                     &error,
                 ),
-            },
         }
     })
 }
@@ -3252,42 +3234,34 @@ fn facade_connections_revoke(call: &FacadeArguments<'_>) -> Result<Value, Module
                 json!({"error": {"code": "invalid_request", "message": "revoke requires connection"}}),
             );
         };
+        // The admin check and the revocation share one fenced transaction.
+        // Transports are unregistered only once `Revoked` reports the commit.
         match state
             .store()
-            .has_connection_admin_grant(principal_key, connection_id, principal_key)
+            .revoke_connection_if_admin(principal_key, connection_id, principal_key)
         {
-            Ok(false) => {
+            Ok(ConnectionAdminRevokeOutcome::AdminRequired) => {
                 json!({"error": {"code": "connection_admin_required", "message": "connection administration grant required"}})
             }
+            Ok(ConnectionAdminRevokeOutcome::Revoked) => {
+                state
+                    .runtime
+                    .mcp_transport
+                    .unregister_connection(connection_id);
+                state
+                    .runtime
+                    .rest_transport
+                    .unregister_connection(connection_id);
+                json!({"result": {"revoked": true}})
+            }
+            Ok(ConnectionAdminRevokeOutcome::ConnectionNotFound) => {
+                json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
+            }
             Err(error) => crate::wire::store_failure(
-                "connection authorization checked",
-                "connection authorization could not be checked",
+                "connection revoked",
+                "connection could not be revoked",
                 &error,
             ),
-            Ok(true) => match state
-                .store()
-                .revoke_connection(principal_key, connection_id)
-            {
-                Ok(true) => {
-                    state
-                        .runtime
-                        .mcp_transport
-                        .unregister_connection(connection_id);
-                    state
-                        .runtime
-                        .rest_transport
-                        .unregister_connection(connection_id);
-                    json!({"result": {"revoked": true}})
-                }
-                Ok(false) => {
-                    json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
-                }
-                Err(error) => crate::wire::store_failure(
-                    "connection revoked",
-                    "connection could not be revoked",
-                    &error,
-                ),
-            },
         }
     })
 }
@@ -5398,6 +5372,8 @@ pub async fn handle_scoped_tool_request_for_test(
 }
 
 #[cfg(test)]
+// Shared with the core test suites; this crate's tests use only part of it.
+#[allow(dead_code)]
 #[path = "../../plexus-core/tests/support/audit.rs"]
 mod audit_test;
 

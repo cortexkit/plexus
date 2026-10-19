@@ -1573,6 +1573,20 @@ pub enum ConfigureOutcome {
         field: String,
         expected: String,
     },
+    /// The caller holds no live connection-admin grant on the connection.
+    /// Only [`PlexusStore::configure_connection_filters_if_admin`] returns it.
+    AdminRequired,
+}
+
+/// Outcome of [`PlexusStore::revoke_connection_if_admin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionAdminRevokeOutcome {
+    /// The connection is revoked and the transaction has committed.
+    Revoked,
+    /// The caller holds no live connection-admin grant; nothing was written.
+    AdminRequired,
+    /// No such connection, or it was already revoked.
+    ConnectionNotFound,
 }
 
 /// App manifests are module-wide catalog DATA, not per-caller state: they are
@@ -3166,11 +3180,68 @@ impl PlexusStore {
         connection_id: &str,
         requested: &Value,
     ) -> Result<ConfigureOutcome, StoreError> {
+        let filters = match self.checked_connection_filters(principal, connection_id, requested)? {
+            Ok(filters) => filters,
+            Err(refusal) => return Ok(refusal),
+        };
+        if self.set_connection_filters(principal, connection_id, &filters)? {
+            Ok(ConfigureOutcome::Configured(filters))
+        } else {
+            Ok(ConfigureOutcome::ConnectionNotFound)
+        }
+    }
+
+    /// [`Self::configure_connection_filters`] on behalf of `caller`, who must
+    /// hold a live connection-admin grant on the connection.
+    ///
+    /// The grant is checked first, so a caller without authority learns
+    /// nothing about the connection or its manifest. It is checked AGAIN inside
+    /// the fenced transaction that writes the filters: a grant revoked after
+    /// the first check, while the request was being validated, must stop the
+    /// write rather than be outrun by it.
+    pub fn configure_connection_filters_if_admin(
+        &self,
+        owner: &str,
+        connection_id: &str,
+        caller: &str,
+        requested: &Value,
+    ) -> Result<ConfigureOutcome, StoreError> {
+        if !self.has_connection_admin_grant(owner, connection_id, caller)? {
+            return Ok(ConfigureOutcome::AdminRequired);
+        }
+        let filters = match self.checked_connection_filters(owner, connection_id, requested)? {
+            Ok(filters) => filters,
+            Err(refusal) => return Ok(refusal),
+        };
+        let stored = serde_json::to_string(&filters)
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        race_point("connection_admin_configure");
+        let now = now_ms();
+        self.inner.with_conn_fenced(|conn| {
+            if !connection_admin_grant_on_conn(conn, owner, connection_id, caller, now)? {
+                return Ok(ConfigureOutcome::AdminRequired);
+            }
+            if set_connection_filters_on_conn(conn, owner, connection_id, &stored, now)? {
+                Ok(ConfigureOutcome::Configured(filters))
+            } else {
+                Ok(ConfigureOutcome::ConnectionNotFound)
+            }
+        })
+    }
+
+    /// The filter document a configure request would store, or the outcome
+    /// that refuses it. Reads only; the caller writes.
+    fn checked_connection_filters(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        requested: &Value,
+    ) -> Result<Result<Value, ConfigureOutcome>, StoreError> {
         let Some(connection) = self.connection(principal, connection_id)? else {
-            return Ok(ConfigureOutcome::ConnectionNotFound);
+            return Ok(Err(ConfigureOutcome::ConnectionNotFound));
         };
         let Some(document) = self.parsed_manifest(CATALOG_PRINCIPAL, &connection.app_key)? else {
-            return Ok(ConfigureOutcome::ManifestMissing);
+            return Ok(Err(ConfigureOutcome::ManifestMissing));
         };
         let manifest = match document {
             Ok(manifest) => manifest,
@@ -3202,10 +3273,10 @@ impl PlexusStore {
         // operator should never have to run. The caller named the key
         // deliberately, so the useful reply is which keys exist.
         let malformed = |field: &str, expected: &str| {
-            Ok(ConfigureOutcome::MalformedFilters {
+            Ok(Err(ConfigureOutcome::MalformedFilters {
                 field: field.to_string(),
                 expected: expected.to_string(),
-            })
+            }))
         };
         let Some(requested) = requested.as_object() else {
             return malformed("resource_filters", "an object");
@@ -3216,10 +3287,10 @@ impl PlexusStore {
                 .keys()
                 .find(|key| !READ_KEYS.contains(&key.as_str()))
             {
-                return Ok(ConfigureOutcome::UnreadFilterKey {
+                return Ok(Err(ConfigureOutcome::UnreadFilterKey {
                     key: unread.clone(),
                     accepted: READ_KEYS.map(String::from).to_vec(),
-                });
+                }));
             }
         }
 
@@ -3241,9 +3312,9 @@ impl PlexusStore {
             .iter()
             .find(|key| !manifest_write_enabling.contains(**key))
         {
-            return Ok(ConfigureOutcome::UndeclaredFilter(
+            return Ok(Err(ConfigureOutcome::UndeclaredFilter(
                 (*undeclared).to_string(),
-            ));
+            )));
         }
         let requested_values = match requested.get("values") {
             None => None,
@@ -3252,7 +3323,7 @@ impl PlexusStore {
         };
         if let Some(values) = requested_values {
             if let Some(undeclared) = values.keys().find(|key| !declared.contains(key.as_str())) {
-                return Ok(ConfigureOutcome::UndeclaredFilter(undeclared.clone()));
+                return Ok(Err(ConfigureOutcome::UndeclaredFilter(undeclared.clone())));
             }
         }
 
@@ -3268,12 +3339,7 @@ impl PlexusStore {
         if let Some(values) = requested_values {
             filters.insert("values".to_string(), Value::Object(values.clone()));
         }
-        let filters = Value::Object(filters);
-        if self.set_connection_filters(principal, connection_id, &filters)? {
-            Ok(ConfigureOutcome::Configured(filters))
-        } else {
-            Ok(ConfigureOutcome::ConnectionNotFound)
-        }
+        Ok(Ok(Value::Object(filters)))
     }
 
     pub fn set_connection_filters(
@@ -3286,13 +3352,7 @@ impl PlexusStore {
             .map_err(|error| StoreError::Backend(error.to_string()))?;
         let now = now_ms();
         self.inner.with_conn_fenced(|conn| {
-            let changed = conn.execute(
-                "UPDATE connections SET resource_filters = ?1,
-                        generation = generation + 1, updated_at_ms = ?2
-                 WHERE principal = ?3 AND connection_id = ?4",
-                rusqlite::params![filters, now, principal, connection_id],
-            )?;
-            Ok(changed != 0)
+            set_connection_filters_on_conn(conn, principal, connection_id, &filters, now)
         })
     }
 
@@ -3417,26 +3477,38 @@ impl PlexusStore {
         connection_id: &str,
     ) -> Result<bool, StoreError> {
         let now = now_ms();
+        self.inner
+            .with_conn_fenced(|conn| revoke_connection_on_conn(conn, principal, connection_id, now))
+    }
+
+    /// [`Self::revoke_connection`] on behalf of `caller`, who must hold a live
+    /// connection-admin grant on the connection.
+    ///
+    /// The grant is checked again inside the fenced transaction that revokes,
+    /// so a grant revoked after the first check cannot be outrun by the
+    /// revocation it no longer authorizes. The caller unregisters the
+    /// connection's transports only after `Revoked` comes back, which is after
+    /// the transaction committed.
+    pub fn revoke_connection_if_admin(
+        &self,
+        owner: &str,
+        connection_id: &str,
+        caller: &str,
+    ) -> Result<ConnectionAdminRevokeOutcome, StoreError> {
+        if !self.has_connection_admin_grant(owner, connection_id, caller)? {
+            return Ok(ConnectionAdminRevokeOutcome::AdminRequired);
+        }
+        race_point("connection_admin_revoke");
+        let now = now_ms();
         self.inner.with_conn_fenced(|conn| {
-            let changed = conn.execute(
-                "UPDATE connections SET status = 'revoked', generation = generation + 1,
-                        updated_at_ms = ?1
-                 WHERE principal = ?2 AND connection_id = ?3 AND status <> 'revoked'",
-                rusqlite::params![now, principal, connection_id],
-            )?;
-            if changed != 0 {
-                conn.execute(
-                    "UPDATE reservations SET status = 'invalidated'
-                     WHERE principal = ?1 AND connection_id = ?2 AND status = 'reserved'",
-                    (principal, connection_id),
-                )?;
-                conn.execute(
-                    "UPDATE binding_tickets SET status = 'expired'
-                     WHERE principal = ?1 AND connection_id = ?2 AND status = 'issued'",
-                    (principal, connection_id),
-                )?;
+            if !connection_admin_grant_on_conn(conn, owner, connection_id, caller, now)? {
+                return Ok(ConnectionAdminRevokeOutcome::AdminRequired);
             }
-            Ok(changed != 0)
+            Ok(if revoke_connection_on_conn(conn, owner, connection_id, now)? {
+                ConnectionAdminRevokeOutcome::Revoked
+            } else {
+                ConnectionAdminRevokeOutcome::ConnectionNotFound
+            })
         })
     }
 
@@ -3617,6 +3689,37 @@ impl PlexusStore {
         action: &str,
         expected_schema_hash: &str,
     ) -> Result<Result<CatalogAction, RepinActionRefusal>, StoreError> {
+        self.repin_reviewed_action_with(principal, connection_id, action, expected_schema_hash, None)
+    }
+
+    /// [`Self::repin_reviewed_action`] with its audit row, built from the
+    /// re-activated action, appended in the re-pin's own fenced transaction.
+    /// A refusal writes neither the re-pin nor a row.
+    pub fn repin_reviewed_action_audited(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        action: &str,
+        expected_schema_hash: &str,
+        audit: &dyn Fn(&CatalogAction) -> AuditRecord,
+    ) -> Result<Result<CatalogAction, RepinActionRefusal>, StoreError> {
+        self.repin_reviewed_action_with(
+            principal,
+            connection_id,
+            action,
+            expected_schema_hash,
+            Some(audit),
+        )
+    }
+
+    fn repin_reviewed_action_with(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        action: &str,
+        expected_schema_hash: &str,
+        audit: AuditFor<'_, CatalogAction>,
+    ) -> Result<Result<CatalogAction, RepinActionRefusal>, StoreError> {
         self.inner.with_conn_fenced(|conn| {
             let current: Option<(String, String, String)> = conn
                 .query_row(
@@ -3691,6 +3794,7 @@ impl PlexusStore {
                 (principal, connection_id, action),
                 map_catalog_action_row,
             )?;
+            append_audit_for(conn, audit, &reactivated)?;
             Ok(Ok(reactivated))
         })
     }
@@ -5998,23 +6102,7 @@ impl PlexusStore {
         grantee: &str,
     ) -> Result<bool, StoreError> {
         self.inner.with_read(|conn| {
-            let mut statement = conn.prepare(
-                "SELECT action_selectors FROM grants
-                 WHERE principal = ?1 AND connection_id = ?2
-                   AND authority_kind = 'connection_admin'
-                   AND grantee_principal = ?3 AND grantee_principal <> '*'
-                   AND (expires_at IS NULL OR expires_at > ?4)",
-            )?;
-            let rows = statement.query_map((owner, connection_id, grantee, now_ms()), |row| {
-                let selectors: String = row.get(0)?;
-                parse_string_list(&selectors)
-            })?;
-            for selectors in rows {
-                if !selectors?.is_empty() {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
+            connection_admin_grant_on_conn(conn, owner, connection_id, grantee, now_ms())
         })
     }
 
@@ -6049,6 +6137,40 @@ impl PlexusStore {
         action_selector: &str,
         effect: &str,
         expires_at: Option<i64>,
+    ) -> Result<PolicyRecord, StoreError> {
+        self.set_policy_with(principal, connection_id, action_selector, effect, expires_at, None)
+    }
+
+    /// [`Self::set_policy`] with its audit row, built from the stored policy,
+    /// appended in the same fenced transaction: the policy and its record
+    /// commit together, or neither does.
+    pub fn set_policy_audited(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        action_selector: &str,
+        effect: &str,
+        expires_at: Option<i64>,
+        audit: &dyn Fn(&PolicyRecord) -> AuditRecord,
+    ) -> Result<PolicyRecord, StoreError> {
+        self.set_policy_with(
+            principal,
+            connection_id,
+            action_selector,
+            effect,
+            expires_at,
+            Some(audit),
+        )
+    }
+
+    fn set_policy_with(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        action_selector: &str,
+        effect: &str,
+        expires_at: Option<i64>,
+        audit: AuditFor<'_, PolicyRecord>,
     ) -> Result<PolicyRecord, StoreError> {
         let candidate_id = new_id("policy");
         let now = now_ms();
@@ -6087,7 +6209,7 @@ impl PlexusStore {
                     candidate_id.clone()
                 }
             };
-            conn.query_row(
+            let policy = conn.query_row(
                 "SELECT policy_id, principal, connection_id, action_selector, effect,
                         expires_at, generation
                  FROM policies WHERE principal = ?1 AND policy_id = ?2",
@@ -6103,18 +6225,49 @@ impl PlexusStore {
                         generation: row.get(6)?,
                     })
                 },
-            )
+            )?;
+            append_audit_for(conn, audit, &policy)?;
+            Ok(policy)
         })
     }
 
     /// Remove a policy. Returning false for an absent id makes retried operator
     /// removals safe.
     pub fn remove_policy(&self, principal: &str, policy_id: &str) -> Result<bool, StoreError> {
+        self.remove_policy_with(principal, policy_id, None)
+    }
+
+    /// [`Self::remove_policy`] with its audit row, built from the policy as it
+    /// stood just before the delete, appended in the delete's own fenced
+    /// transaction. An absent policy removes nothing and writes no row.
+    pub fn remove_policy_audited(
+        &self,
+        principal: &str,
+        policy_id: &str,
+        audit: &dyn Fn(&PolicySummary) -> AuditRecord,
+    ) -> Result<bool, StoreError> {
+        self.remove_policy_with(principal, policy_id, Some(audit))
+    }
+
+    fn remove_policy_with(
+        &self,
+        principal: &str,
+        policy_id: &str,
+        audit: AuditFor<'_, PolicySummary>,
+    ) -> Result<bool, StoreError> {
+        let now = now_ms();
         self.inner.with_conn_fenced(|conn| {
+            let removed = match audit {
+                Some(_) => policy_summary_on_conn(conn, principal, policy_id, now)?,
+                None => None,
+            };
             let changed = conn.execute(
                 "DELETE FROM policies WHERE principal = ?1 AND policy_id = ?2",
                 (principal, policy_id),
             )?;
+            if let (true, Some(removed)) = (changed != 0, removed) {
+                append_audit_for(conn, audit, &removed)?;
+            }
             Ok(changed != 0)
         })
     }
@@ -7102,6 +7255,7 @@ impl PlexusStore {
             ref_role,
             credential_id_bytes,
             ceiling,
+            None,
         )?
         .map_err(|refusal| StoreError::Backend(format!("binding ticket refused: {refusal}")))
     }
@@ -7133,9 +7287,36 @@ impl PlexusStore {
             ref_role,
             credential_id_bytes,
             ceiling,
+            None,
         )
     }
 
+    /// [`Self::issue_binding_ticket`] with its audit row, built from the issued
+    /// ticket, appended in the issue's own fenced transaction. A refusal writes
+    /// neither a ticket nor a row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_binding_ticket_audited(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        app_key: &str,
+        ref_role: &str,
+        credential_id_bytes: &[u8],
+        ceiling: &Ceiling,
+        audit: &dyn Fn(&BindingTicket) -> AuditRecord,
+    ) -> Result<Result<BindingTicket, CeremonyRefusal>, StoreError> {
+        self.write_binding_ticket(
+            principal,
+            connection_id,
+            Some(app_key),
+            ref_role,
+            credential_id_bytes,
+            ceiling,
+            Some(audit),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn write_binding_ticket(
         &self,
         principal: &str,
@@ -7144,6 +7325,7 @@ impl PlexusStore {
         ref_role: &str,
         credential_id_bytes: &[u8],
         ceiling: &Ceiling,
+        audit: AuditFor<'_, BindingTicket>,
     ) -> Result<Result<BindingTicket, CeremonyRefusal>, StoreError> {
         let credential_free = ref_role == NO_CREDENTIAL_REF_ROLE;
         if credential_free != credential_id_bytes.is_empty() {
@@ -7170,6 +7352,14 @@ impl PlexusStore {
             .map_err(|error| StoreError::Backend(error.to_string()))?;
         let risk = ceiling.risk.to_string();
         let now = now_ms();
+        let ticket = BindingTicket {
+            ticket_id: ticket_id.clone(),
+            principal: principal.to_string(),
+            connection_id: connection_id.to_string(),
+            ref_role: ref_role.to_string(),
+            expires_at,
+            status: "issued".to_string(),
+        };
         let refusal = self.inner.with_conn_fenced(|conn| {
             let existing: Option<(String, String, Option<String>, Option<String>)> = conn
                 .query_row(
@@ -7243,19 +7433,13 @@ impl PlexusStore {
                     selectors
                 ],
             )?;
+            append_audit_for(conn, audit, &ticket)?;
             Ok(None)
         })?;
         if let Some(refusal) = refusal {
             return Ok(Err(refusal));
         }
-        Ok(Ok(BindingTicket {
-            ticket_id,
-            principal: principal.to_string(),
-            connection_id: connection_id.to_string(),
-            ref_role: ref_role.to_string(),
-            expires_at,
-            status: "issued".to_string(),
-        }))
+        Ok(Ok(ticket))
     }
 
     /// Resolve a requested ceiling against the vendor's reviewed manifest.
@@ -7379,6 +7563,25 @@ impl PlexusStore {
         &self,
         request: &GrantMintRequest,
     ) -> Result<Result<GrantRecord, CeremonyRefusal>, StoreError> {
+        self.mint_grant_bounded_with(request, None)
+    }
+
+    /// [`Self::mint_grant_bounded`] with its audit row, built from the minted
+    /// grant, appended in the mint's own fenced transaction. A refusal writes
+    /// neither a grant nor a row.
+    pub fn mint_grant_bounded_audited(
+        &self,
+        request: &GrantMintRequest,
+        audit: &dyn Fn(&GrantRecord) -> AuditRecord,
+    ) -> Result<Result<GrantRecord, CeremonyRefusal>, StoreError> {
+        self.mint_grant_bounded_with(request, Some(audit))
+    }
+
+    fn mint_grant_bounded_with(
+        &self,
+        request: &GrantMintRequest,
+        audit: AuditFor<'_, GrantRecord>,
+    ) -> Result<Result<GrantRecord, CeremonyRefusal>, StoreError> {
         let GrantMintRequest {
             principal,
             connection_id,
@@ -7484,7 +7687,7 @@ impl PlexusStore {
                 expires_at,
             };
             insert_grant_on_conn(conn, &input)?;
-            Ok(Ok(GrantRecord {
+            let minted = GrantRecord {
                 grant_id,
                 principal: principal.to_string(),
                 connection_id: connection_id.to_string(),
@@ -7498,7 +7701,9 @@ impl PlexusStore {
                 revoked_at_ms: None,
                 revoked_by: None,
                 state: grant_state(expires_at, None, now_ms()).to_string(),
-            }))
+            };
+            append_audit_for(conn, audit, &minted)?;
+            Ok(Ok(minted))
         })
     }
 
@@ -7508,10 +7713,8 @@ impl PlexusStore {
         principal: &str,
         grant_id: &str,
     ) -> Result<Option<GrantSummary>, StoreError> {
-        self.inner.with_read(|conn|conn.query_row(
-            "SELECT g.grant_id,g.connection_id,c.app_key,g.grantee_principal,g.risk_ceiling,g.action_selectors,g.authority_kind,g.expires_at,g.created_at_ms,NULL,NULL FROM grants g LEFT JOIN connections c ON c.principal=g.principal AND c.connection_id=g.connection_id WHERE g.principal=?1 AND g.grant_id=?2",
-            (principal,grant_id),|row|map_grant_summary_row(row,now_ms()),
-        ).optional())
+        self.inner
+            .with_read(|conn| grant_summary_on_conn(conn, principal, grant_id, now_ms()))
     }
 
     /// Read one policy without loading the owner's unrelated policy history.
@@ -7520,10 +7723,8 @@ impl PlexusStore {
         principal: &str,
         policy_id: &str,
     ) -> Result<Option<PolicySummary>, StoreError> {
-        self.inner.with_read(|conn|conn.query_row(
-            "SELECT p.policy_id,p.connection_id,c.app_key,p.action_selector,p.effect,p.expires_at FROM policies p LEFT JOIN connections c ON c.principal=p.principal AND c.connection_id=p.connection_id WHERE p.principal=?1 AND p.policy_id=?2",
-            (principal,policy_id),|row|map_policy_summary_row(row,now_ms()),
-        ).optional())
+        self.inner
+            .with_read(|conn| policy_summary_on_conn(conn, principal, policy_id, now_ms()))
     }
 
     /// Every grant this principal holds, across all connections, shaped for an
@@ -7655,15 +7856,33 @@ impl PlexusStore {
         grant_id: &str,
         actor: &str,
     ) -> Result<bool, StoreError> {
+        self.revoke_grant_with(principal, grant_id, actor, None)
+    }
+
+    /// [`Self::revoke_grant_as`] with its audit row, built from the grant as
+    /// it stood just before the revoke, appended in the revoke's own fenced
+    /// transaction. An absent grant revokes nothing and writes no row.
+    pub fn revoke_grant_audited(
+        &self,
+        principal: &str,
+        grant_id: &str,
+        actor: &str,
+        audit: &dyn Fn(&GrantSummary) -> AuditRecord,
+    ) -> Result<bool, StoreError> {
+        self.revoke_grant_with(principal, grant_id, actor, Some(audit))
+    }
+
+    fn revoke_grant_with(
+        &self,
+        principal: &str,
+        grant_id: &str,
+        actor: &str,
+        audit: AuditFor<'_, GrantSummary>,
+    ) -> Result<bool, StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            let exists: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM grants WHERE principal=?1 AND grant_id=?2)",
-                (principal, grant_id),
-                |row| row.get(0),
-            )?;
-            if !exists {
+            let Some(revoked) = grant_summary_on_conn(conn, principal, grant_id, now_ms())? else {
                 return Ok(false);
-            }
+            };
             let entry = crate::grant_journal::Revocation {
                 principal: principal.into(),
                 grant_id: grant_id.into(),
@@ -7672,7 +7891,11 @@ impl PlexusStore {
             if let Some(path) = &self.grant_journal {
                 crate::grant_journal::append(path, &entry)?;
             }
-            Ok(crate::grant_journal::apply_as(conn, &entry, actor)? != 0)
+            let applied = crate::grant_journal::apply_as(conn, &entry, actor)? != 0;
+            if applied {
+                append_audit_for(conn, audit, &revoked)?;
+            }
+            Ok(applied)
         })
     }
 
@@ -8296,6 +8519,10 @@ impl PlexusStore {
         })
     }
 
+    /// Store a manifest, and when it replaces a stored one with different
+    /// content, append its `manifest_changed` audit row in the same fenced
+    /// transaction. `changed` in the outcome is exactly whether that row was
+    /// written.
     pub fn upsert_manifest(
         &self,
         principal: &str,
@@ -8439,9 +8666,22 @@ impl PlexusStore {
                     )?;
                 }
             }
-            Ok(ManifestWriteOutcome {
-                changed: previous.is_some_and(|old_hash| old_hash != *hash),
-            })
+            let changed = previous.is_some_and(|old_hash| old_hash != *hash);
+            // The change record commits with the change. Appending it after
+            // this transaction left a window where a crash kept the new
+            // manifest and lost its record. A first ingest and an identical
+            // re-ingest are not changes, so neither writes a row.
+            if changed {
+                append_audit_on_conn(
+                    conn,
+                    &AuditRecord::manifest_changed(principal, key),
+                    None,
+                    None,
+                    None,
+                    None,
+                )?;
+            }
+            Ok(ManifestWriteOutcome { changed })
         })
     }
 
@@ -8485,6 +8725,10 @@ impl PlexusStore {
     /// Marks rather than deletes: the row is the only record of what an existing
     /// connection was minted against, so removing it would orphan live
     /// connections and their audit history.
+    ///
+    /// Each retirement appends its `manifest_changed` audit row in the same
+    /// fenced transaction, so the retirements and their records commit or roll
+    /// back together.
     pub fn retire_absent_manifests(
         &self,
         principal: &str,
@@ -8545,6 +8789,17 @@ impl PlexusStore {
                         [&key],
                     )?;
                 }
+                // Recorded in the retirement's own transaction, so a retired
+                // manifest always has its record and a failed record undoes
+                // the retirement.
+                append_audit_on_conn(
+                    conn,
+                    &AuditRecord::manifest_changed(principal, &key),
+                    None,
+                    None,
+                    None,
+                    None,
+                )?;
                 retired.push(key);
             }
             Ok(retired)
@@ -8876,6 +9131,122 @@ fn disable_catalog_action_on_conn(
         observed_at_ms,
     )?;
     Ok(changed != 0)
+}
+
+/// Whether `grantee` holds a live connection-admin grant on the connection:
+/// an unexpired `connection_admin` grant naming them, with at least one
+/// action selector. Shared by the read-only check and by the writes that
+/// must repeat that check inside their own transaction.
+fn connection_admin_grant_on_conn(
+    conn: &Connection,
+    owner: &str,
+    connection_id: &str,
+    grantee: &str,
+    now: i64,
+) -> rusqlite::Result<bool> {
+    let mut statement = conn.prepare(
+        "SELECT action_selectors FROM grants
+         WHERE principal = ?1 AND connection_id = ?2
+           AND authority_kind = 'connection_admin'
+           AND grantee_principal = ?3 AND grantee_principal <> '*'
+           AND (expires_at IS NULL OR expires_at > ?4)",
+    )?;
+    let rows = statement.query_map((owner, connection_id, grantee, now), |row| {
+        let selectors: String = row.get(0)?;
+        parse_string_list(&selectors)
+    })?;
+    for selectors in rows {
+        if !selectors?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn set_connection_filters_on_conn(
+    conn: &Connection,
+    principal: &str,
+    connection_id: &str,
+    filters: &str,
+    now: i64,
+) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE connections SET resource_filters = ?1,
+                generation = generation + 1, updated_at_ms = ?2
+         WHERE principal = ?3 AND connection_id = ?4",
+        rusqlite::params![filters, now, principal, connection_id],
+    )?;
+    Ok(changed != 0)
+}
+
+/// Revoke a connection, invalidating its undispatched reservations and
+/// expiring its unconsumed binding tickets, inside the caller's transaction.
+/// `false` when there is no such connection or it was already revoked.
+fn revoke_connection_on_conn(
+    conn: &Connection,
+    principal: &str,
+    connection_id: &str,
+    now: i64,
+) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE connections SET status = 'revoked', generation = generation + 1,
+                updated_at_ms = ?1
+         WHERE principal = ?2 AND connection_id = ?3 AND status <> 'revoked'",
+        rusqlite::params![now, principal, connection_id],
+    )?;
+    if changed != 0 {
+        conn.execute(
+            "UPDATE reservations SET status = 'invalidated'
+             WHERE principal = ?1 AND connection_id = ?2 AND status = 'reserved'",
+            (principal, connection_id),
+        )?;
+        conn.execute(
+            "UPDATE binding_tickets SET status = 'expired'
+             WHERE principal = ?1 AND connection_id = ?2 AND status = 'issued'",
+            (principal, connection_id),
+        )?;
+    }
+    Ok(changed != 0)
+}
+
+/// The audit row an operator write appends inside its own transaction, built
+/// from what the write produced. `None` writes no row: the unaudited forms of
+/// those writes are kept for internal callers and tests.
+type AuditFor<'a, T> = Option<&'a dyn Fn(&T) -> AuditRecord>;
+
+fn append_audit_for<T>(conn: &Connection, audit: AuditFor<'_, T>, value: &T) -> rusqlite::Result<()> {
+    match audit {
+        Some(build) => append_audit_on_conn(conn, &build(value), None, None, None, None),
+        None => Ok(()),
+    }
+}
+
+fn grant_summary_on_conn(
+    conn: &Connection,
+    principal: &str,
+    grant_id: &str,
+    now: i64,
+) -> rusqlite::Result<Option<GrantSummary>> {
+    conn.query_row(
+        "SELECT g.grant_id,g.connection_id,c.app_key,g.grantee_principal,g.risk_ceiling,g.action_selectors,g.authority_kind,g.expires_at,g.created_at_ms,NULL,NULL FROM grants g LEFT JOIN connections c ON c.principal=g.principal AND c.connection_id=g.connection_id WHERE g.principal=?1 AND g.grant_id=?2",
+        (principal, grant_id),
+        |row| map_grant_summary_row(row, now),
+    )
+    .optional()
+}
+
+fn policy_summary_on_conn(
+    conn: &Connection,
+    principal: &str,
+    policy_id: &str,
+    now: i64,
+) -> rusqlite::Result<Option<PolicySummary>> {
+    conn.query_row(
+        "SELECT p.policy_id,p.connection_id,c.app_key,p.action_selector,p.effect,p.expires_at FROM policies p LEFT JOIN connections c ON c.principal=p.principal AND c.connection_id=p.connection_id WHERE p.principal=?1 AND p.policy_id=?2",
+        (principal, policy_id),
+        |row| map_policy_summary_row(row, now),
+    )
+    .optional()
 }
 
 fn append_audit_on_conn(

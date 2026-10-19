@@ -496,6 +496,201 @@ fn returning_manifest_does_not_revive_a_quarantined_watch() {
         "returning app must not revive an unsafe catalog action"
     );
 }
+fn admin_store() -> Arc<PlexusStore> {
+    let store = fixture();
+    store
+        .upsert_manifest(CATALOG_PRINCIPAL, &manifest())
+        .unwrap();
+    store
+        .insert_grant(&GrantInput {
+            grant_id: "admin".into(),
+            principal: "owner".into(),
+            connection_id: "connection".into(),
+            grantee_principal: "owner".into(),
+            risk_ceiling: "write".into(),
+            action_selectors: vec!["*".into()],
+            authority_kind: "connection_admin".into(),
+            expires_at: None,
+        })
+        .unwrap();
+    Arc::new(store)
+}
+fn revoke_admin_grant_at(store: &Arc<PlexusStore>, point: &'static str) {
+    let other = store.clone();
+    RACE_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some((
+            point,
+            Box::new(move || {
+                assert!(other.revoke_grant("owner", "admin").unwrap());
+            }),
+        ))
+    });
+}
+/// An admin grant revoked after configure's first check, while the request
+/// is validated, must stop the write: the write's own transaction checks
+/// the grant again.
+#[test]
+fn connection_filter_configure_rechecks_admin_inside_its_transaction() {
+    let store = admin_store();
+    let before = store.connection("owner", "connection").unwrap().unwrap();
+    revoke_admin_grant_at(&store, "connection_admin_configure");
+    assert_eq!(
+        store
+            .configure_connection_filters_if_admin(
+                "owner",
+                "connection",
+                "owner",
+                &json!({"write_enabling": [], "values": {}})
+            )
+            .unwrap(),
+        ConfigureOutcome::AdminRequired
+    );
+    assert_eq!(
+        store.connection("owner", "connection").unwrap().unwrap(),
+        before,
+        "a refused configure must not write"
+    );
+}
+/// The same race for revoke: a grant revoked after the first check leaves
+/// the connection live.
+#[test]
+fn connection_revoke_rechecks_admin_inside_its_transaction() {
+    let store = admin_store();
+    let before = store.connection("owner", "connection").unwrap().unwrap();
+    revoke_admin_grant_at(&store, "connection_admin_revoke");
+    assert_eq!(
+        store
+            .revoke_connection_if_admin("owner", "connection", "owner")
+            .unwrap(),
+        ConnectionAdminRevokeOutcome::AdminRequired
+    );
+    assert_eq!(
+        store.connection("owner", "connection").unwrap().unwrap(),
+        before,
+        "a refused revoke must not write"
+    );
+}
+/// Positive and refusal controls for the two admin writes when nothing races.
+#[test]
+fn connection_admin_writes_apply_only_with_a_live_grant() {
+    let store = admin_store();
+    assert_eq!(
+        store
+            .configure_connection_filters_if_admin("owner", "connection", "stranger", &json!({}))
+            .unwrap(),
+        ConfigureOutcome::AdminRequired,
+        "a caller without the grant is refused before validation"
+    );
+    assert_eq!(
+        store
+            .revoke_connection_if_admin("owner", "connection", "stranger")
+            .unwrap(),
+        ConnectionAdminRevokeOutcome::AdminRequired
+    );
+    assert!(matches!(
+        store
+            .configure_connection_filters_if_admin(
+                "owner",
+                "connection",
+                "owner",
+                &json!({"values": {}})
+            )
+            .unwrap(),
+        ConfigureOutcome::Configured(_)
+    ));
+    assert_eq!(
+        store
+            .revoke_connection_if_admin("owner", "connection", "owner")
+            .unwrap(),
+        ConnectionAdminRevokeOutcome::Revoked
+    );
+    assert_eq!(
+        store.connection("owner", "connection").unwrap().unwrap().status,
+        "revoked"
+    );
+    assert_eq!(
+        store
+            .revoke_connection_if_admin("owner", "connection", "owner")
+            .unwrap(),
+        ConnectionAdminRevokeOutcome::ConnectionNotFound,
+        "an already revoked connection is not revoked again"
+    );
+}
+fn manifest_change_rows(store: &PlexusStore) -> i64 {
+    store
+        .inner
+        .with_read(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM audit_journal WHERE reason_code='manifest_changed'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+fn edited_manifest(description: &str) -> crate::manifest::IngestedManifest {
+    let mut value = manifest().json;
+    value["description"] = json!(description);
+    crate::manifest::ingest_value(value).unwrap()
+}
+/// A manifest change and a retirement each write exactly one audit row, and
+/// only when something changed: a first ingest and an identical re-ingest
+/// write none.
+#[test]
+fn manifest_changes_and_retirements_are_audited_once_by_the_store() {
+    let store = fixture();
+    store
+        .upsert_manifest(CATALOG_PRINCIPAL, &manifest())
+        .unwrap();
+    assert_eq!(manifest_change_rows(&store), 0, "a first ingest is not a change");
+    assert!(!store
+        .upsert_manifest(CATALOG_PRINCIPAL, &manifest())
+        .unwrap()
+        .changed);
+    assert_eq!(manifest_change_rows(&store), 0, "an identical re-ingest is not a change");
+    assert!(store
+        .upsert_manifest(CATALOG_PRINCIPAL, &edited_manifest("edited"))
+        .unwrap()
+        .changed);
+    assert_eq!(manifest_change_rows(&store), 1);
+    assert_eq!(
+        store
+            .retire_absent_manifests(CATALOG_PRINCIPAL, &["other".into()])
+            .unwrap(),
+        vec!["fixture".to_string()]
+    );
+    assert_eq!(manifest_change_rows(&store), 2, "a retirement is recorded");
+    assert!(store
+        .retire_absent_manifests(CATALOG_PRINCIPAL, &["other".into()])
+        .unwrap()
+        .is_empty());
+    assert_eq!(manifest_change_rows(&store), 2, "an already retired manifest is not retired again");
+}
+/// The audit row shares the change's transaction: when the row cannot be
+/// written, neither the new manifest content nor the retirement is kept.
+#[test]
+fn a_refused_manifest_audit_row_rolls_back_the_change() {
+    let store = fixture();
+    store
+        .upsert_manifest(CATALOG_PRINCIPAL, &manifest())
+        .unwrap();
+    store.inner.with_conn_fenced(|conn| conn.execute_batch("CREATE TRIGGER reject_manifest_audit BEFORE INSERT ON audit_journal WHEN NEW.reason_code='manifest_changed' BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;")).unwrap();
+    assert!(store
+        .upsert_manifest(CATALOG_PRINCIPAL, &edited_manifest("edited"))
+        .is_err());
+    assert_eq!(
+        store.manifest_json(CATALOG_PRINCIPAL, "fixture").unwrap().unwrap()["description"],
+        manifest().json["description"],
+        "the unaudited content change must not be kept"
+    );
+    assert!(store
+        .retire_absent_manifests(CATALOG_PRINCIPAL, &["other".into()])
+        .is_err());
+    assert!(
+        !store.manifest_is_retired("fixture").unwrap(),
+        "the unaudited retirement must not be kept"
+    );
+}
 #[test]
 fn manifest_reingest_repairs_corrupt_stored_json() {
     let store = fixture();
