@@ -145,7 +145,8 @@ fn searxng_instances_do_not_share_entries() {
         ("searxng", true),
         "two spellings of one instance address share entries"
     );
-    let other_instance = search_as(&service, &engine, "other", "weather report").unwrap();
+    let other_instance = search_as(&service, &engine, "other", "weather report")
+        .expect("a hit refused for its instance must not have spent the caller's rate token");
     assert!(
         !other_instance.cached,
         "an entry from one SearXNG instance must not answer a caller on another"
@@ -214,7 +215,8 @@ fn failed_cached_read_policy_then_walk_charges_no_more_than_a_miss() {
         search_as(&service, &engine, "direct", "another report")
             .unwrap()
             .backend,
-        "exa"
+        "exa",
+        "a hit refused by policy must not have spent Exa's rate tokens"
     );
     // The walk charged Tavily exactly once, as a plain miss would: one of
     // its two tokens is left.
@@ -302,7 +304,7 @@ fn quarantined_or_unusable_serving_connection_makes_the_hit_a_miss() {
         assert_eq!(
             search_as(&service, &engine, "direct", "weather report"),
             Err(unavailable(&[("exa", reason)])),
-            "{scenario}"
+            "a hit requires the serving connection to pass its standing checks: {scenario}"
         );
         assert_eq!(transport.requests().len(), 1);
     }
@@ -327,7 +329,11 @@ fn provider_removed_from_the_order_makes_the_hit_a_miss() {
 
     order(&engine, &["tavily"]);
     let walked = search_as(&service, &engine, "direct", "weather report").unwrap();
-    assert_eq!((walked.backend.as_str(), walked.cached), ("tavily", false));
+    assert_eq!(
+        (walked.backend.as_str(), walked.cached),
+        ("tavily", false),
+        "a provider removed from the order must not answer from its cached entry"
+    );
     assert_eq!(connection_ids(&transport), ["brave", "tavily"]);
 }
 
@@ -401,14 +407,15 @@ fn a_hit_reports_its_provider_ignores_cooldown_and_allowance_and_audits_its_conn
         .lock()
         .unwrap()
         .insert("tavily".into(), NOW + 60_000);
-    let hit = search_as(&service, &engine, "direct", "weather report").unwrap();
+    let hit = search_as(&service, &engine, "direct", "weather report");
     assert_eq!(
         hit,
-        WebSearchResponse {
+        Ok(WebSearchResponse {
             results: served.results,
             backend: "tavily".into(),
             cached: true,
-        }
+        }),
+        "cooldown and a used-up allowance must not block a cache hit"
     );
     assert_eq!(connection_ids(&transport), ["exa", "tavily"]);
     assert_eq!(
@@ -443,7 +450,8 @@ fn a_rate_refused_hit_is_a_miss_and_the_walk_charges_once() {
         search_as(&service, &engine, "direct", "weather report"),
         Err(WebSearchRefusal::RateLimited {
             retry_after_ms: 60_000
-        })
+        }),
+        "a rate-refused hit must be a miss, and the walk is refused too"
     );
     // Neither the refused hit nor the refused walk took a token: exactly one
     // refills in a minute, and the hit spends it.

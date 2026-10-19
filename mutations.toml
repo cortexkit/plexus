@@ -16655,3 +16655,99 @@ expect_red = ["web_search::chain::tests::allowance::used_up_allowance_is_a_skip_
 expect_message = "a new UTC month must start a fresh allowance count"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-chain-cache-hit-order-membership"
+guards = "A chain cache entry answers only while the provider that served it is still in the current order"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = "if !order.iter().any(|ordered| ordered == name) {"
+new = "if false { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/cache.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::cache::provider_removed_from_the_order_makes_the_hit_a_miss"]
+expect_message = "a provider removed from the order must not answer from its cached entry"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-cache-hit-instance-digest"
+guards = "A chain cache entry served by one SearXNG instance never answers a caller whose connection searches another instance"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = "if instance != entry.served.instance_digest {"
+new = "if false { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/cache.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::cache::searxng_instances_do_not_share_entries"]
+expect_message = "an entry from one SearXNG instance must not answer a caller on another"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-cache-hit-standing-checks"
+guards = "A chain cache hit requires the caller's connection for the serving provider to pass action status and connection health"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = "self.standing_checks(store, &connection, &action, now_ms)"
+new = "Ok::<(), SkipReason>(()) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/cache.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::cache::quarantined_or_unusable_serving_connection_makes_the_hit_a_miss"]
+expect_message = "a hit requires the serving connection to pass its standing checks"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-cache-hit-ignores-cooldown-and-allowance"
+guards = "Cooldown and a used-up allowance limit vendor contact only, so they never turn a chain cache hit into a miss"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = "self.standing_checks(store, &connection, &action, now_ms)"
+new = "self.chain_checks(store, &connection, &action, now_ms) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/cache.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::cache::a_hit_reports_its_provider_ignores_cooldown_and_allowance_and_audits_its_connection"]
+expect_message = "cooldown and a used-up allowance must not block a cache hit"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-cache-hit-charges-last"
+guards = "A chain cache hit charges the provider's rate buckets only after every other hit condition passed, so a refused hit costs no more than a miss"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = "let name = entry.served.provider.as_str();"
+new = "let name = entry.served.provider.as_str(); self.limiter.try_acquire(name, caller_key, store.web_search_limits(name).ok().flatten().unwrap_or_else(default_limits), now_ms).ok()?; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/cache.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::cache::failed_cached_read_policy_then_walk_charges_no_more_than_a_miss", "web_search::chain::tests::cache::searxng_instances_do_not_share_entries"]
+expect_message = "must not have spent"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-cache-hit-rate-refusal-misses"
+guards = "A rate-refused chain cache hit is a miss, never a served hit"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = ".try_acquire(name, caller_key, limits, now_ms)"
+new = ".try_acquire(name, caller_key, limits, now_ms).or(Ok::<(), u64>(())) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/cache.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::cache::a_rate_refused_hit_is_a_miss_and_the_walk_charges_once"]
+expect_message = "a rate-refused hit must be a miss, and the walk is refused too"
+build_timeout_s = 3600
+timeout_s = 120
