@@ -186,6 +186,53 @@ async fn health_reports_live_cooldowns_per_connection_and_zero_after_a_restart()
     );
 }
 
+/// Health with Exa ordered and its only connection moved to `status`.
+fn health_with_only_connection(label: &str, status: &str) -> Value {
+    let fixture = Fixture::new(label);
+    order(&fixture, &["exa"]);
+    let updated = Connection::open(fixture.path.as_ref() as &Path)
+        .unwrap()
+        .execute(
+            "UPDATE connections SET status = ?1 WHERE connection_id = ?2",
+            params![status, CONNECTION],
+        )
+        .unwrap();
+    assert_eq!(updated, 1);
+    web_search_health(&state_of(fixture.runtime()))
+}
+
+/// The single row of a provider with no connection that can serve a search.
+fn absent_exa_row() -> Value {
+    json!({"order": ["exa"], "providers": [{
+        "provider": "exa",
+        "order_position": 1,
+        "connection_id": null,
+        "principal": null,
+        "connection_present": false,
+        "cooldown_remaining_ms": 0,
+        "allowance_used": null,
+        "allowance_limit": null,
+    }]})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_provider_whose_only_connection_is_revoked_has_no_connection_present() {
+    assert_eq!(
+        health_with_only_connection("health-revoked", "revoked"),
+        absent_exa_row(),
+        "a revoked connection cannot serve a search, so health reports none present"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_provider_whose_only_connection_is_disabled_has_no_connection_present() {
+    assert_eq!(
+        health_with_only_connection("health-disabled", "disabled"),
+        absent_exa_row(),
+        "a disabled connection cannot serve a search, so health reports none present"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn with_no_order_health_lists_no_providers() {
     let fixture = Fixture::new("health-no-order");

@@ -14,7 +14,7 @@
 
 use cortexkit_store::StoreError;
 use plexus_core::storage::PlexusStore;
-use plexus_core::web_search::{providers, WebSearchService};
+use plexus_core::web_search::{connection_status_can_search, providers, WebSearchService};
 use serde_json::{json, Value};
 
 /// What the scheduler last read from the store for the `webSearch` section.
@@ -62,9 +62,9 @@ pub(crate) fn snapshot(
     let mut connections = Vec::new();
     for principal in principals {
         for summary in store.list_connections(principal)? {
-            // The same statuses search resolution leaves out: these
-            // connections cannot serve a search.
-            if !matches!(summary.status.as_str(), "pending" | "disabled" | "revoked") {
+            // Search resolution's own status rule: a connection that cannot
+            // serve a search is not reported as present.
+            if connection_status_can_search(&summary.status) {
                 connections.push((principal.clone(), summary));
             }
         }

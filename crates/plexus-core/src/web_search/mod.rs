@@ -172,6 +172,16 @@ pub fn registered_backend(provider: &providers::ProviderName) -> Option<Arc<dyn 
     }
 }
 
+/// Whether a connection with this status can serve a web search. A pending
+/// connection was never activated, and a disabled or revoked one was stopped
+/// by an operator; every other status (active, degraded, auth-required) stays
+/// a candidate, so governance can name a recoverable health condition.
+/// Search resolution and the health report's `connection_present` both use
+/// this, so the two cannot disagree about which connections exist.
+pub fn connection_status_can_search(status: &str) -> bool {
+    !matches!(status, "pending" | "disabled" | "revoked")
+}
+
 /// A successful search as the tool returns it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WebSearchResponse {
@@ -535,10 +545,7 @@ impl WebSearchService {
             // Reload after candidate selection: a connection may have changed
             // owner, backend or status between the two store reads.
             if connection.app_key != backend.app_key
-                || matches!(
-                    connection.status.as_str(),
-                    "pending" | "disabled" | "revoked"
-                )
+                || !connection_status_can_search(&connection.status)
             {
                 continue;
             }

@@ -16990,3 +16990,19 @@ expect_red = ["web_search_tests::health_report::diagnostics_never_print_an_insta
 expect_message = "diagnostics must not print"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-revoked-connection-cannot-search"
+guards = "A revoked connection can neither serve a web search nor be reported present by web search health; both read one status predicate"
+file = "crates/plexus-core/src/web_search/mod.rs"
+old = "!matches!(status, \"pending\" | \"disabled\" | \"revoked\")"
+new = "!matches!(status, \"pending\" | \"disabled\") /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_health_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::health_report::a_provider_whose_only_connection_is_revoked_has_no_connection_present"]
+expect_message = "a revoked connection cannot serve a search, so health reports none present"
+build_timeout_s = 3600
+timeout_s = 120
