@@ -44,9 +44,10 @@ fn shipped_manifest(file: &str) -> crate::manifest::AppManifest {
     .manifest
 }
 
-/// Connect `connection` of `app_key` owned by `direct`, bound to the vault
-/// credential `credential`, with `action` reviewed under `schema` and an
-/// invoke grant to `direct`.
+/// Connect `connection` of `app_key` for the `direct` principal, which owns
+/// it and is the caller every search in these tests runs as. The connection
+/// is bound to the vault credential `credential`, with `action` reviewed under
+/// `schema` and an invoke grant for `action` to `direct`.
 fn connect(
     store: &PlexusStore,
     connection: &str,
