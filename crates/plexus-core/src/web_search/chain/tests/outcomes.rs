@@ -110,8 +110,14 @@ fn quota_cooldown_is_connection_local() {
     );
     transport.set_response(MockResponse::Success(json!({"results":[]})));
     assert!(search(&service, &engine, "direct").is_ok());
+    // A different query: cooldown does not block a cache hit, and the same
+    // query would be answered from the entry the direct search just stored.
     assert_eq!(
-        search(&service, &engine, "other"),
+        service.search(
+            &engine,
+            "other",
+            json!({"query":"other weather report"}).as_object().unwrap()
+        ),
         Err(unavailable(&[("exa", SkipReason::Cooldown)]))
     );
     assert_eq!(transport.requests().len(), 2);
