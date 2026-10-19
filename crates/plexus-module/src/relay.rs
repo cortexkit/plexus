@@ -424,8 +424,39 @@ async fn dial(url: &str, credential: &[u8], home: &Arc<ConnectorHome>) -> Result
         false,
     )
     .await
-    .map(|(socket, _)| socket)
+    .map(|(socket, _)| {
+        // The credential id is not secret. Logging it lets an operator match
+        // this connection against the vault's current record and the relay's
+        // list of live credentials when checking a rotation.
+        if let Some(id) = credential_id(credential) {
+            eprintln!(info relay: "relay connection opened with credential id {id}");
+        }
+        socket
+    })
     .map_err(connection_failure)
+}
+
+/// The public id inside a relay credential,
+/// `ckwr_<account>.<id>.<key_id>.<mac>.<secret>`: the second dot-separated
+/// field, a 26-character ULID. The relay requires exactly five fields. Returns
+/// `None` for anything else, so a credential in an unexpected format is never
+/// logged in part. The MAC and secret fields are never returned.
+fn credential_id(credential: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(credential).ok()?;
+    if !text.starts_with("ckwr_") {
+        return None;
+    }
+    let fields: Vec<&str> = text.split('.').collect();
+    if fields.len() != 5 {
+        return None;
+    }
+    let id = fields[1];
+    // Crockford base32, as ULIDs use: digits and upper-case letters except I, L, O, U.
+    let is_ulid = id.len() == 26
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b.is_ascii_uppercase() && !b"ILOU".contains(&b)));
+    is_ulid.then_some(id)
 }
 
 fn connection_failure(error: tungstenite::Error) -> Failure {

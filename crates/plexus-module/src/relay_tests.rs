@@ -2805,3 +2805,23 @@ fn relay_marker_logging_counts_committed_watches_and_suppresses_repeats() {
     }
     assert_eq!(due(&scratch), 2);
 }
+
+#[test]
+fn credential_id_is_the_public_field_only() {
+    const ID: &str = "01HZX3K7Q9M2R8T4V6W0Y5Z1AB";
+    let good = format!("ckwr_acct42.{ID}.key7.macPART.secretPART");
+    assert_eq!(credential_id(good.as_bytes()), Some(ID));
+    // Anything other than exactly five fields with a ULID id yields nothing,
+    // so no part of an unexpected credential format is ever logged.
+    for malformed in [
+        format!("ckwr_acct42.{ID}.key7.macPART"),
+        format!("ckwr_acct42.{ID}.key7.macPART.secretPART.extra"),
+        format!("other_acct42.{ID}.key7.macPART.secretPART"),
+        "ckwr_acct42.01HZX3K7Q9M2R8T4V6W0Y5Z1AI.key7.mac.secret".to_string(),
+        "ckwr_acct42.01hzx3k7q9m2r8t4v6w0y5z1ab.key7.mac.secret".to_string(),
+        "ckwr_acct42.01HZX3K7Q9M2R8T4V6W0Y5Z1A.key7.mac.secret".to_string(),
+    ] {
+        assert_eq!(credential_id(malformed.as_bytes()), None, "{malformed}");
+    }
+    assert_eq!(credential_id(b"\xff\xfe"), None);
+}
