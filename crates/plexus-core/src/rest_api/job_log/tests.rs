@@ -645,3 +645,23 @@ fn a_range_past_the_end_is_an_empty_read_that_names_the_length() {
         json!({"body":"","offset":64,"length":0,"total_bytes":16})
     );
 }
+
+#[test]
+fn a_range_read_refuses_a_second_storage_redirect() {
+    // Storage may only answer the range itself. Following a further redirect
+    // would take a second hop to a host nobody reviewed, so the read refuses
+    // and stops after the one storage request.
+    let storage = Storage::start(|_| {
+        response(
+            302,
+            "Location: https://localhost/other?sig=SIGNED-URL-SECRET\r\nContent-Length: 0\r\n",
+            "",
+        )
+    });
+    let result = run_range(&storage.url, 0, 16);
+    assert_eq!(
+        result.error_code.as_deref(),
+        Some("job_log_redirect_refused")
+    );
+    assert_eq!(storage.requests.lock().unwrap().len(), 1);
+}

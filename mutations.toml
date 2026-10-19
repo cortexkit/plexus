@@ -17150,3 +17150,18 @@ expect_red = ["github_read_frame_tests::bot_read_tests::job_log_with_max_bytes_k
 expect_message = "a max_bytes job log read keeps the tail form"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "github-bot-job-log-range-second-redirect"
+guards = "A ranged job-log read refuses a storage redirect by name instead of taking a second hop"
+file = "crates/plexus-core/src/rest_api/job_log.rs"
+old = "    if (300..400).contains(&status) {\n        return refused(\"job_log_redirect_refused\");"
+new = "    if false && (300..400).contains(&status) { /* NON-VACUITY BREAK */\n        return refused(\"job_log_redirect_refused\");"
+test_file = "crates/plexus-core/src/rest_api/job_log/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::job_log::tests::a_range_read_refuses_a_second_storage_redirect"]
+build_timeout_s = 3600
+timeout_s = 120
