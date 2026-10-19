@@ -1,0 +1,112 @@
+// Tavily REST: the `tavily` provider of the web_search chain.
+//
+// This is a second manifest for the vendor behind catalog/tavily.jsonc, which
+// reaches Tavily over its hosted MCP server. The two keys are deliberately
+// distinct: web_search resolves only `tavily_rest` connections, so existing
+// `tavily` MCP connections and their grants keep serving the MCP actions and
+// are never chain candidates.
+//
+// Wire contract pinned from Tavily's own API reference, an embedded OpenAPI
+// 3.0.3 document at
+// https://docs.tavily.com/documentation/api-reference/endpoint/search
+// (read 2026-10-19):
+// - method and path: POST /search on server https://api.tavily.com/;
+// - auth: the `bearerAuth` scheme, "Bearer authentication header in the form
+//   Bearer <token>, where <token> is your Tavily API key", so the key goes in
+//   `Authorization` with the `Bearer ` prefix. The connection is bound to the
+//   vault credential `apikey:tavily`; plexus reads it by name at dispatch and
+//   never stores it;
+// - request fields: `query` (the only required field; no documented maximum
+//   length, the search guide only advises staying under 1500 characters),
+//   `max_results` (0 to 20), `include_domains` (at most 300), `time_range`
+//   (`day`, `week`, `month`, `year`, or their one-letter forms, which are not
+//   used here), `include_published_date` and `filter_by_published_date`;
+// - reply: `results[]` items carry `title`, `url`, `content` ("A short
+//   description of the search result") and `published_date`, an HTTP date
+//   such as "Tue, 11 Mar 2025 17:00:00 GMT", or null when none was detected.
+//   The top-level `answer` is an LLM-generated summary and is never read;
+// - documented errors: 400 and 422 (request invalid), 401 (key missing or
+//   invalid), 429 (rate limited, with an optional Retry-After in seconds), 432
+//   (key or plan limit exceeded), 433 (pay-as-you-go limit exceeded) and 500.
+//   The reference documents no 403 for /search.
+//
+// Differences from the provider facts the web_search chain design started from
+// (Bearer auth; request fields query, max_results up to 20, include_domains and
+// time_range; results[].title, url, content and published_date):
+// - every search also sends `include_published_date: true`. The reference says
+//   `published_date` is "Only returned when include_published_date is true"
+//   (automatic only for the news topic), so without it no result would carry
+//   a date. Tavily marks the field beta;
+// - a search with a recency window also sends `filter_by_published_date:
+//   true`. By default Tavily keeps results with no detectable date inside a
+//   time range; the tool's recency filter promises recent results only;
+// - Tavily reports a used-up plan or pay-as-you-go allowance as 432 or 433, not
+//   402, and neither body names credits, quota or balance. web_search's
+//   failure classification (crates/plexus-core/src/web_search/chain/outcome.rs)
+//   therefore treats both as another 4xx: the provider is skipped as
+//   unavailable for 60 seconds, not cooled down for an hour as quota.
+//
+// The search action is read-risk and has no side effects, so a retry is safe.
+// No other Tavily endpoint is declared: web_search needs only search.
+{
+  "schema_version": 1,
+  "key": "tavily_rest",
+  "name": "Tavily (REST)",
+  "description": "Web search over Tavily's REST API, as a provider for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Documented REST API with a published OpenAPI spec and static API-key bearer auth; search mutates no vendor-side state, so it maps to a read grant.",
+  "tier": "S1",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://api.tavily.com"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/search",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string" },
+            "max_results": { "type": "integer", "minimum": 0, "maximum": 20 },
+            "include_domains": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 300
+            },
+            "time_range": { "type": "string", "enum": ["day", "week", "month", "year"] },
+            "include_published_date": { "type": "boolean" },
+            "filter_by_published_date": { "type": "boolean" }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

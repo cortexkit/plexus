@@ -47,7 +47,9 @@ use crate::scope::{resolve_call_agent, CallScope};
 use crate::storage::{AuditRecord, CatalogAction, ConnectionRecord, PlexusStore, RelayOrigin};
 use crate::transport::Transport;
 
-pub use backend::{ExaRestBackend, WebSearchBackend, WebSearchResult, EXCERPT_MAX_CHARS};
+pub use backend::{
+    ExaRestBackend, TavilyRestBackend, WebSearchBackend, WebSearchResult, EXCERPT_MAX_CHARS,
+};
 pub use cache::{CacheKey, ResultCache, CACHE_CAPACITY, CACHE_TTL_MS};
 pub use chain::{ProviderSkip, SkipReason, WEB_SEARCH_ATTEMPT_BOUND, WEB_SEARCH_CHAIN_DEADLINE};
 pub use limiter::{
@@ -168,6 +170,7 @@ impl WebSearchRefusal {
 pub fn registered_backend(provider: &providers::ProviderName) -> Option<Arc<dyn WebSearchBackend>> {
     match provider.name {
         "exa" => Some(Arc::new(ExaRestBackend)),
+        "tavily" => Some(Arc::new(TavilyRestBackend)),
         _ => None,
     }
 }

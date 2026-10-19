@@ -1,0 +1,63 @@
+{
+  "_source": "Built from the per-field examples, error bodies and headers in Tavily's API reference (https://docs.tavily.com/documentation/api-reference/endpoint/search) and rate-limit page (https://docs.tavily.com/documentation/rate-limits). The reference publishes one example per field rather than one whole reply, so the success body assembles those examples; the empty and malformed bodies drop fields from it. Error bodies are the reference's own examples.",
+  "success": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"query\":\"Who is Leo Messi?\",\"answer\":\"Lionel Messi, born in 1987, is an Argentine footballer widely regarded as one of the greatest players of his generation.\",\"images\":[],\"results\":[{\"title\":\"Lionel Messi Facts | Britannica\",\"url\":\"https://www.britannica.com/facts/Lionel-Messi\",\"content\":\"Lionel Messi, an Argentine footballer, is widely regarded as one of the greatest football players of his generation.\",\"score\":0.81025416,\"raw_content\":null,\"published_date\":\"Tue, 11 Mar 2025 17:00:00 GMT\",\"favicon\":\"https://britannica.com/favicon.png\",\"id\":\"a3f9c2-04\"}],\"auto_parameters\":{\"topic\":\"general\",\"search_depth\":\"basic\"},\"response_time\":\"1.67\",\"usage\":{\"credits\":1},\"request_id\":\"123e4567-e89b-12d3-a456-426614174111\"}"
+  },
+  "empty": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"query\":\"Who is Leo Messi?\",\"answer\":\"Lionel Messi, born in 1987, is an Argentine footballer widely regarded as one of the greatest players of his generation.\",\"images\":[],\"results\":[],\"response_time\":\"1.67\",\"usage\":{\"credits\":1},\"request_id\":\"123e4567-e89b-12d3-a456-426614174111\"}"
+  },
+  "malformed": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"query\":\"Who is Leo Messi?\",\"answer\":\"Lionel Messi, born in 1987, is an Argentine footballer widely regarded as one of the greatest players of his generation.\",\"images\":[],\"response_time\":\"1.67\"}"
+  },
+  "bad_request": {
+    "status": 400,
+    "headers": "",
+    "body": "{\"detail\":{\"error\":\"<400 Bad Request, (e.g Invalid topic. Must be 'general' or 'news'.)>\"}}"
+  },
+  "unauthorized": {
+    "status": 401,
+    "headers": "",
+    "body": "{\"detail\":{\"error\":\"Unauthorized: missing or invalid API key.\"}}"
+  },
+  "validation_failed": {
+    "status": 422,
+    "headers": "",
+    "body": "{\"detail\":[{\"type\":\"string_type\",\"loc\":[\"body\",\"query\"],\"msg\":\"Input should be a valid string\",\"input\":[]}]}"
+  },
+  "throttled_retry": {
+    "status": 429,
+    "headers": "Retry-After: 60\r\n",
+    "body": "{\"detail\":{\"error\":\"Your request has been blocked due to excessive requests. Please reduce the rate of requests.\"}}"
+  },
+  "throttled_short_retry": {
+    "status": 429,
+    "headers": "Retry-After: 7\r\n",
+    "body": "{\"detail\":{\"error\":\"Your request has been blocked due to excessive requests. Please reduce the rate of requests.\"}}"
+  },
+  "throttled_no_retry": {
+    "status": 429,
+    "headers": "",
+    "body": "{\"detail\":{\"error\":\"Your request has been blocked due to excessive requests. Please reduce the rate of requests.\"}}"
+  },
+  "plan_limit": {
+    "status": 432,
+    "headers": "",
+    "body": "{\"detail\":{\"error\":\"<432 Custom Forbidden Error (e.g This request exceeds your plan's set usage limit. Please upgrade your plan or contact support@tavily.com)>\"}}"
+  },
+  "pay_as_you_go_limit": {
+    "status": 433,
+    "headers": "",
+    "body": "{\"detail\":{\"error\":\"This request exceeds the pay-as-you-go limit. You can increase your limit on the Tavily dashboard.\"}}"
+  },
+  "server_error": {
+    "status": 500,
+    "headers": "",
+    "body": "{\"detail\":{\"error\":\"Internal Server Error\"}}"
+  }
+}

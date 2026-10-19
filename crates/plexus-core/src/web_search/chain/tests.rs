@@ -7,6 +7,7 @@ mod allowance;
 mod cache;
 mod deadline;
 mod outcomes;
+mod tavily;
 
 const NOW: i64 = 1_790_000_000_000;
 type Engine = GovernanceEngine<StubCredentialSource, MockTransport>;

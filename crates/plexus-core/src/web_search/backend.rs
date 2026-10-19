@@ -12,6 +12,9 @@ use serde_json::{json, Value};
 use super::query::WebSearchQuery;
 use crate::poller::iso8601;
 
+mod tavily;
+pub use tavily::{TavilyRestBackend, TAVILY_MAX_INCLUDE_DOMAINS, TAVILY_MAX_RESULTS};
+
 /// Longest excerpt returned per result, in characters.
 pub const EXCERPT_MAX_CHARS: usize = 600;
 
