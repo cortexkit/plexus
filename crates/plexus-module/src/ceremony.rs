@@ -542,11 +542,9 @@ pub(crate) fn revoke_grant(state: &Arc<ModuleState>, principal_key: &str, params
     // The store reads the grant and writes the audit row naming it inside the
     // revoke's own transaction, so the record always names what was removed
     // and a revoke never commits without it.
-    match state.store().revoke_grant_audited(
-        principal_key,
-        grant_id,
-        principal_key,
-        &|revoked| {
+    match state
+        .store()
+        .revoke_grant_audited(principal_key, grant_id, principal_key, &|revoked| {
             let mut audit = AuditRecord::ceremony(
                 principal_key,
                 revoked.app_key.as_deref(),
@@ -560,8 +558,7 @@ pub(crate) fn revoke_grant(state: &Arc<ModuleState>, principal_key: &str, params
             // records it.
             audit.args_redaction_summary = Some(format!("grant {grant_id} revoked"));
             audit
-        },
-    ) {
+        }) {
         Ok(removed) => json!({"result": {"revoked": removed}}),
         Err(error) => {
             crate::wire::store_failure("grant revoked", "grant could not be revoked", &error)

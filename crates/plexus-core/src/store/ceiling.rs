@@ -360,15 +360,13 @@ mod tests {
     }
 
     #[test]
-    fn widen_ceiling_allows_degraded_and_reauth_and_rolls_back_on_audit_failure() {
-        for status in ["degraded", "auth_required"] {
-            let store = fixture();
-            store
-                .inner
-                .with_conn_fenced(|conn| conn.execute("UPDATE connections SET status=?1", [status]))
-                .unwrap();
-            assert_eq!(widen(&store, &["get_job"], false).unwrap()["applied"], true);
-        }
+    fn widen_ceiling_allows_degraded_and_rolls_back_on_audit_failure() {
+        let store = fixture();
+        store
+            .inner
+            .with_conn_fenced(|conn| conn.execute("UPDATE connections SET status='degraded'", []))
+            .unwrap();
+        assert_eq!(widen(&store, &["get_job"], false).unwrap()["applied"], true);
         let store = fixture();
         store.inner.with_conn_fenced(|conn|conn.execute_batch("CREATE TRIGGER reject_widen_audit BEFORE INSERT ON audit_journal BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;")).unwrap();
         let before = snapshot(&store);

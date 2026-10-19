@@ -4656,8 +4656,8 @@ timeout_s = 120
 id = "ticket-revoke-expires-issued"
 guards = "Revoking a connection expires its issued binding tickets in the same transaction"
 file = "crates/plexus-core/src/storage.rs"
-old = "if changed != 0 {\n                conn.execute(\n                    \"UPDATE reservations SET status = 'invalidated'\n                     WHERE principal = ?1 AND connection_id = ?2 AND status = 'reserved'\",\n                    (principal, connection_id),\n                )?;\n                conn.execute(\n                    \"UPDATE binding_tickets SET status = 'expired'"
-new = "if changed != 0 {\n                conn.execute(\n                    \"UPDATE reservations SET status = 'invalidated'\n                     WHERE principal = ?1 AND connection_id = ?2 AND status = 'reserved'\",\n                    (principal, connection_id),\n                )?;\n                conn.execute(\n                    \"UPDATE binding_tickets SET status = status /* NON-VACUITY BREAK */"
+old = "if changed != 0 {\n        conn.execute(\n            \"UPDATE reservations SET status = 'invalidated'\n             WHERE principal = ?1 AND connection_id = ?2 AND status = 'reserved'\",\n            (principal, connection_id),\n        )?;\n        conn.execute(\n            \"UPDATE binding_tickets SET status = 'expired'"
+new = "if changed != 0 {\n        conn.execute(\n            \"UPDATE reservations SET status = 'invalidated'\n             WHERE principal = ?1 AND connection_id = ?2 AND status = 'reserved'\",\n            (principal, connection_id),\n        )?;\n        conn.execute(\n            \"UPDATE binding_tickets SET status = status /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/tests/it/ceremony.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -8090,8 +8090,8 @@ build_timeout_s = 3600
 id = "revoke-unregister"
 guards = "Successful connection revocation unregisters its transport configuration only after the store commits"
 file = "crates/plexus-module/src/lib.rs"
-old = "state\n                        .runtime\n                        .mcp_transport\n                        .unregister_connection(connection_id);"
-new = "/* NON-VACUITY BREAK: keep revoked MCP configuration */"
+old = "Ok(ConnectionAdminRevokeOutcome::Revoked) => {\n                state\n                    .runtime\n                    .mcp_transport\n                    .unregister_connection(connection_id);"
+new = "Ok(ConnectionAdminRevokeOutcome::Revoked) => {\n                /* NON-VACUITY BREAK: keep revoked MCP configuration */"
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -8863,8 +8863,8 @@ build_timeout_s = 3600
 id = "policy-record-risk"
 guards = "Policy effects stay in the audit summary and never masquerade as risk values"
 file = "crates/plexus-module/src/ceremony.rs"
-old = "audit.risk = None;\n                audit.args_redaction_summary = Some(format!(\n                    \"policy {policy_id} removed; effect={}\","
-new = "audit.risk = Some(\"block\".into()); /* NON-VACUITY BREAK */\n                audit.args_redaction_summary = Some(format!(\n                    \"policy {policy_id} removed; effect={}\","
+old = "audit.risk = None;\n            audit.args_redaction_summary = Some(format!(\n                \"policy {policy_id} removed; effect={}\","
+new = "audit.risk = Some(\"block\".into()); /* NON-VACUITY BREAK */\n            audit.args_redaction_summary = Some(format!(\n                \"policy {policy_id} removed; effect={}\","
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -15952,5 +15952,221 @@ package = "plexus-core"
 target = "--lib"
 select = "expected"
 expect_red = ["web_search::chain::tests::policy_status_connection_cooldown_then_rate_is_the_failure_order"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "moda15-configure-admin-recheck-in-tx"
+guards = "Connection filter configure rechecks the caller's connection-admin grant inside the fenced write transaction"
+file = "crates/plexus-core/src/storage.rs"
+old = "if !connection_admin_grant_on_conn(conn, owner, connection_id, caller, now)? {\n                return Ok(ConfigureOutcome::AdminRequired);"
+new = "if false && !connection_admin_grant_on_conn(conn, owner, connection_id, caller, now)? { /* NON-VACUITY BREAK */\n                return Ok(ConfigureOutcome::AdminRequired);"
+test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::store_contract_tests::connection_filter_configure_rechecks_admin_inside_its_transaction"]
+expect_message = "a grant revoked mid-request must refuse the configure"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "moda15-revoke-admin-recheck-in-tx"
+guards = "Connection revoke rechecks the caller's connection-admin grant inside the fenced write transaction"
+file = "crates/plexus-core/src/storage.rs"
+old = "if !connection_admin_grant_on_conn(conn, owner, connection_id, caller, now)? {\n                return Ok(ConnectionAdminRevokeOutcome::AdminRequired);"
+new = "if false && !connection_admin_grant_on_conn(conn, owner, connection_id, caller, now)? { /* NON-VACUITY BREAK */\n                return Ok(ConnectionAdminRevokeOutcome::AdminRequired);"
+test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::store_contract_tests::connection_revoke_rechecks_admin_inside_its_transaction"]
+expect_message = "a grant revoked mid-request must refuse the revoke"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "moda16-manifest-change-audit-in-tx"
+guards = "A changed manifest upsert writes its manifest_changed audit row in the upsert transaction"
+file = "crates/plexus-core/src/storage.rs"
+old = "            if changed {\n                append_audit_on_conn(\n                    conn,\n                    &AuditRecord::manifest_changed(principal, key),\n                    None,\n                    None,\n                    None,\n                    None,\n                )?;\n            }\n"
+new = "            /* NON-VACUITY BREAK */\n"
+test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::store_contract_tests::manifest_changes_and_retirements_are_audited_once_by_the_store", "storage::store_contract_tests::a_refused_manifest_audit_row_rolls_back_the_change"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "moda16-retirement-audit-in-tx"
+guards = "A manifest retirement writes its manifest_changed audit row in the retirement transaction"
+file = "crates/plexus-core/src/storage.rs"
+old = "                append_audit_on_conn(\n                    conn,\n                    &AuditRecord::manifest_changed(principal, &key),\n                    None,\n                    None,\n                    None,\n                    None,\n                )?;\n                retired.push(key);"
+new = "                /* NON-VACUITY BREAK */\n                retired.push(key);"
+test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::store_contract_tests::manifest_changes_and_retirements_are_audited_once_by_the_store", "storage::store_contract_tests::a_refused_manifest_audit_row_rolls_back_the_change"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb09-issue-ticket-audit-in-tx"
+guards = "The issue_ticket operator write appends its audit row inside its own fenced transaction"
+file = "crates/plexus-core/src/storage.rs"
+old = "append_audit_for(conn, audit, &ticket)?;"
+new = "let _ = (audit, &ticket); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ceremony.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["ceremony::tests::issue_ticket_audit_failure_rolls_back_the_ticket"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb09-grant-audit-in-tx"
+guards = "The grant operator write appends its audit row inside its own fenced transaction"
+file = "crates/plexus-core/src/storage.rs"
+old = "append_audit_for(conn, audit, &minted)?;"
+new = "let _ = (audit, &minted); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ceremony.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["ceremony::tests::grant_audit_failure_rolls_back_the_grant"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb09-revoke-grant-audit-in-tx"
+guards = "The revoke_grant operator write appends its audit row inside its own fenced transaction"
+file = "crates/plexus-core/src/storage.rs"
+old = "append_audit_for(conn, audit, &revoked)?;"
+new = "let _ = (audit, &revoked); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ceremony.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["ceremony::tests::revoke_grant_audit_failure_rolls_back_the_revocation"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb09-repin-action-audit-in-tx"
+guards = "The repin_action operator write appends its audit row inside its own fenced transaction"
+file = "crates/plexus-core/src/storage.rs"
+old = "append_audit_for(conn, audit, &reactivated)?;"
+new = "let _ = (audit, &reactivated); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ceremony.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["ceremony::tests::repin_action_audit_failure_rolls_back_the_repin"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb09-set-policy-audit-in-tx"
+guards = "The set_policy operator write appends its audit row inside its own fenced transaction"
+file = "crates/plexus-core/src/storage.rs"
+old = "append_audit_for(conn, audit, &policy)?;"
+new = "let _ = (audit, &policy); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ceremony.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["ceremony::tests::set_policy_audit_failure_rolls_back_the_policy"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "modb09-remove-policy-audit-in-tx"
+guards = "The remove_policy operator write appends its audit row inside its own fenced transaction"
+file = "crates/plexus-core/src/storage.rs"
+old = "append_audit_for(conn, audit, &removed)?;"
+new = "let _ = (audit, &removed); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/ceremony.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["ceremony::tests::remove_policy_audit_failure_rolls_back_the_removal"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "cat27-retired-auth-required-not-recovered"
+guards = "A refresh never reactivates a connection in the retired auth_required status"
+file = "crates/plexus-core/src/storage.rs"
+old = "WHERE principal = ?3 AND connection_id = ?4 AND status = 'degraded'\","
+new = "WHERE principal = ?3 AND connection_id = ?4 AND status IN ('degraded', 'auth_required') /* NON-VACUITY BREAK */\","
+test_file = "crates/plexus-core/src/catalog.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["catalog::tests::a_successful_refresh_does_not_reactivate_a_retired_auth_required_status"]
+expect_message = "a refresh must not treat the retired auth_required status as recoverable"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "deps04-rate-limit-declared-optional"
+guards = "Manifests that still carry defaults.rate_limit parse under deny_unknown_fields while the field is ignored"
+file = "crates/plexus-core/src/manifest.rs"
+old = "    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub rate_limit: Option<RateLimit>,"
+new = "    /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::defaults_rate_limit_is_optional_and_ignored"]
+expect_message = "a catalog that still carries defaults.rate_limit must parse"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store21-inactive-repo-resolution"
+guards = "A repository claim for an inactive watch reports Inactive and claims nothing instead of a store error"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = "Err(rusqlite::Error::QueryReturnedNoRows) => {\n                    return Ok(RepoResolutionAdmission::Inactive)\n                }"
+new = "Err(rusqlite::Error::QueryReturnedNoRows) => {\n                    return Err(rusqlite::Error::QueryReturnedNoRows) /* NON-VACUITY BREAK */\n                }"
+test_file = "crates/plexus-core/src/store/event_outbox.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::event_outbox::tests::repo_resolution_for_an_inactive_watch_claims_nothing"]
+expect_message = "an inactive watch is not a store failure"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "store33-preview-keeps-generation"
+guards = "A recipient preview reads membership without moving the binding generation"
+file = "crates/plexus-core/src/store/recipients.rs"
+old = "} else { 0 };"
+new = "} else { 1 }; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/recipients.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::recipients_store::tests::a_preview_never_moves_the_binding_generation"]
+expect_message = "a preview must not"
 build_timeout_s = 3600
 timeout_s = 120

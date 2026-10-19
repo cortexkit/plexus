@@ -178,6 +178,10 @@ pub enum RepoResolutionAdmission {
     },
     NotDue,
     Deferred,
+    /// The watch is missing or no longer active. Nothing was claimed or
+    /// reserved; the poller ends the cycle as not eligible, which is neither a
+    /// store nor a vendor failure.
+    Inactive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -706,7 +710,13 @@ impl PlexusStore {
         now: i64,
     ) -> Result<RepoResolutionAdmission, StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            require_active(conn, principal, subscription_id)?;
+            match require_active(conn, principal, subscription_id) {
+                Ok(()) => {}
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Ok(RepoResolutionAdmission::Inactive)
+                }
+                Err(error) => return Err(error),
+            }
             let entry = cache_entry(conn, repo)?;
             if entry
                 .as_ref()
@@ -3521,6 +3531,39 @@ mod tests {
             store.repo_id_cache("owner/repo").unwrap().unwrap().repo_id,
             Some(101)
         );
+    }
+
+    /// A watch that went inactive before its repository claim is reported as
+    /// such, not as a store error, and claims nothing: no attempt stamp and no
+    /// quota debit.
+    #[test]
+    fn repo_resolution_for_an_inactive_watch_claims_nothing() {
+        let store = store();
+        subscription(&store, "a", "probe");
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                conn.execute("UPDATE trigger_subscriptions SET status='suspended'", [])
+            })
+            .unwrap();
+        for id in ["a", "missing"] {
+            assert_eq!(
+                store
+                    .reserve_repo_id_resolution("direct", id, "owner/repo", 10000000)
+                    .expect("an inactive watch is not a store failure"),
+                RepoResolutionAdmission::Inactive
+            );
+        }
+        assert!(store.repo_id_cache("owner/repo").unwrap().is_none());
+        let debits: i64 = store
+            .inner
+            .with_read(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM github_actions_quota", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(debits, 0, "an inactive watch must not spend quota");
     }
 
     #[test]

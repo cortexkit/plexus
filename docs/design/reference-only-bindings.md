@@ -10,8 +10,10 @@ a `credential_id` remedy. Both CLIs use `--credential-id`, never `--handle-file`
 ## Recovery, migration and rollback
 
 Migration 33 runs once under the store's existing version guard. It nulls legacy
-blobs **only on revoked connections**. Pending, degraded, auth_required and
-disabled connections can recover; their bindings are not disposable. There is
+blobs **only on revoked connections**. Pending and degraded connections can
+recover, and rows in the retired auth_required and disabled statuses (still
+admitted by the schema, written by no current code) are kept the same way;
+their bindings are not disposable. There is
 no `retired` connection status (retirement belongs to app manifests).
 
 Open refuses any non-revoked non-reference binding, naming all offending

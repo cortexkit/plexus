@@ -497,7 +497,13 @@ pub enum Idempotency {
 #[serde(deny_unknown_fields)]
 pub struct ManifestDefaults {
     pub ask_first_risk: Vec<Risk>,
-    pub rate_limit: RateLimit,
+    /// Accepted and ignored. Plexus enforces no per-connection call budget:
+    /// vendor 429 replies and their Retry-After are what pace calls, and the
+    /// search facades have their own limiters. The field stays declared,
+    /// optional, so the shipped catalogs that still carry it parse under
+    /// `deny_unknown_fields`, and a manifest without it parses too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimit>,
     /// Maximum age of an observed MCP catalog before periodic refresh.
     #[serde(default = "default_catalog_ttl_s")]
     pub catalog_ttl_s: u64,
@@ -714,11 +720,6 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
             ));
         }
         (_, None) => {}
-    }
-    if manifest.defaults.rate_limit.calls_per_min == 0 {
-        return Err(ManifestError::InvalidField(
-            "defaults.rate_limit.calls_per_min must be positive".to_string(),
-        ));
     }
     // Only MCP remote and REST have both discovery and dispatch paths. Stdio
     // adapters lack catalog freshness support, so accepting their manifests
@@ -1923,6 +1924,35 @@ mod tests {
             "defaults": {"ask_first_risk": ["write"], "rate_limit": {"calls_per_min": 60}},
             "availability": "ga"
         })
+    }
+
+    /// `defaults.rate_limit` is optional and ignored: plexus enforces no
+    /// per-connection call budget. A manifest without it parses, so a later
+    /// catalog can drop it; one that still carries it parses unchanged and
+    /// keeps it in the normalized form its content hash is computed from, so
+    /// the shipped catalogs keep their hashes across this change.
+    #[test]
+    fn defaults_rate_limit_is_optional_and_ignored() {
+        let carried = ingest_value(rest_manifest_value())
+            .expect("a catalog that still carries defaults.rate_limit must parse");
+        assert_eq!(
+            serde_json::to_value(&carried.manifest).unwrap()["defaults"]["rate_limit"],
+            serde_json::json!({"calls_per_min": 60}),
+            "a carried rate_limit must stay in the hashed form"
+        );
+        let mut omitted = rest_manifest_value();
+        omitted["defaults"]
+            .as_object_mut()
+            .unwrap()
+            .remove("rate_limit");
+        let omitted =
+            ingest_value(omitted).expect("a manifest without defaults.rate_limit must parse");
+        assert!(serde_json::to_value(&omitted.manifest).unwrap()["defaults"]
+            .get("rate_limit")
+            .is_none());
+        let mut zero = rest_manifest_value();
+        zero["defaults"]["rate_limit"] = serde_json::json!({"calls_per_min": 0});
+        ingest_value(zero).expect("an ignored field carries no validation");
     }
 
     #[test]

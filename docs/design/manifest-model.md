@@ -43,8 +43,11 @@ semantics.
 `availability` and `reuse_rationale` are display/review metadata, not connection
 or governance gates. In particular, `gated` is not an operator admission switch.
 No production decision plane is wired: S3/S4 actions refuse regardless of those
-labels. `defaults.rate_limit` is currently validated metadata, not an enforced
-vendor-call budget; the search facades have separate implemented limiters.
+labels. `defaults.rate_limit` is accepted and ignored: plexus has no
+per-connection call limit. Vendor 429 replies and their Retry-After are what pace
+calls, and the search facades have separate implemented limiters. The field is
+optional; shipped catalogs still carry it so an older binary, which requires it,
+can read them.
 
 `idempotency`, `auth.oauth.profile_digest` and `auth.oauth.requested_scopes` are
 deprecated and ignored. Shipped catalogs omit idempotency; the three OAuth

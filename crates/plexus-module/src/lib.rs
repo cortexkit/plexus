@@ -65,8 +65,8 @@ use plexus_core::test_scratch::Scratch;
 use plexus_core::withdraw::{WithdrawCall, WithdrawRefusal, WITHDRAW_NOT_PERMITTED};
 use plexus_core::{
     ActorSource, AuditRecord, AuthorizationRequest, CatalogError, ConfigureOutcome,
-    ConnectionAdminRevokeOutcome,
-    DispatchOutcome, EventLookupOutcome, EventReader, PlexusStore, TransportOutcome,
+    ConnectionAdminRevokeOutcome, DispatchOutcome, EventLookupOutcome, EventReader, PlexusStore,
+    TransportOutcome,
 };
 #[cfg(any(test, feature = "test-support"))]
 use plexus_core::{MockTransport, StubCredentialSource};
@@ -3175,51 +3175,51 @@ fn facade_connections_configure(call: &FacadeArguments<'_>) -> Result<Value, Mod
             principal_key,
             filters,
         ) {
-                Ok(ConfigureOutcome::AdminRequired) => {
-                    json!({"error": {"code": "connection_admin_required", "message": "connection administration grant required"}})
-                }
-                Ok(ConfigureOutcome::Configured(stored)) => {
-                    json!({"result": {"resource_filters": stored}})
-                }
-                Ok(ConfigureOutcome::ConnectionNotFound) => {
-                    json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
-                }
-                Ok(ConfigureOutcome::ManifestMissing) => {
-                    json!({"error": {"code": "manifest_missing", "message": "vendor manifest is not in the catalog"}})
-                }
-                Ok(ConfigureOutcome::UndeclaredFilter(key)) => {
-                    json!({"error": {"code": "undeclared_filter", "message": format!("filter key '{key}' is not declared by the vendor manifest"), "key": key}})
-                }
-                // Distinct from undeclared_filter because the fixes differ:
-                // an undeclared filter names a key the VENDOR does not have,
-                // while this names one this OPERATION does not read. Telling
-                // an operator their key is not in the manifest when they
-                // actually mistyped `write_enabling` sends them to read
-                // vendor documentation for a spelling mistake.
-                Ok(ConfigureOutcome::UnreadFilterKey { key, accepted }) => {
-                    json!({"error": {
-                        "code": "unread_filter_key",
-                        "message": format!(
-                            "resource_filters key '{key}' is not read by configure (accepted: {})",
-                            accepted.join(", ")
-                        ),
-                        "key": key,
-                        "accepted": accepted
-                    }})
-                }
-                Ok(ConfigureOutcome::MalformedFilters { field, expected }) => {
-                    json!({"error": {
-                        "code": "malformed_filters",
-                        "message": format!("resource_filters {field} must be {expected}"),
-                        "field": field,
-                        "expected": expected
-                    }})
-                }
-                Err(error) => crate::wire::store_failure(
-                    "filters configured",
-                    "filters could not be configured",
-                    &error,
-                ),
+            Ok(ConfigureOutcome::AdminRequired) => {
+                json!({"error": {"code": "connection_admin_required", "message": "connection administration grant required"}})
+            }
+            Ok(ConfigureOutcome::Configured(stored)) => {
+                json!({"result": {"resource_filters": stored}})
+            }
+            Ok(ConfigureOutcome::ConnectionNotFound) => {
+                json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
+            }
+            Ok(ConfigureOutcome::ManifestMissing) => {
+                json!({"error": {"code": "manifest_missing", "message": "vendor manifest is not in the catalog"}})
+            }
+            Ok(ConfigureOutcome::UndeclaredFilter(key)) => {
+                json!({"error": {"code": "undeclared_filter", "message": format!("filter key '{key}' is not declared by the vendor manifest"), "key": key}})
+            }
+            // Distinct from undeclared_filter because the fixes differ:
+            // an undeclared filter names a key the VENDOR does not have,
+            // while this names one this OPERATION does not read. Telling
+            // an operator their key is not in the manifest when they
+            // actually mistyped `write_enabling` sends them to read
+            // vendor documentation for a spelling mistake.
+            Ok(ConfigureOutcome::UnreadFilterKey { key, accepted }) => {
+                json!({"error": {
+                    "code": "unread_filter_key",
+                    "message": format!(
+                        "resource_filters key '{key}' is not read by configure (accepted: {})",
+                        accepted.join(", ")
+                    ),
+                    "key": key,
+                    "accepted": accepted
+                }})
+            }
+            Ok(ConfigureOutcome::MalformedFilters { field, expected }) => {
+                json!({"error": {
+                    "code": "malformed_filters",
+                    "message": format!("resource_filters {field} must be {expected}"),
+                    "field": field,
+                    "expected": expected
+                }})
+            }
+            Err(error) => crate::wire::store_failure(
+                "filters configured",
+                "filters could not be configured",
+                &error,
+            ),
         }
     })
 }
@@ -4316,27 +4316,24 @@ fn run_health_probes_for(state: &ModuleState, principals: &[String]) {
             }
         };
         for summary in connections {
-            // `degraded` and `auth_required` are probed alongside `active`, and
-            // that is the whole point of the probe rather than an edge case.
+            // `degraded` is probed alongside `active`, and that is the whole
+            // point of the probe rather than an edge case.
             //
-            // A refresh failure sets `degraded`, while a credential failure sets
-            // `auth_required`; both are health states a successful refresh can
-            // clear. Skipping non-active connections would make either recovery
-            // unreachable: nothing else re-runs discovery either, because reads
-            // return early from the freshness check (only writes reach it) and
-            // `connect` consumes a single-use ticket that no longer exists.
+            // A refresh failure sets `degraded`, and only a successful refresh
+            // clears it. Skipping non-active connections would make that
+            // recovery unreachable: nothing else re-runs discovery either,
+            // because reads return early from the freshness check (only writes
+            // reach it) and `connect` consumes a single-use ticket that no
+            // longer exists.
             //
             // Without this, a connection can stay degraded indefinitely, across
-            // restarts, while its vendor is reachable the whole time. The
-            // remaining statuses are deliberately still skipped:
-            // `revoked`, `disabled` and `pending` describe authority, not
-            // health, and probing them would resurrect a connection an
-            // operator deliberately stopped, so a revoked one is neither
-            // probed nor logged here.
-            if summary.status != "active"
-                && summary.status != "degraded"
-                && summary.status != "auth_required"
-            {
+            // restarts, while its vendor is reachable the whole time. Every
+            // other status is deliberately skipped: `revoked` and `pending`
+            // describe authority, not health, and probing them would resurrect
+            // a connection an operator deliberately stopped, so a revoked one
+            // is neither probed nor logged here. No production path writes any
+            // further status, so none is probed for recovery.
+            if summary.status != "active" && summary.status != "degraded" {
                 continue;
             }
             total += 1;
@@ -5972,11 +5969,6 @@ mod tests {
         imported_handle_probe_scenario("degraded");
     }
 
-    #[test]
-    fn health_probe_imported_handle_auth_required_fixture() {
-        imported_handle_probe_scenario("auth_required");
-    }
-
     /// A probe over an imported GitHub handle connection succeeds and logs
     /// nothing. Every such connection used to log a probe failure once a
     /// minute, because the probe looked for a stored credential binding these
@@ -5990,21 +5982,17 @@ mod tests {
         );
     }
 
-    /// A handle connection left `degraded` or `auth_required` recovers on a
-    /// successful probe, the same as any other connection. The fixture asserts
-    /// the recovered status; this also checks the pass logged no failure.
+    /// A handle connection left `degraded` recovers on a successful probe, the
+    /// same as any other connection. The fixture asserts the recovered status;
+    /// this also checks the pass logged no failure.
     #[test]
-    fn health_probe_recovers_a_degraded_or_auth_required_handle_connection() {
-        for fixture in [
-            "tests::health_probe_imported_handle_degraded_fixture",
-            "tests::health_probe_imported_handle_auth_required_fixture",
-        ] {
-            let stderr = module_diagnostic_output(fixture);
-            assert!(
-                !stderr.contains("health probe failed"),
-                "{fixture}: {stderr}"
-            );
-        }
+    fn health_probe_recovers_a_degraded_handle_connection() {
+        let fixture = "tests::health_probe_imported_handle_degraded_fixture";
+        let stderr = module_diagnostic_output(fixture);
+        assert!(
+            !stderr.contains("health probe failed"),
+            "{fixture}: {stderr}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -12269,97 +12257,6 @@ mod health_probe_scope_tests {
         assert_eq!(
             status, "active",
             "the scheduler's health probe must reach a degraded connection and recover it"
-        );
-    }
-
-    /// The spawned scheduler must probe `auth_required` connections, because a
-    /// restored credential can only recover them from a successful refresh.
-    ///
-    /// This uses the same REST probe path as the degraded-state test: discovery
-    /// resolves the credential and succeeds without a network call. If the
-    /// filter skips `auth_required`, recovery is unreachable even though the
-    /// refresh path has the correct guarded store update.
-    ///
-    /// Mutation-proved: removing the scheduler tick's `run_health_probes` call
-    /// leaves this row `auth_required` and fails the assertion below.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_spawned_scheduler_probes_auth_required_connections() {
-        let descriptor = StorageDescriptor {
-            module_id: "plexus".to_string(),
-            storage_namespace: format!("probe-auth-required-{}", std::process::id()),
-            isolation: cortexkit_store_types::Isolation::Module,
-            backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: ":memory:".to_string(),
-            },
-        };
-        let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
-
-        let manifest_source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa_rest.jsonc"),
-        )
-        .expect("read rest manifest");
-        let normalized = subc_jsonc::jsonc_to_json(&manifest_source).expect("normalize jsonc");
-        let ingested = plexus_core::ingest_value(
-            serde_json::from_str::<serde_json::Value>(&normalized).expect("parse manifest"),
-        )
-        .expect("ingest manifest");
-        store
-            .upsert_manifest("system", &ingested)
-            .expect("store manifest");
-        store
-            .insert_connection(
-                "direct",
-                "conn-rest",
-                &ingested.manifest.key,
-                "pending",
-                &json!({"required": [], "optional": [], "write_enabling": []}),
-            )
-            .expect("connection");
-        let ticket = store
-            .create_binding_ticket(
-                "direct",
-                "conn-rest",
-                b"test:probe-auth-required-test-handle",
-            )
-            .expect("binding ticket");
-        store
-            .connect_with_ticket("direct", &ticket.ticket_id)
-            .expect("consume ticket")
-            .expect("connection activated");
-        store
-            .set_connection_health(
-                "direct",
-                "conn-rest",
-                "auth_required",
-                &json!({"reason": "credential_auth_required"}),
-            )
-            .expect("mark auth required");
-
-        let state = Arc::new(ModuleState {
-            health: Arc::new(health::HealthState::new()),
-            runtime: runtime_for_test(Arc::clone(&store)),
-        });
-        let (shutdown, stop) = mpsc::channel::<()>(1);
-        let task = spawn_trigger_scheduler(
-            Arc::clone(&state),
-            stop,
-            DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY,
-        );
-        // The first probe is due immediately; wait one scheduler tick so the
-        // spawned task, rather than this test, performs the recovery.
-        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
-        let connection = store
-            .connection("direct", "conn-rest")
-            .expect("read")
-            .expect("row");
-        drop(shutdown);
-        task.await.expect("scheduler task joins");
-
-        assert_eq!(connection.status, "active");
-        assert_eq!(
-            connection.health_state,
-            json!({"reason": "credential_auth_recovered"}),
-            "the scheduler's health probe must reach an auth-required connection and recover it"
         );
     }
 

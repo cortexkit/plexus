@@ -199,6 +199,75 @@ mod tests {
         }).unwrap();
     }
 
+    /// A preview reads membership and writes only its audit row: it never
+    /// moves the connection's generation, never invalidates a reservation and
+    /// never changes the list, whether it previews an add or a remove.
+    #[test]
+    fn a_preview_never_moves_the_binding_generation() {
+        let scratch = Scratch::database("recipient-preview");
+        let store = PlexusStore::open(&cortexkit_store_types::StorageDescriptor {
+            module_id: "plexus".into(),
+            storage_namespace: "recipient-preview-store".into(),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: cortexkit_store_types::StorageBackend::Sqlite {
+                path: scratch.to_string_lossy().into_owned(),
+            },
+        })
+        .unwrap();
+        store
+            .insert_connection(
+                "owner",
+                "conn-mail",
+                "fixture",
+                "active",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        store
+            .change_recipient("owner", "conn-mail", None, "kept@example.com", true, true)
+            .unwrap();
+        store.inner.with_conn_fenced(|conn| conn.execute_batch(
+            "INSERT INTO reservations(reservation_id,principal,connection_id,action,snapshot_generations,approved_args_hash,schema_hash,expires_at,status,created_at_ms)
+                VALUES ('r','owner','conn-mail','send','{}','h','h',9007199254740991,'reserved',1)")).unwrap();
+        let before = store.connection("owner", "conn-mail").unwrap().unwrap();
+        for (recipient, add) in [("new@example.com", true), ("kept@example.com", false)] {
+            assert_eq!(
+                store
+                    .change_recipient("owner", "conn-mail", None, recipient, add, false)
+                    .unwrap(),
+                RecipientChange::Unchanged,
+                "a preview must not report a change"
+            );
+        }
+        assert_eq!(
+            store
+                .connection("owner", "conn-mail")
+                .unwrap()
+                .unwrap()
+                .generation,
+            before.generation,
+            "a preview must not move the binding generation"
+        );
+        let reservation: String = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT status FROM reservations WHERE reservation_id='r'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            reservation, "reserved",
+            "a preview must not invalidate a reservation"
+        );
+        assert_eq!(
+            store.list_recipients("owner", "conn-mail", None).unwrap(),
+            vec!["kept@example.com"]
+        );
+    }
+
     /// Two owners whose connections share an id keep separate lists: adding,
     /// listing, invalidating reservations and deleting the connection all stay
     /// on the one owner named.

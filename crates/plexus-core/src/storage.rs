@@ -3360,13 +3360,27 @@ impl PlexusStore {
     /// failure, once a refresh has succeeded again.
     ///
     /// Deliberately narrow: the UPDATE is guarded on `status = 'degraded'`, so
-    /// it can only ever undo the transition `mark_degraded` makes. The other
-    /// non-active statuses describe AUTHORITY rather than health — `revoked`,
-    /// `disabled` and `pending` are states an operator or a credential failure
-    /// put the connection into — and a successful vendor call is not grounds
-    /// to clear any of them. Doing this in SQL rather than by reading the
-    /// status and writing back keeps the guard inside the same statement, so a
-    /// concurrent revoke cannot land between the read and the write.
+    /// it can only ever undo the transition `mark_degraded` makes. `revoked`
+    /// and `pending` describe AUTHORITY rather than health, and a successful
+    /// vendor call is not grounds to clear either. Doing this in SQL rather
+    /// than by reading the status and writing back keeps the guard inside the
+    /// same statement, so a concurrent revoke cannot land between the read and
+    /// the write.
+    ///
+    /// This is the only status inverse, and the absence of the others is a
+    /// decision. `revoked` has no inverse because recovery must be a NEW
+    /// CEREMONY: a fresh binding ticket and a fresh connection, which is how a
+    /// permanent authority ceiling is supposed to arrive. That is perfectly
+    /// implementable and refused on purpose, so argue with it rather than
+    /// assuming it is impossible. `pending` is completed by `connect`, so its
+    /// inverse exists under a different name.
+    ///
+    /// The schema's status CHECK also admits `auth_required` and `disabled`,
+    /// but no production path writes either and neither has a recovery: they
+    /// are retired states. They stay in the constraint because narrowing it
+    /// would need a table-rebuilding migration, and leaving the schema as it
+    /// is keeps a rollback to an older binary safe. Readers treat them as not
+    /// routable.
     pub fn clear_connection_degraded(
         &self,
         principal: &str,
@@ -3380,56 +3394,6 @@ impl PlexusStore {
                  WHERE principal = ?3 AND connection_id = ?4 AND status = 'degraded'",
                 rusqlite::params![
                     "{\"reason\":\"catalog_refresh_recovered\"}",
-                    now,
-                    principal,
-                    connection_id
-                ],
-            )?;
-            Ok(changed != 0)
-        })
-    }
-
-    /// Restore a connection that was marked `auth_required` once its credential
-    /// resolves successfully again.
-    ///
-    /// Deliberately narrow: the UPDATE is guarded on `status = 'auth_required'`,
-    /// so it can only ever undo the transition credential resolution makes after
-    /// an authentication-required failure. The other non-active statuses describe
-    /// AUTHORITY rather than credential health — `revoked`, `disabled` and
-    /// `pending` must not be cleared merely because a credential now resolves.
-    /// Keeping the guard in SQL rather than reading the status first prevents a
-    /// concurrent authority change from landing between the check and this write.
-    ///
-    /// THE REMAINING ABSENCES ARE DECLINED, NOT FORCED, and this note exists
-    /// because two inverses now sit side by side. With `clear_connection_degraded`
-    /// and this function adjacent, the next reader reaches for
-    /// `clear_connection_revoked` by analogy, and nothing would tell them the gap
-    /// was chosen: an absence leaves no symbol to read and no test to fail.
-    ///
-    /// `revoked` and `disabled` have no inverse because recovery must be a NEW
-    /// CEREMONY: a fresh binding ticket and a fresh connection, which is how a
-    /// permanent authority ceiling is supposed to arrive. Both are perfectly
-    /// implementable and refused on purpose, so the decision is arguable — argue
-    /// with it rather than assuming it is impossible. That is the distinction
-    /// worth preserving: a DECLINED absence can be contested, an IMPOSSIBLE one
-    /// cannot, and collapsing them either invites someone to build the
-    /// impossible or stops them questioning a decision that deserves it.
-    ///
-    /// `pending` is neither: `connect` completes it, so its inverse exists under
-    /// a different name.
-    pub fn clear_connection_auth_required(
-        &self,
-        principal: &str,
-        connection_id: &str,
-    ) -> Result<bool, StoreError> {
-        let now = now_ms();
-        self.inner.with_conn_fenced(|conn| {
-            let changed = conn.execute(
-                "UPDATE connections SET status = 'active', health_state = ?1,
-                        generation = generation + 1, updated_at_ms = ?2
-                 WHERE principal = ?3 AND connection_id = ?4 AND status = 'auth_required'",
-                rusqlite::params![
-                    "{\"reason\":\"credential_auth_recovered\"}",
                     now,
                     principal,
                     connection_id
@@ -3504,11 +3468,13 @@ impl PlexusStore {
             if !connection_admin_grant_on_conn(conn, owner, connection_id, caller, now)? {
                 return Ok(ConnectionAdminRevokeOutcome::AdminRequired);
             }
-            Ok(if revoke_connection_on_conn(conn, owner, connection_id, now)? {
-                ConnectionAdminRevokeOutcome::Revoked
-            } else {
-                ConnectionAdminRevokeOutcome::ConnectionNotFound
-            })
+            Ok(
+                if revoke_connection_on_conn(conn, owner, connection_id, now)? {
+                    ConnectionAdminRevokeOutcome::Revoked
+                } else {
+                    ConnectionAdminRevokeOutcome::ConnectionNotFound
+                },
+            )
         })
     }
 
@@ -3689,7 +3655,13 @@ impl PlexusStore {
         action: &str,
         expected_schema_hash: &str,
     ) -> Result<Result<CatalogAction, RepinActionRefusal>, StoreError> {
-        self.repin_reviewed_action_with(principal, connection_id, action, expected_schema_hash, None)
+        self.repin_reviewed_action_with(
+            principal,
+            connection_id,
+            action,
+            expected_schema_hash,
+            None,
+        )
     }
 
     /// [`Self::repin_reviewed_action`] with its audit row, built from the
@@ -6138,7 +6110,14 @@ impl PlexusStore {
         effect: &str,
         expires_at: Option<i64>,
     ) -> Result<PolicyRecord, StoreError> {
-        self.set_policy_with(principal, connection_id, action_selector, effect, expires_at, None)
+        self.set_policy_with(
+            principal,
+            connection_id,
+            action_selector,
+            effect,
+            expires_at,
+            None,
+        )
     }
 
     /// [`Self::set_policy`] with its audit row, built from the stored policy,
@@ -9214,7 +9193,11 @@ fn revoke_connection_on_conn(
 /// those writes are kept for internal callers and tests.
 type AuditFor<'a, T> = Option<&'a dyn Fn(&T) -> AuditRecord>;
 
-fn append_audit_for<T>(conn: &Connection, audit: AuditFor<'_, T>, value: &T) -> rusqlite::Result<()> {
+fn append_audit_for<T>(
+    conn: &Connection,
+    audit: AuditFor<'_, T>,
+    value: &T,
+) -> rusqlite::Result<()> {
     match audit {
         Some(build) => append_audit_on_conn(conn, &build(value), None, None, None, None),
         None => Ok(()),

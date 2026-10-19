@@ -247,8 +247,8 @@ impl CatalogReconciler {
         };
         let mut registered = 0;
         for summary in connections {
-            // Only active or degraded connections are routable. Pending,
-            // auth_required, disabled and revoked connections stay unregistered.
+            // Only active or degraded connections are routable. Pending and
+            // revoked connections, and any other status, stay unregistered.
             if summary.status != "active" && summary.status != "degraded" {
                 continue;
             }
@@ -301,8 +301,8 @@ impl CatalogReconciler {
     /// What remains is what the probe is for on these connections: the stored
     /// row and its manifest must load, the REST transport config is registered
     /// again (transport config is in-memory and the probe is what repairs it),
-    /// and success clears `degraded` and `auth_required` through the same
-    /// guarded store updates as `refresh_rest`, so those recovery paths keep
+    /// and success clears `degraded` through the same guarded store update as
+    /// `refresh_rest`, so that recovery path keeps
     /// working. A failure here never marks the connection degraded. Returns no
     /// actions because no discovery ran.
     fn health_probe_handle_connection(
@@ -707,12 +707,6 @@ impl CatalogReconciler {
             .clear_connection_degraded(principal, connection_id)
         {
             eprintln!(warn catalog: "clear degraded health failed for connection {principal}/{connection_id}: {error}");
-        }
-        if let Err(error) = self
-            .store
-            .clear_connection_auth_required(principal, connection_id)
-        {
-            eprintln!(warn catalog: "clear auth_required health failed for connection {principal}/{connection_id}: {error}");
         }
     }
 
@@ -2470,16 +2464,12 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// A successful refresh must also clear an authentication-required health
-    /// state after its credential has been restored.
-    ///
-    /// Uses the real REST refresh call site so this proves the recovery runs as
-    /// part of refresh rather than merely proving the store UPDATE exists.
-    ///
-    /// Mutation-proved: deleting the `clear_connection_auth_required` call from
-    /// `refresh_rest` leaves the row `auth_required` and fails this test.
+    /// `auth_required` is a retired connection status: no production path
+    /// writes it, and nothing recovers from it. The schema still admits the
+    /// value so an older binary can open the store, so a legacy row holding it
+    /// must not be reactivated by a refresh as if it were a health state.
     #[test]
-    fn a_successful_refresh_clears_an_auth_required_connection() {
+    fn a_successful_refresh_does_not_reactivate_a_retired_auth_required_status() {
         let (store, path) = rest_test_store();
         let reconciler = CatalogReconciler::new(
             store.clone(),
@@ -2494,22 +2484,22 @@ mod tests {
                 "direct",
                 "connection",
                 "auth_required",
-                &json!({"reason": "credential_auth_required"}),
+                &json!({"reason": "legacy"}),
             )
-            .expect("mark auth required");
+            .expect("write a legacy status");
 
         reconciler
             .refresh_rest("direct", &connection, &manifest)
             .expect("rest refresh");
 
-        let connection = store
-            .connection("direct", "connection")
-            .expect("read")
-            .expect("row");
-        assert_eq!(connection.status, "active");
         assert_eq!(
-            connection.health_state,
-            json!({"reason": "credential_auth_recovered"})
+            store
+                .connection("direct", "connection")
+                .expect("read")
+                .expect("row")
+                .status,
+            "auth_required",
+            "a refresh must not treat the retired auth_required status as recoverable"
         );
         let _ = std::fs::remove_file(path);
     }
@@ -2517,17 +2507,16 @@ mod tests {
     /// Recovery must not resurrect a connection an operator stopped.
     ///
     /// The fix has to be narrow or it trades a liveness bug for an authority
-    /// one: `revoked`, `disabled` and `pending` describe AUTHORITY, not health,
-    /// and a vendor answering a tools/list call is no reason to clear any of
-    /// them. The guard lives in the SQL predicate rather than in a caller-side
-    /// status check, so a concurrent revoke cannot slip between a read and a
-    /// write.
+    /// one: `revoked` and `pending` describe AUTHORITY, not health, and a
+    /// vendor answering a tools/list call is no reason to clear either. The
+    /// guard lives in the SQL predicate rather than in a caller-side status
+    /// check, so a concurrent revoke cannot slip between a read and a write.
     ///
     /// Mutation-proved: dropping `AND status = 'degraded'` from the UPDATE
-    /// fails this test by reactivating all three.
+    /// fails this test by reactivating both.
     #[test]
     fn recovery_does_not_reactivate_a_connection_stopped_on_purpose() {
-        for stopped in ["revoked", "disabled", "pending"] {
+        for stopped in ["revoked", "pending"] {
             let (store, path) = test_store();
             if stopped == "revoked" {
                 store

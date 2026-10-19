@@ -4739,8 +4739,9 @@ pub(crate) fn connection_denial(connection: &ConnectionRecord) -> Option<Connect
             }
         }
         "pending" => Some(ConnectionDenial::Pending),
-        "disabled" => Some(ConnectionDenial::Disabled),
         "revoked" => Some(ConnectionDenial::Revoked),
+        // Every other status, including the retired `auth_required` and
+        // `disabled` the schema still admits, is refused as disabled.
         _ => Some(ConnectionDenial::Disabled),
     }
 }

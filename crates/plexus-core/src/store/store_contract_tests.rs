@@ -106,7 +106,7 @@ fn grant_mint_rechecks_revocation_at_insert() {
 }
 #[test]
 fn grant_mint_allows_nonrevoked_recovery_states() {
-    for status in ["pending", "degraded", "auth_required", "active"] {
+    for status in ["pending", "degraded", "active"] {
         let store = fixture();
         store
             .inner
@@ -543,7 +543,8 @@ fn connection_filter_configure_rechecks_admin_inside_its_transaction() {
                 &json!({"write_enabling": [], "values": {}})
             )
             .unwrap(),
-        ConfigureOutcome::AdminRequired
+        ConfigureOutcome::AdminRequired,
+        "a grant revoked mid-request must refuse the configure"
     );
     assert_eq!(
         store.connection("owner", "connection").unwrap().unwrap(),
@@ -562,7 +563,8 @@ fn connection_revoke_rechecks_admin_inside_its_transaction() {
         store
             .revoke_connection_if_admin("owner", "connection", "owner")
             .unwrap(),
-        ConnectionAdminRevokeOutcome::AdminRequired
+        ConnectionAdminRevokeOutcome::AdminRequired,
+        "a grant revoked mid-request must refuse the revoke"
     );
     assert_eq!(
         store.connection("owner", "connection").unwrap().unwrap(),
@@ -605,7 +607,11 @@ fn connection_admin_writes_apply_only_with_a_live_grant() {
         ConnectionAdminRevokeOutcome::Revoked
     );
     assert_eq!(
-        store.connection("owner", "connection").unwrap().unwrap().status,
+        store
+            .connection("owner", "connection")
+            .unwrap()
+            .unwrap()
+            .status,
         "revoked"
     );
     assert_eq!(
@@ -642,17 +648,33 @@ fn manifest_changes_and_retirements_are_audited_once_by_the_store() {
     store
         .upsert_manifest(CATALOG_PRINCIPAL, &manifest())
         .unwrap();
-    assert_eq!(manifest_change_rows(&store), 0, "a first ingest is not a change");
-    assert!(!store
-        .upsert_manifest(CATALOG_PRINCIPAL, &manifest())
-        .unwrap()
-        .changed);
-    assert_eq!(manifest_change_rows(&store), 0, "an identical re-ingest is not a change");
-    assert!(store
-        .upsert_manifest(CATALOG_PRINCIPAL, &edited_manifest("edited"))
-        .unwrap()
-        .changed);
-    assert_eq!(manifest_change_rows(&store), 1);
+    assert_eq!(
+        manifest_change_rows(&store),
+        0,
+        "a first ingest is not a change"
+    );
+    assert!(
+        !store
+            .upsert_manifest(CATALOG_PRINCIPAL, &manifest())
+            .unwrap()
+            .changed
+    );
+    assert_eq!(
+        manifest_change_rows(&store),
+        0,
+        "an identical re-ingest is not a change"
+    );
+    assert!(
+        store
+            .upsert_manifest(CATALOG_PRINCIPAL, &edited_manifest("edited"))
+            .unwrap()
+            .changed
+    );
+    assert_eq!(
+        manifest_change_rows(&store),
+        1,
+        "a content change is recorded"
+    );
     assert_eq!(
         store
             .retire_absent_manifests(CATALOG_PRINCIPAL, &["other".into()])
@@ -664,7 +686,11 @@ fn manifest_changes_and_retirements_are_audited_once_by_the_store() {
         .retire_absent_manifests(CATALOG_PRINCIPAL, &["other".into()])
         .unwrap()
         .is_empty());
-    assert_eq!(manifest_change_rows(&store), 2, "an already retired manifest is not retired again");
+    assert_eq!(
+        manifest_change_rows(&store),
+        2,
+        "an already retired manifest is not retired again"
+    );
 }
 /// The audit row shares the change's transaction: when the row cannot be
 /// written, neither the new manifest content nor the retirement is kept.
@@ -679,7 +705,10 @@ fn a_refused_manifest_audit_row_rolls_back_the_change() {
         .upsert_manifest(CATALOG_PRINCIPAL, &edited_manifest("edited"))
         .is_err());
     assert_eq!(
-        store.manifest_json(CATALOG_PRINCIPAL, "fixture").unwrap().unwrap()["description"],
+        store
+            .manifest_json(CATALOG_PRINCIPAL, "fixture")
+            .unwrap()
+            .unwrap()["description"],
         manifest().json["description"],
         "the unaudited content change must not be kept"
     );

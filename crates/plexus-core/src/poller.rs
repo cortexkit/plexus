@@ -2138,6 +2138,14 @@ where
                 }));
             }
             RepoResolutionAdmission::Reserved { cached_repo_id, .. } => cached_repo_id,
+            // The watch went inactive after this cycle began. That is the same
+            // outcome as the attempt stamp finding it inactive, not a store or
+            // vendor failure.
+            RepoResolutionAdmission::Inactive => {
+                return Err(PollCycle::NotEligible {
+                    reason: SUBSCRIPTION_NOT_ACTIVE.to_string(),
+                })
+            }
         };
         let mut grant_missing = false;
         let resolved = match request

@@ -293,8 +293,8 @@ fn enroll(store: &PlexusStore, risk: &str, selectors: &[&str]) -> String {
 /// `connect` IS the inverse of `pending`, pinned rather than asserted in prose.
 ///
 /// `pending` has no `clear_connection_pending`, and a reader counting the
-/// inverses beside `clear_connection_degraded` and
-/// `clear_connection_auth_required` could read that gap as an oversight. It is
+/// inverses beside `clear_connection_degraded` could read that gap as an
+/// oversight. It is
 /// not: the inverse exists under a name filed under ENROLMENT rather than
 /// repair, which is the category that misleads rather than blocks — the reader
 /// is not stopped, they are pointed at a more expensive path.

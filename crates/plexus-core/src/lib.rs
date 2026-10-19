@@ -285,14 +285,13 @@ pub use storage::now_ms;
 pub use storage::{
     ActionRequestRecord, ActorSource, AuditRecord, AuditRow, BindingTicket, CatalogAction,
     CatalogActionInput, CatalogActionReview, Ceiling, CeremonyRefusal, ConfigureOutcome,
-    ConnectionAdminRevokeOutcome,
-    ConnectionRecord, ConnectionSummary, ConsentSettlement, DeleteConnectionOutcome,
-    EventsConsumeAuthority, EventsIncludingGranted, GrantInput, GrantMintRequest, GrantRecord,
-    ManifestSummary, ManifestWriteOutcome, PlexusStore, PolicyInput, PolicyRecord, PollEventInput,
-    ProbeRegistration, ProbeSubscription, RelayOrigin, RepinActionRefusal, ReservationRecord,
-    SnapshotGenerations, SubscriptionRefusal, SubscriptionResumeRefusal, TriggerEvent,
-    TriggerEventInsertOutcome, TriggerSubscription, CATALOG_PRINCIPAL,
-    CIRCUIT_BREAKER_SUSPENSION_REASON, MIGRATIONS, NO_CREDENTIAL_REF_ROLE,
+    ConnectionAdminRevokeOutcome, ConnectionRecord, ConnectionSummary, ConsentSettlement,
+    DeleteConnectionOutcome, EventsConsumeAuthority, EventsIncludingGranted, GrantInput,
+    GrantMintRequest, GrantRecord, ManifestSummary, ManifestWriteOutcome, PlexusStore, PolicyInput,
+    PolicyRecord, PollEventInput, ProbeRegistration, ProbeSubscription, RelayOrigin,
+    RepinActionRefusal, ReservationRecord, SnapshotGenerations, SubscriptionRefusal,
+    SubscriptionResumeRefusal, TriggerEvent, TriggerEventInsertOutcome, TriggerSubscription,
+    CATALOG_PRINCIPAL, CIRCUIT_BREAKER_SUSPENSION_REASON, MIGRATIONS, NO_CREDENTIAL_REF_ROLE,
     PROBE_SUBSCRIPTION_ACTION,
 };
 #[cfg(any(test, feature = "test-support"))]
