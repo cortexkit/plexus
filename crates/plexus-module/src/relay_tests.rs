@@ -2371,7 +2371,7 @@ async fn relay_polling_gap_reset_and_overflow_restart_the_clock_and_catch_up() {
 }
 
 #[tokio::test]
-async fn relay_polling_disconnect_catches_up_once_and_reconnects_fresh() {
+async fn relay_polling_normal_disconnect_catches_up_once_and_reconnects_fresh() {
     let (scratch, store, _) = fixture("relay-disconnect-catchup");
     let release = kind_watch(&store, "get_latest_release");
     kind_watch(&store, "list_workflow_runs");
@@ -2407,8 +2407,7 @@ async fn relay_polling_disconnect_catches_up_once_and_reconnects_fresh() {
         .await
         .unwrap();
     wait_state(&status, State::Connected).await;
-    age_relay(&status, 3600);
-    assert_eq!(status.polling_status()["mode"], "relay_slow");
+    assert_eq!(status.polling_status()["mode"], "normal");
     assert!(scheduler.due_now(&["direct".into()], now).is_empty());
     socket.close(None).await.unwrap();
     wait_state(&status, State::Reconnecting).await;
@@ -2447,4 +2446,360 @@ async fn relay_polling_disconnect_catches_up_once_and_reconnects_fresh() {
     assert!(status.polling_status()["healthy_for_ms"].as_u64().unwrap() < 1000);
     drop(stop);
     bounded(task).await.unwrap();
+}
+
+#[test]
+fn relay_polling_clean_reconnect_grace_has_a_five_minute_limit() {
+    for (elapsed, expected) in [
+        (Duration::from_secs(300), "relay_slow"),
+        (Duration::from_secs(300) + Duration::from_nanos(1), "normal"),
+    ] {
+        let status = Status::default();
+        status.connected(ORIGINAL_STREAM.into(), None);
+        age_relay(&status, 3600);
+        status.set(State::Reconnecting);
+        let disconnected = status.0.lock().unwrap().disconnected_at.unwrap();
+        // The bound is inclusive; test it without sleeping or wall-clock jitter.
+        status.connected_at(ORIGINAL_STREAM.into(), None, disconnected + elapsed);
+        let snapshot = status.0.lock().unwrap();
+        assert_eq!(
+            if Status::slow_at(&snapshot, disconnected + elapsed) {
+                "relay_slow"
+            } else {
+                "normal"
+            },
+            expected,
+            "clean reconnect grace must end after five minutes"
+        );
+        assert_eq!(snapshot.reconcile_pending, expected == "normal");
+        if expected == "normal" {
+            assert_eq!(snapshot.last_clock_reset, "reconnect_timeout");
+        }
+    }
+}
+
+#[test]
+fn relay_polling_disqualifiers_cancel_reconnect_grace_immediately() {
+    for reason in [
+        "credential_rejected",
+        "not_home",
+        "no_credential",
+        "source_not_served",
+        "superseded",
+        "overflow",
+    ] {
+        let status = Status::default();
+        status.connected(ORIGINAL_STREAM.into(), None);
+        age_relay(&status, 3600);
+        status.set(State::Reconnecting);
+        assert_eq!(status.polling_status()["mode"], "relay_slow");
+        match reason {
+            "credential_rejected" => status.rejected(RejectionCause::Close4001),
+            "not_home" => status.set(State::NotHome),
+            "no_credential" => status.set(State::NoCredential),
+            "source_not_served" => status.set(State::SourceNotServed),
+            "superseded" => status.superseded(),
+            "overflow" => status.reset_clock("overflow"),
+            _ => unreachable!(),
+        }
+        assert_eq!(status.polling_status()["mode"], "normal", "{reason}");
+        assert_eq!(status.polling_status()["last_clock_reset"], reason);
+        assert!(status.0.lock().unwrap().disconnected_at.is_none());
+        // Overflow reconciliation is already committed with the event.
+        assert_eq!(status.take_reconcile(), reason != "overflow");
+        status.connected(ORIGINAL_STREAM.into(), None);
+        assert_eq!(status.polling_status()["mode"], "normal");
+    }
+}
+
+async fn reconnect_scenario(reason: &str) {
+    let (scratch, store, _) = fixture(&format!("relay-reconnect-{reason}"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1/relay/github/ws", listener.local_addr().unwrap());
+    let status = Arc::new(Status::default());
+    let task_status = status.clone();
+    let task_store = store.clone();
+    let (stop, rx) = mpsc::channel(1);
+    let task = tokio::spawn(async move {
+        run(
+            &url,
+            task_store,
+            Arc::new(StubCredentialSource::with_default_success(
+                b"secret".to_vec(),
+            )),
+            Arc::new(ConnectorHome::test_admitted()),
+            &task_status,
+            rx,
+        )
+        .await;
+    });
+    let (tcp, _) = bounded(listener.accept()).await.unwrap();
+    let mut socket = bounded(accept_async(tcp)).await.unwrap();
+    socket
+        .send(Message::Text(vector(HELLOS, "empty").into()))
+        .await
+        .unwrap();
+    wait_state(&status, State::Connected).await;
+    // Commit seq 1 so a clean resume must actually continue the durable cursor.
+    socket
+        .send(Message::Text(full_event().into()))
+        .await
+        .unwrap();
+    let ack = bounded(socket.next()).await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(ack.to_text().unwrap()).unwrap()["through_seq"],
+        1
+    );
+    let now = now_ms();
+    sql(
+        &scratch,
+        &format!("UPDATE trigger_subscriptions SET last_polled_at_ms={now}"),
+    );
+    age_relay(&status, 3600);
+    status.1.notify_one();
+    bounded(async {
+        while !status.0.lock().unwrap().logged_slow {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(status.polling_status()["mode"], "relay_slow");
+    socket.close(None).await.unwrap();
+    wait_state(&status, State::Reconnecting).await;
+    assert_eq!(status.polling_status()["mode"], "relay_slow");
+    assert_eq!(due(&scratch), 0, "short disconnect must not queue catch-up");
+    let (tcp, _) = bounded(listener.accept()).await.unwrap();
+    let mut socket = bounded(accept_async(tcp)).await.unwrap();
+    let mut greeting: Value = serde_json::from_str(&vector(HELLOS, "empty")).unwrap();
+    greeting["next_seq"] = json!(2);
+    greeting["oldest_seq"] = json!(2);
+    greeting["last_acked_seq"] = json!(1);
+    match reason {
+        "clean" => {}
+        "timeout" => {
+            status.0.lock().unwrap().disconnected_at =
+                Some(Instant::now() - Duration::from_secs(600));
+            status.1.notify_one();
+            // No hello or health read: the supervisor must time out a stalled handshake itself.
+            bounded(async {
+                while due(&scratch) != 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            assert_eq!(
+                status.polling_status()["last_clock_reset"],
+                "reconnect_timeout"
+            );
+        }
+        "gap" => {
+            greeting["next_seq"] = json!(4);
+            greeting["oldest_seq"] = json!(3);
+        }
+        "sequence_reset" => {
+            greeting["next_seq"] = json!(1);
+            greeting["oldest_seq"] = json!(1);
+            greeting["last_acked_seq"] = json!(0);
+        }
+        "stream_changed" => greeting["stream_id"] = json!(RECREATED_STREAM),
+        _ => unreachable!(),
+    }
+    socket
+        .send(Message::Text(greeting.to_string().into()))
+        .await
+        .unwrap();
+    wait_state(&status, State::Connected).await;
+    if reason == "clean" {
+        assert_eq!(status.polling_status()["mode"], "relay_slow");
+        assert_eq!(due(&scratch), 0, "clean resume must not queue catch-up");
+        assert!(relay_scheduler(&store, status.clone())
+            .due_now(&["direct".into()], now + 300_000)
+            .is_empty());
+        let mut event: Value = serde_json::from_str(&full_event()).unwrap();
+        event["seq"] = json!(2);
+        event["delivery_id"] = json!("resumed-event");
+        socket
+            .send(Message::Text(event.to_string().into()))
+            .await
+            .unwrap();
+        let ack = bounded(socket.next()).await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(ack.to_text().unwrap()).unwrap()["through_seq"],
+            2
+        );
+        assert_eq!(
+            store.relay_cursor(SOURCE).unwrap().unwrap().committed_seq,
+            2
+        );
+    } else {
+        assert_eq!(
+            status.polling_status()["mode"],
+            "normal",
+            "reset hello must cancel slow reconnect grace: {reason}"
+        );
+        assert_eq!(due(&scratch), 2);
+        assert_eq!(
+            status.polling_status()["last_clock_reset"],
+            if reason == "timeout" {
+                "reconnect_timeout"
+            } else {
+                reason
+            }
+        );
+        assert!(status.polling_status()["healthy_for_ms"].as_u64().unwrap() < 1000);
+    }
+    drop(stop);
+    bounded(task).await.unwrap();
+}
+
+#[tokio::test]
+async fn relay_polling_short_clean_reconnect_preserves_slow_without_catchup() {
+    reconnect_scenario("clean").await;
+}
+
+#[tokio::test]
+async fn relay_polling_expired_reconnect_goes_normal_without_waiting_for_hello() {
+    reconnect_scenario("timeout").await;
+}
+
+#[tokio::test]
+async fn relay_polling_reset_hello_cancels_slow_reconnect_grace() {
+    reconnect_scenario("gap").await;
+    reconnect_scenario("sequence_reset").await;
+}
+
+#[tokio::test]
+async fn relay_polling_changed_stream_cancels_slow_reconnect_grace() {
+    reconnect_scenario("stream_changed").await;
+}
+
+#[test]
+fn relay_polling_mode_changes_log_once_with_reason() {
+    const TEST: &str = "relay::tests::relay_polling_mode_changes_log_once_with_reason";
+    let reasons = [
+        "overflow",
+        "gap",
+        "stream_changed",
+        "sequence_reset",
+        "not_home",
+        "credential_rejected",
+        "superseded",
+        "reconnect_timeout",
+    ];
+    if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
+        let output = crate::bounded::child_output(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+            Duration::from_secs(30),
+            "polling mode log child",
+        )
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        for reason in reasons {
+            let message = format!("GitHub polling mode changed: mode=normal reason={reason}");
+            assert_eq!(
+                stderr.matches(&message).count(),
+                1,
+                "every fallback must log its reason exactly once: {stderr}"
+            );
+        }
+        assert_eq!(stderr.matches("GitHub polling mode changed: mode=relay_slow reason=healthy_relay_window_elapsed").count(), reasons.len() + 1, "slow entry must log once: {stderr}");
+        assert_eq!(
+            stderr
+                .matches("GitHub polling kept relay_slow: reason=clean_resume")
+                .count(),
+            1,
+            "clean resume needs one explanation: {stderr}"
+        );
+        assert_eq!(
+            stderr.matches("GitHub polling mode changed:").count(),
+            reasons.len() * 2 + 1,
+            "reads must not repeat transition logs: {stderr}"
+        );
+        return;
+    }
+    diagnostic_logging::init_child();
+    for reason in reasons {
+        let status = Status::default();
+        status.connected(ORIGINAL_STREAM.into(), None);
+        age_relay(&status, 3600);
+        assert_eq!(status.polling_status()["mode"], "relay_slow");
+        status.polling_status();
+        match reason {
+            "overflow" => status.reset_clock(reason),
+            "gap" | "stream_changed" | "sequence_reset" => {
+                use plexus_core::storage::relay::CoverageReset;
+                status.set(State::Reconnecting);
+                let reset = match reason {
+                    "gap" => CoverageReset::Gap,
+                    "stream_changed" => CoverageReset::StreamChanged,
+                    _ => CoverageReset::SequenceReset,
+                };
+                status.connected(ORIGINAL_STREAM.into(), Some(reset));
+            }
+            "not_home" => status.set(State::NotHome),
+            "credential_rejected" => status.rejected(RejectionCause::Close4001),
+            "superseded" => status.superseded(),
+            "reconnect_timeout" => {
+                status.set(State::Reconnecting);
+                status.0.lock().unwrap().disconnected_at =
+                    Some(Instant::now() - Duration::from_secs(600));
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(status.polling_status()["mode"], "normal");
+        status.polling_status();
+    }
+    let status = Status::default();
+    status.connected(ORIGINAL_STREAM.into(), None);
+    age_relay(&status, 3600);
+    status.polling_status();
+    status.set(State::Reconnecting);
+    status.connected(ORIGINAL_STREAM.into(), None);
+    assert_eq!(status.polling_status()["mode"], "relay_slow");
+}
+
+#[test]
+fn relay_marker_logging_counts_committed_watches_and_suppresses_repeats() {
+    const TEST: &str =
+        "relay::tests::relay_marker_logging_counts_committed_watches_and_suppresses_repeats";
+    if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
+        let output = crate::bounded::child_output(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+            Duration::from_secs(30),
+            "marker due log child",
+        )
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert_eq!(
+            stderr.matches("relay markers made watches due:").count(),
+            1,
+            "marker bursts need one rate-limited line: {stderr}"
+        );
+        assert!(
+            stderr.contains("latest_reason=installation_bound markers=1 watch_marks=2"),
+            "log must count the affected watches: {stderr}"
+        );
+        return;
+    }
+    diagnostic_logging::init_child();
+    let (scratch, store, _) = fixture("relay-marker-log");
+    store
+        .relay_hello(
+            SOURCE,
+            &serde_json::from_str::<Hello>(&vector(HELLOS, "empty")).unwrap(),
+        )
+        .unwrap();
+    for seq in 1..=2 {
+        let event: Event = serde_json::from_value(json!({"seq":seq,"delivery_id":format!("marker-{seq}"),"event":"cortexkit_installation_bound","installation_id":42,"received_at":TIME,"stub":null,"body":{"repositories":null}})).unwrap();
+        store
+            .commit_relay_event(SOURCE, ORIGINAL_STREAM, &event)
+            .unwrap();
+    }
+    assert_eq!(due(&scratch), 2);
 }

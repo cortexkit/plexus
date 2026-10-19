@@ -37,6 +37,7 @@ const CREDENTIAL_RECHECK: Duration = Duration::from_secs(300);
 const NOT_HOME_RECHECK: Duration = Duration::from_secs(30);
 const INITIAL_CREDENTIAL_RECHECK: Duration = Duration::from_secs(5);
 const HEALTHY_RELAY_WINDOW: Duration = Duration::from_secs(3600);
+const CLEAN_RECONNECT_WINDOW: Duration = Duration::from_secs(300);
 const PING_PERIOD: Duration = Duration::from_secs(30);
 const RECEIVE_DEADLINE: Duration = Duration::from_secs(60);
 const SUPERSEDED_MESSAGE: &str =
@@ -90,18 +91,29 @@ struct Snapshot {
     connected_since: Option<Instant>,
     healthy_since: Option<Instant>,
     last_clock_reset: &'static str,
+    stream_id: Option<String>,
+    disconnected_at: Option<Instant>,
+    logged_slow: bool,
+    reconcile_pending: bool,
 }
-pub struct Status(Mutex<Snapshot>);
+pub struct Status(Mutex<Snapshot>, tokio::sync::Notify);
 impl Default for Status {
     fn default() -> Self {
-        Self(Mutex::new(Snapshot {
-            state: State::NoCredential,
-            last_event_at: None,
-            superseded: false,
-            connected_since: None,
-            healthy_since: None,
-            last_clock_reset: "process_started",
-        }))
+        Self(
+            Mutex::new(Snapshot {
+                state: State::NoCredential,
+                last_event_at: None,
+                superseded: false,
+                connected_since: None,
+                healthy_since: None,
+                last_clock_reset: "process_started",
+                stream_id: None,
+                disconnected_at: None,
+                logged_slow: false,
+                reconcile_pending: false,
+            }),
+            tokio::sync::Notify::new(),
+        )
     }
 }
 impl Status {
@@ -114,23 +126,33 @@ impl Status {
     fn transition(&self, state: State, cause: Option<RejectionCause>) {
         let changed = {
             let mut status = self.0.lock().unwrap();
+            let now = Instant::now();
+            Self::observe(&mut status, now);
             let changed = status.state != state;
             if changed {
                 if state == State::Connected {
-                    status.connected_since = Some(Instant::now());
+                    status.connected_since = Some(now);
                     status.healthy_since = status.connected_since;
-                } else {
+                    status.disconnected_at = None;
+                } else if state == State::Reconnecting && Self::slow_at(&status, now) {
+                    // Cursor replay can bridge a short transport outage without a full poll.
+                    status.disconnected_at = Some(now);
                     status.connected_since = None;
-                    status.healthy_since = None;
-                    status.last_clock_reset = state.name();
+                } else {
+                    let reconcile =
+                        status.state == State::Connected || status.disconnected_at.is_some();
+                    Self::fall_back(&mut status, state.name(), reconcile);
+                    status.connected_since = None;
                 }
             }
             status.state = state;
             if state != State::Reconnecting {
                 status.superseded = false;
             }
+            Self::observe(&mut status, now);
             changed
         };
+        self.1.notify_one();
         if changed {
             log_transition(state, cause);
         }
@@ -138,14 +160,17 @@ impl Status {
     fn superseded(&self) {
         let changed = {
             let mut status = self.0.lock().unwrap();
+            Self::observe(&mut status, Instant::now());
             let changed = status.state != State::Reconnecting;
+            let reconcile = status.state == State::Connected || status.disconnected_at.is_some();
+            Self::fall_back(&mut status, "superseded", reconcile);
             status.state = State::Reconnecting;
             status.superseded = true;
             status.connected_since = None;
-            status.healthy_since = None;
-            status.last_clock_reset = "superseded";
+            Self::observe(&mut status, Instant::now());
             changed
         };
+        self.1.notify_one();
         if changed {
             log_transition(State::Reconnecting, None);
         }
@@ -155,20 +180,111 @@ impl Status {
     }
     fn reset_clock(&self, reason: &'static str) {
         let mut status = self.0.lock().unwrap();
+        Self::observe(&mut status, Instant::now());
+        Self::fall_back(&mut status, reason, false);
         status.healthy_since = status.connected_since.map(|_| Instant::now());
+        Self::observe(&mut status, Instant::now());
+        self.1.notify_one();
+    }
+    fn connected(&self, stream: String, reset: Option<plexus_core::storage::relay::CoverageReset>) {
+        self.connected_at(stream, reset, Instant::now());
+    }
+    fn connected_at(
+        &self,
+        stream: String,
+        reset: Option<plexus_core::storage::relay::CoverageReset>,
+        now: Instant,
+    ) {
+        let mut status = self.0.lock().unwrap();
+        Self::observe(&mut status, now);
+        let disconnected = status.disconnected_at;
+        let clean_resume = disconnected
+            .is_some_and(|since| now.saturating_duration_since(since) <= CLEAN_RECONNECT_WINDOW)
+            && status.stream_id.as_ref() == Some(&stream)
+            && reset.is_none();
+        if clean_resume {
+            eprintln!(info relay: "GitHub polling kept relay_slow: reason=clean_resume disconnect_ms={} stream_unchanged=true reset=none", now.saturating_duration_since(disconnected.unwrap()).as_millis());
+        } else if disconnected.is_some() || reset.is_some() {
+            let reason = reset.map_or("stream_changed", |reset| reset.name());
+            // A reset hello already queued reconciliation in its store transaction.
+            Self::fall_back(&mut status, reason, reset.is_none());
+            if reset.is_some() {
+                status.reconcile_pending = false;
+            }
+        }
+        let changed = status.state != State::Connected;
+        if !clean_resume && (changed || status.healthy_since.is_none()) {
+            status.healthy_since = Some(now);
+        }
+        status.connected_since = if changed {
+            Some(now)
+        } else {
+            status.connected_since
+        };
+        status.state = State::Connected;
+        status.stream_id = Some(stream);
+        status.disconnected_at = None;
+        status.superseded = false;
+        Self::observe(&mut status, now);
+        drop(status);
+        self.1.notify_one();
+        if changed {
+            log_transition(State::Connected, None);
+        }
+    }
+    fn fall_back(status: &mut Snapshot, reason: &'static str, reconcile: bool) {
+        status.healthy_since = None;
+        status.disconnected_at = None;
         status.last_clock_reset = reason;
+        status.reconcile_pending |= reconcile;
+    }
+    fn observe(status: &mut Snapshot, now: Instant) -> bool {
+        if status
+            .disconnected_at
+            .is_some_and(|since| now.saturating_duration_since(since) > CLEAN_RECONNECT_WINDOW)
+        {
+            Self::fall_back(status, "reconnect_timeout", true);
+        }
+        let slow = Self::slow_at(status, now);
+        if slow != status.logged_slow {
+            eprintln!(info relay: "GitHub polling mode changed: mode={} reason={}", if slow { "relay_slow" } else { "normal" }, if slow { "healthy_relay_window_elapsed" } else { status.last_clock_reset });
+            status.logged_slow = slow;
+        }
+        slow
+    }
+    fn polling_deadline(&self) -> Option<Instant> {
+        let status = self.0.lock().unwrap();
+        if let Some(since) = status.disconnected_at {
+            Some(since + CLEAN_RECONNECT_WINDOW + Duration::from_nanos(1))
+        } else if status.state == State::Connected && !status.logged_slow {
+            status
+                .healthy_since
+                .map(|since| since + HEALTHY_RELAY_WINDOW)
+        } else {
+            None
+        }
+    }
+    fn take_reconcile(&self) -> bool {
+        let mut status = self.0.lock().unwrap();
+        Self::observe(&mut status, Instant::now());
+        std::mem::take(&mut status.reconcile_pending)
     }
     fn slow_at(status: &Snapshot, now: Instant) -> bool {
-        status.state == State::Connected
+        (status.state == State::Connected
+            || status.disconnected_at.is_some_and(|since| {
+                now.saturating_duration_since(since) <= CLEAN_RECONNECT_WINDOW
+            }))
             && status
                 .healthy_since
                 .is_some_and(|since| now.saturating_duration_since(since) >= HEALTHY_RELAY_WINDOW)
     }
     pub(crate) fn polling_status(&self) -> Value {
-        let s = self.0.lock().unwrap();
+        let mut s = self.0.lock().unwrap();
         let now = Instant::now();
+        let slow = Self::observe(&mut s, now);
+        self.1.notify_one();
         json!({
-            "mode": if Self::slow_at(&s, now) { "relay_slow" } else { "normal" },
+            "mode": if slow { "relay_slow" } else { "normal" },
             "relay_state": s.state.name(),
             "connected_for_ms": s.connected_since.map(|since| now.saturating_duration_since(since).as_millis()),
             "healthy_for_ms": s.healthy_since.map(|since| now.saturating_duration_since(since).as_millis()),
@@ -193,7 +309,9 @@ impl Status {
 
 impl plexus_core::scheduler::RelayPollingHealth for Status {
     fn slow_polling(&self) -> bool {
-        Self::slow_at(&self.0.lock().unwrap(), Instant::now())
+        let slow = Self::observe(&mut self.0.lock().unwrap(), Instant::now());
+        self.1.notify_one();
+        slow
     }
 }
 
@@ -381,10 +499,7 @@ async fn consume(
                             }
                         };
                         stream = Some(stream_id);
-                        status.set(State::Connected);
-                        if let Some(reset) = reset {
-                            status.reset_clock(reset.name());
-                        }
+                        status.connected(stream.as_ref().unwrap().clone(), reset);
                     }
                     Frame::Event(event) if stream.is_some() => {
                         if event.seq != next {
@@ -465,6 +580,39 @@ async fn run(
     credentials: Arc<dyn CredentialSource>,
     home: Arc<ConnectorHome>,
     status: &Status,
+    stop: mpsc::Receiver<()>,
+) {
+    let connection = run_connections(url, store.clone(), credentials, home, status, stop);
+    tokio::pin!(connection);
+    loop {
+        let deadline = status.polling_deadline();
+        tokio::select! {
+            _ = &mut connection => return,
+            _ = status.1.notified() => {},
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                    None => std::future::pending().await,
+                }
+            } => {},
+        }
+        // Run even while credential lookup, dialing or receiving a hello is stalled.
+        if status.take_reconcile() {
+            let db = store.clone();
+            local_store_failed(
+                "disconnect reconcile",
+                tokio::task::spawn_blocking(move || db.relay_disconnected()).await,
+            );
+        }
+    }
+}
+
+async fn run_connections(
+    url: &str,
+    store: Arc<PlexusStore>,
+    credentials: Arc<dyn CredentialSource>,
+    home: Arc<ConnectorHome>,
+    status: &Status,
     mut stop: mpsc::Receiver<()>,
 ) {
     let mut rejected: Option<(Zeroizing<Vec<u8>>, RejectionCause)> = None;
@@ -519,7 +667,6 @@ async fn run(
             } => result.unwrap_or_else(|failure| failure),
         };
         reset_failure_count(status.0.lock().unwrap().state, failure, &mut failures);
-        let was_connected = status.0.lock().unwrap().state == State::Connected;
         if status.0.lock().unwrap().state == State::Connected && failure != Failure::Superseded {
             credential_recheck = INITIAL_CREDENTIAL_RECHECK;
         }
@@ -558,13 +705,6 @@ async fn run(
                 failures = failures.saturating_add(1);
                 delay = backoff(failures);
             }
-        }
-        if was_connected {
-            let db = store.clone();
-            local_store_failed(
-                "disconnect reconcile",
-                tokio::task::spawn_blocking(move || db.relay_disconnected()).await,
-            );
         }
     }
 }
