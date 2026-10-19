@@ -141,6 +141,28 @@ fn published_event_declarations() -> Vec<EventDeclaration> {
         .collect()
 }
 
+/// Where the provenance's commit came from, read from the `PLEXUS_BUILD_COMMIT`
+/// value build.rs stamps: a 40-hex commit for a clean build, the same commit
+/// with `-dirty` when compiled inputs had uncommitted changes, or
+/// `unavailable` when git could not be asked. The dirty check is the one
+/// build.rs runs for the `-dirty` suffix (`git status --porcelain` over the
+/// compiled inputs, without optional locks), so the wire provenance and the
+/// health and `--version` commit never disagree about the same build.
+fn build_git_sha_source(build_commit: &str) -> subc_protocol::manifest::BuildGitShaSource<'_> {
+    use subc_protocol::manifest::{BuildGitShaSource, GitTreeState};
+    match build_commit.strip_suffix("-dirty") {
+        _ if build_commit == "unavailable" => BuildGitShaSource::NoGitDir,
+        Some(revision) => BuildGitShaSource::Git {
+            revision,
+            tree_state: GitTreeState::Dirty,
+        },
+        None => BuildGitShaSource::Git {
+            revision: build_commit,
+            tree_state: GitTreeState::Clean,
+        },
+    }
+}
+
 /// Build the stable facade of eleven public tools. Connector actions are not
 /// exposed as separate tools; the facade returns the current connector catalog instead.
 ///
@@ -196,7 +218,7 @@ pub fn build_with_launch_nonce_source(
         // declared on the wire so the supervisor's declared-vs-observed
         // attestation covers this module without shelling into the binary.
         //
-        // Routed through `build_provenance` rather than a struct literal so
+        // Routed through `build_provenance_from_source` rather than a struct literal so
         // the canonical-form validation actually runs against what this module
         // publishes (a literal compiles clean whatever the values are), and so
         // `wire_crate_version` comes from the linked protocol crate instead of
@@ -205,15 +227,12 @@ pub fn build_with_launch_nonce_source(
         // A dirty build omits the sha instead of publishing `<sha>-dirty`: the
         // suffix is deploy-ladder vocabulary (health `buildCommit` keeps it),
         // but on the wire a 40-hex value claims "this binary is that commit",
-        // which a dirty tree cannot honestly claim — and an absent field
-        // prompts the reader to ask, where a malformed one would just fail
-        // form validation at boot.
+        // which a dirty tree cannot honestly claim. The source-aware builder
+        // also says why the sha is absent (a dirty tree, or no git at build
+        // time), so the placement gate can tell the reader what to fix.
     .provenance(Some({
-            let build_commit = env!("PLEXUS_BUILD_COMMIT");
-            let build_git_sha =
-                (!build_commit.ends_with("-dirty")).then_some(build_commit);
-            subc_protocol::manifest::build_provenance(
-                build_git_sha,
+            subc_protocol::manifest::build_provenance_from_source(
+                build_git_sha_source(env!("PLEXUS_BUILD_COMMIT")),
                 Some(env!("PLEXUS_LOCK_DIGEST")),
                 Some(&plexus_core::storage::MIGRATIONS.len().to_string()),
             )
@@ -642,6 +661,31 @@ mod build_support;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provenance_declines_a_dirty_build_and_names_a_missing_git() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let provenance = |commit: &str| {
+            serde_json::to_value(
+                subc_protocol::manifest::build_provenance_from_source(
+                    super::build_git_sha_source(commit),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let clean = provenance(sha);
+        assert_eq!(clean["build_git_sha"], sha);
+        assert!(clean.get("build_git_sha_absence_reason").is_none());
+        let dirty = provenance(&format!("{sha}-dirty"));
+        assert!(dirty.get("build_git_sha").is_none(), "{dirty}");
+        assert_eq!(dirty["build_git_sha_absence_reason"], "declined_dirty");
+        let missing = provenance("unavailable");
+        assert!(missing.get("build_git_sha").is_none(), "{missing}");
+        assert_eq!(missing["build_git_sha_absence_reason"], "no_git_dir");
+    }
+
     #[test]
     fn regression_dirty_marker_checks_only_watched_compiled_inputs() {
         let scratch = plexus_core::test_scratch::Scratch::directory("build-dirty-inputs");

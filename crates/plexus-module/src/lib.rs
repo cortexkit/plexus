@@ -380,6 +380,18 @@ pub fn version_line() -> String {
     )
 }
 
+/// The JSON `ck-plexus --manifest` prints: the manifest this module registers,
+/// including its `provenance` object. Under a supervisor the module id comes
+/// from `SUBC_MODULE_ID`; a placement check runs without one and gets the
+/// default id.
+pub fn printed_manifest() -> String {
+    let module_id = std::env::var(SUBC_MODULE_ID_ENV)
+        .ok()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| DEFAULT_MODULE_ID.to_string());
+    serde_json::to_string(&manifest::build(&module_id)).expect("module manifest serializes")
+}
+
 /// Binary entry point used by `ck-plexus`.
 pub async fn run_entry() -> Result<(), ModuleError> {
     // Placement scripts check a staged binary before the supervisor launches
@@ -391,6 +403,19 @@ pub async fn run_entry() -> Result<(), ModuleError> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--version") {
         println!("{}", version_line());
+        return Ok(());
+    }
+    // SUBC's placement gate runs a staged binary with only `--manifest`, with
+    // no daemon, store, network or stdin and a short alarm, and reads the
+    // build provenance from the printed JSON. It is the manifest this module
+    // registers, so it is answered here, before anything reads the supervisor
+    // environment or opens a store.
+    if args.first().is_some_and(|arg| arg == "--manifest") {
+        if args.len() != 1 {
+            std::eprintln!("usage: ck-plexus --manifest");
+            std::process::exit(2);
+        }
+        println!("{}", printed_manifest());
         return Ok(());
     }
     if args.first().is_some_and(|arg| arg == "--check-catalog") {
@@ -426,7 +451,7 @@ pub async fn run_entry() -> Result<(), ModuleError> {
         .first()
         .is_some_and(|arg| arg == "--help" || arg == "-h")
     {
-        println!("usage: ck-plexus [--version | --help | --check-catalog <dir> | --smoke-probe]\n\n  --check-catalog <dir>  Validate catalog manifests without supervisor, store or network access\n                        Exit 0: all ok; 1: refused manifest; 2: usage or I/O error\n  --smoke-probe          Run one guest through the probe sandbox without supervisor, store or network access\n                        Exit 0: the guest ran and answered correctly; 1: it did not; 2: usage error");
+        println!("usage: ck-plexus [--version | --help | --manifest | --check-catalog <dir> | --smoke-probe]\n\n  --manifest             Print the module manifest with its build provenance as JSON, without supervisor, store or network access\n  --check-catalog <dir>  Validate catalog manifests without supervisor, store or network access\n                        Exit 0: all ok; 1: refused manifest; 2: usage or I/O error\n  --smoke-probe          Run one guest through the probe sandbox without supervisor, store or network access\n                        Exit 0: the guest ran and answered correctly; 1: it did not; 2: usage error");
         return Ok(());
     }
     // Only the executable owns the subscriber; library hosts install their own.
