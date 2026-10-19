@@ -43,6 +43,7 @@ pub mod smoke;
 #[path = "../../plexus-core/tests/support/http_server.rs"]
 mod test_http;
 mod tool_provider;
+mod web_search_health;
 pub mod wire;
 #[cfg(test)]
 mod wire_safety_tests;
@@ -4245,6 +4246,15 @@ fn connector_home_health(state: &ModuleState) -> ModuleControlResponse {
                 }
             }
             metrics["lastPublishError"] = json!(state.health.last_publish_error());
+            metrics["webSearch"] = web_search_health::render(
+                state
+                    .health
+                    .web_search
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_ref(),
+                &state.runtime.web_search,
+            );
         }
     }
     report
@@ -4277,6 +4287,22 @@ fn refresh_store_health(state: &ModuleState, principals: &[String]) {
             metrics["effectiveCiCadenceS"] = Value::Null;
         }
     }
+    let web_search = match web_search_health::snapshot(
+        state.store(),
+        principals,
+        state.runtime.web_search.now_ms(),
+    ) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            eprintln!(warn health: "web search health read failed: {error}");
+            None
+        }
+    };
+    *state
+        .health
+        .web_search
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = web_search;
     *state
         .health
         .store_metrics

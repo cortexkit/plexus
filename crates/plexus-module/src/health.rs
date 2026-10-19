@@ -61,6 +61,9 @@ type CredentialRepairSource = Box<dyn Fn() -> BTreeMap<String, String> + Send + 
 pub struct HealthState {
     pub(crate) relay: Arc<crate::relay::Status>,
     pub(crate) store_metrics: std::sync::Mutex<serde_json::Value>,
+    /// The store facts behind the `webSearch` metric, read with
+    /// `store_metrics`; `None` until read, or after a failed read.
+    pub(crate) web_search: std::sync::Mutex<Option<crate::web_search_health::Snapshot>>,
     publish_error: std::sync::Mutex<Option<String>>,
     started_at_ms: u64,
     /// Wall-clock instant when the dispatch loop last showed it was responsive.
@@ -244,6 +247,7 @@ impl HealthState {
         Self {
             relay: Arc::new(crate::relay::Status::default()),
             store_metrics: std::sync::Mutex::new(serde_json::json!({})),
+            web_search: std::sync::Mutex::new(None),
             publish_error: std::sync::Mutex::new(None),
             started_at_ms: now,
             last_heartbeat_ms: AtomicU64::new(now),

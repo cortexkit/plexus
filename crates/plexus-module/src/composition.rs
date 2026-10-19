@@ -170,7 +170,7 @@ impl ModuleRuntime {
             github_handle_credentials,
             github_control_reader: None,
             endpoint_override: None,
-            web_search: Arc::new(WebSearchService::exa()),
+            web_search: Arc::new(WebSearchService::production()),
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),
         }
     }
@@ -213,7 +213,7 @@ impl ModuleRuntime {
             github_handle_credentials: None,
             github_control_reader: None,
             endpoint_override: None,
-            web_search: Arc::new(WebSearchService::exa()),
+            web_search: Arc::new(WebSearchService::production()),
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),
         }
     }
@@ -257,7 +257,7 @@ impl ModuleRuntime {
             github_handle_credentials: None,
             github_control_reader: None,
             endpoint_override,
-            web_search: Arc::new(WebSearchService::exa()),
+            web_search: Arc::new(WebSearchService::production()),
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),
         }
     }
@@ -612,6 +612,55 @@ mod github_facade_wiring_tests {
         assert!(
             matches!(denied, Err(Denial::BotActionRequiresFacade)),
             "{denied:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod web_search_composition_tests {
+    use super::*;
+    use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+    use plexus_core::web_search::providers::PROVIDER_NAMES;
+    use plexus_core::web_search::registered_backend;
+
+    #[test]
+    fn production_composition_registers_every_backend_in_the_name_table_registry() {
+        let scratch = plexus_core::test_scratch::Scratch::database("module-web-search-composition");
+        let store = Arc::new(
+            PlexusStore::open(&StorageDescriptor {
+                module_id: "plexus".into(),
+                storage_namespace: "module-web-search-composition".into(),
+                isolation: Isolation::Module,
+                backend: StorageBackend::Sqlite {
+                    path: scratch.path().to_string_lossy().into_owned(),
+                },
+            })
+            .unwrap(),
+        );
+        let runtime = ModuleRuntime::production(store, Path::new("/unavailable-route"));
+
+        let mut registered = Vec::new();
+        for provider in PROVIDER_NAMES {
+            if let Some(backend) = registered_backend(provider) {
+                assert_eq!(
+                    (backend.name(), backend.app_key(), backend.action()),
+                    (provider.name, provider.app_key, provider.action),
+                    "a registered backend serves exactly its name-table row"
+                );
+                registered.push(provider.name);
+            }
+        }
+        registered.sort_unstable();
+        assert!(registered.contains(&"exa"), "{registered:?}");
+        assert_eq!(
+            runtime.web_search.chain_backend_names(),
+            registered,
+            "the production service offers an order every registered backend"
+        );
+        assert_eq!(
+            runtime.web_search.backend_name(),
+            "exa",
+            "searches with no order still use Exa"
         );
     }
 }

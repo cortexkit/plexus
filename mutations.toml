@@ -16846,3 +16846,147 @@ expect_red = ["web_search::chain::tests::cache::a_rate_refused_hit_is_a_miss_and
 expect_message = "a rate-refused hit must be a miss, and the walk is refused too"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-health-order-position"
+guards = "Each web search health row reports its provider's place in the stored order, counting from 1"
+file = "crates/plexus-module/src/web_search_health.rs"
+old = "let order_position = index + 1;"
+new = "let order_position = index; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_health_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::health_report::health_lists_each_ordered_provider_with_its_position_presence_and_connections"]
+expect_message = "order_position is the provider's place in the order, counting from 1"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-health-connection-present"
+guards = "A web search health row says whether its provider has a live connection, so an ordered provider with none reads as absent"
+file = "crates/plexus-module/src/web_search_health.rs"
+old = "\"connection_present\": connection.is_some(),"
+new = "\"connection_present\": true, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_health_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::health_report::health_lists_each_ordered_provider_with_its_position_presence_and_connections"]
+expect_message = "connection_present says whether the provider has a live connection"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-health-one-row-per-connection"
+guards = "Web search health gives one row per connection when a provider has several, across principals, rather than hiding all but the first"
+file = "crates/plexus-module/src/web_search_health.rs"
+old = "            present = true;"
+new = "            if present { continue; } present = true; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_health_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::health_report::health_lists_each_ordered_provider_with_its_position_presence_and_connections"]
+expect_message = "a provider with several connections gets one row per connection, across principals"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-health-cooldown-from-the-service"
+guards = "Web search health reads each connection's cooldown from the running search service's in-memory cooldowns"
+file = "crates/plexus-module/src/web_search_health.rs"
+old = "service.cooldown_remaining_ms(&connection.connection_id)"
+new = "{ let _ = (service, connection); 0 } /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_health_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::health_report::health_reports_live_cooldowns_per_connection_and_zero_after_a_restart"]
+expect_message = "cooldown_remaining_ms counts down the failed connection's cooldown only"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-cooldown-remaining-counts-from-now"
+guards = "A connection's remaining cooldown is its cooldown end minus the service clock's current time"
+file = "crates/plexus-core/src/web_search/mod.rs"
+old = "until.saturating_sub((self.clock)())"
+new = "until.saturating_sub(0) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_health_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::health_report::health_reports_live_cooldowns_per_connection_and_zero_after_a_restart"]
+expect_message = "cooldown_remaining_ms counts down the failed connection's cooldown only"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-health-allowance-used"
+guards = "Web search health reports each connection owner's allowance count for the current month"
+file = "crates/plexus-module/src/web_search_health.rs"
+old = "\"allowance_used\": connection.map(|connection| connection.allowance_used),"
+new = "\"allowance_used\": connection.map(|_| 0), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_health_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::health_report::health_reports_each_owners_allowance_use_against_the_providers_limit"]
+expect_message = "allowance_used is this month's count for the connection's owner"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-health-allowance-month-from-the-service-clock"
+guards = "Web search health reads allowance counts for the month of the search service's clock, the one reservations are counted against"
+file = "crates/plexus-module/src/lib.rs"
+old = "        state.runtime.web_search.now_ms(),"
+new = "        plexus_core::storage::now_ms(), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_health_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::health_report::health_reports_each_owners_allowance_use_against_the_providers_limit"]
+expect_message = "allowance_used is this month's count for the connection's owner"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-health-allowance-limit"
+guards = "Web search health reports the provider's monthly allowance limit on each of its rows"
+file = "crates/plexus-module/src/web_search_health.rs"
+old = "\"allowance_limit\": row.allowance_limit,"
+new = "\"allowance_limit\": Value::Null, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_health_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::health_report::health_reports_each_owners_allowance_use_against_the_providers_limit"]
+expect_message = "allowance_limit is the provider's monthly allowance, or null when none is set"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-diagnostics-omit-instance-address"
+guards = "Chain-mode web search diagnostics never print a SearXNG instance address"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = "let until = (self.clock)().saturating_add(cooldown_ms as i64);"
+new = "let until = (self.clock)().saturating_add(cooldown_ms as i64); eprintln!(warn web_search: \"{name} failed on {:?}\", backend.instance_url(&connection)); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_health_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::health_report::diagnostics_never_print_an_instance_address_or_vendor_text"]
+expect_message = "diagnostics must not print"
+build_timeout_s = 3600
+timeout_s = 120
