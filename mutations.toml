@@ -17325,3 +17325,99 @@ expect_red = ["web_search_tests::health_report::a_provider_whose_only_connection
 expect_message = "a revoked connection cannot serve a search, so health reports none present"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-tavily-excerpt-from-content"
+guards = "Tavily results take their excerpt from each result's content, never from another field"
+file = "crates/plexus-core/src/web_search/backend/tavily.rs"
+old = "excerpt: truncate_chars(&text(\"content\"), EXCERPT_MAX_CHARS),"
+new = "excerpt: truncate_chars(&text(\"raw_content\"), EXCERPT_MAX_CHARS), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tavily/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tavily::tests::a_documented_reply_maps_title_url_content_and_date_and_drops_the_answer"]
+expect_message = "Tavily results map title, url, content and published_date"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tavily-http-date-published"
+guards = "Tavily's documented HTTP-date published_date is normalized to RFC 3339 rather than dropped"
+file = "crates/plexus-core/src/web_search/backend/tavily.rs"
+old = "if let Ok(date) = httpdate::parse_http_date(value.trim()) {"
+new = "if let Ok(date) = httpdate::parse_http_date(\"\") { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tavily/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tavily::tests::a_documented_reply_maps_title_url_content_and_date_and_drops_the_answer"]
+expect_message = "Tavily results map title, url, content and published_date"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tavily-recency-drops-undated"
+guards = "A Tavily search with a recency window asks Tavily to remove results with no detectable date"
+file = "crates/plexus-core/src/web_search/backend/tavily.rs"
+old = "args[\"filter_by_published_date\"] = Value::Bool(true);"
+new = "/* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tavily/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tavily::tests::vendor_args_use_tavilys_documented_field_names"]
+expect_message = "a recency search maps every filter to Tavily's documented fields"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tavily-capability-query-length"
+guards = "Tavily's capability declares the tool's query length cap, so a longer query skips Tavily without dispatch"
+file = "crates/plexus-core/src/web_search/backend/tavily.rs"
+old = "max: MAX_QUERY_CHARS,"
+new = "max: usize::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tavily/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tavily::tests::capability_skips_what_tavily_cannot_take_before_mapping"]
+expect_message = "a query beyond the declared length must skip"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tavily-capability-domain-count"
+guards = "Tavily's capability declares its documented 300-domain maximum, so more domains skip Tavily rather than being sent"
+file = "crates/plexus-core/src/web_search/backend/tavily.rs"
+old = "max_domains: TAVILY_MAX_INCLUDE_DOMAINS,"
+new = "max_domains: usize::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tavily/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tavily::tests::capability_skips_what_tavily_cannot_take_before_mapping"]
+expect_message = "more domains than Tavily takes must skip"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tavily-capability-result-count"
+guards = "Tavily's capability clamps max_results to its documented maximum of 20"
+file = "crates/plexus-core/src/web_search/backend/tavily.rs"
+old = "max_results: TAVILY_MAX_RESULTS,"
+new = "max_results: 100, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tavily/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tavily::tests::capability_serves_the_whole_tool_envelope_natively"]
+expect_message = "max_results is clamped to Tavily's maximum of 20"
+build_timeout_s = 3600
+timeout_s = 120

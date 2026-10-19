@@ -56,7 +56,8 @@ fn vendor_args_use_tavilys_documented_field_names() {
             "time_range": "week",
             "include_published_date": true,
             "filter_by_published_date": true
-        })
+        }),
+        "a recency search maps every filter to Tavily's documented fields"
     );
     let bare = TavilyRestBackend.vendor_args(&query("Who is Leo Messi?", &[], None), NOW);
     assert_eq!(
@@ -171,7 +172,8 @@ fn a_documented_reply_maps_title_url_content_and_date_and_drops_the_answer() {
             excerpt: "Lionel Messi, an Argentine footballer, is widely regarded as one of the greatest football players of his generation.".into(),
             published_at: Some("2025-03-11T17:00:00.000Z".into()),
             fetched_at: "2026-09-28T12:00:00.000Z".into(),
-        }]
+        }],
+        "Tavily results map title, url, content and published_date"
     );
     let answer = reply["answer"].as_str().unwrap();
     assert!(!serde_json::to_string(&results).unwrap().contains(answer));
@@ -248,6 +250,17 @@ fn capability_serves_the_whole_tool_envelope_natively() {
         );
         assert_eq!(prepared.vendor_args["max_results"], 20);
     }
+    let mut many = query("news", &[], None);
+    many.max_results = 50;
+    let prepared = TavilyRestBackend.prepare(&many, NOW).unwrap();
+    assert_eq!(
+        (
+            prepared.query.max_results,
+            &prepared.vendor_args["max_results"]
+        ),
+        (TAVILY_MAX_RESULTS, &json!(20)),
+        "max_results is clamped to Tavily's maximum of 20"
+    );
 }
 
 #[test]
@@ -260,7 +273,8 @@ fn capability_skips_what_tavily_cannot_take_before_mapping() {
     let long = query(&"x".repeat(MAX_QUERY_CHARS + 1), &[], None);
     assert_eq!(
         TavilyRestBackend.prepare(&long, NOW),
-        Err(skip(CapabilityFailure::Length))
+        Err(skip(CapabilityFailure::Length)),
+        "a query beyond the declared length must skip"
     );
     let domains: Vec<String> = (0..=TAVILY_MAX_INCLUDE_DOMAINS)
         .map(|index| format!("d{index}.example"))
@@ -268,7 +282,8 @@ fn capability_skips_what_tavily_cannot_take_before_mapping() {
     let domains: Vec<&str> = domains.iter().map(String::as_str).collect();
     assert_eq!(
         TavilyRestBackend.prepare(&query("news", &domains, None), NOW),
-        Err(skip(CapabilityFailure::DomainFilter))
+        Err(skip(CapabilityFailure::DomainFilter)),
+        "more domains than Tavily takes must skip"
     );
     assert!(TavilyRestBackend
         .prepare(&query("news", &domains[1..], None), NOW)
