@@ -4,6 +4,7 @@ use crate::{MockTransport, StubCredentialSource};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod allowance;
+mod cache;
 mod deadline;
 mod outcomes;
 
@@ -685,7 +686,15 @@ fn connection_resolution_is_per_caller_not_per_provider() {
     ));
     let service = service();
     assert!(search(&service, &engine, "direct").is_ok());
-    assert!(search(&service, &engine, "other").is_ok());
+    // A different query: chain results are shared across callers, so the same
+    // query would be a cache hit and never reach the second connection.
+    assert!(service
+        .search(
+            &engine,
+            "other",
+            json!({"query":"other weather report"}).as_object().unwrap()
+        )
+        .is_ok());
     let requests = transport.requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].connection_id, "exa");

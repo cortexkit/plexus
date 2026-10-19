@@ -89,6 +89,33 @@ impl Drop for AllowanceHold<'_> {
     }
 }
 
+/// What a chain cache entry records about the instance a connection searches:
+/// the SHA-256 hex digest of its normalized instance address, or `None` for a
+/// provider with one fixed vendor endpoint. Normalizing (the URL parser's
+/// lower-cased scheme and host, default port dropped, no fragment, no
+/// trailing slash) lets two spellings of one instance share entries.
+///
+/// `Err` means the connection's results must be neither stored nor served
+/// from the cache: the address does not parse, or a SearXNG connection has
+/// none, so its instance cannot be told apart from any other.
+fn instance_digest(
+    provider: &str,
+    backend: &dyn WebSearchBackend,
+    connection: &ConnectionRecord,
+) -> Result<Option<String>, ()> {
+    use sha2::{Digest, Sha256};
+    match backend.instance_url(connection) {
+        Some(address) => {
+            let mut url = reqwest::Url::parse(&address).map_err(|_| ())?;
+            url.set_fragment(None);
+            let normalized = url.as_str().trim_end_matches('/');
+            Ok(Some(hex::encode(Sha256::digest(normalized.as_bytes()))))
+        }
+        None if provider == "searxng" => Err(()),
+        None => Ok(None),
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ChainAudit {
     pub attempted: Option<BackendIdentity>,
@@ -123,6 +150,30 @@ impl WebSearchService {
         action: &CatalogAction,
         now_ms: i64,
     ) -> Result<(), SkipReason> {
+        self.standing_checks(store, connection, action, now_ms)?;
+        // Cooldown is connection-local. A provider's other account stays usable.
+        if self
+            .chain_cooldowns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&connection.connection_id)
+            .is_some_and(|until| *until > now_ms)
+        {
+            return Err(SkipReason::Cooldown);
+        }
+        Ok(())
+    }
+
+    /// Checks 3-5: policy and per-call approval, action status and connection
+    /// health. A cache hit must pass these too; cooldown, allowance and the
+    /// deadline only govern contacting the vendor, so they are kept apart.
+    fn standing_checks(
+        &self,
+        store: &PlexusStore,
+        connection: &ConnectionRecord,
+        action: &CatalogAction,
+        now_ms: i64,
+    ) -> Result<(), SkipReason> {
         // Policy, action status and connection health precede transient admission:
         // a durable refusal must not be hidden by cooldown or quota exhaustion.
         let effect = self
@@ -139,17 +190,84 @@ impl WebSearchService {
         if connection_denial(connection).is_some() {
             return Err(SkipReason::ConnectionUnusable);
         }
-        // Cooldown is connection-local. A provider's other account stays usable.
-        if self
-            .chain_cooldowns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&connection.connection_id)
-            .is_some_and(|until| *until > now_ms)
-        {
-            return Err(SkipReason::Cooldown);
-        }
         Ok(())
+    }
+
+    /// Serve a chain search from the cache, or return `None` for a miss.
+    ///
+    /// The entry was served by one provider, and a hit is used only if this
+    /// caller could be served by that same provider now: it is still in the
+    /// order, the caller resolves exactly one connection for it, that
+    /// connection passes policy, action status and health and the cached-read
+    /// policy, and for a per-connection instance the instance matches.
+    /// Cooldown and allowance limit vendor contact, not cached reads, so they
+    /// do not block a hit, and a hit counts no allowance.
+    ///
+    /// The provider's rate buckets are charged last, only once every other
+    /// condition passed. A failed condition or a rate refusal is a miss, and
+    /// the walk that follows charges each provider at most once, so a miss
+    /// costs no more than if the cache had held nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn chain_cache_hit(
+        &self,
+        store: &PlexusStore,
+        order: &[String],
+        key: &CacheKey,
+        caller_key: &CallerKey,
+        is_flow: bool,
+        now_ms: i64,
+        audit: &mut CallAudit,
+    ) -> Option<WebSearchResponse> {
+        let entry = self.cache.get_served(key, now_ms)?;
+        let name = entry.served.provider.as_str();
+        if !order.iter().any(|ordered| ordered == name) {
+            return None;
+        }
+        let provider = providers::provider_named(name)?;
+        let backend = self.chain_backends.get(provider.name)?;
+        let identity = BackendIdentity {
+            app_key: provider.app_key,
+            action: provider.action,
+        };
+        let target = crate::grant_refusal::GrantTarget::new(
+            crate::grant_refusal::Layer::Module,
+            &audit.caller,
+            "web_search",
+            Some(provider.name),
+            provider.action,
+        );
+        let (connection, action) = self
+            .backing_connection_for(store, &audit.caller, now_ms, is_flow, identity, target)
+            .ok()?;
+        self.cached_read_policy(store, &connection, &action, now_ms, is_flow)
+            .ok()?;
+        self.standing_checks(store, &connection, &action, now_ms)
+            .ok()?;
+        let instance = instance_digest(provider.name, backend.as_ref(), &connection).ok()?;
+        if instance != entry.served.instance_digest {
+            return None;
+        }
+        // Every other hit condition has passed: only now spend the caller's
+        // and the provider's rate tokens. A refusal takes no tokens.
+        let limits = store
+            .web_search_limits(name)
+            .ok()?
+            .unwrap_or_else(default_limits);
+        self.limiter
+            .try_acquire(name, caller_key, limits, now_ms)
+            .ok()?;
+        audit.principal = connection.principal.clone();
+        audit.connection_id = Some(connection.connection_id.clone());
+        audit.risk = Some(action.risk.clone());
+        audit.severity = Some(action.severity.clone());
+        let chain = audit.chain.get_or_insert_with(ChainAudit::default);
+        chain.attempted = Some(identity);
+        chain.served_by = Some(name.to_string());
+        Some(WebSearchResponse {
+            results: entry.results,
+            backend: name.to_string(),
+            cached: true,
+        })
     }
 
     pub(super) fn run_chain<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
@@ -160,19 +278,31 @@ impl WebSearchService {
         now_ms: i64,
         audit: &mut CallAudit,
     ) -> Result<WebSearchResponse, WebSearchRefusal> {
-        let deadline_at_ms =
-            (self.clock)().saturating_add(WEB_SEARCH_CHAIN_DEADLINE.as_millis() as i64);
-        let mut deadline_stopped = false;
         audit.chain = Some(ChainAudit::default());
-        let caller = &audit.caller;
         let is_flow = audit
             .scope
             .as_ref()
             .is_some_and(|scope| scope.flow_id.is_some());
         let caller_key = CallerKey {
-            principal: caller.clone(),
+            principal: audit.caller.clone(),
             agent_id: audit.agent_id.clone(),
         };
+        let cache_key = CacheKey::new(cache::CHAIN_CACHE_BACKEND, query);
+        if let Some(hit) = self.chain_cache_hit(
+            engine.store(),
+            order,
+            &cache_key,
+            &caller_key,
+            is_flow,
+            now_ms,
+            audit,
+        ) {
+            return Ok(hit);
+        }
+        let deadline_at_ms =
+            (self.clock)().saturating_add(WEB_SEARCH_CHAIN_DEADLINE.as_millis() as i64);
+        let mut deadline_stopped = false;
+        let caller = &audit.caller;
         let mut all_not_granted = true;
         let mut first_grant_refusal = None;
         let mut retry_after = None::<u64>;
@@ -347,11 +477,14 @@ impl WebSearchService {
                         return Err(reason);
                     }
                 };
-                Ok(WebSearchResponse {
-                    results,
-                    backend: name.clone(),
-                    cached: false,
-                })
+                Ok((
+                    WebSearchResponse {
+                        results,
+                        backend: name.clone(),
+                        cached: false,
+                    },
+                    instance_digest(name, backend.as_ref(), &connection),
+                ))
             })();
             if request_rejected {
                 return Err(WebSearchRefusal::RequestRejected {
@@ -359,8 +492,21 @@ impl WebSearchService {
                 });
             }
             match attempt {
-                Ok(response) => {
+                Ok((response, instance)) => {
                     audit.chain.as_mut().unwrap().served_by = Some(name.clone());
+                    // An instance address that cannot be told apart from
+                    // another instance's is served but never cached.
+                    if let Ok(instance_digest) = instance {
+                        self.cache.put_served(
+                            cache_key,
+                            response.results.clone(),
+                            cache::ServedBy {
+                                provider: name.clone(),
+                                instance_digest,
+                            },
+                            now_ms,
+                        );
+                    }
                     return Ok(response);
                 }
                 Err(reason) => audit.chain.as_mut().unwrap().skipped.push(ProviderSkip {

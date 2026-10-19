@@ -65,6 +65,14 @@ pub trait WebSearchBackend: Send + Sync {
         max_results: usize,
         fetched_at_ms: i64,
     ) -> Result<Vec<WebSearchResult>, ReplyShapeError>;
+    /// The instance address `connection` searches, for a backend whose endpoint
+    /// is chosen per connection (SearXNG), as stored on the connection. Chain
+    /// cache entries record a digest of its normalized form, so results from
+    /// one instance never answer a caller on another. Backends with one fixed
+    /// vendor endpoint return `None`. The address is never logged.
+    fn instance_url(&self, _connection: &crate::storage::ConnectionRecord) -> Option<String> {
+        None
+    }
 }
 
 /// Exa over its REST API: `catalog/exa_rest.jsonc`, action `search`

@@ -13,7 +13,9 @@
 //!    dispatch through governance. The stamped agent never adds an agent
 //!    grant requirement to a search.
 //!
-//! With a stored order, `chain` prepares each provider's capability, resolves
+//! With a stored order, `chain` first tries the cache, whose entry records the
+//! provider that served it and is used only if this caller could be served by
+//! that provider now. On a miss it prepares each provider's capability, resolves
 //! the caller's grant, then checks policy, action status, connection health and
 //! cooldown and the chain deadline, then reserves any monthly allowance, before
 //! charging rate limits and authorizing a governed dispatch.

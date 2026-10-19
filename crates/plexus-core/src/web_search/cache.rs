@@ -2,7 +2,9 @@
 //!
 //! Entries are shared across callers because search results are public data.
 //! Sharing is safe only because a hit never skips governance: the caller's
-//! grants are checked and its rate limit is charged before the cache is read.
+//! grants are checked and its rate limit is charged before a hit is served.
+//! In chain mode the entry also records the serving provider, and a hit is
+//! served only to a caller who could use that provider right now.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -30,6 +32,12 @@ pub struct CacheKey {
     recency: Option<Recency>,
 }
 
+/// The backend component of every chain-mode key. Any provider in the order
+/// may have served the entry, so the key cannot name one; the entry records
+/// which provider did. No provider is named `chain`, so chain keys never
+/// collide with the compatibility keys, which carry the backend's own name.
+pub const CHAIN_CACHE_BACKEND: &str = "chain";
+
 impl CacheKey {
     pub fn new(backend: &str, query: &WebSearchQuery) -> Self {
         Self {
@@ -45,6 +53,26 @@ impl CacheKey {
 struct Entry {
     results: Vec<WebSearchResult>,
     stored_at_ms: i64,
+    served: Option<ServedBy>,
+}
+
+/// Which provider produced a chain-mode entry. Compatibility entries have
+/// none: their key already names the one backend.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ServedBy {
+    /// The provider's order name.
+    pub provider: String,
+    /// For a provider whose endpoint is set per connection (SearXNG), the
+    /// SHA-256 hex digest of the serving connection's normalized instance URL.
+    /// Results from one instance must never answer a caller on another. It is
+    /// compared only, never printed, so the address stays out of every log.
+    pub instance_digest: Option<String>,
+}
+
+/// A chain-mode entry as a hit candidate.
+pub(crate) struct ServedEntry {
+    pub results: Vec<WebSearchResult>,
+    pub served: ServedBy,
 }
 
 #[derive(Default)]
@@ -56,13 +84,29 @@ impl ResultCache {
     /// The cached results for `key`, if stored less than the TTL ago. Each
     /// result keeps the `fetched_at` of the vendor reply it came from.
     pub fn get(&self, key: &CacheKey, now_ms: i64) -> Option<Vec<WebSearchResult>> {
+        self.live(key, now_ms, |entry| entry.results.clone())
+    }
+
+    /// The live chain-mode entry for `key` with the provider that served it.
+    /// An entry stored without a serving provider is never a chain hit.
+    pub(crate) fn get_served(&self, key: &CacheKey, now_ms: i64) -> Option<ServedEntry> {
+        self.live(key, now_ms, |entry| {
+            entry.served.clone().map(|served| ServedEntry {
+                results: entry.results.clone(),
+                served,
+            })
+        })
+        .flatten()
+    }
+
+    fn live<R>(&self, key: &CacheKey, now_ms: i64, read: impl FnOnce(&Entry) -> R) -> Option<R> {
         let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match entries.get(key) {
             Some(entry) if now_ms.saturating_sub(entry.stored_at_ms) < CACHE_TTL_MS => {
-                Some(entry.results.clone())
+                Some(read(entry))
             }
             Some(_) => {
                 entries.remove(key);
@@ -75,6 +119,28 @@ impl ResultCache {
     /// Store results, making room first: expired entries go, then the oldest
     /// entry if the cache is still full.
     pub fn put(&self, key: CacheKey, results: Vec<WebSearchResult>, now_ms: i64) {
+        self.insert(key, results, None, now_ms);
+    }
+
+    /// Store a chain-mode entry with the provider that served it. A later
+    /// serve of the same key replaces it, whichever provider served.
+    pub(crate) fn put_served(
+        &self,
+        key: CacheKey,
+        results: Vec<WebSearchResult>,
+        served: ServedBy,
+        now_ms: i64,
+    ) {
+        self.insert(key, results, Some(served), now_ms);
+    }
+
+    fn insert(
+        &self,
+        key: CacheKey,
+        results: Vec<WebSearchResult>,
+        served: Option<ServedBy>,
+        now_ms: i64,
+    ) {
         let bytes = results.iter().fold(
             results
                 .capacity()
@@ -112,6 +178,7 @@ impl ResultCache {
             Entry {
                 results,
                 stored_at_ms: now_ms,
+                served,
             },
         );
     }
