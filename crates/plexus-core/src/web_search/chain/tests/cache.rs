@@ -130,8 +130,10 @@ fn searxng_instances_do_not_share_entries() {
     add_connection(&engine, "sx-a-again", "searxng", Some("third"));
     add_connection(&engine, "sx-b", "searxng", Some("other"));
     order(&engine, &["searxng"]);
-    // One search per caller per minute: a hit that charged before its
-    // instance check would leave the caller nothing for the walk.
+    // One search per caller per minute. A cached answer from another SearXNG
+    // instance is not served, and the search goes on down the provider
+    // order. If that refused cache hit had already used up the caller's one
+    // search, the caller would have none left for the real search.
     limit(&engine, "searxng", 1, 3);
     transport.set_response(one_result());
     let now = Arc::new(AtomicI64::new(NOW));
@@ -479,7 +481,10 @@ fn each_attempt_writes_its_own_row_pair_and_the_call_row_names_the_right_connect
             .count()
     };
 
-    // Exa fails and Tavily serves: two governed pairs, the call row on Tavily.
+    // Exa fails and Tavily serves. Each provider attempt goes through
+    // governance and writes a decision row and a dispatch row, so each has
+    // two audit rows. The one web_search row for the whole call names Tavily,
+    // the provider that answered.
     let (engine, transport) = super::super::super::tests::granted_exa_engine("cache-audit-served");
     add_connection(&engine, "tavily", "tavily", Some("direct"));
     order(&engine, &["exa", "tavily"]);

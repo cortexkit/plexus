@@ -10,9 +10,14 @@ use crate::{credentials::CredentialSource, transport::Transport};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
-// Three groups: the issue and review reads (also granted to prefrontal on
-// every handle), the CI reads, and the agent bot reads served by `bot`, which
-// need a head's or worker's agent on the route's stamp.
+// The `github_read` actions, in three groups:
+// - Issue and review reads, made with a repository's bot token. Importing a
+//   bot (a GitHub App handle) also grants these to Prefrontal, the core
+//   module, on that bot's connection.
+// - CI reads, made through the operator's GitHub Actions connection.
+// - Agent bot reads, served by `bot`. They read as one agent's own bot, so
+//   the call's session must name that agent: a head session's `agent_id`, or
+//   a worker session's `on_behalf_of_agent`.
 macro_rules! read_actions {
     ($($bot:literal),* ; $($ci:literal),* ; $($agent_bot:literal),*) => {
         pub(crate) const BOT_ACTIONS: &[&str] = &[$($bot),*];

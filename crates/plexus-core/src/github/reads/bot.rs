@@ -16,11 +16,13 @@ use super::*;
 use crate::scope::{BotReadIdentity, CallScope};
 use crate::storage::github_bot_reads_store::{BotRateLimit, BotReadAdmission};
 
-/// The bot read actions callers name on `github_read`. AFT's byte-range
-/// `github.actions.job_log` is also served here (by [`job_log`]), but that
-/// action name stays in the CI group of `reads::ACTIONS`: every other caller,
-/// and an AFT call with `max_bytes`, still gets its older form, a bounded tail
-/// of the log read with the operator's Actions connection.
+/// The `github_read` actions that always read with the calling agent's own
+/// bot. A ranged CI job log read, `github.actions.job_log` with `offset` and
+/// `length`, also reads with the bot (see [`job_log`]), but that action is not
+/// listed here. The same action name also has an older form, a bounded tail
+/// of the log read through the operator's GitHub Actions connection, and the
+/// module decides per call which form applies. So the name stays in the CI
+/// group of `reads::ACTIONS`.
 pub const ACTIONS: &[&str] = &[
     "github.repo.get",
     "github.search.code",
@@ -486,7 +488,10 @@ fn prepare<'a, C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     })
 }
 
-/// Serve one of [`ACTIONS`] through the bot bound to the stamped agent.
+/// Serve one of [`ACTIONS`] with the GitHub bot of the agent the call is for.
+/// That agent is the head's `agent_id` in `scope`, or `on_behalf_of_agent` for
+/// a worker; the bot is the one bound to the repository in `repository`, and
+/// it must belong to that agent.
 pub fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     engine: &GovernanceEngine<C, T>,
     principal: &str,

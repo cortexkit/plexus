@@ -4602,10 +4602,12 @@ enum BotReadForm {
     /// `github.repo.get`, `github.search.code` and `github.search.issues`,
     /// whichever module carries the call.
     Repository,
-    /// The byte-range job log read for AFT (the module whose `gh` shim routes
-    /// agents' GitHub reads, principal `reserved:aft`). A call carrying
-    /// `max_bytes`, and every other module's call, keeps the older form: a
-    /// bounded tail of the log read with the operator's Actions connection.
+    /// `github.actions.job_log` carried by AFT (principal `reserved:aft`, the
+    /// module whose `gh` shim routes agents' GitHub reads) without `max_bytes`:
+    /// a byte range of the log, read with the agent's bot. All other
+    /// `github.actions.job_log` calls, from AFT with `max_bytes` or from any
+    /// other module, are not bot reads: they keep the older bounded tail read
+    /// through the operator's Actions connection.
     JobLogRange,
 }
 

@@ -29,10 +29,11 @@
   // Issue-comment reactions are a third path again and are not declared either;
   // add_issue_comment below writes comments, it does not react to them.
   //
-  // THE BOT JOB LOG READS NEED Actions: read ON THE APP. github.actions.job.get
-  // and github.actions.job_log below are answered 403 until the App has it;
-  // that surfaces as vendor_error with status 403 and is a permission refusal,
-  // never a credential failure.
+  // The bot job log reads, github.actions.job.get and github.actions.job_log
+  // below, need the "Actions: read" permission on each bot's GitHub App. An
+  // App without it gets 403, which plexus returns as vendor_error with status
+  // 403: a permission refusal, never reported to the vault as a broken
+  // credential.
   //
   // PILOT APP CANNOT MERGE, AND THAT IS EXPECTED RATHER THAN BROKEN. The App
   // backing this connection is minted with issues:write, pull_requests:write,
@@ -222,7 +223,8 @@
       // A byte range of a finished job's log, with the bot's installation
       // token. GitHub answers with a one-minute signed storage URL; the log is
       // fetched from it with a new request that carries no credential, as the
-      // operator-token read in github_actions.jsonc does. Hosts as there.
+      // operator-token read in github_actions.jsonc does, and only from the
+      // same allowed storage hosts.
       // https://docs.github.com/en/rest/actions/workflow-jobs#download-job-logs-for-a-workflow-run
       "name": "github.actions.job_log",
       "risk": "read", "ask_first": false,
