@@ -8164,7 +8164,7 @@ impl PlexusStore {
                 Some(&fingerprint),
             );
             record.outcome = Some("applied".into());
-            append_audit_on_conn(conn, &record, &AuditContext::default())?;
+            append_audit_on_conn(conn, &record, None, None, None, None)?;
             Ok(true)
         })
     }
@@ -8199,7 +8199,7 @@ impl PlexusStore {
         on_behalf_of_agent: Option<&str>,
     ) -> Result<(), StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            append_audit_on_conn(
+            append_audit_on_conn_with(
                 conn,
                 record,
                 &AuditContext {
@@ -8227,17 +8227,7 @@ impl PlexusStore {
         relay_origin: Option<&RelayOrigin>,
     ) -> Result<(), StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            append_audit_on_conn(
-                conn,
-                record,
-                &AuditContext {
-                    query_text,
-                    result_count,
-                    scope,
-                    relay_origin,
-                    on_behalf_of_agent: None,
-                },
-            )
+            append_audit_on_conn(conn, record, query_text, result_count, scope, relay_origin)
         })
     }
 
@@ -8711,7 +8701,10 @@ impl PlexusStore {
                 append_audit_on_conn(
                     conn,
                     &AuditRecord::manifest_changed(principal, key),
-                    &AuditContext::default(),
+                    None,
+                    None,
+                    None,
+                    None,
                 )?;
             }
             Ok(ManifestWriteOutcome { changed })
@@ -8828,7 +8821,10 @@ impl PlexusStore {
                 append_audit_on_conn(
                     conn,
                     &AuditRecord::manifest_changed(principal, &key),
-                    &AuditContext::default(),
+                    None,
+                    None,
+                    None,
+                    None,
                 )?;
                 retired.push(key);
             }
@@ -9250,7 +9246,7 @@ fn append_audit_for<T>(
     value: &T,
 ) -> rusqlite::Result<()> {
     match audit {
-        Some(build) => append_audit_on_conn(conn, &build(value), &AuditContext::default()),
+        Some(build) => append_audit_on_conn(conn, &build(value), None, None, None, None),
         None => Ok(()),
     }
 }
@@ -9297,6 +9293,27 @@ struct AuditContext<'a> {
 }
 
 fn append_audit_on_conn(
+    conn: &Connection,
+    record: &AuditRecord,
+    query_text: Option<&str>,
+    result_count: Option<i64>,
+    scope: Option<&CallScope>,
+    relay_origin: Option<&RelayOrigin>,
+) -> rusqlite::Result<()> {
+    append_audit_on_conn_with(
+        conn,
+        record,
+        &AuditContext {
+            query_text,
+            result_count,
+            scope,
+            relay_origin,
+            on_behalf_of_agent: None,
+        },
+    )
+}
+
+fn append_audit_on_conn_with(
     conn: &Connection,
     record: &AuditRecord,
     context: &AuditContext<'_>,

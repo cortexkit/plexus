@@ -440,14 +440,14 @@ fn github_read_tool() -> Tool {
                     // An artifact file path is never empty; github.repo.get's
                     // empty path reads the repository itself.
                     "path": {"type": "string"},
-                    "max_bytes": {"type": "integer", "minimum": 1, "maximum": 262144, "default": 65536},
                     "query": {"type": "object", "additionalProperties": {"type": "string"}},
                     "accept": {"type": "string", "enum": plexus_core::github::reads::bot::ACCEPTED_MEDIA_TYPES},
                     "q": {"type": "string"},
                     "page": {"type": "integer", "minimum": 1},
                     "per_page": {"type": "integer", "minimum": 1, "maximum": 100},
                     "offset": {"type": "integer", "minimum": 0},
-                    "length": {"type": "integer", "minimum": 1, "maximum": 1048576}
+                    "length": {"type": "integer", "minimum": 1, "maximum": 1048576},
+                    "max_bytes": {"type": "integer", "minimum": 1, "maximum": 262144, "default": 65536}
                 }}
             },
             "required": ["action", "repository", "args"],

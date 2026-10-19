@@ -350,7 +350,7 @@ fn download_range(
         Err(_) => return refused("job_log_download_failed"),
     };
     let status = response.status().as_u16();
-    if response.status().is_redirection() {
+    if (300..400).contains(&status) {
         return refused("job_log_redirect_refused");
     }
     if missing_log(status) {
@@ -437,7 +437,7 @@ fn window_bytes<R: Read>(
     let mut position = 0u64;
     let mut buffer = [0u8; 8192];
     loop {
-        if started.elapsed() >= deadline {
+        if deadline <= started.elapsed() {
             return Err("job_log_read_limit");
         }
         let count = response
