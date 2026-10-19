@@ -16731,8 +16731,8 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::chain::tests::cache::failed_cached_read_policy_then_walk_charges_no_more_than_a_miss", "web_search::chain::tests::cache::searxng_instances_do_not_share_entries"]
-expect_message = "must not have spent"
+expect_red = ["web_search::chain::tests::cache::failed_cached_read_policy_then_walk_charges_no_more_than_a_miss"]
+expect_message = "a hit refused by policy must not have spent Exa's rate tokens"
 build_timeout_s = 3600
 timeout_s = 120
 
