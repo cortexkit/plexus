@@ -6206,8 +6206,8 @@ timeout_s = 120
 id = "consent-held-route-epoch"
 guards = "A card route must carry the held scope epoch exactly"
 file = "crates/plexus-core/src/github_identity.rs"
-old = "scope_epoch: Some(scope.scope_epoch),"
-new = "scope_epoch: Some(scope.scope_epoch + 1), /* NON-VACUITY BREAK */"
+old = "            Some(scope.scope_epoch),\n        );"
+new = "            None, /* NON-VACUITY BREAK */\n        );"
 test_file = "crates/plexus-module/tests/it/consent_requester.rs"
 package = "plexus-module"
 target = "--test it"
@@ -10474,8 +10474,8 @@ timeout_s = 60
 id = "tool-catalog-capability-filter-advertised"
 guards = "role.describe advertises capability-tag selection so consumers send the tag filter only to providers that honour it"
 file = "crates/plexus-module/src/tool_provider.rs"
-old = "            capabilities: vec![CAPABILITY_FILTER.to_owned()],"
-new = "            capabilities: Vec::new(), // NON-VACUITY BREAK"
+old = ".with_capabilities(vec![CAPABILITY_FILTER.to_owned()])\n        .with_tool_capabilities(tool_capability_union());"
+new = ".with_capabilities(Vec::new()); /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/tool_provider.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -16751,6 +16751,7 @@ expect_red = ["github::resolver::review_thread_tests::review_threads_graphql_var
 expect_message = "GraphQL variables must match the bound repository"
 build_timeout_s = 3600
 timeout_s = 120
+
 [[control]]
 id = "web-search-chain-cache-hit-order-membership"
 guards = "A chain cache entry answers only while the provider that served it is still in the current order"
@@ -16844,5 +16845,308 @@ target = "--lib"
 select = "expected"
 expect_red = ["web_search::chain::tests::cache::a_rate_refused_hit_is_a_miss_and_the_walk_charges_once"]
 expect_message = "a rate-refused hit must be a miss, and the walk is refused too"
+build_timeout_s = 3600
+timeout_s = 120
+[[control]]
+id = "github-bot-read-path-dot-segment"
+guards = "A bot read path segment that decodes to . or .. is refused"
+file = "crates/plexus-core/src/github/reads/bot.rs"
+old = "if decoded.contains(['/', '\\\\']) || decoded == \".\" || decoded == \"..\" {"
+new = "if decoded.contains(['/', '\\\\']) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/github/reads/bot_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["github::reads::bot::tests::every_refused_path_form_is_refused"]
+expect_message = "must be refused"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-path-leading-slash"
+guards = "A bot read path starting with / is refused, a lone / included"
+file = "crates/plexus-core/src/github/reads/bot.rs"
+old = "    if path.starts_with('/')\n        || path.contains(\"//\")"
+new = "    if false /* NON-VACUITY BREAK */\n        || path.contains(\"//\")"
+test_file = "crates/plexus-core/src/github/reads/bot_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["github::reads::bot::tests::every_refused_path_form_is_refused"]
+expect_message = "must be refused"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-accept-allowlist"
+guards = "A bot read accept value outside the four GitHub media types is refused"
+file = "crates/plexus-core/src/github/reads/bot.rs"
+old = ".find(|allowed| *allowed == asked),"
+new = ".find(|_| true), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/github/reads/bot_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["github::reads::bot::tests::accept_allows_only_the_four_media_types_and_defaults_to_json"]
+expect_message = "application/vnd.github.raw+json"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-search-qualifier-refusal"
+guards = "A bot search q carrying repo:, org: or user: is refused"
+file = "crates/plexus-core/src/github/reads/bot.rs"
+old = "            if [\"repo:\", \"org:\", \"user:\"]\n                .iter()"
+new = "            if false && [\"repo:\", \"org:\", \"user:\"] /* NON-VACUITY BREAK */\n                .iter()"
+test_file = "crates/plexus-core/src/github/reads/bot_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["github::reads::bot::tests::search_refuses_scope_qualifiers_and_fences_to_the_bound_repository"]
+expect_message = "x repo:acme/other"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-search-forced-repo-qualifier"
+guards = "A bot search is sent with repo:owner/name of the bound repository appended"
+file = "crates/plexus-core/src/github/reads/bot.rs"
+old = "json!(format!(\"{q} repo:{owner}/{repo}\"))"
+new = "json!(q) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/github/reads/bot_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["github::reads::bot::tests::search_refuses_scope_qualifiers_and_fences_to_the_bound_repository"]
+expect_message = "parse_config repo:acme/widgets"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-hourly-cap"
+guards = "A bot installation's reads stop at 3,500 in any trailing hour"
+file = "crates/plexus-core/src/store/github_bot_reads.rs"
+old = "if used + units > BOT_READ_HOURLY_CAP {"
+new = "if false && used + units > BOT_READ_HOURLY_CAP { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/github_bot_reads_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::github_bot_reads_store::tests::reads_past_the_hourly_cap_are_refused_until_the_oldest_ages_out"]
+expect_message = "Exhausted"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-remaining-floor"
+guards = "Reads stop while GitHub reports under 1,000 remaining, until its reset"
+file = "crates/plexus-core/src/store/github_bot_reads.rs"
+old = "if remaining < BOT_READ_REMAINING_FLOOR && now < reset_at_ms {"
+new = "if false && remaining < BOT_READ_REMAINING_FLOOR && now < reset_at_ms { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/github_bot_reads_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::github_bot_reads_store::tests::reads_stop_while_github_reports_under_a_thousand_remaining"]
+expect_message = "Exhausted"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-ledger-ages-out"
+guards = "Ledger rows older than an hour are deleted as reads arrive"
+file = "crates/plexus-core/src/store/github_bot_reads.rs"
+old = "\"DELETE FROM github_bot_read_ledger WHERE reserved_at_ms <= ?1\","
+new = "\"DELETE FROM github_bot_read_ledger WHERE 0 AND reserved_at_ms <= ?1\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/github_bot_reads_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::github_bot_reads_store::tests::ledger_entries_age_out_after_an_hour"]
+expect_message = "left: 3501"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-budget-before-send"
+guards = "A bot read with no budget left is refused read_budget_exhausted before anything is sent"
+file = "crates/plexus-core/src/github/reads/bot.rs"
+old = "                    Err(BotReadError::BudgetExhausted { retry_after_ms })"
+new = "                    { let _ = retry_after_ms; Ok(()) } /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bot_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::a_spent_read_budget_refuses_before_anything_is_sent", "github_read_frame_tests::bot_read_tests::github_reporting_under_a_thousand_remaining_stops_reads_until_reset"]
+expect_message = "read_budget_exhausted"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-records-rate-limit"
+guards = "Every bot read reply's x-ratelimit-remaining is recorded for the budget"
+file = "crates/plexus-core/src/github/reads/bot.rs"
+old = "                self.record_rate_limit(response.get(\"rate_limit\"));"
+new = "                /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bot_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::github_reporting_under_a_thousand_remaining_stops_reads_until_reset"]
+expect_message = "read_budget_exhausted"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-head-identity"
+guards = "A head scope's agent_id chooses the bot for its reads"
+file = "crates/plexus-core/src/scope.rs"
+old = "Some(\"head\") => named(scope.agent_id.as_deref()).map(BotReadIdentity::Head),"
+new = "Some(\"head\") => None, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bot_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::repo_get_reads_through_the_head_agents_bot", "github_read_frame_tests::bot_read_tests::a_403_on_a_bot_read_is_never_reported_to_the_vault_but_a_401_is", "github_read_frame_tests::bot_read_tests::a_github_refusal_is_vendor_error_with_its_status", "github_read_frame_tests::bot_read_tests::a_spent_read_budget_refuses_before_anything_is_sent", "github_read_frame_tests::bot_read_tests::aft_job_log_reads_a_byte_range_with_the_agents_bot", "github_read_frame_tests::bot_read_tests::an_unfinished_job_has_no_log_request", "github_read_frame_tests::bot_read_tests::github_reporting_under_a_thousand_remaining_stops_reads_until_reset", "github_read_frame_tests::bot_read_tests::only_repositories_bound_to_the_agents_bot_are_visible", "github_read_frame_tests::bot_read_tests::refused_paths_accept_values_and_queries_send_nothing", "github_read_frame_tests::bot_read_tests::search_is_fenced_to_the_bound_repository"]
+expect_message = "agent_identity_required"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-worker-identity"
+guards = "A worker scope's on_behalf_of_agent chooses the bot for its reads"
+file = "crates/plexus-core/src/scope.rs"
+old = "named(on_behalf_of_agent).map(BotReadIdentity::OnBehalfOf)"
+new = "None /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bot_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::a_worker_reads_with_the_bot_of_the_agent_it_works_for", "github_read_frame_tests::bot_read_tests::only_repositories_bound_to_the_agents_bot_are_visible"]
+expect_message = "agent_identity_required"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-identity-required"
+guards = "A stamp naming neither a head agent nor a worker's on_behalf_of_agent is refused"
+file = "crates/plexus-core/src/scope.rs"
+old = "        _ => None,\n    }\n}"
+new = "        _ => named(scope.agent_id.as_deref()).map(BotReadIdentity::Head), /* NON-VACUITY BREAK */\n    }\n}"
+test_file = "crates/plexus-module/src/bot_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::a_stamp_naming_no_usable_agent_is_refused_agent_identity_required"]
+expect_message = "agent_identity_required"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-binding"
+guards = "Only repositories bound to the agent's own enabled bot are visible to its reads"
+file = "crates/plexus-core/src/github/reads/bot.rs"
+old = ".filter(|handle| handle.agent_id == identity.agent() && handle.status == \"enabled\")"
+new = ".filter(|handle| handle.status == \"enabled\") /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bot_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::only_repositories_bound_to_the_agents_bot_are_visible"]
+expect_message = "repository_not_visible"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-on-behalf-of-is-not-authority"
+guards = "A worker's on_behalf_of_agent never becomes the scope's agent or delegation, so it cannot write"
+file = "crates/plexus-core/src/scope.rs"
+old = "            agent_id: stamp.attributes.agent_id.clone(),\n            flow_id: stamp.attributes.flow_id.clone(),\n            delegates: stamp.attributes.delegates,"
+new = "            agent_id: stamp.attributes.agent_id.clone().or_else(|| stamp.attributes.on_behalf_of_agent.clone()),\n            flow_id: stamp.attributes.flow_id.clone(),\n            delegates: stamp.attributes.delegates || stamp.attributes.on_behalf_of_agent.is_some(), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/github_react_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_react_tests::a_worker_working_on_behalf_of_an_agent_cannot_write_as_its_bot"]
+expect_message = "delegating_scope_required"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-403-not-a-credential-failure"
+guards = "A 403 on a bot read keeps its status and is never reported as a credential failure"
+file = "crates/plexus-core/src/rest_api/read_envelope.rs"
+old = "TransportResponse::vendor_error(&format!(\"http_{status}\"), \"\");"
+new = "TransportResponse::vendor_error(&format!(\"http_{}\", if status == 403 { 401 } else { status }), \"\"); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api/read_envelope_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::read_envelope::tests::github_refusals_keep_their_status_and_only_a_401_names_the_credential"]
+expect_message = "403"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-read-response-too-large"
+guards = "A bot read body over 1 MiB is refused response_too_large, never truncated"
+file = "crates/plexus-core/src/rest_api/read_envelope.rs"
+old = "    if body.truncated {"
+new = "    if false && body.truncated { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api/read_envelope_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::read_envelope::tests::a_body_over_one_mebibyte_is_refused_not_truncated"]
+expect_message = "result.response.is_none()"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-job-log-length-cap"
+guards = "A bot job log range length is capped at 1,048,576"
+file = "crates/plexus-core/src/github/reads/bot.rs"
+old = "positive(fields, \"length\", MAX_JOB_LOG_RANGE_BYTES)?"
+new = "positive(fields, \"length\", u64::MAX)? /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bot_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::aft_job_log_reads_a_byte_range_with_the_agents_bot"]
+expect_message = "endpoint_not_allowed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-bot-job-log-tail-form-kept"
+guards = "A job log read with max_bytes keeps the tail form on the Actions connection"
+file = "crates/plexus-module/src/lib.rs"
+old = "            && args.get(\"max_bytes\").is_none())"
+new = "            /* NON-VACUITY BREAK */)"
+test_file = "crates/plexus-module/src/bot_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::job_log_with_max_bytes_keeps_the_tail_form_off_the_bot"]
+expect_message = "a max_bytes job log read keeps the tail form"
 build_timeout_s = 3600
 timeout_s = 120

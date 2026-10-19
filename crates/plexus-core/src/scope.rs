@@ -165,6 +165,51 @@ pub fn basal_flow_read_agent<'a>(principal: &str, scope: Option<&'a CallScope>) 
         .and_then(|scope| scope.agent_id.as_deref())
 }
 
+/// Which agent's GitHub App bot serves a bot read (see
+/// `github::reads::bot`): a head scope's own `agent_id`, or a worker scope's
+/// `on_behalf_of_agent`, both taken from the scope stamp the daemon put on
+/// the route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BotReadIdentity {
+    /// A head scope's own `agent_id`.
+    Head(String),
+    /// A worker scope's `on_behalf_of_agent`: the agent whose head started the
+    /// worker. It chooses which bot reads, which read budget is charged and
+    /// which repositories are visible, and is recorded for audit. It is never
+    /// the scope's agent, never authority to write or act as that agent, and
+    /// never selects a credential that leaves plexus.
+    OnBehalfOf(String),
+}
+
+impl BotReadIdentity {
+    pub fn agent(&self) -> &str {
+        match self {
+            Self::Head(agent) | Self::OnBehalfOf(agent) => agent,
+        }
+    }
+}
+
+/// Which agent's bot a bot read uses: a head scope's `agent_id`, or a worker
+/// scope's `on_behalf_of_agent` (which the daemon stamps only on a worker
+/// scope with no `agent_id`, `delegates` or flow). Anything else names no
+/// agent, and the read is refused.
+pub fn bot_read_identity(
+    scope: Option<&CallScope>,
+    on_behalf_of_agent: Option<&str>,
+) -> Option<BotReadIdentity> {
+    let scope = scope?;
+    let named = |agent: Option<&str>| agent.filter(|agent| !agent.is_empty()).map(str::to_owned);
+    match scope.kind.as_deref() {
+        Some("head") => named(scope.agent_id.as_deref()).map(BotReadIdentity::Head),
+        Some("worker")
+            if scope.agent_id.is_none() && !scope.delegates && scope.flow_id.is_none() =>
+        {
+            named(on_behalf_of_agent).map(BotReadIdentity::OnBehalfOf)
+        }
+        _ => None,
+    }
+}
+
 /// Decide a call's agent only from its route's daemon scope stamp. Without a
 /// stamp there is no agent; attribution alone never grants agent authority.
 pub fn resolve_call_agent(scope: Option<&CallScope>) -> CallAgent {

@@ -1,0 +1,19 @@
+{
+  "replies": {
+    "github.repo.get": {
+      "vendor_error": "http_404"
+    }
+  },
+  "expected_requests": [
+    {
+      "connection_id": "github-handle-app-x",
+      "action": "github.repo.get",
+      "args": {
+        "owner": "o",
+        "repo": "x",
+        "path": "pulls/999",
+        "accept": "application/vnd.github+json"
+      }
+    }
+  ]
+}

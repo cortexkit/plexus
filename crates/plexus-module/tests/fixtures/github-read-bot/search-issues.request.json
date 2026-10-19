@@ -1,0 +1,17 @@
+{
+  "scope": {
+    "kind": "worker",
+    "on_behalf_of_agent": "agent-x"
+  },
+  "call": {
+    "name": "github_read",
+    "arguments": {
+      "action": "github.search.issues",
+      "repository": "o/x",
+      "args": {
+        "q": "is:open label:bug",
+        "page": 2
+      }
+    }
+  }
+}

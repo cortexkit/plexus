@@ -100,6 +100,17 @@ pub(crate) const EXCLUDED_TABLES: &[(&str, &str)] = &[
     ),
     ("sqlite_sequence", "SQLite's own AUTOINCREMENT bookkeeping"),
     (
+        "github_bot_read_ledger",
+        "the bot read budget's trailing-hour counts restart after a cutover; a cutover stops \
+         the module, and GitHub's own remaining count, recorded again from the first replies, \
+         still holds reads back while the installation's real quota is low",
+    ),
+    (
+        "github_bot_rate_limit",
+        "the last rate-limit headers GitHub reported for each bot; the next bot read reply \
+         reports them again",
+    ),
+    (
         "github_repo_binding_generation",
         "a fence counter compared only against snapshots held in a running module; a cutover \
          starts from a stopped module, the destination's migration creates the counter, and \

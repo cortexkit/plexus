@@ -1,0 +1,36 @@
+{
+  "replies": {
+    "github.search.issues": {
+      "success": {
+        "status": 200,
+        "body": {
+          "total_count": 31,
+          "incomplete_results": false,
+          "items": [
+            {
+              "number": 7,
+              "title": "Crash on start"
+            }
+          ]
+        },
+        "next_page": 3,
+        "rate_limit": {
+          "remaining": 4000,
+          "reset_at_ms": 4102444800000
+        }
+      }
+    }
+  },
+  "expected_requests": [
+    {
+      "connection_id": "github-handle-app-x",
+      "action": "github.search.issues",
+      "args": {
+        "owner": "o",
+        "repo": "x",
+        "q": "is:open label:bug repo:o/x",
+        "page": 2
+      }
+    }
+  ]
+}

@@ -529,11 +529,11 @@ impl crate::consent_card::ElicitationRoute for SubcPrefrontalRoutePeer {
         use crate::consent_card::ElicitationCallError;
         let owner =
             crate::scope::parse_scope_owner(&scope.owner).ok_or(ElicitationCallError::NotSent)?;
-        let selector = subc_protocol::scope::ScopeSelector {
+        let selector = subc_protocol::scope::ScopeSelector::new(
             owner,
-            scope_ref: scope.scope_ref.clone(),
-            scope_epoch: Some(scope.scope_epoch),
-        };
+            scope.scope_ref.clone(),
+            Some(scope.scope_epoch),
+        );
         match self.call_value_scoped(operation, params, Some(selector), Some(timeout)) {
             Ok(mut reply) => Ok(reply.get_mut("result").map(Value::take).unwrap_or(reply)),
             Err(RouteCallFailure::Module { code, message, .. }) => {

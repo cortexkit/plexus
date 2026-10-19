@@ -135,6 +135,11 @@ pub struct AuthorizationRequest {
     /// Written on the call's audit rows and on any approval request it raises, for
     /// attribution only: no gate, key or lookup reads it.
     relay_origin: Option<RelayOrigin>,
+    /// The agent a worker scope says it is working for (the stamp's
+    /// `on_behalf_of_agent`). Written on the call's audit rows, for
+    /// attribution only: no gate, grant or credential lookup reads it, and it
+    /// never becomes `attributed_agent_id` or an acting agent.
+    on_behalf_of_agent: Option<String>,
     origin: RequestOrigin,
     receipt_approval: Option<ReceiptApproval>,
     receipt: Option<ReceiptClaim>,
@@ -280,6 +285,7 @@ impl AuthorizationRequest {
             supports_per_call_approval: true,
             call_key: None,
             relay_origin: None,
+            on_behalf_of_agent: None,
             origin: RequestOrigin::Ordinary,
             receipt_approval: None,
             receipt: None,
@@ -385,6 +391,13 @@ impl AuthorizationRequest {
     /// else: the request is still keyed by [`Self::with_call_key`].
     pub fn with_relay_origin(mut self, relay_origin: RelayOrigin) -> Self {
         self.relay_origin = Some(relay_origin);
+        self
+    }
+
+    /// Record the agent a worker scope works for on this call's audit rows.
+    /// Attribution only: it grants nothing and is never the acting agent.
+    pub fn with_on_behalf_of_agent(mut self, agent: impl Into<String>) -> Self {
+        self.on_behalf_of_agent = Some(agent.into());
         self
     }
 
@@ -908,6 +921,9 @@ pub struct Reservation {
     /// The call from which the reserved call was relayed, written on the
     /// dispatch audit row as it was on the authorization row.
     pub relay_origin: Option<RelayOrigin>,
+    /// The worker scope's `on_behalf_of_agent`, written on the dispatch audit
+    /// row as it was on the authorization row. Attribution only.
+    pub on_behalf_of_agent: Option<String>,
     /// For a call made as an agent, the agent grant that authorized it.
     pub agent_grant: Option<PinnedGrant>,
     /// When this reservation runs a stored approval raised under a scope, that
@@ -2595,6 +2611,7 @@ where
             origin: request.origin,
             scope: request.scope,
             relay_origin: request.relay_origin,
+            on_behalf_of_agent: request.on_behalf_of_agent,
             agent_grant: agent_grant_pin,
             approval_scope,
         })
@@ -4428,6 +4445,7 @@ where
             &record,
             request.scope.as_ref(),
             request.relay_origin.as_ref(),
+            request.on_behalf_of_agent.as_deref(),
         ) {
             eprintln!(error governance: "audit append failed: authorization decision={decision:?} reason={reason:?} principal={:?} actor={:?} acting_principal={:?} request_id={:?} action={:?}: {error}", connection.map(|value| value.principal.as_str()).unwrap_or(&request.principal), request.actor, request.principal, request.request_id, request.action);
         }
@@ -4509,6 +4527,7 @@ where
             },
             reservation.scope.as_ref(),
             reservation.relay_origin.as_ref(),
+            reservation.on_behalf_of_agent.as_deref(),
         ) {
             eprintln!(error governance: "audit append failed: dispatch denial reason={reason:?} principal={:?} actor={:?} request_id={:?}: {error}", reservation.principal, reservation.actor, reservation.request_id);
         }
@@ -4584,6 +4603,7 @@ where
             reconciliation_of: None, },
             reservation.scope.as_ref(),
             reservation.relay_origin.as_ref(),
+            reservation.on_behalf_of_agent.as_deref(),
         ) {
             eprintln!(error governance: "audit append failed: dispatch result outcome={outcome:?} principal={:?} actor={:?} request_id={:?}: {error}", reservation.principal, reservation.actor, reservation.request_id);
         }
@@ -7116,6 +7136,7 @@ mod tests {
             origin: RequestOrigin::Ordinary,
             scope: None,
             relay_origin: None,
+            on_behalf_of_agent: None,
             agent_grant: None,
             approval_scope: None,
         };

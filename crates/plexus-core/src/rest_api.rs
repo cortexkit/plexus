@@ -41,6 +41,7 @@ use crate::transport::{
 
 pub(crate) mod artifact_file;
 mod job_log;
+mod read_envelope;
 
 const REST_ERROR_BODY_CAP: usize = 4096;
 
@@ -566,6 +567,23 @@ impl RestTransport {
             ThrottleGate::Refuse(remaining) => return throttle_refusal("REST", remaining),
             ThrottleGate::Wait(delay) => thread::sleep(delay),
             ThrottleGate::Clear => {}
+        }
+        if let Some(shape) = crate::github::reads::bot::envelope_shape(&request.action)
+            .filter(|_| operation.credentialless_tail.is_none())
+        {
+            let client = match state.download_client(config) {
+                Ok(client) => client,
+                Err(_) => return local_not_sent(),
+            };
+            return read_envelope::send(
+                &client,
+                &mut state.throttle_until,
+                config,
+                operation,
+                shape,
+                request,
+                credential,
+            );
         }
         if let Some(tail) = &operation.credentialless_tail {
             let client = match state.download_client(config) {

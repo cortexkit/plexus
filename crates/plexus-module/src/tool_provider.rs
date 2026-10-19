@@ -319,8 +319,11 @@ pub(crate) fn reply(name: &str, arguments: &Map<String, Value>) -> Result<Value,
         if let Some(field) = arguments.keys().next() {
             return Err(invalid_request(field, "role.describe takes no arguments"));
         }
-        let mut describe = serde_json::to_value(RoleDescribe {
-            majors: vec![Major {
+        // tool-provider/v1 requires a provider that advertises the capability
+        // filter to list every tag its catalog tools carry, so a consumer can
+        // pick the tags to ask for before fetching the catalog.
+        let describe = RoleDescribe::new(
+            vec![Major {
                 version: PROVIDES.to_owned(),
                 ops: vec![
                     ops::ROLE_DESCRIBE.to_owned(),
@@ -329,23 +332,11 @@ pub(crate) fn reply(name: &str, arguments: &Map<String, Value>) -> Result<Value,
                 ],
                 stability: "alpha".to_owned(),
             }],
-            implementation_version: env!("CARGO_PKG_VERSION").to_owned(),
-            capabilities: vec![CAPABILITY_FILTER.to_owned()],
-        })
-        .expect("role description serializes");
-        // tool-provider/v1 (from role crate 0.9.0) requires a provider that
-        // advertises the capability filter to list every tag its catalog tools
-        // carry, so a consumer can pick the tags to ask for before fetching the
-        // catalog. The crate version plexus pins predates the field, so it is
-        // added to the wire reply here.
-        describe
-            .as_object_mut()
-            .expect("role description is an object")
-            .insert(
-                "tool_capabilities".to_owned(),
-                serde_json::json!(tool_capability_union()),
-            );
-        return Ok(describe);
+            env!("CARGO_PKG_VERSION"),
+        )
+        .with_capabilities(vec![CAPABILITY_FILTER.to_owned()])
+        .with_tool_capabilities(tool_capability_union());
+        return Ok(serde_json::to_value(describe).expect("role description serializes"));
     }
     // The wire type permits additive members; this provider refuses axes it
     // cannot implement rather than silently returning the default catalog.

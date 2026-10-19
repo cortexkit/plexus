@@ -1,0 +1,25 @@
+{
+  "content": [
+    {
+      "text": "{\n  \"result\": {\n    \"body\": {\n      \"default_branch\": \"main\",\n      \"full_name\": \"o/x\"\n    },\n    \"next_page\": null,\n    \"status\": 200\n  }\n}",
+      "type": "text"
+    }
+  ],
+  "isError": false,
+  "result": {
+    "body": {
+      "default_branch": "main",
+      "full_name": "o/x"
+    },
+    "next_page": null,
+    "status": 200
+  },
+  "structuredContent": {
+    "body": {
+      "default_branch": "main",
+      "full_name": "o/x"
+    },
+    "next_page": null,
+    "status": 200
+  }
+}

@@ -1099,6 +1099,32 @@ CREATE TABLE event_outbox_failures (
 CREATE INDEX idx_github_binding_lower_repo ON github_repo_binding(lower(repository));
 "#,
     },
+    // GitHub bot reads share each App installation's 5,000-request hourly
+    // quota with that bot's writes. The ledger counts the read requests each
+    // installation's handle sent in the trailing hour, so reads can be capped
+    // below the quota and writes always keep headroom. The rate-limit row
+    // keeps the last `x-ratelimit-remaining` and reset GitHub reported for
+    // the handle. The audit column records the agent a worker scope works
+    // for, kept apart from `agent_id`, which only ever names the acting or
+    // attributed agent.
+    Migration {
+        version: 56,
+        statements: r#"
+CREATE TABLE github_bot_read_ledger (
+    app_handle_id TEXT NOT NULL,
+    reserved_at_ms INTEGER NOT NULL,
+    units INTEGER NOT NULL CHECK (units BETWEEN 1 AND 16)
+);
+CREATE INDEX idx_github_bot_read_ledger_handle_time ON github_bot_read_ledger(app_handle_id, reserved_at_ms);
+CREATE TABLE github_bot_rate_limit (
+    app_handle_id TEXT PRIMARY KEY NOT NULL,
+    remaining INTEGER NOT NULL CHECK (remaining >= 0),
+    reset_at_ms INTEGER NOT NULL,
+    observed_at_ms INTEGER NOT NULL
+);
+ALTER TABLE audit_journal ADD COLUMN scope_on_behalf_of_agent TEXT;
+"#,
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
@@ -1172,6 +1198,9 @@ pub mod web_search_store;
 
 #[path = "store/github/mod.rs"]
 pub mod github_store;
+
+#[path = "store/github_bot_reads.rs"]
+pub mod github_bot_reads_store;
 
 #[path = "store/permissions.rs"]
 pub mod permissions_store;
@@ -2628,6 +2657,9 @@ pub struct AuditRow {
     /// The daemon scope the call's route was bound under, when there was one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<CallScope>,
+    /// The agent the call's worker scope worked for, when it named one.
+    /// Attribution only, and never the same thing as `agent_id`.
+    pub scope_on_behalf_of_agent: Option<String>,
 }
 
 /// One grant row attributed to an agent: what revoking it needs, plus the
@@ -8157,13 +8189,27 @@ impl PlexusStore {
     /// relayed: `relay_origin` is the call from which the audited call was
     /// relayed, recorded for attribution, and `None` leaves the origin columns
     /// NULL.
+    /// `on_behalf_of_agent` is the agent a worker scope works for, written to
+    /// its own column for attribution; it never fills `agent_id`.
     pub(crate) fn append_audit_relayed(
         &self,
         record: &AuditRecord,
         scope: Option<&CallScope>,
         relay_origin: Option<&RelayOrigin>,
+        on_behalf_of_agent: Option<&str>,
     ) -> Result<(), StoreError> {
-        self.append_audit_row(record, None, None, scope, relay_origin)
+        self.inner.with_conn_fenced(|conn| {
+            append_audit_on_conn_with(
+                conn,
+                record,
+                &AuditContext {
+                    scope,
+                    relay_origin,
+                    on_behalf_of_agent,
+                    ..AuditContext::default()
+                },
+            )
+        })
     }
 
     /// The one audit INSERT. `query_text` and `result_count` are `Some` only for
@@ -8322,7 +8368,7 @@ impl PlexusStore {
                         vendor_request_id, idempotency_key_fingerprint, response_class,
                         reconciliation_of, app_handle_id, scope_owner, scope_ref, scope_epoch,
                         scope_kind, scope_parent, scope_parent_state, scope_delegates,
-                         scope_owner_authorized, scope_flow_id
+                         scope_owner_authorized, scope_flow_id, scope_on_behalf_of_agent
                  FROM audit_journal WHERE principal = ?1 ORDER BY journal_id",
             )?;
             let rows = statement.query_map([principal], |row| {
@@ -8373,6 +8419,7 @@ impl PlexusStore {
                     response_class: row.get(24)?,
                     reconciliation_of: row.get(25)?,
                     scope,
+                    scope_on_behalf_of_agent: row.get(36)?,
                 })
             })?;
             rows.collect()
@@ -9232,6 +9279,19 @@ fn policy_summary_on_conn(
     .optional()
 }
 
+/// What an audit row records beside its [`AuditRecord`]: the web search
+/// query columns, the daemon scope the call's route was bound under, the
+/// call it was relayed from, and the agent a worker scope works for. Each
+/// absent part leaves its columns NULL.
+#[derive(Default)]
+struct AuditContext<'a> {
+    query_text: Option<&'a str>,
+    result_count: Option<i64>,
+    scope: Option<&'a CallScope>,
+    relay_origin: Option<&'a RelayOrigin>,
+    on_behalf_of_agent: Option<&'a str>,
+}
+
 fn append_audit_on_conn(
     conn: &Connection,
     record: &AuditRecord,
@@ -9240,6 +9300,31 @@ fn append_audit_on_conn(
     scope: Option<&CallScope>,
     relay_origin: Option<&RelayOrigin>,
 ) -> rusqlite::Result<()> {
+    append_audit_on_conn_with(
+        conn,
+        record,
+        &AuditContext {
+            query_text,
+            result_count,
+            scope,
+            relay_origin,
+            on_behalf_of_agent: None,
+        },
+    )
+}
+
+fn append_audit_on_conn_with(
+    conn: &Connection,
+    record: &AuditRecord,
+    context: &AuditContext<'_>,
+) -> rusqlite::Result<()> {
+    let AuditContext {
+        query_text,
+        result_count,
+        scope,
+        relay_origin,
+        on_behalf_of_agent,
+    } = *context;
     let now = now_ms();
     let scope_epoch = scope.map(|scope| epoch_to_sql(scope.scope_epoch));
     conn.execute(
@@ -9252,12 +9337,12 @@ fn append_audit_on_conn(
             reconciliation_of, app_handle_id, query_text, result_count,
             scope_owner, scope_ref, scope_epoch, scope_kind, scope_parent,
             scope_parent_state, scope_delegates, scope_owner_authorized,
-            origin_carrier, origin_call_key, scope_flow_id
+            origin_carrier, origin_call_key, scope_flow_id, scope_on_behalf_of_agent
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
             ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34,
-            ?35, ?36, ?37, ?38, ?39
+            ?35, ?36, ?37, ?38, ?39, ?40
         )",
         rusqlite::params![
             now,
@@ -9299,6 +9384,7 @@ fn append_audit_on_conn(
             relay_origin.map(|origin| origin.carrier.as_str()),
             relay_origin.map(|origin| origin.call_key.as_str()),
             scope.and_then(|scope| scope.flow_id.as_deref()),
+            on_behalf_of_agent,
         ],
     )?;
     // A settled send of a claimed approval also settles the approval

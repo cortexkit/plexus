@@ -146,6 +146,22 @@ pub(super) fn download(
 ) -> TransportResponse {
     let started = Instant::now();
     let deadline = config.request_timeout.min(LOG_DEADLINE);
+    // Only the bot catalog's job log action declares `offset` and `length`,
+    // and only its callers get the byte-range form; every other caller keeps
+    // the bounded tail below.
+    if request.args.get("length").is_some() {
+        return download_range(
+            client,
+            throttle_until,
+            config,
+            operation,
+            tail,
+            request,
+            credential,
+            started,
+            deadline,
+        );
+    }
     let max_bytes = match request.args.get("max_bytes") {
         None => 65_536,
         Some(value) => match value.as_u64().filter(|value| (1..=262_144).contains(value)) {
@@ -264,6 +280,186 @@ pub(super) fn download(
     TransportResponse::success(
         serde_json::json!({"total_bytes": total, "truncated": total > max_bytes as u64, "text": text}),
     )
+}
+
+/// A byte range of a job log: `length` bytes from `offset`, through the same
+/// single credential-free redirect to log storage the tail read uses. The
+/// reply's `length` counts the raw bytes read, so `offset + length` is where
+/// the next range starts; `total_bytes` comes from storage's `Content-Range`.
+#[allow(clippy::too_many_arguments)]
+fn download_range(
+    client: &Client,
+    throttle_until: &mut Option<Instant>,
+    config: &RestConfig,
+    operation: &HttpOperation,
+    tail: &crate::manifest::CredentiallessTail,
+    request: &TransportRequest,
+    credential: &ResolvedCredential,
+    started: Instant,
+    deadline: Duration,
+) -> TransportResponse {
+    let offset = request
+        .args
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let Some(length) = request
+        .args
+        .get("length")
+        .and_then(Value::as_u64)
+        .filter(|length| (1..=crate::github::reads::bot::MAX_JOB_LOG_RANGE_BYTES).contains(length))
+    else {
+        return local_not_sent();
+    };
+    let Some(last) = offset.checked_add(length - 1) else {
+        return local_not_sent();
+    };
+    let mut args = request.args.clone();
+    if let Some(args) = args.as_object_mut() {
+        args.remove("offset");
+        args.remove("length");
+    }
+    let url = match api_redirect(
+        client,
+        throttle_until,
+        config,
+        operation,
+        tail,
+        &args,
+        credential,
+        deadline,
+    ) {
+        Ok(url) => url,
+        Err(response) => return *response,
+    };
+    let Some(time) = deadline
+        .checked_sub(started.elapsed())
+        .filter(|time| !time.is_zero())
+    else {
+        return refused("job_log_read_limit");
+    };
+    // A new request, not a copy of the API request: no credential header
+    // leaves the API origin.
+    let response = match client
+        .get(url.clone())
+        .timeout(time)
+        .header(reqwest::header::RANGE, format!("bytes={offset}-{last}"))
+        .send()
+    {
+        Ok(response) => response,
+        Err(_) => return refused("job_log_download_failed"),
+    };
+    let status = response.status().as_u16();
+    if (300..400).contains(&status) {
+        return refused("job_log_redirect_refused");
+    }
+    if missing_log(status) {
+        return refused("job_log_unavailable");
+    }
+    let content_range = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("bytes "))
+        .map(str::to_owned);
+    if status == 416 {
+        // The range starts at or past the end: an empty read that still says
+        // how long the log is.
+        let Some(total) = content_range
+            .as_deref()
+            .and_then(|range| range.strip_prefix("*/"))
+            .and_then(|total| total.parse::<u64>().ok())
+        else {
+            return refused("job_log_download_failed");
+        };
+        return TransportResponse::success(serde_json::json!({
+            "body": "", "offset": offset, "length": 0, "total_bytes": total,
+        }));
+    }
+    let (bytes, total) = match status {
+        206 => {
+            let Some((start, end, total)) = content_range.as_deref().and_then(|range| {
+                let (range, total) = range.split_once('/')?;
+                let (start, end) = range.split_once('-')?;
+                Some((
+                    start.parse::<u64>().ok()?,
+                    end.parse::<u64>().ok()?,
+                    total.parse::<u64>().ok()?,
+                ))
+            }) else {
+                return refused("job_log_download_failed");
+            };
+            if start != offset || end < start || end > last || end >= total {
+                return refused("job_log_download_failed");
+            }
+            let expected = end - start + 1;
+            match tail_bytes(
+                response,
+                expected as usize,
+                started,
+                deadline,
+                expected,
+                "job_log_download_failed",
+                "job_log_download_failed",
+            ) {
+                Ok((bytes, read)) if read == expected => (bytes, total),
+                Ok(_) => return refused("job_log_download_failed"),
+                Err(code) => return refused(code),
+            }
+        }
+        // Storage ignored the range and sent the whole log: keep only the
+        // asked-for window while reading it.
+        200 => match window_bytes(response, offset, length, started, deadline) {
+            Ok(window) => window,
+            Err(code) => return refused(code),
+        },
+        _ => return storage_failure(status, &url),
+    };
+    let read = bytes.len() as u64;
+    TransportResponse::success(serde_json::json!({
+        "body": redact(&bytes, &url, credential),
+        "offset": offset,
+        "length": read,
+        "total_bytes": total,
+    }))
+}
+
+/// Read a whole log body, keeping bytes `offset..offset + length` and counting
+/// the rest. Refuses a body longer than the log read limit.
+fn window_bytes<R: Read>(
+    mut response: R,
+    offset: u64,
+    length: u64,
+    started: Instant,
+    deadline: Duration,
+) -> Result<(Vec<u8>, u64), &'static str> {
+    let mut window = Vec::new();
+    let mut position = 0u64;
+    let mut buffer = [0u8; 8192];
+    loop {
+        if deadline <= started.elapsed() {
+            return Err("job_log_read_limit");
+        }
+        let count = response
+            .read(&mut buffer)
+            .map_err(|_| "job_log_download_failed")?;
+        if count == 0 {
+            break;
+        }
+        let chunk_start = position;
+        position += count as u64;
+        if position > MAX_LOG_READ_BYTES {
+            return Err("job_log_read_limit");
+        }
+        let from = offset.max(chunk_start);
+        let to = (offset + length).min(position);
+        if from < to {
+            window.extend_from_slice(
+                &buffer[(from - chunk_start) as usize..(to - chunk_start) as usize],
+            );
+        }
+    }
+    Ok((window, position))
 }
 
 pub(super) fn content_length(response: &Response) -> Option<u64> {

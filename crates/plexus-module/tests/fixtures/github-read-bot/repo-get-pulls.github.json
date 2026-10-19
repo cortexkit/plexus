@@ -1,0 +1,40 @@
+{
+  "replies": {
+    "github.repo.get": {
+      "success": {
+        "status": 200,
+        "body": [
+          {
+            "number": 12,
+            "title": "Fix the parser"
+          },
+          {
+            "number": 11,
+            "title": "Add tests"
+          }
+        ],
+        "next_page": 2,
+        "rate_limit": {
+          "remaining": 4000,
+          "reset_at_ms": 4102444800000
+        }
+      }
+    }
+  },
+  "expected_requests": [
+    {
+      "connection_id": "github-handle-app-x",
+      "action": "github.repo.get",
+      "args": {
+        "owner": "o",
+        "repo": "x",
+        "path": "pulls",
+        "query": {
+          "state": "open",
+          "per_page": "2"
+        },
+        "accept": "application/vnd.github+json"
+      }
+    }
+  ]
+}

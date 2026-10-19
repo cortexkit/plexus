@@ -10,14 +10,18 @@ use crate::{credentials::CredentialSource, transport::Transport};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
+// Three groups: the issue and review reads (also granted to prefrontal on
+// every handle), the CI reads, and the agent bot reads served by `bot`, which
+// need a head's or worker's agent on the route's stamp.
 macro_rules! read_actions {
-    ($($bot:literal),* ; $($ci:literal),*) => {
+    ($($bot:literal),* ; $($ci:literal),* ; $($agent_bot:literal),*) => {
         pub(crate) const BOT_ACTIONS: &[&str] = &[$($bot),*];
-        pub const ACTIONS: &[&str] = &[$($bot),*, $($ci),*];
+        pub const ACTIONS: &[&str] = &[$($bot),*, $($ci),*, $($agent_bot),*];
     };
 }
 read_actions!("github.issue.get", "github.issue_comments.list", "github.issue.search", "github.pr.review_threads";
-    "github.actions.job_log", "github.actions.artifact_file", "github.actions.run.superseded");
+    "github.actions.job_log", "github.actions.artifact_file", "github.actions.run.superseded";
+    "github.repo.get", "github.search.code", "github.search.issues");
 
 /// Mark only a binding-checked selection as internal search authority. Raw
 /// caller arguments never become this marker merely by naming repositories.
@@ -262,6 +266,11 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     scope: Option<&crate::scope::CallScope>,
     attributed_agent: Option<&str>,
 ) -> Result<Value, ReadError> {
+    // Agent bot reads choose their bot from the stamp and are served only by
+    // `bot::read`; this module-grant path never serves them.
+    if bot::ACTIONS.contains(&action) {
+        return Err(ReadError::UnsupportedAction);
+    }
     if action == "github.pr.review_threads" {
         review_threads::validate_args(args)?;
     }
@@ -420,6 +429,7 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
 }
 
 mod artifact_file;
+pub mod bot;
 mod ci;
 mod job_log;
 mod review_threads;

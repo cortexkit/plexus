@@ -53,7 +53,12 @@
     "add_issue_labels": "sha256:da020bd7f89c7fe760246172f8ec51db822a8c35c644b6bce0a90b1d97255edb",
     "remove_issue_label": "sha256:e7784c8ed02c51f1d79738b81c2c72e74d3c309703fb813a671631fe641e2fc1",
     "add_issue_assignees": "sha256:6eda1394bdefeab72c4038a735f897aae795ccae1d7a764a8a6391332588f16f",
-    "remove_issue_assignees": "sha256:6eda1394bdefeab72c4038a735f897aae795ccae1d7a764a8a6391332588f16f"
+    "remove_issue_assignees": "sha256:6eda1394bdefeab72c4038a735f897aae795ccae1d7a764a8a6391332588f16f",
+    "github.repo.get": "sha256:54454b5ac233a1d4ec915e18dc3225134a6b4afb12e84bdaf577f424418dd18d",
+    "github.search.code": "sha256:29f7e73cb1cfa250ec6aaf0bb9a05a5c0151dfb0c8c93dbd580ea0d9c4ad0e10",
+    "github.search.issues": "sha256:29f7e73cb1cfa250ec6aaf0bb9a05a5c0151dfb0c8c93dbd580ea0d9c4ad0e10",
+    "github.actions.job.get": "sha256:ff27d1ba019b1bb0a4ed352675f11843b6cb7ca366e6d80bd91b56fd2f0af447",
+    "github.actions.job_log": "sha256:47228675be3a8f8f10fc094093725c6be1ad530616d46df0d8dbdb4fbc28c817"
   },
   "github_actions": {
     "get_job": "sha256:ff27d1ba019b1bb0a4ed352675f11843b6cb7ca366e6d80bd91b56fd2f0af447",

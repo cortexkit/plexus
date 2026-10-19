@@ -1,0 +1,16 @@
+{
+  "scope": {
+    "kind": "worker",
+    "on_behalf_of_agent": "agent-x"
+  },
+  "call": {
+    "name": "github_read",
+    "arguments": {
+      "action": "github.repo.get",
+      "repository": "O/X",
+      "args": {
+        "path": ""
+      }
+    }
+  }
+}

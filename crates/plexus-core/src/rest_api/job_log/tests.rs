@@ -551,3 +551,97 @@ fn tail_reader_uses_the_configured_deadline() {
         "tail reader must use the caller's shortened deadline"
     );
 }
+
+fn run_range(url: &str, offset: u64, length: u64) -> TransportResponse {
+    let url = url.to_owned();
+    let (api, server) = super::super::tests::start_server(1, move |_, request| {
+        let line = request.lines().next().unwrap();
+        assert_eq!(line, "GET /repos/o/r/actions/jobs/42/logs HTTP/1.1");
+        response(
+            302,
+            &format!("Location: {url}\r\nContent-Length: 0\r\n"),
+            "",
+        )
+    });
+    let mut op = super::super::tests::http_op(
+        HttpMethod::Get,
+        "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
+    );
+    op.credentialless_tail = Some(CredentiallessTail {
+        allowed_hosts: vec!["localhost".into()],
+        kind: crate::manifest::CredentiallessTailKind::JobLog,
+    });
+    let mut config = super::super::tests::config(api, vec![("github.actions.job_log", op)]);
+    config.test_root_certificate = Some(CERT.to_vec());
+    config.request_timeout = Duration::from_secs(3);
+    let transport = RestTransport::new(config);
+    let result = transport.dispatch(
+        super::super::tests::request(
+            "bot",
+            "github.actions.job_log",
+            json!({"owner":"o","repo":"r","job_id":42,"offset":offset,"length":length}),
+        ),
+        &ResolvedCredential::new(b"BOT-CREDENTIAL".to_vec(), None, 0),
+    );
+    server.join().unwrap();
+    result
+}
+
+#[test]
+fn a_range_read_asks_storage_for_exactly_that_range_without_credentials() {
+    let log = "line one\nline two\nline three\n";
+    let total = log.len();
+    let storage = Storage::start(move |request| {
+        assert!(
+            request.starts_with("GET "),
+            "one GET and no HEAD: {request}"
+        );
+        assert!(request.to_ascii_lowercase().contains("range: bytes=9-17"));
+        let window = &log[9..18];
+        response(
+            206,
+            &format!(
+                "Content-Length: {}\r\nContent-Range: bytes 9-17/{total}\r\n",
+                window.len()
+            ),
+            window,
+        )
+    });
+    let result = run_range(&storage.url, 9, 9);
+    assert_eq!(
+        result.response.unwrap(),
+        json!({"body":"line two\n","offset":9,"length":9,"total_bytes":total})
+    );
+    let requests = storage.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].to_ascii_lowercase().contains("authorization:"));
+    assert!(!requests[0].contains("BOT-CREDENTIAL"));
+}
+
+#[test]
+fn a_range_read_that_storage_ignores_keeps_only_the_asked_window() {
+    let log = "0123456789abcdef";
+    let storage =
+        Storage::start(move |_| response(200, &format!("Content-Length: {}\r\n", log.len()), log));
+    let result = run_range(&storage.url, 4, 6);
+    assert_eq!(
+        result.response.unwrap(),
+        json!({"body":"456789","offset":4,"length":6,"total_bytes":16})
+    );
+}
+
+#[test]
+fn a_range_past_the_end_is_an_empty_read_that_names_the_length() {
+    let storage = Storage::start(move |_| {
+        response(
+            416,
+            "Content-Range: bytes */16\r\nContent-Length: 0\r\n",
+            "",
+        )
+    });
+    let result = run_range(&storage.url, 64, 10);
+    assert_eq!(
+        result.response.unwrap(),
+        json!({"body":"","offset":64,"length":0,"total_bytes":16})
+    );
+}
