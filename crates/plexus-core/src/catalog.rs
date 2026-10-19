@@ -2630,7 +2630,11 @@ mod tests {
             "a write on an S1 app must not go out against a catalog that failed to refresh"
         );
         assert_eq!(severity_from_action("read", "S1"), Severity::S1);
-        assert_eq!(severity_from_action("write", "S1"), Severity::S2);
+        assert_eq!(
+            severity_from_action("write", "S1"),
+            Severity::S2,
+            "a write on an S1 app must have S2 action severity for catalog freshness"
+        );
         assert_eq!(severity_from_action("destructive", "S1"), Severity::S3);
         assert_eq!(severity_from_action("read", "S4"), Severity::S2);
         assert_eq!(severity_from_action("write", "S4"), Severity::S4);

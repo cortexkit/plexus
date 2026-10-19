@@ -350,7 +350,10 @@ async fn parked_calls_do_not_starve_work(recalled: bool) {
         )
         .await;
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
-        assert!(body["error"].is_null(), "{body}");
+        assert!(
+            body["error"].is_null(),
+            "unrelated work must complete while 32 approvals wait: {body}"
+        );
         match reply.header.corr {
             100 => assert_eq!(body["isError"], false, "search must succeed: {body}"),
             101 => assert_eq!(

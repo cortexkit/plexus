@@ -3487,9 +3487,7 @@ timeout_s = 120
 [[control]]
 id = "mcp-refusal-classified-by-status"
 guards = "An MCP refusal whose body is not JSON is classified by its HTTP status, not failed as a protocol error"
-file = "crates/plexus-core/src/mcp_remote.rs"
-old = "Err(_) if !success => Value::Null,"
-new = "Err(_) if false => Value::Null, // NON-VACUITY BREAK"
+edits = [{ file = "crates/plexus-core/src/mcp_remote.rs", old = "if !success {\n        crate::rest_api::log_vendor_error(", new = "if false && !success { /* NON-VACUITY BREAK */\n        crate::rest_api::log_vendor_error(" }, { file = "crates/plexus-core/src/mcp_remote.rs", old = "Err(_) if !success => Value::Null,", new = "Err(_) if false => Value::Null, // NON-VACUITY BREAK" }]
 test_file = "crates/plexus-core/src/mcp_remote.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -3571,6 +3569,7 @@ package = "plexus-core"
 target = "--lib"
 select = "expected"
 expect_red = ["rest_api::tests::a_changed_config_rebuilds_the_pooled_client"]
+expect_message = "the rebuilt entry must use the new idle timeout"
 build_timeout_s = 3600
 timeout_s = 120
 
@@ -3668,8 +3667,8 @@ timeout_s = 120
 id = "rest-path-dot-segment"
 guards = "REST path arguments cannot form a '.' or '..' segment that the URL parser would resolve to an unreviewed endpoint"
 file = "crates/plexus-core/src/rest_api.rs"
-old = "if has_dot_segment(&path) {"
-new = "if false && has_dot_segment(&path) { /* NON-VACUITY BREAK */"
+old = "segment == \".\" || segment == \"..\""
+new = "false && (segment == \".\" || segment == \"..\") /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/rest_api.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -4482,7 +4481,7 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 expect_red = ["catalog::tests::a_write_on_an_s1_app_is_blocked_by_a_stale_catalog"]
-expect_message = "must not go out against a catalog that failed to refresh"
+expect_message = "a write on an S1 app must have S2 action severity for catalog freshness"
 build_timeout_s = 3600
 
 [[control]]
@@ -5024,9 +5023,7 @@ timeout_s = 120
 [[control]]
 id = "recipient-declaration-sets-ask-first"
 guards = "A newly declared recipient makes existing catalog rows of that action ask first"
-file = "crates/plexus-core/src/storage.rs"
-old = "WHERE name = ?2 AND ask_first = 0 AND (principal, connection_id) IN"
-new = "WHERE 0 AND name = ?2 AND ask_first = 0 AND (principal, connection_id) IN /* NON-VACUITY BREAK */"
+edits = [{ file = "crates/plexus-core/src/storage.rs", old = "WHERE name = ?2 AND ask_first = 0 AND (principal, connection_id) IN", new = "WHERE 0 AND name = ?2 AND ask_first = 0 AND (principal, connection_id) IN /* NON-VACUITY BREAK */" }, { file = "crates/plexus-core/src/storage.rs", old = "action.get(\"recipients\").is_some(),", new = "false, /* NON-VACUITY BREAK: omit recipient floor when reseeding existing rows */" }]
 test_file = "crates/plexus-core/tests/governance.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -5057,8 +5054,8 @@ timeout_s = 120
 id = "pin-placeholder-suspends-watches"
 guards = "Moving a handle row off the placeholder schema suspends watches pinned to the placeholder hash"
 file = "crates/plexus-core/src/storage.rs"
-old = "&connection_id,\n                        &action,\n                        None,\n                        now,\n                    )?;\n                    report.pinned.push"
-new = "&connection_id,\n                        \"no-such-action\", /* NON-VACUITY BREAK */\n                        None,\n                        now,\n                    )?;\n                    report.pinned.push"
+old = "suspend_subscriptions_for_action(\n                        conn,\n                        &principal,\n                        &connection_id,\n                        &action,\n                        None,\n                        now,\n                    )?;\n                    report.pinned.push"
+new = "/* NON-VACUITY BREAK: pin the schema without suspending its watches. */\n                    report.pinned.push"
 test_file = "crates/plexus-core/tests/it/github_handle_placeholder_schemas.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -6778,8 +6775,8 @@ timeout_s = 120
 id = "approval-fairness"
 guards = "A bounded scope-check batch cannot repeat its first unreachable row forever"
 file = "crates/plexus-core/src/storage.rs"
-old = "ORDER BY scope_checked_at_ms,created_at_ms,principal,request_id LIMIT ?2"
-new = "ORDER BY created_at_ms,principal,request_id LIMIT ?2 /* NON-VACUITY BREAK */"
+old = "AND (expires_at <= ?3 OR scope_checked_at_ms <= ?4)\n                 ORDER BY scope_checked_at_ms,created_at_ms,principal,request_id LIMIT ?2"
+new = "AND (?3 IS NOT NULL AND ?4 IS NOT NULL)\n                 ORDER BY created_at_ms,principal,request_id LIMIT ?2 /* NON-VACUITY BREAK: remove cooldown and rotation */"
 test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -9665,9 +9662,7 @@ timeout_s = 120
 [[control]]
 id = "github-job-log-storage-https"
 guards = "An allowlisted host is still refused over plaintext HTTP"
-file = "crates/plexus-core/src/rest_api/job_log.rs"
-old = "if url.scheme() != \"https\""
-new = "if (url.scheme() != \"https\" && false) /* NON-VACUITY BREAK */"
+edits = [{ file = "crates/plexus-core/src/rest_api/job_log.rs", old = "if url.scheme() != \"https\"", new = "if (url.scheme() != \"https\" && false) /* NON-VACUITY BREAK */" }, { file = "crates/plexus-core/src/rest_api/job_log.rs", old = "|| url.port_or_known_default() != Some(443)", new = "|| (url.port_or_known_default() != Some(443) && false) /* NON-VACUITY BREAK */" }]
 test_file = "crates/plexus-core/src/rest_api/job_log/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -10295,9 +10290,7 @@ timeout_s = 120
 [[control]]
 id = "github-artifact-storage-https"
 guards = "Allow only HTTPS storage URLs"
-file = "crates/plexus-core/src/rest_api/job_log.rs"
-old = "if url.scheme() != \"https\""
-new = "if (url.scheme() != \"https\" && false) /* NON-VACUITY BREAK */"
+edits = [{ file = "crates/plexus-core/src/rest_api/job_log.rs", old = "if url.scheme() != \"https\"", new = "if (url.scheme() != \"https\" && false) /* NON-VACUITY BREAK */" }, { file = "crates/plexus-core/src/rest_api/job_log.rs", old = "|| url.port_or_known_default() != Some(443)", new = "|| (url.port_or_known_default() != Some(443) && false) /* NON-VACUITY BREAK */" }]
 test_file = "crates/plexus-core/src/rest_api/artifact_file/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -13924,8 +13917,8 @@ timeout_s = 120
 id = "github-receipts-independent-audit-retention"
 guards = "Audit pruning cannot delete retry evidence before the receipt's own lease-aware horizon"
 file = "crates/plexus-core/src/storage.rs"
-old = "let cutoff = now.saturating_sub(retention);"
-new = "let cutoff = now.saturating_sub(retention);\n    conn.execute(\"DELETE FROM github_bot_receipt WHERE state IN ('outcome_unknown','pending','pending_approval') AND updated_at<?1\", [cutoff])?; /* NON-VACUITY BREAK */"
+old = "let cutoff = now_ms.saturating_sub(retention_window_ms);\n        self.inner.with_conn_fenced(|conn| {\n            conn.execute(\n                \"DELETE FROM audit_journal"
+new = "let cutoff = now_ms.saturating_sub(retention_window_ms);\n        self.inner.with_conn_fenced(|conn| {\n            conn.execute(\"DELETE FROM github_bot_receipt WHERE state IN ('outcome_unknown','pending','pending_approval') AND updated_at<?1\", [cutoff])?; /* NON-VACUITY BREAK */\n            conn.execute(\n                \"DELETE FROM audit_journal"
 test_file = "crates/plexus-core/tests/it/github_receipt.rs"
 runner = "cargo"
 package = "plexus-core"

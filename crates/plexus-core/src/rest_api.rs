@@ -2507,8 +2507,8 @@ mod tests {
     }
 
     /// Re-registering a connection with new client settings rebuilds its
-    /// pooled client. The timeouts live inside the client, so the old one
-    /// kept the old timeout however the config changed.
+    /// pooled client. Check idle eviction as well as the request timeout: the
+    /// per-request deadline can enforce a new timeout even on an old client.
     #[test]
     fn a_changed_config_rebuilds_the_pooled_client() {
         let (endpoint, task) = start_server(2, |index, _request| {
@@ -2534,6 +2534,7 @@ mod tests {
 
         let mut short = config(endpoint, ops());
         short.request_timeout = Duration::from_millis(100);
+        short.idle_timeout = Duration::from_secs(1);
         transport.register_config("rest", short);
         let second = transport.dispatch(
             request("rest", "get_issue", json!({"issue_id": "1"})),
@@ -2543,6 +2544,15 @@ mod tests {
             (second.transmission, second.error_code.as_deref()),
             (TransmissionState::OutcomeUnknown, Some("timeout")),
             "the new 100ms timeout must apply: {second:?}"
+        );
+        {
+            let entries = transport.entries.lock().unwrap();
+            entries["rest"].lock().unwrap().last_used = Instant::now() - Duration::from_secs(2);
+        }
+        assert_eq!(
+            transport.sweep_idle(),
+            1,
+            "the rebuilt entry must use the new idle timeout"
         );
         task.join().expect("server exits");
     }

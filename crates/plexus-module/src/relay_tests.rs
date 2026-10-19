@@ -1307,6 +1307,10 @@ async fn connector_home_is_checked_before_dial_and_again_on_superseded() {
     );
     assert_eq!(claim.reads.load(SeqCst), 1);
     claim.held.store(true, SeqCst);
+    // Publish admission before run subscribes, so an unread admission change
+    // cannot trigger a retry whose pre-dial refresh masks the 4009 recheck.
+    home.refresh().unwrap();
+    assert_eq!(claim.reads.load(SeqCst), 2);
     let credentials = Arc::new(StubCredentialSource::with_default_success(
         b"secret".to_vec(),
     ));
@@ -1330,7 +1334,7 @@ async fn connector_home_is_checked_before_dial_and_again_on_superseded() {
         .unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(200), async {
-            while claim.reads.load(SeqCst) < 3 {
+            while claim.reads.load(SeqCst) < 4 {
                 tokio::task::yield_now().await;
             }
         })
@@ -1340,7 +1344,7 @@ async fn connector_home_is_checked_before_dial_and_again_on_superseded() {
     );
     assert_eq!(
         claim.reads.load(SeqCst),
-        3,
+        4,
         "4009 must immediately recheck connector home"
     );
     wait_state(&status, State::Reconnecting).await;
