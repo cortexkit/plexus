@@ -18,8 +18,11 @@ pub(super) enum Classified {
     },
 }
 
-/// Only a private transport classification may supply this signal. Error
-/// messages are redacted before dispatch returns and must never be unredacted.
+/// Whether a provider's failed reply said its quota or credit is used up, for a
+/// provider that reports that with a status other than 402. Only the HTTP
+/// transport may set this, from the raw reply, because the error text this
+/// classifier receives has already had vendor wording removed; recovering the
+/// signal by reading that text is not possible and must not be attempted.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum QuotaSignal {
     Absent,
