@@ -122,15 +122,12 @@ fn quota_cooldown_is_connection_local() {
 struct ReportingCredentials(Mutex<Vec<u16>>);
 
 impl CredentialSource for ReportingCredentials {
-    fn get(&self, _: &[u8]) -> Result<ResolvedCredential, CredentialError> {
+    fn get_by_id(&self, _: &str) -> Result<ResolvedCredential, CredentialError> {
         Ok(ResolvedCredential::new(
             b"test-credential".to_vec(),
             None,
             7,
         ))
-    }
-    fn get_by_id(&self, _: &str) -> Result<ResolvedCredential, CredentialError> {
-        self.get(&[])
     }
     fn report_id_auth_failure(&self, _: &str, status: u16) {
         self.0.lock().unwrap().push(status);
@@ -238,6 +235,7 @@ fn recorded_rest_attempt(record: &str, reason: SkipReason, cooldown_ms: i64) {
                     method: HttpMethod::Post,
                     path: "/search".into(),
                     args_schema: json!({"type":"object"}),
+                    parameters: None,
                     request_constants: None,
                     credentialless_tail: None,
                 },
