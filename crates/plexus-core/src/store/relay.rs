@@ -4,6 +4,46 @@ use crate::actor_attribution::ActorUnknownCode;
 use crate::poller::iso8601::parse_to_millis;
 use serde::Deserialize;
 use serde_json::json;
+use std::time::{Duration, Instant};
+
+#[derive(Default)]
+struct MarkerLog {
+    last: Option<Instant>,
+    markers: usize,
+    watches: usize,
+}
+impl MarkerLog {
+    fn record(&mut self, watches: usize, now: Instant) -> Option<(usize, usize)> {
+        if watches == 0 {
+            return None;
+        }
+        self.markers += 1;
+        self.watches += watches;
+        if self
+            .last
+            .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_secs(60))
+        {
+            return None;
+        }
+        self.last = Some(now);
+        Some((
+            std::mem::take(&mut self.markers),
+            std::mem::take(&mut self.watches),
+        ))
+    }
+}
+static MARKER_LOG: std::sync::Mutex<MarkerLog> = std::sync::Mutex::new(MarkerLog {
+    last: None,
+    markers: 0,
+    watches: 0,
+});
+fn log_marker_due(reason: &str, watches: usize) {
+    // Count committed watch marks, including repeats; suppressed markers join the next line.
+    let mut log = MARKER_LOG.lock().unwrap();
+    if let Some((markers, watches)) = log.record(watches, Instant::now()) {
+        diag!(info relay: "relay markers made watches due: latest_reason={reason} markers={markers} watch_marks={watches}");
+    }
+}
 
 pub const MAX_SEQ: u64 = 9_007_199_254_740_991;
 
@@ -212,7 +252,7 @@ fn cursor(conn: &rusqlite::Connection, source: &str) -> rusqlite::Result<Option<
 fn reconcile(
     conn: &rusqlite::Connection,
     repository: Option<(&str, Option<i64>)>,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<usize> {
     reconcile_backstop(conn, repository, true)
 }
 
@@ -220,7 +260,7 @@ fn reconcile_backstop(
     conn: &rusqlite::Connection,
     repository: Option<(&str, Option<i64>)>,
     include_releases: bool,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<usize> {
     if let Some((repo, Some(id))) = repository {
         let recorded: Option<i64> = conn
             .query_row(
@@ -231,7 +271,7 @@ fn reconcile_backstop(
             .optional()?
             .flatten();
         if recorded.is_some_and(|recorded| recorded != id) {
-            return Ok(());
+            return Ok(0);
         }
     }
     conn.execute("UPDATE trigger_subscriptions SET last_polled_at_ms=NULL
@@ -240,13 +280,11 @@ fn reconcile_backstop(
         AND (?1 IS NULL OR lower(json_extract(fixed_args,'$.owner') || '/' || json_extract(fixed_args,'$.repo'))=lower(?1))
         AND EXISTS (SELECT 1 FROM connections c WHERE c.principal=trigger_subscriptions.principal
             AND c.connection_id=trigger_subscriptions.connection_id AND c.app_key IN ('github','github_actions'))",
-        rusqlite::params![repository.map(|(name, _)| name), include_releases])?;
-    Ok(())
+        rusqlite::params![repository.map(|(name, _)| name), include_releases])
 }
 
-fn reread(conn: &rusqlite::Connection, event: &Event) -> rusqlite::Result<()> {
+fn reread(conn: &rusqlite::Connection, event: &Event) -> rusqlite::Result<usize> {
     let repo = repository(&event.body);
-    diag!(info relay: "relay reread queued installation={}", event.installation_id);
     reconcile(
         conn,
         repo.as_ref().map(|(name, id)| (name.as_str(), Some(*id))),
@@ -258,7 +296,7 @@ impl PlexusStore {
     /// covered by the relay App, so their polling schedule is left alone.
     pub fn relay_disconnected(&self) -> Result<(), StoreError> {
         self.inner
-            .with_conn_fenced(|conn| reconcile_backstop(conn, None, false))
+            .with_conn_fenced(|conn| reconcile_backstop(conn, None, false).map(|_| ()))
     }
     #[cfg(any(test, feature = "test-support"))]
     pub fn relay_cursor(&self, source: &str) -> Result<Option<Cursor>, StoreError> {
@@ -282,7 +320,8 @@ impl PlexusStore {
         {
             return Err(StoreError::Backend("invalid relay hello".into()));
         }
-        self.inner.with_conn_fenced(|conn| {
+        let mut watches = 0;
+        let reset = self.inner.with_conn_fenced(|conn| {
             let mut reset = None;
             let old = cursor(conn, source)?;
             let changed = old.as_ref().is_some_and(|old| old.stream_id != hello.stream_id);
@@ -290,7 +329,7 @@ impl PlexusStore {
             if changed {
                 reset = Some(CoverageReset::StreamChanged);
                 diag!(warn relay: "relay {source} stream changed; full reconcile queued");
-                reconcile(conn, None)?;
+                watches += reconcile(conn, None)?;
             }
             let floor = hello.oldest_seq - 1;
             // On the same stream the relay will next send `next_seq`, so a
@@ -301,20 +340,24 @@ impl PlexusStore {
             if !changed && committed >= hello.next_seq {
                 reset = Some(CoverageReset::SequenceReset);
                 diag!(warn relay: "relay {source} sequence went back from committed {committed} to next {}; full reconcile queued", hello.next_seq);
-                reconcile(conn, None)?;
+                watches += reconcile(conn, None)?;
                 committed = floor.max(hello.last_acked_seq.min(hello.next_seq - 1));
             }
             if committed < floor || committed < hello.last_acked_seq {
                 reset = reset.or(Some(CoverageReset::Gap));
                 diag!(warn relay: "relay {source} gap {}..{}; full reconcile queued", committed + 1, floor.max(hello.last_acked_seq));
-                reconcile(conn, None)?;
+                watches += reconcile(conn, None)?;
                 committed = floor.max(hello.last_acked_seq);
             }
             conn.execute("INSERT INTO relay_cursor(source,stream_id,committed_seq) VALUES (?1,?2,?3)
                 ON CONFLICT(source) DO UPDATE SET stream_id=excluded.stream_id,committed_seq=excluded.committed_seq",
                 (source, &hello.stream_id, committed))?;
             Ok(reset)
-        })
+        })?;
+        if let Some(reset) = reset {
+            log_marker_due(reset.name(), watches);
+        }
+        Ok(reset)
     }
 
     /// The cursor, drop ledger, reconcile queue and event/outbox insert commit together.
@@ -339,6 +382,8 @@ impl PlexusStore {
         }
         let mut inserted = false;
         let mut committed_new = false;
+        let mut due_watches = 0;
+        let mut marker_reason = "pr_comment_reread";
         self.inner.with_conn_fenced(|conn| {
             let current = cursor(conn, source)?.ok_or_else(protocol_error)?;
             if current.stream_id != stream { return Err(protocol_error()); }
@@ -346,25 +391,26 @@ impl PlexusStore {
             if event.seq != current.committed_seq + 1 { return Err(protocol_error()); }
             committed_new = true;
             match event.stub {
-                Some(Stub::Oversized) => reread(conn, event)?,
-                Some(Stub::RateLimited) => reread(conn, event)?,
+                Some(Stub::Oversized) => { marker_reason = "oversized"; due_watches += reread(conn, event)?; }
+                Some(Stub::RateLimited) => { marker_reason = "rate_limited"; due_watches += reread(conn, event)?; }
                 Some(Stub::Overflow) => {
                     diag!(warn relay: "relay overflow gap at seq={} installation={}; full reconcile queued", event.seq, event.installation_id);
                     // Relay installations are not agent bot Apps; without an authoritative mapping, reconcile all watches.
-                    reconcile(conn, None)?;
+                    marker_reason = "overflow";
+                    due_watches += reconcile(conn, None)?;
                 }
                 None if event.event == "cortexkit_installation_bound" => {
-                    diag!(info relay: "relay installation bound reconcile queued installation={}", event.installation_id);
+                    marker_reason = "installation_bound";
                     match event.body.get("repositories") {
-                        Some(Value::Null) => reconcile(conn, None)?,
+                        Some(Value::Null) => due_watches += reconcile(conn, None)?,
                         Some(Value::Array(repos)) => for repo in repos {
-                            if let Some((name, id)) = repository_item(repo) { reconcile(conn, Some((&name, Some(id))))?; }
+                            if let Some((name, id)) = repository_item(repo) { due_watches += reconcile(conn, Some((&name, Some(id))))?; }
                         },
                         _ => return Err(protocol_error()),
                     }
                 }
                 None => {
-                    if let Err(reason) = admit(conn, event, received, &self.ci_runs)? {
+                    if let Err(reason) = admit(conn, event, received, &self.ci_runs, &mut due_watches)? {
                         event_outbox::increment(conn, reason.counter(), 1)?;
                         diag!(info relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action);
                     } else {
@@ -375,6 +421,7 @@ impl PlexusStore {
             conn.execute("UPDATE relay_cursor SET committed_seq=?1 WHERE source=?2 AND stream_id=?3", (event.seq, source, stream))?;
             Ok(())
         })?;
+        log_marker_due(marker_reason, due_watches);
         if committed_new && event.stub.is_none() && event.event == "workflow_run" {
             self.ci_runs.remember(event, received);
         }
@@ -566,6 +613,7 @@ fn admit(
     event: &Event,
     received: i64,
     ci_runs: &CiRunCache,
+    due_watches: &mut usize,
 ) -> rusqlite::Result<Result<(), DropReason>> {
     let Some((repo, repo_id)) = repository(&event.body) else {
         return Ok(Err(DropReason::InvalidPayload));
@@ -600,6 +648,7 @@ fn admit(
             AND EXISTS (SELECT 1 FROM connections c WHERE c.principal=trigger_subscriptions.principal
                 AND c.connection_id=trigger_subscriptions.connection_id AND c.status='active'
                 AND c.app_key IN ('github','github_actions'))", [&repo])?;
+        *due_watches += queued;
         return Ok(Err(if queued > 0 {
             DropReason::PrCommentReread
         } else {
@@ -732,6 +781,22 @@ fn admit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marker_due_logging_is_limited_to_once_per_minute_and_counts_suppressed_marks() {
+        let mut log = MarkerLog::default();
+        let now = Instant::now();
+        assert_eq!(log.record(0, now), None);
+        assert_eq!(log.record(2, now), Some((1, 2)));
+        assert_eq!(
+            log.record(3, now + Duration::from_secs(59)),
+            None,
+            "marker logs must be limited to once per minute"
+        );
+        assert_eq!(log.record(4, now + Duration::from_secs(60)), Some((2, 7)));
+        assert_eq!(log.record(1, now + Duration::from_secs(61)), None);
+        assert_eq!(log.record(5, now + Duration::from_secs(120)), Some((2, 6)));
+    }
 
     #[test]
     fn ci_and_release_inherit_only_their_principals_issue_project() {

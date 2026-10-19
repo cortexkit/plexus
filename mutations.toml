@@ -2301,8 +2301,8 @@ build_timeout_s = 3600
 id = "relay-gap-reconcile"
 guards = "A restored older store or expired buffer queues a full reconciliation, not an ordinary behind cursor"
 file = "crates/plexus-core/src/store/relay.rs"
-old = "reconcile(conn, None)?;\n                committed = floor.max(hello.last_acked_seq);"
-new = "reconcile(conn, Some((\"\", None)))?; /* NON-VACUITY BREAK */\n                committed = floor.max(hello.last_acked_seq);"
+old = "watches += reconcile(conn, None)?;\n                committed = floor.max(hello.last_acked_seq);"
+new = "watches += reconcile(conn, Some((\"\", None)))?; /* NON-VACUITY BREAK */\n                committed = floor.max(hello.last_acked_seq);"
 test_file = "crates/plexus-module/src/relay_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -2343,7 +2343,7 @@ build_timeout_s = 3600
 id = "relay-oversized-reread"
 guards = "Oversized stubs queue a re-read of existing watches without publishing an event"
 file = "crates/plexus-core/src/store/relay.rs"
-old = "Some(Stub::Oversized) => reread(conn, event)?,"
+old = "Some(Stub::Oversized) => { marker_reason = \"oversized\"; due_watches += reread(conn, event)?; }"
 new = "Some(Stub::Oversized) => {}, /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/relay_tests.rs"
 runner = "cargo"
@@ -2357,7 +2357,7 @@ build_timeout_s = 3600
 id = "relay-rate-limited-reread"
 guards = "Rate-limited stubs queue a re-read of existing watches without publishing an event"
 file = "crates/plexus-core/src/store/relay.rs"
-old = "Some(Stub::RateLimited) => reread(conn, event)?,"
+old = "Some(Stub::RateLimited) => { marker_reason = \"rate_limited\"; due_watches += reread(conn, event)?; }"
 new = "Some(Stub::RateLimited) => {}, /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/relay_tests.rs"
 runner = "cargo"
@@ -2371,8 +2371,8 @@ build_timeout_s = 3600
 id = "relay-overflow-reconcile"
 guards = "Overflow markers are gaps that reconcile the watch set without publishing an event"
 file = "crates/plexus-core/src/store/relay.rs"
-old = "// Relay installations are not agent bot Apps; without an authoritative mapping, reconcile all watches.\n                    reconcile(conn, None)?;"
-new = "// Relay installations are not agent bot Apps; without an authoritative mapping, reconcile all watches.\n                    /* NON-VACUITY BREAK */"
+old = "due_watches += reconcile(conn, None)?;"
+new = "/* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/relay_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -2385,7 +2385,7 @@ build_timeout_s = 3600
 id = "relay-bound-list-reconcile"
 guards = "An installation-bound repository list queues matching repository watches before ack"
 file = "crates/plexus-core/src/store/relay.rs"
-old = "if let Some((name, id)) = repository_item(repo) { reconcile(conn, Some((&name, Some(id))))?; }"
+old = "if let Some((name, id)) = repository_item(repo) { due_watches += reconcile(conn, Some((&name, Some(id))))?; }"
 new = "if let Some((_name, _id)) = repository_item(repo) { /* NON-VACUITY BREAK */ }"
 test_file = "crates/plexus-module/src/relay_tests.rs"
 runner = "cargo"
@@ -2399,7 +2399,7 @@ build_timeout_s = 3600
 id = "relay-bound-null-reconcile"
 guards = "An installation-bound null repository list queues the entire existing watch set before ack"
 file = "crates/plexus-core/src/store/relay.rs"
-old = "Some(Value::Null) => reconcile(conn, None)?,"
+old = "Some(Value::Null) => due_watches += reconcile(conn, None)?,"
 new = "Some(Value::Null) => {}, /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/relay_tests.rs"
 runner = "cargo"
@@ -11088,7 +11088,7 @@ timeout_s = 120
 
 [[control]]
 id = "relay-polling-disconnect-catchup"
-guards = "Losing the relay immediately makes affected watches due for one catch-up poll"
+guards = "Losing the relay before slow mode immediately makes affected watches due for one catch-up poll"
 file = "crates/plexus-module/src/relay.rs"
 old = "tokio::task::spawn_blocking(move || db.relay_disconnected()).await"
 new = "tokio::task::spawn_blocking(move || { let _ = db; Ok::<(), cortexkit_store::StoreError>(()) /* NON-VACUITY BREAK */ }).await"
@@ -11097,7 +11097,7 @@ runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["relay::tests::relay_polling_disconnect_catches_up_once_and_reconnects_fresh"]
+expect_red = ["relay::tests::relay_polling_normal_disconnect_catches_up_once_and_reconnects_fresh"]
 build_timeout_s = 3600
 timeout_s = 120
 
@@ -16168,5 +16168,52 @@ target = "--lib"
 select = "expected"
 expect_red = ["storage::recipients_store::tests::a_preview_never_moves_the_binding_generation"]
 expect_message = "a preview must not"
+build_timeout_s = 3600
+timeout_s = 120
+[[control]]
+id = "relay-clean-reconnect-five-minute-bound"
+guards = "A clean reconnect preserves slow polling for at most five minutes"
+file = "crates/plexus-module/src/relay.rs"
+old = "const CLEAN_RECONNECT_WINDOW: Duration = Duration::from_secs(300);"
+new = "const CLEAN_RECONNECT_WINDOW: Duration = Duration::from_secs(301); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_clean_reconnect_grace_has_a_five_minute_limit"]
+expect_message = "clean reconnect grace must end after five minutes"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-clean-reconnect-requires-no-reset"
+guards = "A hello reporting a gap or sequence reset cannot keep slow polling across a short reconnect"
+file = "crates/plexus-module/src/relay.rs"
+old = "&& reset.is_none();"
+new = "&& true; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_reset_hello_cancels_slow_reconnect_grace"]
+expect_message = "reset hello must cancel slow reconnect grace"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-marker-due-log-rate-limit"
+guards = "Marker-induced watch-due INFO logs are limited to one per minute, counting suppressed marks"
+file = "crates/plexus-core/src/store/relay.rs"
+old = "now.saturating_duration_since(last) < Duration::from_secs(60)"
+new = "now.saturating_duration_since(last) < Duration::ZERO /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/relay.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::relay::tests::marker_due_logging_is_limited_to_once_per_minute_and_counts_suppressed_marks"]
+expect_message = "marker logs must be limited to once per minute"
 build_timeout_s = 3600
 timeout_s = 120
