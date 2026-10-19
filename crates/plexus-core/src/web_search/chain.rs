@@ -1,6 +1,10 @@
 //! Ordered provider admission. Compatibility searches never enter this walk.
 
 use super::*;
+use crate::storage::web_search_store::{
+    WebSearchAllowanceAdmission, WebSearchAllowanceReservation,
+};
+use crate::transport::TransmissionState;
 use std::time::Duration;
 
 mod outcome;
@@ -47,6 +51,40 @@ impl BackendIdentity {
         Self {
             app_key: backend.app_key(),
             action: backend.action(),
+        }
+    }
+}
+
+/// One provider's reserved monthly allowance count while its attempt is in
+/// progress. Dropping it hands the count back, so every early exit between
+/// reservation and transmission (a rate-limit refusal, an authorize denial, an
+/// unreadable limits row) releases it without a separate call at each exit.
+/// `keep` settles a request that may have reached the vendor. The count was
+/// committed by the reserving transaction, so a process that dies before
+/// settling keeps it.
+struct AllowanceHold<'a> {
+    store: &'a PlexusStore,
+    reservation: Option<WebSearchAllowanceReservation>,
+}
+
+impl AllowanceHold<'_> {
+    /// Settle the count as spent: the request was sent, or may have been.
+    fn keep(mut self) {
+        self.reservation = None;
+    }
+}
+
+impl Drop for AllowanceHold<'_> {
+    fn drop(&mut self) {
+        // A panic may have unwound out of a dispatch whose request already
+        // left, so an unknown attempt keeps its count, as a crash would.
+        if std::thread::panicking() {
+            return;
+        }
+        if let Some(reservation) = self.reservation.take() {
+            if let Err(error) = self.store.release_web_search_allowance(reservation) {
+                eprintln!(error web_search: "web_search allowance release failed: {error}");
+            }
         }
     }
 }
@@ -210,7 +248,30 @@ impl WebSearchService {
                     deadline_stopped = true;
                     return Err(SkipReason::Deadline);
                 }
-                // Reserve the allowance here, before rate charging.
+                // Check 7. The store decides eligibility and reserves the count
+                // in one transaction, so concurrent searches cannot both take
+                // the last unit. Only a provider with an allowance set is
+                // counted, and the month is the UTC month of this reservation.
+                let hold = AllowanceHold {
+                    store: engine.store(),
+                    reservation: match engine.store().reserve_web_search_allowance(
+                        name,
+                        &connection.principal,
+                        (self.clock)(),
+                    ) {
+                        Ok(WebSearchAllowanceAdmission::Unlimited) => None,
+                        Ok(WebSearchAllowanceAdmission::Reserved(reservation)) => Some(reservation),
+                        Ok(WebSearchAllowanceAdmission::Exhausted) => {
+                            return Err(SkipReason::Allowance)
+                        }
+                        Err(error) => {
+                            eprintln!(error web_search: "web_search allowance unreadable for {name}: {error}");
+                            return Err(SkipReason::Unavailable);
+                        }
+                    },
+                };
+                // Every return from here until the dispatch outcome drops
+                // `hold` unsent, which releases the count.
                 let limits = engine
                     .store()
                     .web_search_limits(name)
@@ -251,6 +312,13 @@ impl WebSearchService {
                     SkipReason::for_refusal(&self.refusal_for_denial(caller, &denial))
                 })?;
                 let dispatched = engine.revalidate_and_dispatch(&reservation);
+                // Revalidation refusals also report NotSent. Sent and
+                // OutcomeUnknown may have reached the vendor, so they keep it.
+                if dispatched.transmission != TransmissionState::NotSent {
+                    hold.keep();
+                } else {
+                    drop(hold);
+                }
                 audit.dispatched = true;
                 let results = match outcome::classify(
                     backend.as_ref(),
