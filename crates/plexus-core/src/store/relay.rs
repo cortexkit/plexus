@@ -729,9 +729,9 @@ fn admit(
     // never rewrites a stored row.
     let mut inserted_any = false;
     let mut delivery_id = Some(event.delivery_id.as_str());
-    for target in targets {
+    for target in &targets {
         let headers = EventHeaders {
-            project: relay_project(conn, &repo, &target, action)?,
+            project: relay_project(conn, &repo, target, action)?,
             ..headers.clone()
         };
         let identity = KeyedEventIdentity {
@@ -765,6 +765,7 @@ fn admit(
         )?;
         inserted_any |= !matches!(inserted, TriggerEventInsertOutcome::Duplicate { .. });
     }
+    inserted_any |= insert_review_notice(conn, event, &repo, repo_id, received, &targets)?;
     // Failed poll resolutions leave a cache row with a null id. Seed that row too,
     // so a polled copy can derive the same key; never overwrite a known identity.
     conn.execute("INSERT INTO github_repo_id_cache(repo,repo_id,last_attempt_at_ms,resolved_at_ms) VALUES (lower(?1),?2,?3,?3)
@@ -776,6 +777,78 @@ fn admit(
     } else {
         Ok(())
     })
+}
+
+fn insert_review_notice(
+    conn: &Connection,
+    event: &Event,
+    repo: &str,
+    repo_id: i64,
+    received: i64,
+    targets: &[Watch],
+) -> rusqlite::Result<bool> {
+    use crate::event_key::*;
+    let (kind, item, id_field, timestamp) = match event.event.as_str() {
+        "pull_request_review" if event.action.as_deref() == Some("submitted") => (
+            GITHUB_PR_REVIEW_SUBMITTED,
+            "review",
+            "review_id",
+            "submitted_at",
+        ),
+        "pull_request_review_comment" if event.action.as_deref() == Some("created") => (
+            GITHUB_PR_REVIEW_COMMENT_CREATED,
+            "comment",
+            "comment_id",
+            "created_at",
+        ),
+        _ => return Ok(false),
+    };
+    let fields = json!({"repo_id": repo_id, (id_field): event.body[item]["id"]});
+    let Ok(key) = derive_event_key(kind, &fields) else {
+        return Ok(false);
+    };
+    let payload = crate::review_body::notice(kind, &key, repo, &event.body);
+    let activity = event.body[item][timestamp]
+        .as_str()
+        .and_then(parse_to_millis);
+    let mut inserted = false;
+    for target in targets {
+        let headers = EventHeaders {
+            repo: repo.to_owned(),
+            project: target.project.clone(),
+            pr: payload["pr"].as_u64().map(|pr| pr.to_string()),
+            ..Default::default()
+        };
+        // The item-change row already owns the delivery id. The supplemental
+        // notice deduplicates by its semantic key, including across deliveries.
+        let outcome = insert_keyed_event_row(
+            conn,
+            &target.principal,
+            &target.connection,
+            &target.subscription,
+            &KeyedPollEventInput {
+                event: PollEventInput {
+                    vendor_event_id: &key,
+                    payload: &payload,
+                    observed_at_ms: received,
+                    item_kind: Some(item),
+                    activity_at_ms: activity,
+                    actor: &ActorAttribution::NotEnriched,
+                },
+                identity: Some(KeyedEventIdentity {
+                    event_key: &key,
+                    event_name: kind,
+                    repo_id,
+                    change: None,
+                    headers: &headers,
+                }),
+                delivery_id: None,
+                envelope_context: Default::default(),
+            },
+        )?;
+        inserted |= !matches!(outcome, TriggerEventInsertOutcome::Duplicate { .. });
+    }
+    Ok(inserted)
 }
 
 #[cfg(test)]

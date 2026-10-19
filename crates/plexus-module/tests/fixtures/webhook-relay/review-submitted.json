@@ -1,0 +1,25 @@
+{
+  "action": "submitted",
+  "review": {
+    "id": 501,
+    "node_id": "PRR_synthetic501",
+    "user": {"login": "synthetic-reviewer[bot]", "id": 901, "type": "Bot"},
+    "body": "Please handle the error before returning.",
+    "state": "CHANGES_REQUESTED",
+    "html_url": "https://github.com/org/repo/pull/7#pullrequestreview-501",
+    "pull_request_url": "https://api.github.com/repos/org/repo/pulls/7",
+    "submitted_at": "2030-10-08T09:00:00Z",
+    "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "pull_request": {
+    "id": 701,
+    "number": 7,
+    "state": "open",
+    "title": "Synthetic change",
+    "updated_at": "2030-10-08T09:00:00Z",
+    "head": {"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+  },
+  "repository": {"id": 101, "full_name": "Org/Repo"},
+  "sender": {"login": "synthetic-reviewer[bot]", "type": "Bot"},
+  "installation": {"id": 42}
+}

@@ -1,0 +1,30 @@
+{
+  "action": "created",
+  "comment": {
+    "id": 601,
+    "node_id": "PRRC_synthetic601",
+    "pull_request_review_id": 501,
+    "in_reply_to_id": 600,
+    "user": {"login": "synthetic-human", "id": 902, "type": "User"},
+    "body": "Could this use the existing helper?",
+    "path": "src/example.rs",
+    "line": 17,
+    "original_line": 15,
+    "side": "RIGHT",
+    "html_url": "https://github.com/org/repo/pull/7#discussion_r601",
+    "created_at": "2030-10-08T09:00:00Z",
+    "updated_at": "2030-10-08T09:00:00Z",
+    "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "pull_request": {
+    "id": 701,
+    "number": 7,
+    "state": "open",
+    "title": "Synthetic change",
+    "updated_at": "2030-10-08T09:00:00Z",
+    "head": {"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+  },
+  "repository": {"id": 101, "full_name": "Org/Repo"},
+  "sender": {"login": "synthetic-human", "type": "User"},
+  "installation": {"id": 42}
+}

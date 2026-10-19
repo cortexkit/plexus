@@ -16452,3 +16452,82 @@ select = "expected"
 expect_red = ["web_search::chain::outcome::tests::quota_signal_matches_only_eligible_errors"]
 build_timeout_s = 3600
 timeout_s = 120
+[[control]]
+id = "github-review-submitted-action"
+guards = "Only submitted reviews produce the supplemental review-submitted notice"
+file = "crates/plexus-core/src/store/relay.rs"
+old = '"pull_request_review" if event.action.as_deref() == Some("submitted") =>'
+new = '"pull_request_review" if true /* NON-VACUITY BREAK */ =>'
+test_file = "crates/plexus-module/src/review_event_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::review_notice_action_filters_preserve_other_pr_changes"]
+expect_message = "nonmatching review actions must emit only the existing PR change"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-review-comment-created-action"
+guards = "Only created review comments produce the supplemental review-comment notice"
+file = "crates/plexus-core/src/store/relay.rs"
+old = '"pull_request_review_comment" if event.action.as_deref() == Some("created") =>'
+new = '"pull_request_review_comment" if true /* NON-VACUITY BREAK */ =>'
+test_file = "crates/plexus-module/src/review_event_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::review_notice_action_filters_preserve_other_pr_changes"]
+expect_message = "nonmatching review actions must emit only the existing PR change"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-review-character-excerpt"
+guards = "Review excerpts stop at 1500 Unicode scalar values without splitting UTF-8"
+file = "crates/plexus-core/src/review_body.rs"
+old = "chars.by_ref().take(1_500).collect()"
+new = "chars.by_ref().take(1_499).collect() /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/review_event_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::review_notice_unicode_excerpt_and_nullable_fields"]
+expect_message = "review excerpts count Unicode characters, not bytes"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-review-bot-user-type"
+guards = "Review bot flags use GitHub user.type, never a login suffix"
+file = "crates/plexus-core/src/review_body.rs"
+old = 'let bot = text("/user/type").map(|kind| kind == "Bot");'
+new = 'let bot = text("/user/login").map(|login| login.ends_with("[bot]")); /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/review_event_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::review_notice_bot_flag_comes_only_from_user_type"]
+expect_message = "bot classification must use user.type"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-review-events-agent-visibility"
+guards = "Review event fetches require the agent's live repository binding"
+file = "crates/plexus-core/src/store/event_outbox.rs"
+old = '(&repo, agent_id), |r| r.get::<_, bool>(0))?,'
+new = '(&repo, agent_id), |_r| Ok(true))?, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["events_get_tests::review_events_get_enforces_live_agent_repository_binding"]
+expect_message = "review events must enforce the calling agent's repository binding"
+build_timeout_s = 3600
+timeout_s = 120
