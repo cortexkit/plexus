@@ -1,0 +1,37 @@
+{
+  "content": [
+    {
+      "text": "{\n  \"result\": {\n    \"body\": [\n      {\n        \"number\": 12,\n        \"title\": \"Fix the parser\"\n      },\n      {\n        \"number\": 11,\n        \"title\": \"Add tests\"\n      }\n    ],\n    \"next_page\": 2,\n    \"status\": 200\n  }\n}",
+      "type": "text"
+    }
+  ],
+  "isError": false,
+  "result": {
+    "body": [
+      {
+        "number": 12,
+        "title": "Fix the parser"
+      },
+      {
+        "number": 11,
+        "title": "Add tests"
+      }
+    ],
+    "next_page": 2,
+    "status": 200
+  },
+  "structuredContent": {
+    "body": [
+      {
+        "number": 12,
+        "title": "Fix the parser"
+      },
+      {
+        "number": 11,
+        "title": "Add tests"
+      }
+    ],
+    "next_page": 2,
+    "status": 200
+  }
+}

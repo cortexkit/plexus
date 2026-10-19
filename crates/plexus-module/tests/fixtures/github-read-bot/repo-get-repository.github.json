@@ -1,0 +1,30 @@
+{
+  "replies": {
+    "github.repo.get": {
+      "success": {
+        "status": 200,
+        "body": {
+          "full_name": "o/x",
+          "default_branch": "main"
+        },
+        "next_page": null,
+        "rate_limit": {
+          "remaining": 4000,
+          "reset_at_ms": 4102444800000
+        }
+      }
+    }
+  },
+  "expected_requests": [
+    {
+      "connection_id": "github-handle-app-x",
+      "action": "github.repo.get",
+      "args": {
+        "owner": "o",
+        "repo": "x",
+        "path": "",
+        "accept": "application/vnd.github+json"
+      }
+    }
+  ]
+}

@@ -29,6 +29,11 @@
   // Issue-comment reactions are a third path again and are not declared either;
   // add_issue_comment below writes comments, it does not react to them.
   //
+  // THE BOT JOB LOG READS NEED Actions: read ON THE APP. github.actions.job.get
+  // and github.actions.job_log below are answered 403 until the App has it;
+  // that surfaces as vendor_error with status 403 and is a permission refusal,
+  // never a credential failure.
+  //
   // PILOT APP CANNOT MERGE, AND THAT IS EXPECTED RATHER THAN BROKEN. The App
   // backing this connection is minted with issues:write, pull_requests:write,
   // contents:read, metadata:read. GitHub requires contents:WRITE on the HEAD
@@ -51,7 +56,7 @@
   "schema_version": 1,
   "key": "github_rest",
   "name": "GitHub (REST)",
-  "description": "Narrow GitHub REST writes, fixed GraphQL PR draft-state mutations and review-thread reads, and the vendor reads needed to check writes.",
+  "description": "Narrow GitHub REST writes, fixed GraphQL PR draft-state mutations and review-thread reads, the vendor reads needed to check writes, and repository-bound agent bot reads.",
   "reuse_path": "openapi_shim",
   "reuse_rationale": "GitHub publishes a stable, documented REST API with a static bearer-token auth shape. The remote MCP server remains preferred for general reads; this manifest covers write verbs it does not expose and only the vendor reads needed to check those writes.",
   "tier": "S1",
@@ -126,6 +131,116 @@
             }
           },
           "required": ["owner", "repo", "variables"]
+        }
+      }
+    },
+    {
+      // Agent bot reads for `gh`: GET only, relative to the bound repository.
+      // Plexus validates `path` (no absolute URL, leading slash, empty or dot
+      // segment, or encoded separator) and `accept` (one of four GitHub media
+      // types) before authorization and again where the URL is built, and
+      // never follows a redirect. `query` is a flat string map. The reply
+      // keeps the status, the Link next page and the rate-limit headers.
+      "name": "github.repo.get",
+      "risk": "read", "ask_first": false,
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}",
+        "args_schema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "path": {"type": "string"},
+            "query": {"type": "object", "additionalProperties": {"type": "string"}},
+            "accept": {"enum": ["application/vnd.github+json", "application/vnd.github.raw+json", "application/vnd.github.diff", "application/vnd.github.patch"]}
+          },
+          "required": ["owner", "repo", "path", "accept"]
+        }
+      }
+    },
+    {
+      // Plexus builds q as the caller's terms plus ` repo:owner/name` for the
+      // bound repository and refuses terms carrying repo:, org: or user:.
+      // owner and repo are governance context and are not sent.
+      // https://docs.github.com/en/rest/search/search#search-code
+      "name": "github.search.code",
+      "risk": "read", "ask_first": false,
+      "http": {
+        "method": "GET",
+        "path": "/search/code",
+        "args_schema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "q": {"type": "string"},
+            "page": {"type": "integer", "minimum": 1},
+            "per_page": {"type": "integer", "minimum": 1, "maximum": 100}
+          },
+          "required": ["owner", "repo", "q"]
+        }
+      }
+    },
+    {
+      // https://docs.github.com/en/rest/search/search#search-issues-and-pull-requests
+      "name": "github.search.issues",
+      "risk": "read", "ask_first": false,
+      "http": {
+        "method": "GET",
+        "path": "/search/issues",
+        "args_schema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "q": {"type": "string"},
+            "page": {"type": "integer", "minimum": 1},
+            "per_page": {"type": "integer", "minimum": 1, "maximum": 100}
+          },
+          "required": ["owner", "repo", "q"]
+        }
+      }
+    },
+    {
+      // The bot job log read checks the job has completed before asking for
+      // its log. Needs Actions: read on the App, like the log itself.
+      // https://docs.github.com/en/rest/actions/workflow-jobs#get-a-job-for-a-workflow-run
+      "name": "github.actions.job.get",
+      "risk": "read", "ask_first": false,
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}/actions/jobs/{job_id}",
+        "args_schema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "job_id": {"type": "integer", "minimum": 1}
+          },
+          "required": ["owner", "repo", "job_id"]
+        }
+      }
+    },
+    {
+      // A byte range of a finished job's log, with the bot's installation
+      // token. GitHub answers with a one-minute signed storage URL; the log is
+      // fetched from it with a new request that carries no credential, as the
+      // operator-token read in github_actions.jsonc does. Hosts as there.
+      // https://docs.github.com/en/rest/actions/workflow-jobs#download-job-logs-for-a-workflow-run
+      "name": "github.actions.job_log",
+      "risk": "read", "ask_first": false,
+      "http": {
+        "method": "GET",
+        "path": "/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
+        "credentialless_tail": {
+          "allowed_hosts": ["*.blob.core.windows.net", "results-receiver.actions.githubusercontent.com"]
+        },
+        "args_schema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "job_id": {"type": "integer", "minimum": 1},
+            "offset": {"type": "integer", "minimum": 0},
+            "length": {"type": "integer", "minimum": 1, "maximum": 1048576}
+          },
+          "required": ["owner", "repo", "job_id", "offset", "length"]
         }
       }
     },

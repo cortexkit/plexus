@@ -129,6 +129,12 @@ struct RouteBinding {
     principal: Principal,
     scope: Option<CallScope>,
     mode: CallMode,
+    /// A worker scope's `on_behalf_of_agent` from the bind stamp: the agent
+    /// whose bot serves the worker's GitHub bot reads. Kept beside the scope,
+    /// not in it, so nothing that reads the scope's agent can mistake it for
+    /// one. It chooses a bot, charges its read budget and limits reads to its
+    /// repositories; it grants no write and no authority to act as the agent.
+    on_behalf_of_agent: Option<String>,
 }
 
 // Held approval calls live for up to 110 seconds and share this budget with
@@ -201,6 +207,18 @@ impl RouteBindings {
         scope: Option<CallScope>,
         mode: CallMode,
     ) -> Result<(), ModuleError> {
+        self.insert_bound(channel, epoch, principal, scope, mode, None)
+    }
+
+    fn insert_bound(
+        &self,
+        channel: u16,
+        epoch: u32,
+        principal: Principal,
+        scope: Option<CallScope>,
+        mode: CallMode,
+        on_behalf_of_agent: Option<String>,
+    ) -> Result<(), ModuleError> {
         let mut routes = self
             .inner
             .write()
@@ -235,6 +253,7 @@ impl RouteBindings {
                 principal,
                 scope,
                 mode,
+                on_behalf_of_agent,
             },
         );
         Ok(())
@@ -1601,6 +1620,9 @@ async fn handle_control_request(
             // session it belongs to and the agent it may act for. Plexus takes
             // that identity only from this stamp, never from a request
             // payload. A bind without a stamp behaves exactly as before.
+            let on_behalf_of_agent = scope
+                .as_ref()
+                .and_then(|stamp| stamp.attributes.on_behalf_of_agent.clone());
             let scope = scope.as_ref().map(CallScope::from_stamp);
             if let Some(scope) = &scope {
                 eprintln!(info wire:
@@ -1613,7 +1635,14 @@ async fn handle_control_request(
                     scope.owner_authorized
                 );
             }
-            match route_bindings.insert_mode(route_channel, epoch, accepted, scope, mode) {
+            match route_bindings.insert_bound(
+                route_channel,
+                epoch,
+                accepted,
+                scope,
+                mode,
+                on_behalf_of_agent,
+            ) {
                 Ok(()) => {}
                 Err(ModuleError::RouteCapacity) => {
                     let response = wire::build_error_frame(
@@ -2609,6 +2638,7 @@ fn facade_tool_reply_inner(
         principal,
         scope: route_scope,
         mode,
+        on_behalf_of_agent,
         ..
     }) = route_bindings.binding(channel, epoch)?
     else {
@@ -2841,6 +2871,32 @@ fn facade_tool_reply_inner(
                 .unwrap_or("");
             let repository = arguments.get("repository").cloned().unwrap_or(Value::Null);
             let args = arguments.get("args").cloned().unwrap_or_else(|| json!({}));
+            if let Some(bot_read) = BotReadForm::of(action, &principal_key, &args) {
+                return Ok(blocking_section(|| {
+                    let engine = &state.runtime.engine;
+                    let scope = route_scope.as_ref();
+                    let on_behalf_of = on_behalf_of_agent.as_deref();
+                    bot_read_reply(match bot_read {
+                        BotReadForm::Repository => plexus_core::github::reads::bot::read(
+                            engine,
+                            &principal_key,
+                            action,
+                            &repository,
+                            &args,
+                            scope,
+                            on_behalf_of,
+                        ),
+                        BotReadForm::JobLogRange => plexus_core::github::reads::bot::job_log(
+                            engine,
+                            &principal_key,
+                            &repository,
+                            &args,
+                            scope,
+                            on_behalf_of,
+                        ),
+                    })
+                }));
+            }
             blocking_section(|| {
                 let read = if mode == CallMode::Codemode {
                     plexus_core::github::reads::read_codemode
@@ -4537,6 +4593,88 @@ fn denial_response(denial: &plexus_core::Denial) -> Value {
         response["error"]["limit"] = json!(limit);
     }
     response
+}
+
+/// Which `github_read` calls are agent bot reads, served with the stamped
+/// agent's own bot rather than the calling module's connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BotReadForm {
+    /// `github.repo.get`, `github.search.code` and `github.search.issues`,
+    /// whichever module carries the call.
+    Repository,
+    /// The byte-range job log read for AFT (the module whose `gh` shim routes
+    /// agents' GitHub reads, principal `reserved:aft`). A call carrying
+    /// `max_bytes`, and every other module's call, keeps the older form: a
+    /// bounded tail of the log read with the operator's Actions connection.
+    JobLogRange,
+}
+
+impl BotReadForm {
+    fn of(action: &str, principal_key: &str, args: &Value) -> Option<Self> {
+        if plexus_core::github::reads::bot::ACTIONS.contains(&action) {
+            return Some(Self::Repository);
+        }
+        (action == "github.actions.job_log"
+            && principal_key == plexus_core::github::AFT_PRINCIPAL
+            && args.get("max_bytes").is_none())
+        .then_some(Self::JobLogRange)
+    }
+}
+
+/// The reply body for a bot read: `{"result": ...}`, or an error whose
+/// `transmission` says whether GitHub was asked. These codes and fields are a
+/// contract AFT's `gh` shim reads (see tests/fixtures/github-read-bot).
+fn bot_read_reply(result: Result<Value, plexus_core::github::reads::bot::BotReadError>) -> Value {
+    use plexus_core::github::reads::bot::BotReadError;
+    let refusal = |code: &str, message: &str, transmission: &str| json!({"error": {"code": code, "message": message, "transmission": transmission}});
+    match result {
+        Ok(result) => json!({"result": result}),
+        Err(BotReadError::AgentIdentityRequired) => refusal(
+            "agent_identity_required",
+            "GitHub bot reads need a head scope's agent or a worker scope working on behalf of one",
+            "not_sent",
+        ),
+        Err(BotReadError::RepositoryNotVisible) => refusal(
+            "repository_not_visible",
+            "repository_not_visible",
+            "not_sent",
+        ),
+        Err(BotReadError::EndpointNotAllowed { field }) => {
+            let mut reply = refusal(
+                "endpoint_not_allowed",
+                "this argument is not one GitHub bot reads serve",
+                "not_sent",
+            );
+            reply["error"]["field"] = json!(field);
+            reply
+        }
+        Err(BotReadError::BudgetExhausted { retry_after_ms }) => {
+            let mut reply = refusal(
+                "read_budget_exhausted",
+                "this bot's GitHub read budget is spent; retry later",
+                "not_sent",
+            );
+            reply["error"]["retry_after_ms"] = json!(retry_after_ms);
+            reply
+        }
+        Err(BotReadError::ResponseTooLarge) => refusal(
+            "response_too_large",
+            "GitHub's reply is larger than 1 MiB and was not returned",
+            "sent",
+        ),
+        Err(BotReadError::Vendor { status }) => {
+            let mut reply = refusal("vendor_error", "GitHub refused the read", "sent");
+            reply["error"]["status"] = json!(status);
+            reply
+        }
+        Err(BotReadError::JobNotFinished) => {
+            refusal("job_not_finished", "the job has not completed", "sent")
+        }
+        Err(BotReadError::JobLog(code)) => refusal(code, code, "sent"),
+        Err(BotReadError::Denied(denial)) => denial_response(&denial),
+        Err(BotReadError::Dispatch(outcome)) => github_read_failure(outcome),
+        Err(BotReadError::InvalidResponse) => json!({"error":{"code":"read_response_invalid"}}),
+    }
 }
 
 fn github_read_failure(outcome: TransportOutcome) -> Value {
@@ -13715,6 +13853,12 @@ mod github_read_frame_tests {
     mod review_threads_tests {
         include!("review_threads_read_tests.rs");
     }
+    mod bot_read_tests {
+        include!("bot_read_tests.rs");
+    }
+    mod bot_read_vector_tests {
+        include!("bot_read_vector_tests.rs");
+    }
     use super::*;
     use plexus_core::github::credential::HandleCredentialProvider;
     use plexus_core::storage::github_store::{
@@ -13751,6 +13895,20 @@ mod github_read_frame_tests {
 
     fn imported_runtime_with_actions(
         actions: &[&str],
+    ) -> (
+        Arc<ModuleState>,
+        Arc<PlexusStore>,
+        Arc<MockTransport>,
+        Scratch,
+    ) {
+        imported_runtime_with_provider(actions, Arc::new(ReadyToken))
+    }
+
+    /// [`imported_runtime_with_actions`] whose bot tokens come from `provider`,
+    /// so a test can see what the vault is told about a vendor reply.
+    fn imported_runtime_with_provider(
+        actions: &[&str],
+        provider: Arc<dyn HandleCredentialProvider>,
     ) -> (
         Arc<ModuleState>,
         Arc<PlexusStore>,
@@ -13806,7 +13964,7 @@ mod github_read_frame_tests {
             .engine
             .with_governance_seams(Arc::new(GithubGovernanceSeams {
                 store: store.clone(),
-                credential_provider: Some(Arc::new(ReadyToken)),
+                credential_provider: Some(provider),
             }));
         (
             Arc::new(ModuleState {

@@ -1,0 +1,27 @@
+{
+  "replies": {
+    "github.repo.get": {
+      "success": {
+        "status": 200,
+        "body": "diff --git a/src/lib.rs b/src/lib.rs\n",
+        "next_page": null,
+        "rate_limit": {
+          "remaining": 4000,
+          "reset_at_ms": 4102444800000
+        }
+      }
+    }
+  },
+  "expected_requests": [
+    {
+      "connection_id": "github-handle-app-x",
+      "action": "github.repo.get",
+      "args": {
+        "owner": "o",
+        "repo": "x",
+        "path": "pulls/12",
+        "accept": "application/vnd.github.diff"
+      }
+    }
+  ]
+}

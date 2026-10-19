@@ -34,6 +34,13 @@ const READS: &[&str] = &[
     "github.issue.search",
     "github.pull_request.get",
     "github.pr.review_threads",
+    // The agent bot reads AFT's `gh` routes through each agent's own bot.
+    // The bot job log read checks the job first, so it needs both actions.
+    "github.repo.get",
+    "github.search.code",
+    "github.search.issues",
+    "github.actions.job.get",
+    "github.actions.job_log",
 ];
 /// The reviewed reads a scheduled poll may be granted on a handle connection:
 /// the import's module reads plus the issue timeline, which actor enrichment

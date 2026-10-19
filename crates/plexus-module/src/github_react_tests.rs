@@ -187,7 +187,7 @@ async fn send(
     .unwrap();
     let routes = Arc::new(RouteBindings::new());
     routes
-        .insert_mode(
+        .insert_bound(
             frame.header.channel,
             frame.header.epoch,
             Principal::Reserved {
@@ -195,6 +195,9 @@ async fn send(
             },
             scope.as_ref().map(CallScope::from_stamp),
             derive_call_mode(scope.as_ref()),
+            scope
+                .as_ref()
+                .and_then(|stamp| stamp.attributes.on_behalf_of_agent.clone()),
         )
         .unwrap();
     let (writer, mut responses) = mpsc::channel(1);
@@ -610,4 +613,92 @@ async fn github_react_replies_byte_for_byte_like_the_equivalent_bot_request() {
     }
     assert_eq!(react_transport.requests().len(), 1);
     assert_eq!(bot_transport.requests().len(), 1);
+}
+
+/// A worker scope that works on behalf of an agent, as the daemon stamps it:
+/// no agent_id, no delegation, only `on_behalf_of_agent`.
+fn on_behalf_of_worker() -> ScopeStamp {
+    ScopeStamp::new(
+        Principal::Reserved {
+            module_id: "aft".into(),
+        },
+        "worker-session",
+        1,
+        ScopeKind::Worker,
+    )
+    .with_attributes(ScopeAttributes::new().with_on_behalf_of_agent(Some(AGENT.into())))
+    .with_owner_authorized(true)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_working_on_behalf_of_an_agent_cannot_write_as_its_bot() {
+    let (state, transport, _scratch) = runtime("on-behalf-of-write", "aft");
+    let scope = Some(on_behalf_of_worker());
+    let reaction = call(
+        &state,
+        scope.clone(),
+        "github_react",
+        react("nonce-w1", "eyes"),
+    )
+    .await;
+    assert_eq!(
+        reaction["result"]["refusal_code"], "delegating_scope_required",
+        "{reaction}"
+    );
+    let request = call(
+        &state,
+        scope.clone(),
+        "github",
+        bot_request("nonce-w2", "eyes"),
+    )
+    .await;
+    assert_eq!(
+        request["result"]["refusal_code"], "delegating_scope_required",
+        "{request}"
+    );
+    // Invoking the bot's write action directly is no way around the facade.
+    let invoke = call(
+        &state,
+        scope,
+        "invoke",
+        json!({"op":"call","connection":"conn-react","action":"add_reaction",
+            "args":{"owner":"org","repo":"repo","issue_number":42,"content":"eyes"}}),
+    )
+    .await;
+    assert!(invoke.get("error").is_some(), "{invoke}");
+    assert!(
+        transport.requests().is_empty(),
+        "nothing may be written for a worker that only works on behalf of an agent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spent_bot_read_budget_never_refuses_a_bot_write() {
+    let (state, transport, _scratch) = runtime("read-budget-write", "aft");
+    let now = plexus_core::now_ms();
+    let store = state.store();
+    for _ in 0..plexus_core::storage::github_bot_reads_store::BOT_READ_HOURLY_CAP {
+        store
+            .reserve_github_bot_read("app-fixture", 1, now)
+            .unwrap();
+    }
+    store
+        .record_github_bot_rate_limit(
+            "app-fixture",
+            plexus_core::storage::github_bot_reads_store::BotRateLimit {
+                remaining: 0,
+                reset_at_ms: now + 3_600_000,
+            },
+            now,
+        )
+        .unwrap();
+    let reply = call(
+        &state,
+        Some(stamp(true, false)),
+        "github_react",
+        react("nonce-b1", "eyes"),
+    )
+    .await;
+    assert_eq!(reply["result"]["status"], "completed", "{reply}");
+    assert_eq!(transport.requests().len(), 1);
 }

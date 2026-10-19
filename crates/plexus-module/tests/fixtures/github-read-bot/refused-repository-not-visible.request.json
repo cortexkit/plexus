@@ -1,0 +1,16 @@
+{
+  "scope": {
+    "kind": "head",
+    "agent_id": "agent-x"
+  },
+  "call": {
+    "name": "github_read",
+    "arguments": {
+      "action": "github.repo.get",
+      "repository": "o/elsewhere",
+      "args": {
+        "path": ""
+      }
+    }
+  }
+}

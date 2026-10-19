@@ -2732,6 +2732,7 @@ mod facade_seam_tests {
             origin: RequestOrigin::Facade,
             scope: None,
             relay_origin: None,
+            on_behalf_of_agent: None,
             agent_grant: None,
             approval_scope: None,
         };

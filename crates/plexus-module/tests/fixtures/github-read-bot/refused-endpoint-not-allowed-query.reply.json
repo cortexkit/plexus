@@ -1,0 +1,15 @@
+{
+  "content": [
+    {
+      "text": "endpoint_not_allowed: this argument is not one GitHub bot reads serve field: query",
+      "type": "text"
+    }
+  ],
+  "error": {
+    "code": "endpoint_not_allowed",
+    "field": "query",
+    "message": "this argument is not one GitHub bot reads serve",
+    "transmission": "not_sent"
+  },
+  "isError": true
+}

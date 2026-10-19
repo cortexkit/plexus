@@ -1,0 +1,15 @@
+{
+  "scope": {
+    "kind": "worker"
+  },
+  "call": {
+    "name": "github_read",
+    "arguments": {
+      "action": "github.repo.get",
+      "repository": "o/x",
+      "args": {
+        "path": ""
+      }
+    }
+  }
+}
