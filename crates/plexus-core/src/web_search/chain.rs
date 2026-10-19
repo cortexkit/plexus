@@ -1,8 +1,14 @@
 //! Ordered provider admission. Compatibility searches never enter this walk.
 
 use super::*;
+use std::time::Duration;
 
 mod outcome;
+
+/// Admission budget measured from entry into the ordered provider walk.
+pub const WEB_SEARCH_CHAIN_DEADLINE: Duration = Duration::from_secs(120);
+/// One vault read (30 s), vendor request (30 s), and maximum throttle wait (5 s).
+pub const WEB_SEARCH_ATTEMPT_BOUND: Duration = Duration::from_secs(65);
 
 /// The closed vocabulary shared by chain refusals and skip auditing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -116,6 +122,9 @@ impl WebSearchService {
         now_ms: i64,
         audit: &mut CallAudit,
     ) -> Result<WebSearchResponse, WebSearchRefusal> {
+        let deadline_at_ms =
+            (self.clock)().saturating_add(WEB_SEARCH_CHAIN_DEADLINE.as_millis() as i64);
+        let mut deadline_stopped = false;
         audit.chain = Some(ChainAudit::default());
         let caller = &audit.caller;
         let is_flow = audit
@@ -182,14 +191,26 @@ impl WebSearchService {
                 };
                 let (connection, action) =
                     resolved.map_err(|refusal| SkipReason::for_refusal(&refusal))?;
+                // Once admission closes, retain capability and grant reasons but
+                // never enter another policy or per-call approval check.
+                if deadline_stopped {
+                    return Err(SkipReason::Deadline);
+                }
                 self.chain_checks(engine.store(), &connection, &action, now_ms)?;
                 let (Some(backend), Some(prepared)) = (backend, prepared) else {
                     return Err(SkipReason::Unavailable);
                 };
 
-                // The chain deadline gate (6a), then allowance reservation (7),
-                // are inserted here before limiter.try_acquire: an inadmissible
-                // attempt must not spend the caller's or provider's rate budget.
+                // Check after policy/approval and cooldown, immediately before
+                // allowance admission. This budgets attempt starts, not time
+                // queued on the transport's per-connection send lock.
+                if deadline_at_ms.saturating_sub((self.clock)())
+                    < WEB_SEARCH_ATTEMPT_BOUND.as_millis() as i64
+                {
+                    deadline_stopped = true;
+                    return Err(SkipReason::Deadline);
+                }
+                // Reserve the allowance here, before rate charging.
                 let limits = engine
                     .store()
                     .web_search_limits(name)
