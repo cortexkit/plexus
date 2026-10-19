@@ -13687,6 +13687,9 @@ mod github_read_frame_tests {
     mod artifact_file_tests {
         include!("artifact_file_read_tests.rs");
     }
+    mod review_threads_tests {
+        include!("review_threads_read_tests.rs");
+    }
     use super::*;
     use plexus_core::github::credential::HandleCredentialProvider;
     use plexus_core::storage::github_store::{
@@ -13709,6 +13712,21 @@ mod github_read_frame_tests {
     }
 
     pub(super) fn imported_runtime() -> (
+        Arc<ModuleState>,
+        Arc<PlexusStore>,
+        Arc<MockTransport>,
+        Scratch,
+    ) {
+        imported_runtime_with_actions(&[
+            "github.issue.get",
+            "github.issue_comments.list",
+            "github.issue.search",
+        ])
+    }
+
+    fn imported_runtime_with_actions(
+        actions: &[&str],
+    ) -> (
         Arc<ModuleState>,
         Arc<PlexusStore>,
         Arc<MockTransport>,
@@ -13745,11 +13763,7 @@ mod github_read_frame_tests {
                 },
                 repositories: vec!["o/x".into()],
                 grants: vec![],
-                module_actions: vec![
-                    "github.issue.get".into(),
-                    "github.issue_comments.list".into(),
-                    "github.issue.search".into(),
-                ],
+                module_actions: actions.iter().map(|action| (*action).to_owned()).collect(),
                 policies: vec![],
             }])
             .unwrap();

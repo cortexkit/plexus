@@ -1334,8 +1334,9 @@ mod tests {
     }
     #[test]
     fn live_connected_catalog_schema_hashes_remain_unchanged() {
-        // Captured from the catalog before metadata cleanup. These hashes pin
-        // rollback-safe schemas, independently of the current manifest parser.
+        // Existing entries were captured before metadata cleanup and pin
+        // rollback-safe schemas independently of the current manifest parser.
+        // Append new actions when introduced; do not regenerate old hashes.
         let expected: std::collections::BTreeMap<
             String,
             std::collections::BTreeMap<String, String>,

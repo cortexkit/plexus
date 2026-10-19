@@ -16703,3 +16703,50 @@ expect_red = ["web_search::chain::tests::allowance::used_up_allowance_is_a_skip_
 expect_message = "a new UTC month must start a fresh allowance count"
 build_timeout_s = 3600
 timeout_s = 120
+[[control]]
+id = "github-review-threads-caller-graphql"
+guards = "The review-thread read refuses caller query text, variables and pagination arguments"
+file = "crates/plexus-core/src/github/reads/review_threads.rs"
+old = 'if fields.keys().any(|key| key != "pr") {'
+new = 'if false && fields.keys().any(|key| key != "pr") { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/review_threads_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::review_threads_tests::review_threads_refuses_caller_graphql_and_pagination_arguments"]
+expect_message = "caller GraphQL and pagination must be refused"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-review-threads-page-cap"
+guards = "Review-thread reads stop after three governed pages and report incomplete without requesting a fourth"
+file = "crates/plexus-core/src/github/reads/review_threads.rs"
+old = "const MAX_PAGES: usize = 3;"
+new = "const MAX_PAGES: usize = 4; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/review_threads_read_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::review_threads_tests::review_threads_page_cap_never_requests_a_fourth_page"]
+expect_message = "review thread reads must never request a fourth page"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "github-review-threads-variable-binding"
+guards = "Review-thread GraphQL variables must name the repository checked by governance"
+file = "crates/plexus-core/src/github/resolver.rs"
+old = 'if request.action == "github.pr.review_threads" {'
+new = 'if false && request.action == "github.pr.review_threads" { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/github/resolver.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["github::resolver::review_thread_tests::review_threads_graphql_variables_cannot_substitute_repository"]
+expect_message = "GraphQL variables must match the bound repository"
+build_timeout_s = 3600
+timeout_s = 120
