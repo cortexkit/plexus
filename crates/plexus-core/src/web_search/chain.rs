@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod outcome;
+
 /// The closed vocabulary shared by chain refusals and skip auditing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -127,6 +129,7 @@ impl WebSearchService {
         let mut all_not_granted = true;
         let mut first_grant_refusal = None;
         let mut retry_after = None::<u64>;
+        let mut request_rejected = false;
 
         for (position, name) in order.iter().enumerate() {
             let Some(provider) = providers::provider_named(name) else {
@@ -228,25 +231,44 @@ impl WebSearchService {
                 })?;
                 let dispatched = engine.revalidate_and_dispatch(&reservation);
                 audit.dispatched = true;
-                let body = match dispatched.outcome {
-                    TransportOutcome::Completed {
-                        response: Some(body),
-                    } => body,
-                    _ => return Err(SkipReason::Unavailable),
+                let results = match outcome::classify(
+                    backend.as_ref(),
+                    &dispatched,
+                    outcome::QuotaSignal::Absent,
+                    usize::from(prepared.query.max_results),
+                    crate::storage::now_ms(),
+                ) {
+                    outcome::Classified::Serve(results) => results,
+                    outcome::Classified::Reject => {
+                        eprintln!(warn web_search: "web_search request rejected by {}", name);
+                        request_rejected = true;
+                        return Err(SkipReason::Unavailable);
+                    }
+                    outcome::Classified::MoveOn {
+                        reason,
+                        cooldown_ms,
+                    } => {
+                        let until = (self.clock)().saturating_add(cooldown_ms as i64);
+                        self.chain_cooldowns
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .entry(connection.connection_id.clone())
+                            .and_modify(|old| *old = (*old).max(until))
+                            .or_insert(until);
+                        return Err(reason);
+                    }
                 };
-                let results = backend
-                    .map_reply(
-                        &body,
-                        usize::from(prepared.query.max_results),
-                        crate::storage::now_ms(),
-                    )
-                    .map_err(|_| SkipReason::Unavailable)?;
                 Ok(WebSearchResponse {
                     results,
                     backend: name.clone(),
                     cached: false,
                 })
             })();
+            if request_rejected {
+                return Err(WebSearchRefusal::RequestRejected {
+                    backend: name.clone(),
+                });
+            }
             match attempt {
                 Ok(response) => {
                     audit.chain.as_mut().unwrap().served_by = Some(name.clone());

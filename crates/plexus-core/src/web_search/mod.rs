@@ -68,6 +68,10 @@ pub enum WebSearchRefusal {
     BackendUnavailable {
         backend: String,
     },
+    /// The provider rejected this request; trying another account cannot repair it.
+    RequestRejected {
+        backend: String,
+    },
     /// The backing catalog action is quarantined.
     BackendQuarantined {
         backend: String,
@@ -98,6 +102,7 @@ impl WebSearchRefusal {
             Self::Grant(refusal) => refusal.code(),
             Self::RateLimited { .. } => "rate_limited",
             Self::BackendUnavailable { .. } => "backend_unavailable",
+            Self::RequestRejected { .. } => "web_search_request_rejected",
             Self::BackendQuarantined { .. } => "backend_quarantined",
             Self::BackendAmbiguous => "backend_ambiguous",
             Self::WebSearchUnavailable { .. } => "web_search_unavailable",
@@ -113,6 +118,7 @@ impl WebSearchRefusal {
             Self::NotGranted | Self::Grant(_) => "no web search backend is granted to this caller",
             Self::RateLimited { .. } => "web search rate limit reached; retry after retry_after_ms",
             Self::BackendUnavailable { .. } => crate::transport::OPERATOR_DIAGNOSTIC_MESSAGE,
+            Self::RequestRejected { .. } => "the web search provider rejected the request",
             Self::WebSearchUnavailable { .. } => crate::transport::OPERATOR_DIAGNOSTIC_MESSAGE,
             Self::BackendQuarantined { .. } => {
                 "the web search backend action is quarantined pending operator review"
@@ -137,9 +143,9 @@ impl WebSearchRefusal {
                 error["action"] = json!(action);
                 error["transmission"] = json!("not_sent");
             }
-            Self::BackendUnavailable { backend } | Self::BackendQuarantined { backend } => {
-                error["backend"] = json!(backend)
-            }
+            Self::BackendUnavailable { backend }
+            | Self::BackendQuarantined { backend }
+            | Self::RequestRejected { backend } => error["backend"] = json!(backend),
             Self::InvalidQuery { field } => error["field"] = json!(field),
             Self::WebSearchUnavailable { providers } => error["detail"] = json!(providers),
             Self::NotGranted
