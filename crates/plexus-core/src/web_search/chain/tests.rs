@@ -3,6 +3,7 @@ use crate::storage::{CatalogActionInput, GrantInput};
 use crate::{MockTransport, StubCredentialSource};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+mod allowance;
 mod deadline;
 mod outcomes;
 

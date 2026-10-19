@@ -15,8 +15,8 @@
 //!
 //! With a stored order, `chain` prepares each provider's capability, resolves
 //! the caller's grant, then checks policy, action status, connection health and
-//! cooldown and the chain deadline before charging rate limits and authorizing
-//! a governed dispatch.
+//! cooldown and the chain deadline, then reserves any monthly allowance, before
+//! charging rate limits and authorizing a governed dispatch.
 //! Argument validation and source-code refusal run once before either path.
 //!
 //! Every call writes one `web_search` audit row. A dispatched call also leaves
