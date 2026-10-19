@@ -113,6 +113,20 @@ pub fn resolve_invoke<F>(
 where
     F: FnMut(&str) -> Result<Option<Binding>, ResolverDenial>,
 {
+    // GraphQL's repository selector lives inside variables, while governance
+    // uses owner/repo. They must name the same repository on every dispatch.
+    if request.action == "github.pr.review_threads" {
+        for field in ["owner", "repo"] {
+            let outer = request.args[field].as_str();
+            let inner = request.args["variables"][field].as_str();
+            if !outer
+                .zip(inner)
+                .is_some_and(|(outer, inner)| outer.eq_ignore_ascii_case(inner))
+            {
+                return Err(ResolverDenial::RepositoryUnbound);
+            }
+        }
+    }
     resolve(&request.args, &request.connection_id, binding_for).map(|_| ())
 }
 
@@ -304,5 +318,35 @@ pub(crate) fn split_repository(name: &str) -> Result<(&str, &str), ResolverDenia
 fn forbidden(field: &str) -> ResolverDenial {
     ResolverDenial::RequestFieldForbidden {
         field: field.into(),
+    }
+}
+
+#[cfg(test)]
+mod review_thread_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn review_threads_graphql_variables_cannot_substitute_repository() {
+        for variables in [
+            json!({"owner":"other","repo":"repo"}),
+            json!({"owner":"org","repo":"other"}),
+            json!({}),
+        ] {
+            let request = AuthorizationRequest::new(
+                "reserved:basal",
+                "handle",
+                "github.pr.review_threads",
+                json!({"repository":"org/repo","owner":"org","repo":"repo","variables":variables}),
+            );
+            assert_eq!(
+                resolve_invoke(&request, |_| Ok(Some(Binding {
+                    app_handle_id: "app".into(),
+                    connection_id: "handle".into()
+                }))),
+                Err(ResolverDenial::RepositoryUnbound),
+                "GraphQL variables must match the bound repository"
+            );
+        }
     }
 }

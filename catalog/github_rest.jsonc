@@ -51,7 +51,7 @@
   "schema_version": 1,
   "key": "github_rest",
   "name": "GitHub (REST)",
-  "description": "Narrow GitHub REST writes, fixed GraphQL PR draft-state mutations, and the vendor reads needed to check them.",
+  "description": "Narrow GitHub REST writes, fixed GraphQL PR draft-state mutations and review-thread reads, and the vendor reads needed to check writes.",
   "reuse_path": "openapi_shim",
   "reuse_rationale": "GitHub publishes a stable, documented REST API with a static bearer-token auth shape. The remote MCP server remains preferred for general reads; this manifest covers write verbs it does not expose and only the vendor reads needed to check those writes.",
   "tier": "S1",
@@ -101,6 +101,34 @@
   // read surface declared, but do not wire it as reconciliation until request
   // arguments and response correlation are expressed separately.
   "actions_baseline": [
+    {
+      // The read facade resolves the repository's bound App handle. Only the
+      // reviewed query can run; each cursor page gets its own authorization.
+      "name": "github.pr.review_threads",
+      "risk": "read",
+      "http": {
+        "method": "POST", "path": "/graphql",
+        "request_constants": {
+          "query": "query($owner: String!, $repo: String!, $pr: Int!, $after: String) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr) { reviewThreads(first: 100, after: $after) { nodes { id isResolved isOutdated path line comments(first: 1) { nodes { author { login __typename } body url } } } pageInfo { hasNextPage endCursor } } } } }"
+        },
+        "args_schema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "variables": {
+              "type": "object", "additionalProperties": false,
+              "properties": {
+                "owner": {"type": "string"}, "repo": {"type": "string"},
+                "pr": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+                "after": {"type": ["string", "null"]}
+              },
+              "required": ["owner", "repo", "pr", "after"]
+            }
+          },
+          "required": ["owner", "repo", "variables"]
+        }
+      }
+    },
     {
       "name": "github.pull_request.get",
       "risk": "read",

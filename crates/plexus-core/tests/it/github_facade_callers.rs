@@ -463,7 +463,8 @@ fn import_grants_prefrontal_only_its_reads_and_the_reaction() {
             "add_reaction",
             "github.issue.get",
             "github.issue.search",
-            "github.issue_comments.list"
+            "github.issue_comments.list",
+            "github.pr.review_threads"
         ]
     );
 }

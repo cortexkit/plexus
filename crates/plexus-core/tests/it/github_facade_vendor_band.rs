@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 mod pr_ready;
 mod regressions;
+mod review_threads;
 
 struct Token;
 impl HandleCredentialProvider for Token {

@@ -16,7 +16,7 @@ macro_rules! read_actions {
         pub const ACTIONS: &[&str] = &[$($bot),*, $($ci),*];
     };
 }
-read_actions!("github.issue.get", "github.issue_comments.list", "github.issue.search";
+read_actions!("github.issue.get", "github.issue_comments.list", "github.issue.search", "github.pr.review_threads";
     "github.actions.job_log", "github.actions.artifact_file", "github.actions.run.superseded");
 
 /// Mark only a binding-checked selection as internal search authority. Raw
@@ -262,6 +262,9 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     scope: Option<&crate::scope::CallScope>,
     attributed_agent: Option<&str>,
 ) -> Result<Value, ReadError> {
+    if action == "github.pr.review_threads" {
+        review_threads::validate_args(args)?;
+    }
     if action == "github.actions.job_log" {
         return job_log::read(engine, principal, repository, args, scope, attributed_agent);
     }
@@ -298,7 +301,7 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     // The handle connection's owner, needed to find the manifest that declares
     // each read's arguments.
     let connection_principal = handle.connection_principal;
-    let invoke = |page: Option<usize>| -> Result<Value, ReadError> {
+    let invoke = |page: Option<usize>, cursor: Option<&str>| -> Result<Value, ReadError> {
         visible()?;
         let mut mapped = if action == "github.issue.search" {
             let terms = args.get("terms").and_then(Value::as_str).unwrap_or("");
@@ -314,6 +317,15 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         } else {
             let mut mapped = resolver::path_args(&resolved, resolved.repositories.first().unwrap())
                 .map_err(|reason| ReadError::Denied(Denial::Resolver(reason)))?;
+            if action == "github.pr.review_threads" {
+                mapped.insert(
+                    "variables".into(),
+                    json!({
+                        "owner": mapped["owner"], "repo": mapped["repo"],
+                        "pr": args["pr"], "after": cursor,
+                    }),
+                );
+            }
             for field in ["issue_number", "since"] {
                 if let Some(value) = args.get(field) {
                     mapped.insert(field.into(), value.clone());
@@ -369,6 +381,11 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             other => Err(ReadError::Dispatch(other)),
         }
     };
+    if action == "github.pr.review_threads" {
+        return review_threads::read(&resolved.repositories[0], &args["pr"], |cursor| {
+            invoke(None, cursor)
+        });
+    }
     if action == "github.issue_comments.list" {
         let started = crate::storage::now_ms();
         let mut failure = None;
@@ -377,7 +394,7 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             started,
             crate::storage::now_ms,
             |page| {
-                invoke(Some(page.page)).map_err(|error| {
+                invoke(Some(page.page), None).map_err(|error| {
                     failure = Some(error);
                     pagination::WalkError::ReadFailed
                 })
@@ -386,7 +403,7 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         .map_err(|error| failure.unwrap_or_else(|| walk_error(error)))?;
         return Ok(json!(walk.items()));
     }
-    let mut response = invoke(None)?;
+    let mut response = invoke(None, None)?;
     if action == "github.issue.search" {
         let items = response
             .get_mut("items")
@@ -405,6 +422,7 @@ fn read_with_attribution<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
 mod artifact_file;
 mod ci;
 mod job_log;
+mod review_threads;
 mod run_superseded;
 
 #[cfg(test)]

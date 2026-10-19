@@ -33,6 +33,7 @@ const READS: &[&str] = &[
     "github.issue_comments.list",
     "github.issue.search",
     "github.pull_request.get",
+    "github.pr.review_threads",
 ];
 /// The reviewed reads a scheduled poll may be granted on a handle connection:
 /// the import's module reads plus the issue timeline, which actor enrichment

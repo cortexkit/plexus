@@ -29,6 +29,7 @@
     "run_secret_scanning": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
   },
   "github_rest": {
+    "github.pr.review_threads": "sha256:0383b5ece0c765e6adb0fa5c8793342c650fa531e949b87420b5b8aa77be7fbb",
     "github.pull_request.get": "sha256:63e718fd050d8c0b3fdd0b1be2cdd4fb263699ba4c19cc9685d8739dca7ee05f",
     "mark_pull_request_ready": "sha256:06f3ee64f022bf645a2dfa2616b9db998e1173e941aa0b3f25b0e5d592792dff",
     "convert_pull_request_to_draft": "sha256:06f3ee64f022bf645a2dfa2616b9db998e1173e941aa0b3f25b0e5d592792dff",
