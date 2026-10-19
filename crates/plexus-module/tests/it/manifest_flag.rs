@@ -40,9 +40,10 @@ fn manifest_prints_the_registered_manifest_with_provenance_and_no_daemon() {
     );
     let printed: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("--manifest prints one JSON document");
-    let registered =
-        serde_json::to_value(plexus_module::manifest::build(plexus_module::DEFAULT_MODULE_ID))
-            .expect("manifest serializes");
+    let registered = serde_json::to_value(plexus_module::manifest::build(
+        plexus_module::DEFAULT_MODULE_ID,
+    ))
+    .expect("manifest serializes");
     assert_eq!(
         printed, registered,
         "--manifest prints the manifest plexus registers"
@@ -69,7 +70,9 @@ fn manifest_prints_the_registered_manifest_with_provenance_and_no_daemon() {
             );
         }
         None => {
-            let sha = provenance["build_git_sha"].as_str().expect("clean builds stamp a sha");
+            let sha = provenance["build_git_sha"]
+                .as_str()
+                .expect("clean builds stamp a sha");
             assert_eq!(sha, commit);
             assert!(sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()));
             assert!(provenance.get("build_git_sha_absence_reason").is_none());
