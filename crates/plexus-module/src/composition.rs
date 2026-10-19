@@ -96,6 +96,9 @@ pub struct ModuleRuntime {
     pub flow_audiences: crate::flow_audience::FlowAudiences,
     pub repository_registry: Option<Arc<dyn plexus_core::repository_ownership::RepositoryRegistry>>,
     pub github_handle_credentials: Option<Arc<dyn HandleCredentialProvider>>,
+    /// Optional read-only installation peer for management ceremonies.
+    pub github_control_reader:
+        Option<Arc<dyn plexus_core::github::control::InstallationReader + Send + Sync>>,
     /// Optional endpoint override used by the conformance harness when the
     /// reviewed manifest URL should not be contacted.
     pub endpoint_override: Option<String>,
@@ -165,6 +168,7 @@ impl ModuleRuntime {
             ),
             repository_registry: production_repository_registry(connection_file),
             github_handle_credentials,
+            github_control_reader: None,
             endpoint_override: None,
             web_search: Arc::new(WebSearchService::exa()),
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),
@@ -207,6 +211,7 @@ impl ModuleRuntime {
             flow_audiences: crate::flow_audience::FlowAudiences::global_fixture(),
             repository_registry: None,
             github_handle_credentials: None,
+            github_control_reader: None,
             endpoint_override: None,
             web_search: Arc::new(WebSearchService::exa()),
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),
@@ -250,6 +255,7 @@ impl ModuleRuntime {
             flow_audiences: crate::flow_audience::FlowAudiences::global_fixture(),
             repository_registry: None,
             github_handle_credentials: None,
+            github_control_reader: None,
             endpoint_override,
             web_search: Arc::new(WebSearchService::exa()),
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),

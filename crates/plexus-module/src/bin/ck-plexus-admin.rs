@@ -1118,6 +1118,11 @@ fn call_module(
     request: Value,
     operation: &str,
 ) -> Result<Value, Failure> {
+    let confirmation = matches!(target, subc_protocol::RouteTarget::ManagementSurface { .. })
+        && request["method"].as_str().is_some_and(|method| {
+            plexus_module::operator_confirmation::may_need_confirmation(method, &request["params"])
+        });
+    let options = admin_call_options(confirmation);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -1136,6 +1141,9 @@ fn call_module(
         .map_err(|error| {
             Failure::transport(format!("connect {}: {error}", connection_file.display()))
         })?;
+        if confirmation {
+            eprintln!("waiting for Touch ID approval…");
+        }
         let bytes = consumer
             .call(
                 target,
@@ -1145,13 +1153,21 @@ fn call_module(
                     "operator",
                 ),
                 body,
-                subc_client_rs::CallOptions::default(),
+                options,
             )
             .await
             .map_err(|error| Failure::unknown(format!("{operation}: {error}")))?;
         serde_json::from_slice(&bytes)
             .map_err(|error| Failure::unknown(format!("decode response: {error}")))
     })
+}
+
+fn admin_call_options(confirmation: bool) -> subc_client_rs::CallOptions {
+    let mut options = subc_client_rs::CallOptions::default();
+    if confirmation {
+        options.timeout = std::time::Duration::from_secs(300);
+    }
+    options
 }
 
 /// Splits the complete grant list the module returned into the grants this
@@ -1664,6 +1680,14 @@ fn schema_type(schema: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn confirmation_calls_allow_five_minutes() {
+        assert!(super::admin_call_options(true).timeout >= std::time::Duration::from_secs(300));
+        assert_eq!(
+            super::admin_call_options(false).timeout,
+            subc_client_rs::CallOptions::default().timeout
+        );
+    }
     #[test]
     fn version_does_not_contact_the_daemon() {
         super::run(&["--version".to_owned()]).unwrap();

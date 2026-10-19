@@ -192,7 +192,7 @@ impl Fixture {
         )
         .unwrap();
         let (writer, mut replies) = mpsc::channel(1);
-        handle_tool_request(frame, &writer, &self.state, &self.routes)
+        handle_tool_request_with_confirmed_test_peer(frame, &writer, &self.state, &self.routes)
             .await
             .unwrap();
         serde_json::from_slice(

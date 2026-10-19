@@ -47,7 +47,13 @@ impl Default for PendingControlReplies {
 }
 
 impl PendingControlReplies {
-    fn register(&self) -> Result<(u64, std_mpsc::Receiver<Frame>), ScopeReadError> {
+    pub(crate) fn clear(&self) {
+        if let Ok(mut waiting) = self.waiting.lock() {
+            waiting.clear();
+        }
+    }
+
+    pub(crate) fn register(&self) -> Result<(u64, std_mpsc::Receiver<Frame>), ScopeReadError> {
         let correlation = self.next.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = std_mpsc::channel();
         self.waiting
@@ -57,7 +63,7 @@ impl PendingControlReplies {
         Ok((correlation, receiver))
     }
 
-    fn forget(&self, correlation: u64) {
+    pub(crate) fn forget(&self, correlation: u64) {
         if let Ok(mut waiting) = self.waiting.lock() {
             waiting.remove(&correlation);
         }

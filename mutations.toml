@@ -1,6 +1,54 @@
 # Mutation controls; see docs/mutations.md. Edits are temporary and must fail the named tests.
 
 [[control]]
+id = "operator-confirmation-widening-classification"
+guards = "Minting a Direct management grant requires an operation-bound operator confirmation"
+file = "crates/plexus-module/src/operator_confirmation.rs"
+old = "        | manifest::ADMIN_GRANT_OP\n        | manifest::ADMIN_REPIN_ACTION_OP => true,"
+new = "        | manifest::ADMIN_REPIN_ACTION_OP => true, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/operator_confirmation_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::operator_confirmation_tests::all_widening_ceremonies_refuse_without_confirmation"]
+expect_message = "must ask before writing"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "operator-confirmation-narrowing-classification"
+guards = "Block and ask_first policies narrow authority and must never ask for operator confirmation"
+file = "crates/plexus-module/src/operator_confirmation.rs"
+old = "        manifest::ADMIN_SET_POLICY_OP => params[\"effect\"] == \"allow\","
+new = "        manifest::ADMIN_SET_POLICY_OP => params[\"effect\"] != \"allow\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/operator_confirmation_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::operator_confirmation_tests::ungated_ceremonies_never_request_confirmation"]
+expect_message = "must not ask"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "operator-confirmation-before-any-write"
+guards = "No authority or audit write occurs while a widening ceremony is waiting for operator confirmation"
+file = "crates/plexus-module/src/lib.rs"
+old = "    if let Some(summary) = operator_confirmation::summary(method, params) {"
+new = "    if let Some(summary) = operator_confirmation::summary(method, params) {\n        if method == manifest::ADMIN_GRANT_OP { let _ = ceremony::grant(state, &principal_key, params); } /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/operator_confirmation_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::operator_confirmation_tests::all_widening_ceremonies_write_only_after_confirmation"]
+expect_message = "wrote before confirmation"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "github-graphql-repository-projection"
 guards = "Every reviewed POST /graphql omits repository governance keys, independently of the action name"
 file = "crates/plexus-core/src/rest_api.rs"
@@ -5228,8 +5276,8 @@ timeout_s = 60
 id = "github-handle-probe-reader-off-worker"
 guards = "github.handle.probe builds and drops its blocking GitHub reader inside blocking_section, so the op answers instead of panicking on the async worker"
 file = "crates/plexus-module/src/lib.rs"
-old = "                    match blocking_section(|| {\n                        let reader = plexus_core::github::control::GithubApiReader::default();\n                        plexus_core::github::control::probe("
-new = "                    let reader = plexus_core::github::control::GithubApiReader::default(); /* NON-VACUITY BREAK */\n                    match blocking_section(|| {\n                        plexus_core::github::control::probe("
+old = "                    match blocking_section(|| {\n                        let reader = github_control_reader(state);\n                        plexus_core::github::control::probe("
+new = "                    let reader = github_control_reader(state); /* NON-VACUITY BREAK */\n                    match blocking_section(|| {\n                        plexus_core::github::control::probe("
 test_file = "crates/plexus-module/src/lib.rs"
 runner = "cargo"
 package = "plexus-module"

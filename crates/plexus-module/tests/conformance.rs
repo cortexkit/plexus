@@ -8,6 +8,8 @@
 
 #[path = "support/bounded.rs"]
 mod bounded;
+#[path = "support/operator_confirmation.rs"]
+mod operator_confirmation_peer;
 
 use bounded::recv_within;
 use std::fs;
@@ -278,6 +280,7 @@ async fn operator_can_reach_invoke_from_an_empty_store_over_the_wire() {
     .await;
     let issued: Value = serde_json::from_slice(&issued.body).expect("issue_ticket response");
     assert!(issued["error"].is_null(), "issue_ticket failed: {issued}");
+    assert!(daemon.operator_peer.approvals() > 0);
     let ticket_id = issued["result"]["ticket_id"]
         .as_str()
         .expect("ticket id")
@@ -847,6 +850,7 @@ async fn granted_reserved_principal_invokes_the_owners_rest_connection_through_t
 
 struct LiveDaemonGuard {
     task: Option<JoinHandle<Result<(), subc_daemon::bootstrap::BootstrapError>>>,
+    operator_peer: operator_confirmation_peer::ConfirmationPeer,
     connection_file_path: PathBuf,
     // Removed here as well as by the `Scratch` guard's own drop, because
     // `stop()` is also called directly by tests that want the daemon's tree
@@ -882,6 +886,7 @@ impl LiveDaemonGuard {
         if let Some(task) = self.task.take() {
             task.abort();
         }
+        self.operator_peer.stop();
         let _ = fs::remove_dir_all(&self.directory);
     }
 }
@@ -1124,6 +1129,8 @@ async fn start_live_daemon_with(
     let home = directory.join("home");
     fs::create_dir_all(&home).expect("create isolated data home");
     let connection_file_path = directory.join("subc-connection.json");
+    let confirmation_file = directory.join("confirmation-peer.json");
+    let confirmation_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let binary = ckdev_binary(
         std::env::var_os("CARGO_BIN_EXE_ck-plexus")
             .map(PathBuf::from)
@@ -1160,17 +1167,17 @@ async fn start_live_daemon_with(
         format!("{unset_nonce}exec '{test_binary}' --exact vault_route_fixture --nocapture\n"),
     )
     .unwrap();
-    // The supervisor appends `--subc <file>` after the configured args, and
-    // "$@" passes it on to the module.
-    let (plexus_program, plexus_args) = match nonce_handoff {
-        NonceHandoff::DescriptorAndEnvironment => (binary_path.clone(), json!([])),
-        NonceHandoff::DescriptorOnly => {
-            let launcher = directory.join("plexus-descriptor-only.sh");
-            let quoted = binary_path.to_string_lossy().replace('\'', "'\\\"'\\\"'");
-            fs::write(&launcher, format!("{unset_nonce}exec '{quoted}' \"$@\"\n")).unwrap();
-            (PathBuf::from("/bin/sh"), json!([launcher]))
-        }
-    };
+    // Only the module's supervisor connection uses the fake confirmation peer.
+    // The daemon publishes its key before this harness can publish the peer's
+    // connection file, so the launcher waits with a bounded startup deadline.
+    let launcher = directory.join("plexus-confirmation-peer.sh");
+    let quoted_binary = binary_path.to_string_lossy().replace('\'', "'\\\"'\\\"'");
+    let quoted_connection = confirmation_file
+        .to_string_lossy()
+        .replace('\'', "'\\\"'\\\"'");
+    fs::write(&launcher, format!("{unset_nonce}attempts=0\nwhile [ ! -f '{quoted_connection}' ]; do\n  attempts=$((attempts + 1))\n  [ \"$attempts\" -lt 3000 ] || exit 1\n  sleep 0.01\ndone\nexec '{quoted_binary}' --subc '{quoted_connection}'\n")).unwrap();
+    let plexus_program = PathBuf::from("/bin/sh");
+    let plexus_args = json!([launcher]);
     let daemon_config_path = directory.join("subc.jsonc");
     fs::write(
         &daemon_config_path,
@@ -1255,9 +1262,21 @@ async fn start_live_daemon_with(
         "daemon published its connection file {:?} after it was spawned",
         spawned.elapsed()
     );
+    let mut peer_connection = connection.clone();
+    peer_connection.endpoints = vec![subc_transport::Endpoint {
+        host: "127.0.0.1".to_string(),
+        port: confirmation_listener.local_addr().unwrap().port(),
+    }];
+    let operator_peer = operator_confirmation_peer::ConfirmationPeer::spawn(
+        confirmation_listener,
+        connection.clone(),
+    );
+    connection_file::write_atomic(&confirmation_file, &peer_connection)
+        .expect("publish fake confirmation peer");
     (
         LiveDaemonGuard {
             task: Some(task),
+            operator_peer,
             connection_file_path,
             directory,
             _serialized: serialized,
@@ -2034,6 +2053,7 @@ async fn every_shipped_manifest_is_reachable_through_the_operator_ceremony() {
         "operator ceremony could not issue a ticket for every shipped manifest:\n{}",
         failures.join("\n")
     );
+    assert!(daemon.operator_peer.approvals() >= 10);
     daemon.stop();
 }
 
@@ -2141,6 +2161,7 @@ async fn descriptor_nonce_reaches_hello_provenance_and_a_later_vault_read() {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(daemon.operator_peer.approvals() > 0);
     daemon.stop();
 }
 
