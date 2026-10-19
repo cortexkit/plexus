@@ -10,6 +10,8 @@ use rusqlite::{params, Connection};
 
 #[path = "web_search_admin_tests.rs"]
 mod admin;
+#[path = "web_search_health_tests.rs"]
+mod health_report;
 
 /// An Exa `/search` reply built from Exa's published API example; see the
 /// README beside it for exactly what is documentation and what is shaped.

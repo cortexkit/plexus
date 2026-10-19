@@ -160,6 +160,28 @@ impl WebSearchRefusal {
     }
 }
 
+/// The backend implementing one provider in the name table, or `None` while
+/// that provider has no backend yet. This is the one place a provider's
+/// backend is registered: [`WebSearchService::production`] builds the module's
+/// service from it, so the module needs no change when a provider is added.
+/// A registered backend's `name`, `app_key` and `action` must equal its row.
+pub fn registered_backend(provider: &providers::ProviderName) -> Option<Arc<dyn WebSearchBackend>> {
+    match provider.name {
+        "exa" => Some(Arc::new(ExaRestBackend)),
+        _ => None,
+    }
+}
+
+/// Whether a connection with this status can serve a web search. A pending
+/// connection was never activated, and a disabled or revoked one was stopped
+/// by an operator; every other status (active, degraded, auth-required) stays
+/// a candidate, so governance can name a recoverable health condition.
+/// Search resolution and the health report's `connection_present` both use
+/// this, so the two cannot disagree about which connections exist.
+pub fn connection_status_can_search(status: &str) -> bool {
+    !matches!(status, "pending" | "disabled" | "revoked")
+}
+
 /// A successful search as the tool returns it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WebSearchResponse {
@@ -222,13 +244,50 @@ impl WebSearchService {
         }
     }
 
-    /// The production service: Exa over REST.
+    /// Exa over REST. A stored provider order can dispatch to Exa only; use
+    /// [`Self::production`] for every implemented provider.
     pub fn exa() -> Self {
         Self::new(Arc::new(ExaRestBackend))
     }
 
+    /// The service the module runs: Exa over REST for searches with no stored
+    /// order, plus every backend [`registered_backend`] implements for ordered
+    /// searches. With no order stored it behaves exactly as [`Self::exa`].
+    pub fn production() -> Self {
+        providers::PROVIDER_NAMES
+            .iter()
+            .filter_map(registered_backend)
+            .fold(Self::exa(), Self::with_chain_backend)
+    }
+
     pub fn backend_name(&self) -> &'static str {
         self.backend.name()
+    }
+
+    /// The names of the providers a stored order can dispatch to, in name order.
+    pub fn chain_backend_names(&self) -> Vec<&'static str> {
+        self.chain_backends.keys().copied().collect()
+    }
+
+    /// The service's clock in epoch milliseconds: the time it counts monthly
+    /// allowances and cooldowns against.
+    pub fn now_ms(&self) -> i64 {
+        (self.clock)()
+    }
+
+    /// How long ordered searches still skip `connection_id` after a failure
+    /// cooled it down, in milliseconds; 0 when it is not cooling. Cooldowns
+    /// live only in this process, so a restarted module reports 0.
+    pub fn cooldown_remaining_ms(&self, connection_id: &str) -> u64 {
+        let until = self
+            .chain_cooldowns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(connection_id)
+            .copied();
+        until.map_or(0, |until| {
+            u64::try_from(until.saturating_sub((self.clock)())).unwrap_or(0)
+        })
     }
 
     /// Run one search for `caller` with the tool's closed argument schema.
@@ -486,10 +545,7 @@ impl WebSearchService {
             // Reload after candidate selection: a connection may have changed
             // owner, backend or status between the two store reads.
             if connection.app_key != backend.app_key
-                || matches!(
-                    connection.status.as_str(),
-                    "pending" | "disabled" | "revoked"
-                )
+                || !connection_status_can_search(&connection.status)
             {
                 continue;
             }
