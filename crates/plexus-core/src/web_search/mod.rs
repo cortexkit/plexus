@@ -15,7 +15,8 @@
 //!
 //! With a stored order, `chain` prepares each provider's capability, resolves
 //! the caller's grant, then checks policy, action status, connection health and
-//! cooldown before charging rate limits and authorizing a governed dispatch.
+//! cooldown and the chain deadline before charging rate limits and authorizing
+//! a governed dispatch.
 //! Argument validation and source-code refusal run once before either path.
 //!
 //! Every call writes one `web_search` audit row. A dispatched call also leaves
@@ -46,7 +47,7 @@ use crate::transport::Transport;
 
 pub use backend::{ExaRestBackend, WebSearchBackend, WebSearchResult, EXCERPT_MAX_CHARS};
 pub use cache::{CacheKey, ResultCache, CACHE_CAPACITY, CACHE_TTL_MS};
-pub use chain::{ProviderSkip, SkipReason};
+pub use chain::{ProviderSkip, SkipReason, WEB_SEARCH_ATTEMPT_BOUND, WEB_SEARCH_CHAIN_DEADLINE};
 pub use limiter::{
     default_limits, CallerKey, RateLimiter, DEFAULT_PER_BACKEND_PER_MINUTE,
     DEFAULT_PER_CALLER_PER_MINUTE,

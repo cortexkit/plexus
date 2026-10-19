@@ -16531,3 +16531,35 @@ expect_red = ["events_get_tests::review_events_get_enforces_live_agent_repositor
 expect_message = "review events must enforce the calling agent's repository binding"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-chain-deadline-admission"
+guards = "Providers with less than the 65-second attempt bound remaining never dispatch or spend admission budgets"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = "< WEB_SEARCH_ATTEMPT_BOUND.as_millis() as i64"
+new = "< 0 /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/deadline.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::deadline::slow_vault_and_timeout_stop_later_providers_without_spending"]
+expect_message = "deadline admission must refuse providers with less than 65 seconds left"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-deadline-narrowing"
+guards = "After a deadline stop only capability and grant checks run, without entering policy or approval checks"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = "if deadline_stopped {"
+new = "if false && deadline_stopped { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/deadline.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::deadline::after_deadline_only_capability_and_grant_checks_run"]
+expect_message = "after a deadline stop, policy and approval must not replace the deadline reason"
+build_timeout_s = 3600
+timeout_s = 120
