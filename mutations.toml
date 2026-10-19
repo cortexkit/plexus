@@ -12552,8 +12552,8 @@ timeout_s = 120
 id = "store-relay-paired-fanout"
 guards = "Every same-principal same-project issue/PR pair receives visibility without extra canonical notices"
 file = "crates/plexus-core/src/store/relay.rs"
-old = "for target in targets {"
-new = "for target in targets.into_iter().take(1) { /* NON-VACUITY BREAK */"
+old = "for target in &targets {"
+new = "for target in targets.iter().take(1) { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/store/relay.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -16294,16 +16294,16 @@ timeout_s = 120
 
 [[control]]
 id = "web-search-outcome-throttled-without-retry"
-guards = "Real REST 429 without Retry-After is throttled for one minute"
+guards = "A throttled reply that carries no retry hint is skipped as throttled for one minute. The REST transport now supplies its own retry hint for a 429, so the recorded-REST test takes the retry-hint branch; this row checks the no-hint branch directly."
 file = "crates/plexus-core/src/web_search/chain/outcome.rs"
 old = 'if throttled {'
 new = 'if throttled && false { /* NON-VACUITY BREAK */'
-test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
+test_file = "crates/plexus-core/src/web_search/chain/outcome/tests.rs"
 runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::chain::tests::outcomes::recorded_rest_throttled_without_retry_uses_one_minute"]
+expect_red = ["web_search::chain::outcome::tests::throttled_without_retry_uses_one_minute"]
 build_timeout_s = 3600
 timeout_s = 120
 
