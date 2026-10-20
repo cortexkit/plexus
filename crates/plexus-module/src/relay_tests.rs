@@ -2583,26 +2583,79 @@ fn relay_polling_disqualifiers_cancel_reconnect_grace_immediately() {
 }
 
 async fn reconnect_scenario(reason: &str) {
+    reconnect_scenario_with_preparation_delay(reason, Duration::ZERO).await;
+}
+
+async fn reconnect_scenario_with_preparation_delay(reason: &str, retry_delay: Duration) {
+    struct DelayedCredentials {
+        reads: std::sync::atomic::AtomicUsize,
+        retry_delay: Duration,
+    }
+    impl CredentialSource for DelayedCredentials {
+        fn get_by_id(
+            &self,
+            _: &str,
+        ) -> Result<plexus_core::ResolvedCredential, plexus_core::CredentialError> {
+            if self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                std::thread::sleep(self.retry_delay);
+            }
+            Ok(plexus_core::ResolvedCredential::new(
+                b"secret".to_vec(),
+                None,
+                1,
+            ))
+        }
+    }
+    struct PreparedHome(tokio::sync::mpsc::UnboundedSender<()>);
+    impl crate::connector_home::RolePeer for PreparedHome {
+        fn call(&self, _: &str, _: Value) -> Result<Value, subc_protocol::ErrorBody> {
+            let _ = self.0.send(());
+            Ok(
+                json!({"role":"connector_home","epoch":1,"known":true,"stale":false,
+                "holder":null,"holder_name":null,"source":"cloud","held_here":true}),
+            )
+        }
+    }
+    async fn prepared(
+        ready: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+        reason: &str,
+        phase: &str,
+    ) {
+        crate::bounded::recv_within(
+            ready.recv(),
+            crate::bounded::STORE_WORK_WAIT,
+            &format!("{reason}: {phase} must reach the pre-dial home check"),
+        )
+        .await;
+    }
     let (scratch, store, _) = fixture(&format!("relay-reconnect-{reason}"));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/v1/relay/github/ws", listener.local_addr().unwrap());
     let status = Arc::new(Status::default());
     let task_status = status.clone();
     let task_store = store.clone();
+    let (ready, mut preparation) = tokio::sync::mpsc::unbounded_channel();
+    let home = Arc::new(ConnectorHome::new(Arc::new(PreparedHome(ready))));
+    // Refresh ConnectorHome and drain its initial readiness signal before
+    // starting run, so that signal cannot satisfy a later pre-dial wait.
+    home.refresh().unwrap();
+    preparation.try_recv().unwrap();
     let (stop, rx) = mpsc::channel(1);
     let task = tokio::spawn(async move {
         run(
             &url,
             task_store,
-            Arc::new(StubCredentialSource::with_default_success(
-                b"secret".to_vec(),
-            )),
-            Arc::new(ConnectorHome::test_admitted()),
+            Arc::new(DelayedCredentials {
+                reads: 0.into(),
+                retry_delay,
+            }),
+            home,
             &task_status,
             rx,
         )
         .await;
     });
+    prepared(&mut preparation, reason, "initial preparation").await;
     let (tcp, _) = bounded(listener.accept()).await.unwrap();
     let mut socket = bounded(accept_async(tcp)).await.unwrap();
     socket
@@ -2638,7 +2691,14 @@ async fn reconnect_scenario(reason: &str) {
     wait_state(&status, State::Reconnecting).await;
     assert_eq!(status.polling_status()["mode"], "relay_slow");
     assert_eq!(due(&scratch), 0, "short disconnect must not queue catch-up");
-    let (tcp, _) = bounded(listener.accept()).await.unwrap();
+    // A normal retry waits two seconds of backoff; the delayed-credential case
+    // adds another two seconds. Wait for the home check so neither consumes the
+    // unchanged three-second WebSocket observation deadline.
+    prepared(&mut preparation, reason, "retry preparation").await;
+    let (tcp, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+        .await
+        .expect("reconnect socket observation deadline")
+        .unwrap();
     let mut socket = bounded(accept_async(tcp)).await.unwrap();
     let mut greeting: Value = serde_json::from_str(&vector(HELLOS, "empty")).unwrap();
     greeting["next_seq"] = json!(2);
@@ -2651,12 +2711,16 @@ async fn reconnect_scenario(reason: &str) {
                 Some(Instant::now() - Duration::from_secs(600));
             status.1.notify_one();
             // No hello or health read: the supervisor must time out a stalled handshake itself.
-            bounded(async {
+            let queued = tokio::time::timeout(Duration::from_secs(3), async {
                 while due(&scratch) != 2 {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             })
             .await;
+            assert!(
+                queued.is_ok(),
+                "expired reconnect must queue catch-up without hello"
+            );
             assert_eq!(
                 status.polling_status()["last_clock_reset"],
                 "reconnect_timeout"
@@ -2680,7 +2744,11 @@ async fn reconnect_scenario(reason: &str) {
         .unwrap();
     wait_state(&status, State::Connected).await;
     if reason == "clean" {
-        assert_eq!(status.polling_status()["mode"], "relay_slow");
+        assert_eq!(
+            status.polling_status()["mode"],
+            "relay_slow",
+            "clean resume must preserve slow polling"
+        );
         assert_eq!(due(&scratch), 0, "clean resume must not queue catch-up");
         assert!(relay_scheduler(&store, status.clone())
             .due_now(&["direct".into()], now + 300_000)
@@ -2741,6 +2809,11 @@ async fn relay_polling_reset_hello_cancels_slow_reconnect_grace() {
 #[tokio::test]
 async fn relay_polling_changed_stream_cancels_slow_reconnect_grace() {
     reconnect_scenario("stream_changed").await;
+}
+
+#[tokio::test]
+async fn reconnect_socket_deadline_starts_after_credential_and_home_preparation() {
+    reconnect_scenario_with_preparation_delay("clean", Duration::from_secs(2)).await;
 }
 
 #[test]

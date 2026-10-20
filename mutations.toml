@@ -19938,3 +19938,67 @@ expect_red = ["web_search::chain::tests::zai::mcp_other_errors_have_closed_outco
 expect_message = "rate_limited_retry"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "relay-reconnect-preparation-before-socket-wait"
+guards = "Reconnect backoff and credential/home preparation do not consume the socket-observation deadline"
+file = "crates/plexus-module/src/relay_tests.rs"
+old = 'prepared(&mut preparation, reason, "retry preparation").await;'
+new = '/* NON-VACUITY BREAK: time credential preparation as a socket operation. */'
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::reconnect_socket_deadline_starts_after_credential_and_home_preparation"]
+expect_message = "reconnect socket observation deadline"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-clean-resume-preserves-slow-mode"
+guards = "A clean same-stream reconnect retains slow polling and does not queue catch-up"
+file = "crates/plexus-module/src/relay.rs"
+old = "if clean_resume {"
+new = "if false && clean_resume { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_short_clean_reconnect_preserves_slow_without_catchup"]
+expect_message = "clean resume must preserve slow polling"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-expired-reconnect-reconciles-before-hello"
+guards = "The supervisor queues catch-up after reconnect grace expires even while hello is stalled"
+file = "crates/plexus-module/src/relay.rs"
+old = "if status.take_reconcile() {"
+new = "if status.take_reconcile() && false { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_expired_reconnect_goes_normal_without_waiting_for_hello"]
+expect_message = "expired reconnect must queue catch-up without hello"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-changed-stream-cancels-grace"
+guards = "A changed stream cannot qualify as a clean reconnect through either resume eligibility check"
+file = "crates/plexus-module/src/relay.rs"
+old = "&& status.stream_id.as_ref() == Some(&stream)\n            && reset.is_none();"
+new = "&& true\n            && true; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_polling_changed_stream_cancels_slow_reconnect_grace"]
+expect_message = "reset hello must cancel slow reconnect grace: stream_changed"
+build_timeout_s = 3600
+timeout_s = 120
