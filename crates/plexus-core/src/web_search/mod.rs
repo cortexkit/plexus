@@ -50,7 +50,8 @@ use crate::transport::Transport;
 pub use backend::{
     BraveRestBackend, DeepSeekRestBackend, ExaRestBackend, FirecrawlRestBackend, JinaRestBackend,
     KagiRestBackend, KimiRestBackend, OllamaRestBackend, ParallelRestBackend,
-    PerplexityRestBackend, TavilyRestBackend, WebSearchBackend, WebSearchResult, EXCERPT_MAX_CHARS,
+    PerplexityRestBackend, SyntheticRestBackend, TavilyRestBackend, WebSearchBackend,
+    WebSearchResult, EXCERPT_MAX_CHARS,
 };
 pub use cache::{CacheKey, ResultCache, CACHE_CAPACITY, CACHE_TTL_MS};
 pub use chain::{ProviderSkip, SkipReason, WEB_SEARCH_ATTEMPT_BOUND, WEB_SEARCH_CHAIN_DEADLINE};
@@ -182,6 +183,7 @@ pub fn registered_backend(provider: &providers::ProviderName) -> Option<Arc<dyn 
         "ollama" => Some(Arc::new(OllamaRestBackend)),
         "parallel" => Some(Arc::new(ParallelRestBackend)),
         "perplexity" => Some(Arc::new(PerplexityRestBackend)),
+        "synthetic" => Some(Arc::new(SyntheticRestBackend)),
         _ => None,
     }
 }

@@ -1,0 +1,19 @@
+{
+  "_source": "Recorded-shape fixtures written from Synthetic's official Search documentation (https://dev.synthetic.new/docs/synthetic/search, read 2026-10-20). Success follows its results array with title, url, text and published; source text and URLs are illustrative. Error bodies are illustrative HTTP outcome probes, not vendor-documented error schemas. Local transmission states are exercised separately. The capability fixture requests an unsupported domain filter.",
+  "success": {"status": 200, "headers": "", "body": "{\"results\":[{\"title\":\"Example Article\",\"url\":\"https://example.com/article\",\"text\":\"A relevant excerpt from the page.\",\"published\":\"2025-01-23T12:30:00Z\"},{\"title\":\"Another Source\",\"url\":\"https://example.org/source\",\"text\":\"Another page excerpt.\",\"published\":null}]}"},
+  "empty": {"status": 200, "headers": "", "body": "{\"results\":[]}"},
+  "malformed": {"status": 200, "headers": "", "body": "{\"answer\":\"Not a search result\"}"},
+  "invalid_json": {"status": 200, "headers": "", "body": "not JSON"},
+  "no_body": {"status": 200, "headers": "", "body": ""},
+  "bad_request": {"status": 400, "headers": "", "body": "{\"error\":\"quota in an invalid request must not be scanned\"}"},
+  "unprocessable": {"status": 422, "headers": "", "body": "{\"error\":\"insufficient balance must not override validation\"}"},
+  "payment_required": {"status": 402, "headers": "", "body": "{\"error\":\"payment required\"}"},
+  "quota_forbidden": {"status": 403, "headers": "", "body": "{\"error\":\"insufficient credits\"}"},
+  "unauthorized": {"status": 401, "headers": "", "body": "{\"error\":\"quota must not override invalid key\"}"},
+  "forbidden": {"status": 403, "headers": "", "body": "{\"error\":\"access forbidden\"}"},
+  "not_found": {"status": 404, "headers": "", "body": "{\"error\":\"not found\"}"},
+  "rate_limited": {"status": 429, "headers": "", "body": "{\"error\":\"quota text is hidden by REST throttling\"}"},
+  "rate_limited_retry": {"status": 429, "headers": "Retry-After: 7\r\n", "body": "{\"error\":\"rate limited\"}"},
+  "server_error": {"status": 500, "headers": "", "body": "{\"error\":\"internal server error\"}"},
+  "capability_skip": {"include_domains": ["example.com"]}
+}

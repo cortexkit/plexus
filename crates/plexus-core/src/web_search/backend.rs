@@ -21,6 +21,7 @@ mod kimi;
 mod ollama;
 mod parallel;
 mod perplexity;
+mod synthetic;
 mod tavily;
 pub use brave::{BraveRestBackend, BRAVE_MAX_COUNT, BRAVE_MAX_QUERY_CHARS, BRAVE_MAX_QUERY_WORDS};
 pub use deepseek::{DeepSeekRestBackend, DEEPSEEK_MAX_COUNT, DEEPSEEK_MAX_QUERY_CHARS};
@@ -31,6 +32,7 @@ pub use kimi::{KimiRestBackend, KIMI_MAX_LIMIT};
 pub use ollama::{OllamaRestBackend, OLLAMA_MAX_QUERY_CHARS, OLLAMA_MAX_RESULTS};
 pub use parallel::ParallelRestBackend;
 pub use perplexity::PerplexityRestBackend;
+pub use synthetic::SyntheticRestBackend;
 pub use tavily::{TavilyRestBackend, TAVILY_MAX_INCLUDE_DOMAINS, TAVILY_MAX_RESULTS};
 
 /// Longest excerpt returned per result, in characters.
