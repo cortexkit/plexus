@@ -17997,3 +17997,147 @@ expect_red = ["manifest::tests::text_path_parameters_must_name_a_placeholder_tha
 expect_message = "text path entry must be refused"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-kagi-bearer-authorization"
+guards = "The shipped Kagi manifest sends the key as Authorization: Bearer <key>, the scheme Kagi's OpenAPI document declares for the Search API"
+file = "catalog/kagi_rest.jsonc"
+old = "\"prefix\": \"Bearer \","
+new = "\"prefix\": \"Bot \", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/kagi.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::kagi::a_documented_success_is_served_from_a_bearer_post_to_api_v1_search"]
+expect_message = "the key travels as a bearer token"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kagi-web-workflow-constant"
+guards = "The shipped Kagi manifest pins workflow to search, so Kagi returns web results and never images, videos, news or podcasts"
+file = "catalog/kagi_rest.jsonc"
+old = "\"workflow\": \"search\""
+new = "\"workflow\": \"images\" /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kagi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kagi::tests::the_shipped_manifest_pins_kagis_bearer_post_to_api_v1_search"]
+expect_message = "only web results are asked for"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kagi-domains-as-lens-sites"
+guards = "Every requested domain reaches Kagi in lens.sites_included; dropping it would silently widen the search to every site"
+file = "crates/plexus-core/src/web_search/backend/kagi.rs"
+old = "args[\"lens\"] = json!({\"sites_included\": query.include_domains});"
+new = "let _ = &query.include_domains; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kagi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kagi::tests::vendor_args_send_the_query_limit_sites_and_after_day"]
+expect_message = "domains travel in lens.sites_included and recency in filters.after"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kagi-recency-as-filters-after"
+guards = "A recency window reaches Kagi as filters.after, a UTC YYYY-MM-DD day; dropping it would return results of any age"
+file = "crates/plexus-core/src/web_search/backend/kagi.rs"
+old = "args[\"filters\"] = json!({\"after\": window_start_day(now_ms, recency.days())});"
+new = "let _ = recency; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kagi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kagi::tests::vendor_args_send_the_query_limit_sites_and_after_day"]
+expect_message = "domains travel in lens.sites_included and recency in filters.after"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kagi-answer-buckets-dropped"
+guards = "Only Kagi's data.search bucket is mapped to results; a direct_answer bucket is never served as a search result"
+file = "crates/plexus-core/src/web_search/backend/kagi.rs"
+old = "let items = match data.get(\"search\") {"
+new = "let items = match data.get(\"search\").or_else(|| data.get(\"direct_answer\")) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kagi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kagi::tests::an_empty_search_bucket_or_an_answer_without_one_is_an_empty_success"]
+expect_message = "an answer bucket is never served as a result"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kagi-snippet-excerpt"
+guards = "A Kagi result's excerpt is its documented snippet field"
+file = "crates/plexus-core/src/web_search/backend/kagi.rs"
+old = "excerpt: truncate_chars(&text(\"snippet\"), EXCERPT_MAX_CHARS),"
+new = "excerpt: truncate_chars(&text(\"description\"), EXCERPT_MAX_CHARS), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kagi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kagi::tests::a_documented_reply_maps_only_search_results_title_url_snippet_and_time"]
+expect_message = "only data.search items are results"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kagi-capability-result-count"
+guards = "Kagi's capability clamps limit to the reviewed maximum of 20, the bound in the shipped schema"
+file = "crates/plexus-core/src/web_search/backend/kagi.rs"
+old = "max_results: KAGI_MAX_LIMIT,"
+new = "max_results: u8::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kagi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kagi::tests::capability_clamps_limit_to_20_and_accepts_every_recency"]
+expect_message = "limit is clamped to the reviewed maximum of 20"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kagi-capability-query-length"
+guards = "Kagi's capability declares the tool's 500-character query envelope, since Kagi documents none; a longer query skips Kagi without dispatch"
+file = "crates/plexus-core/src/web_search/backend/kagi.rs"
+old = "max: MAX_QUERY_CHARS,"
+new = "max: usize::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kagi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kagi::tests::capability_skips_a_query_or_domain_list_beyond_the_declared_envelope"]
+expect_message = "a query over the declared 500-character envelope must skip"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kagi-capability-domain-count"
+guards = "Kagi's capability declares at most 20 domains, the bound in the shipped lens.sites_included schema; more skip Kagi without dispatch"
+file = "crates/plexus-core/src/web_search/backend/kagi.rs"
+old = "max_domains: MAX_INCLUDE_DOMAINS,"
+new = "max_domains: usize::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kagi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kagi::tests::capability_skips_a_query_or_domain_list_beyond_the_declared_envelope"]
+expect_message = "more domains than declared must skip"
+build_timeout_s = 3600
+timeout_s = 120

@@ -1,0 +1,166 @@
+// Kagi Search REST (kagi.com/api/v1): the `kagi` provider of the web_search
+// chain.
+//
+// Search only. Kagi's Universal Summarizer and FastGPT are answer endpoints
+// and are not declared; neither is the Extract API. The Search API is a keyed
+// search endpoint that returns result links, so this provider is built.
+//
+// Wire contract pinned from Kagi's own documentation (read 2026-10-20):
+// - the published OpenAPI 3.0 document behind https://kagi.com/api/docs,
+//   https://redocly-api-docs.kagi.com/api/docs/_bundle/openapi.yaml (server,
+//   the `search` operation, its request schema, responses and the `kagi`
+//   security scheme), rendered at
+//   https://kagi.com/api/docs/openapi/search/search;
+// - the API Quick Start and Search API pages,
+//   https://help.kagi.com/kagi/api/api-portal.html and
+//   https://help.kagi.com/kagi/api/search.html;
+// - the search operators page,
+//   https://help.kagi.com/kagi/features/search-operators.html.
+//
+// - method and path: POST https://kagi.com/api/v1/search (OpenAPI server
+//   https://kagi.com/api/v1, operation POST /search) with a JSON body. The
+//   transport URL is the host and the path carries /api/v1/search;
+// - auth: the OpenAPI `kagi` security scheme is `type: http, scheme: bearer`
+//   ("Kagi API key from https://kagi.com/api/keys"), so the key goes in
+//   `Authorization` with the `Bearer ` prefix. The connection is bound to the
+//   vault credential `apikey:kagi`; plexus reads it by name at dispatch and
+//   never stores it;
+// - request fields used: `query` (required; no maximum length documented),
+//   `workflow` (default `search`; sent as the reviewed constant "search" so
+//   the reply is web results, never images, videos, news or podcasts),
+//   `limit` (documented 1 to 1024; it "only limits the maximum amount
+//   returned"), `lens.sites_included` ("Search only these domains") for
+//   requested domains, and `filters.after` (format `date`, "results published
+//   or updated after this date") for a recency window. The OpenAPI also
+//   documents format, lens_id, the other lens options, timeout, page,
+//   filters.region and filters.before, extract (billed extra), safe_search
+//   (default true) and personalizations; none are sent and they are not in
+//   the reviewed schema;
+// - reply: {meta, data}. `data` holds result buckets of one shared item
+//   schema (required `url` and `title`; optional `snippet`, `time`, `image`,
+//   `props`). Only `data.search` ("all search results for html pages or
+//   websites") is read: its `title`, `url`, `snippet` and `time` (an
+//   RFC 3339 timestamp, "when the resource was created or last updated").
+//   No bucket is required by the schema, so a `data` object without `search`
+//   is an empty result. `data.direct_answer` (quick answers such as maths or
+//   unit conversions), `data.infobox` and every other bucket are never read,
+//   so no answer text reaches a caller;
+// - errors (errorEnvelope: meta, data null or empty, error[] of code, url,
+//   message, location): 400 invalid request parameters, 401 "Access token is
+//   missing or invalid", 403 "Forbidden - IP address not authorized", 429
+//   "Rate limited or usage limit exhausted" and 500. No 402 and no
+//   Retry-After header are documented.
+//
+// Differences from the provider facts the web_search chain design started from
+// (Kagi search API at kagi.com/api, search not summarizer; bearer; query and
+// limit, with domains and dates as query syntax; search result items' title,
+// url and snippet):
+// - auth: the help pages' examples send "Authorization: Bot $TOKEN" (and a GET
+//   with ?q=), which conflicts with the OpenAPI document. The OpenAPI bearer
+//   scheme and its POST operation are followed here;
+// - domains travel in the native `lens.sites_included` field, not as `site:`
+//   operators in the query. The field is documented on this operation with no
+//   plan restriction, and the OpenAPI says lens options take precedence over
+//   operators in the search terms, so it cannot be widened by the caller's
+//   own text. Kagi documents no limit on its length; the tool's 20 applies;
+// - recency travels in the native `filters.after` as a UTC YYYY-MM-DD day,
+//   not as query syntax: Kagi's operators page documents site:, grouping,
+//   AND, OR, +, -, quotes and *, but no date operator, and an undocumented
+//   `after:` could be ignored and return results of any age. Every recency
+//   window (day, week, month, year) is supported;
+// - `limit` is reviewed as 1 to 20, the tool's own maximum, not Kagi's 1024;
+// - query length: none is documented, so the tool's own 500-character limit
+//   applies and no valid tool query skips Kagi for capability;
+// - a publication date is reported from `time` when it is a parseable date;
+// - Kagi's 429 covers both a rate limit and an exhausted usage limit. The
+//   transport returns no 429 body, so both are classified as throttled (the
+//   Retry-After, if one is ever sent, or 60 seconds), never as quota. 401 is a
+//   credential failure, 400 a rejected request, and 403 and 500 are
+//   unavailable for 60 seconds;
+// - the Search page notes that the API inherits the account's settings
+//   (blocked or promoted sites, snippet length). Those can reorder or remove
+//   results but are not part of this contract.
+//
+// The search action is read-risk and has no side effects, so a retry is safe.
+{
+  "schema_version": 1,
+  "key": "kagi_rest",
+  "name": "Kagi Search (REST)",
+  "description": "Web search over Kagi's Search API (kagi.com/api/v1), as a provider for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Documented REST API with a published OpenAPI spec and static API-key bearer auth; a search mutates no vendor-side state, so it maps to a read grant.",
+  "tier": "S1",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://kagi.com"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/api/v1/search",
+        "request_constants": {
+          "workflow": "search"
+        },
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 20 },
+            "lens": {
+              "type": "object",
+              "properties": {
+                "sites_included": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1, "maxLength": 253 },
+                  "minItems": 1,
+                  "maxItems": 20
+                }
+              },
+              "required": ["sites_included"],
+              "additionalProperties": false
+            },
+            "filters": {
+              "type": "object",
+              "properties": {
+                "after": {
+                  "type": "string",
+                  "format": "date",
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                }
+              },
+              "required": ["after"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

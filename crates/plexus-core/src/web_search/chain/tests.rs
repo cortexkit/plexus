@@ -10,6 +10,7 @@ mod deadline;
 mod deepseek;
 mod firecrawl;
 mod jina;
+mod kagi;
 mod outcomes;
 mod tavily;
 

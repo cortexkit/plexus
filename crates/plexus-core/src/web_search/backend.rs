@@ -16,11 +16,13 @@ mod brave;
 mod deepseek;
 mod firecrawl;
 mod jina;
+mod kagi;
 mod tavily;
 pub use brave::{BraveRestBackend, BRAVE_MAX_COUNT, BRAVE_MAX_QUERY_CHARS, BRAVE_MAX_QUERY_WORDS};
 pub use deepseek::{DeepSeekRestBackend, DEEPSEEK_MAX_COUNT, DEEPSEEK_MAX_QUERY_CHARS};
 pub use firecrawl::{FirecrawlRestBackend, FIRECRAWL_MAX_LIMIT, FIRECRAWL_MAX_QUERY_UTF16};
 pub use jina::{JinaRestBackend, JINA_MAX_COUNT, JINA_MAX_DOMAINS};
+pub use kagi::{KagiRestBackend, KAGI_MAX_LIMIT};
 pub use tavily::{TavilyRestBackend, TAVILY_MAX_INCLUDE_DOMAINS, TAVILY_MAX_RESULTS};
 
 /// Longest excerpt returned per result, in characters.

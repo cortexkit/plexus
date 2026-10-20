@@ -1,0 +1,53 @@
+{
+  "_source": "Built from Kagi's Search API OpenAPI document (https://redocly-api-docs.kagi.com/api/docs/_bundle/openapi.yaml, operation POST /search, read 2026-10-20). The success body is the first and fifth data.search items of the operation's documented 200 example (the Wikipedia snippet is the schema's own snippet example, the Apple snippet shortened), with the same meta; the fifth item has no time. Its direct_answer, infobox and related_search buckets are built from the shared result schema to show that only data.search is read; their texts are illustrative. empty is a 200 with an empty data.search array; answer_only is a 200 whose data has a direct_answer bucket and no search bucket, which the schema allows. malformed is the deprecated v0 reply shape (data as an array of t:0 items), which v1 never sends. Error statuses are the ones the operation lists (400, 401, 403, 429, 500), each with the documented errorEnvelope (meta, data null, error[] of code, url, message, location). The 401 body is the documented unauthorized example; the codes and messages of the others are illustrative. Kagi documents no Retry-After; rate_limited_retry checks that one is honoured if sent.",
+  "success": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"meta\": {\"trace\": \"97383064af92b8980b9b4d419b4ce4a9\", \"ms\": 314, \"node\": \"us-east4\"}, \"data\": {\"search\": [{\"url\": \"https://en.wikipedia.org/wiki/Steve_Jobs\", \"title\": \"Steve Jobs - Wikipedia\", \"snippet\": \"Steven Paul Jobs (February 24, 1955 – October 5, 2011) was an American businessman, inventor, and investor best known for co-founding the ...\", \"time\": \"2012-02-23T07:00:59Z\", \"image\": {\"url\": \"https://p.kagi.com/proxy/th?c=fl5H5doFdZVT3TYbM87OdIZHFmzy_9fVEKrvFI-hPjn9NSJulYkorNApo0h-QjOIcaPzoLVMmbuzEkIM-iPgqNDDIn0YpMaotS5c51iUmF37FaWcxqp-HUqn_2lndJOU\"}, \"props\": {\"language\": \"en\", \"language_probability\": 0.9653164148330688, \"group_id\": \"en.wikipedia.org\"}}, {\"url\": \"https://www.apple.com/stevejobs/\", \"title\": \"Remembering Steve Jobs - Apple\", \"snippet\": \"Apple has lost a visionary and creative genius, and the world has lost an amazing human being.\", \"props\": {\"language\": \"en\", \"group_id\": \"apple.com\"}}], \"direct_answer\": [{\"url\": \"https://kagi.com/\", \"title\": \"Steve Jobs was an American businessman, the co-founder of Apple\", \"snippet\": \"Steve Jobs (1955-2011) co-founded Apple and led it as chief executive.\"}], \"infobox\": [{\"url\": \"https://en.wikipedia.org/wiki/Steve_Jobs\", \"title\": \"Steve Jobs\", \"snippet\": \"American businessman, inventor and investor (1955-2011).\"}], \"related_search\": [{\"url\": \"https://kagi.com/search?q=steve+jobs+biography\", \"title\": \"steve jobs biography\"}]}}"
+  },
+  "empty": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"meta\": {\"trace\": \"97383064af92b8980b9b4d419b4ce4a9\", \"ms\": 314, \"node\": \"us-east4\"}, \"data\": {\"search\": []}}"
+  },
+  "answer_only": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"meta\": {\"trace\": \"97383064af92b8980b9b4d419b4ce4a9\", \"ms\": 314, \"node\": \"us-east4\"}, \"data\": {\"direct_answer\": [{\"url\": \"https://kagi.com/\", \"title\": \"2 + 2 = 4\", \"snippet\": \"4\"}]}}"
+  },
+  "malformed": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"meta\": {\"trace\": \"97383064af92b8980b9b4d419b4ce4a9\", \"ms\": 314, \"node\": \"us-east4\"}, \"data\": [{\"t\": 0, \"url\": \"https://en.wikipedia.org/wiki/Steve_Jobs\", \"title\": \"Steve Jobs - Wikipedia\", \"snippet\": \"Steven Paul Jobs ...\"}]}"
+  },
+  "bad_request": {
+    "status": 400,
+    "headers": "",
+    "body": "{\"meta\": {\"trace\": \"69c3f5c4168f66b860e951c585550f1c\", \"node\": \"us-central1\", \"ms\": 213}, \"data\": null, \"error\": [{\"code\": \"search.invalid_limit\", \"url\": \"https://help.kagi.com/api/errors#search.invalid_limit\", \"message\": \"limit must be between 1 and 1024\", \"location\": null}]}"
+  },
+  "unauthorized": {
+    "status": 401,
+    "headers": "",
+    "body": "{\"meta\": {\"trace\": \"69c3f5c4168f66b860e951c585550f1c\", \"node\": \"us-central1\", \"ms\": 213}, \"data\": null, \"error\": [{\"code\": \"2\", \"url\": \"https://help.kagi.com/api/errors#unauthorized\", \"message\": \"Unauthorized\", \"location\": null}]}"
+  },
+  "forbidden": {
+    "status": 403,
+    "headers": "",
+    "body": "{\"meta\": {\"trace\": \"69c3f5c4168f66b860e951c585550f1c\", \"node\": \"us-central1\", \"ms\": 213}, \"data\": null, \"error\": [{\"code\": \"search.ip_not_authorized\", \"url\": \"https://help.kagi.com/api/errors#search.ip_not_authorized\", \"message\": \"IP address not authorized\", \"location\": null}]}"
+  },
+  "rate_limited_retry": {
+    "status": 429,
+    "headers": "Retry-After: 7\r\n",
+    "body": "{\"meta\": {\"trace\": \"69c3f5c4168f66b860e951c585550f1c\", \"node\": \"us-central1\", \"ms\": 213}, \"data\": null, \"error\": [{\"code\": \"search.rate_limited\", \"url\": \"https://help.kagi.com/api/errors#search.rate_limited\", \"message\": \"Rate limited or usage limit exhausted\", \"location\": null}]}"
+  },
+  "rate_limited_no_retry": {
+    "status": 429,
+    "headers": "",
+    "body": "{\"meta\": {\"trace\": \"69c3f5c4168f66b860e951c585550f1c\", \"node\": \"us-central1\", \"ms\": 213}, \"data\": null, \"error\": [{\"code\": \"search.rate_limited\", \"url\": \"https://help.kagi.com/api/errors#search.rate_limited\", \"message\": \"Rate limited or usage limit exhausted\", \"location\": null}]}"
+  },
+  "server_error": {
+    "status": 500,
+    "headers": "",
+    "body": "{\"meta\": {\"trace\": \"69c3f5c4168f66b860e951c585550f1c\", \"node\": \"us-central1\", \"ms\": 213}, \"data\": null, \"error\": [{\"code\": \"search.internal_error\", \"url\": \"https://help.kagi.com/api/errors#search.internal_error\", \"message\": \"Internal server error\", \"location\": null}]}"
+  }
+}
