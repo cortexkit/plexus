@@ -2486,6 +2486,7 @@ package = "plexus-module"
 target = "--lib"
 expect_red = ["relay::tests::connector_home_is_checked_before_dial_and_again_on_superseded"]
 expect_message = "connector home must fence dial before network contact"
+select = "expected"
 build_timeout_s = 3600
 
 [[control]]
@@ -2500,6 +2501,7 @@ package = "plexus-module"
 target = "--lib"
 expect_red = ["relay::tests::connector_home_is_checked_before_dial_and_again_on_superseded"]
 expect_message = "4009 must immediately recheck connector home"
+select = "expected"
 build_timeout_s = 3600
 
 [[control]]

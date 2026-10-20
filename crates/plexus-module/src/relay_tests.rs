@@ -1310,6 +1310,28 @@ impl crate::connector_home::RolePeer for Claim {
 #[tokio::test]
 async fn connector_home_is_checked_before_dial_and_again_on_superseded() {
     use std::sync::atomic::Ordering::SeqCst;
+    struct RetryCredentials {
+        source: StubCredentialSource,
+        reads: std::sync::atomic::AtomicUsize,
+        retry_started: Arc<tokio::sync::Notify>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl CredentialSource for RetryCredentials {
+        fn get_by_id(
+            &self,
+            id: &str,
+        ) -> Result<plexus_core::ResolvedCredential, plexus_core::CredentialError> {
+            if self.reads.fetch_add(1, SeqCst) > 0 {
+                self.retry_started.notify_one();
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(crate::bounded::STORE_WORK_WAIT);
+            }
+            self.source.get_by_id(id)
+        }
+    }
     let (_scratch, store, _) = fixture("relay-home");
     let claim = Arc::new(Claim {
         held: false.into(),
@@ -1336,9 +1358,18 @@ async fn connector_home_is_checked_before_dial_and_again_on_superseded() {
     // cannot trigger a retry whose pre-dial refresh masks the 4009 recheck.
     home.refresh().unwrap();
     assert_eq!(claim.reads.load(SeqCst), 2);
-    let credentials = Arc::new(StubCredentialSource::with_default_success(
-        b"secret".to_vec(),
-    ));
+    let mut home_changes = home.decisions();
+    let retry_started = Arc::new(tokio::sync::Notify::new());
+    let (release_retry, wait_retry) = std::sync::mpsc::channel();
+    // The refresh triggered by a 4009 close also publishes a claim-change wake.
+    // Gate the next credential lookup before its pre-dial refresh, so that later
+    // refresh cannot satisfy the assertion about handling the close.
+    let credentials = Arc::new(RetryCredentials {
+        source: StubCredentialSource::with_default_success(b"secret".to_vec()),
+        reads: 0.into(),
+        retry_started: retry_started.clone(),
+        release: std::sync::Mutex::new(wait_retry),
+    });
     let status = Arc::new(Status::default());
     let task_status = status.clone();
     let (stop, rx) = mpsc::channel(1);
@@ -1357,14 +1388,20 @@ async fn connector_home_is_checked_before_dial_and_again_on_superseded() {
         })))
         .await
         .unwrap();
+    let refreshed_before_retry = bounded(async {
+        tokio::select! {
+            biased;
+            result = home_changes.changed() => { result.unwrap(); true }
+            _ = retry_started.notified() => false,
+        }
+    })
+    .await;
+    // Pause only the test's observer after the home-change notification. The
+    // exact count must remain stable while the next attempt waits at the
+    // credential fence, even when the test does not assert promptly.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), async {
-            while claim.reads.load(SeqCst) < 4 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .is_ok(),
+        refreshed_before_retry && !*home_changes.borrow(),
         "4009 must immediately recheck connector home"
     );
     assert_eq!(
@@ -1375,6 +1412,7 @@ async fn connector_home_is_checked_before_dial_and_again_on_superseded() {
     wait_state(&status, State::Reconnecting).await;
     assert_eq!(status.degraded_message(), Some(SUPERSEDED_MESSAGE));
     drop(stop);
+    drop(release_retry);
     bounded(task).await.unwrap();
 }
 
