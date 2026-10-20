@@ -1998,7 +1998,10 @@ async fn handle_management_request(
             | manifest::GITHUB_PROBE_OP
             | manifest::GITHUB_GRANT_OP
             | manifest::GITHUB_BIND_OP
-    ) {
+    ) && !(method == manifest::GITHUB_GRANT_OP && params["kind"] == "read")
+    {
+        // Read upgrades audit changes inside their transaction and leave previews
+        // and no-ops untouched, rather than appending a second control audit here.
         // The op has run (an applied bind or grant has changed the store), so
         // a failed audit row is reported alongside its reply, not in place of it.
         if let Err(error) = state.store().audit_github_control(
@@ -2119,9 +2122,10 @@ fn github_handle_grant(state: &ModuleState, principal_key: &str, params: &Value)
     match params.get("kind").map(|kind| kind.as_str()) {
         None | Some(Some("invoke")) => {}
         Some(Some("poll")) => return github_handle_poll_grant(state, principal_key, params),
+        Some(Some("read")) => return github_handle_read_grant(state, principal_key, params),
         Some(_) => {
             return json!({"error":{"code":"invalid_request",
-                "message":"kind must be \"invoke\" or \"poll\""}})
+                "message":"kind must be \"invoke\", \"poll\" or \"read\""}})
         }
     }
     let (Some(app_handle_id), Some(module), Some(effect)) =
@@ -2200,6 +2204,45 @@ fn github_handle_poll_grant(state: &ModuleState, principal_key: &str, params: &V
     ) {
         Ok(plan) => json!({"result":plan}),
         Err(code) => github_handle_refusal(&code, app_handle_id),
+    }
+}
+
+fn github_handle_read_grant(state: &ModuleState, principal_key: &str, params: &Value) -> Value {
+    let actions: Option<Vec<String>> =
+        params
+            .get("actions")
+            .and_then(Value::as_array)
+            .and_then(|values| {
+                values
+                    .iter()
+                    .map(|value| value.as_str().map(str::to_owned))
+                    .collect()
+            });
+    let module = params.get("module").and_then(Value::as_str);
+    let handle = params.get("app_handle_id").and_then(Value::as_str);
+    let all_handles = params
+        .get("all_handles")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (Some(actions), Some(module)) = (actions, module) else {
+        return json!({"error":{"code":"invalid_request","message":"module and an array of actions are required"}});
+    };
+    if params.get("effect").is_some() || all_handles == handle.is_some() || handle == Some("") {
+        return json!({"error":{"code":"invalid_request","message":"read takes no effect and requires exactly one of app_handle_id or all_handles: true"}});
+    }
+    let request = plexus_core::storage::github_store::GithubHandleReadGrant {
+        app_handle_id: handle.map(str::to_owned),
+        all_handles,
+        module: module.to_owned(),
+        actions,
+        dry_run: params
+            .get("dry_run")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    };
+    match plexus_core::github::control::grant_read(state.store(), principal_key, &request) {
+        Ok(plan) => json!({"result":plan}),
+        Err(code) => github_handle_refusal(&code, handle.unwrap_or("all enabled handles")),
     }
 }
 

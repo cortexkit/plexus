@@ -5,6 +5,10 @@
 use super::*;
 use subc_protocol::scope::{ScopeAttributes, ScopeKind, ScopeStamp};
 
+mod read_grant_tests {
+    include!("bot_read_grant_tests.rs");
+}
+
 const BOT_ACTIONS: &[&str] = &[
     "github.repo.get",
     "github.search.code",

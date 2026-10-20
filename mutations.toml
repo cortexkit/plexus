@@ -18765,3 +18765,362 @@ expect_red = ["web_search::backend::perplexity::tests::documented_results_map_li
 expect_message = "only linked sources, never generated answer text or last_updated, may become results"
 build_timeout_s = 3600
 timeout_s = 120
+[[control]]
+id = "bot-read-upgrade-allowlist"
+guards = "Read upgrades admit only the exact agent-bot read action list, never writes or other reads"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'if !crate::github::reads::bot::GRANT_ACTIONS.contains(&action.as_str()) {'
+new = 'if false && !crate::github::reads::bot::GRANT_ACTIONS.contains(&action.as_str()) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_refuses_writes_unknown_actions_and_nonoperator"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-selector"
+guards = "Read upgrades require exactly one handle selector"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'if grant.all_handles == grant.app_handle_id.is_some() {'
+new = 'if false && grant.all_handles == grant.app_handle_id.is_some() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_requires_one_selector_and_nonempty_authority"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-nonempty"
+guards = "Read upgrades require a carrier and nonempty actions"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'if grant.module.is_empty() || grant.actions.is_empty() {'
+new = 'if false && (grant.module.is_empty() || grant.actions.is_empty()) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_requires_one_selector_and_nonempty_authority"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-reviewed"
+guards = "Read upgrades require the action to be a read in the active reviewed manifest"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'if reviewed.is_none_or(|row| row["risk"] != "read") {'
+new = 'if false && reviewed.is_none_or(|row| row["risk"] != "read") { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_requires_reviewed_manifest_action"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-bulk-enabled"
+guards = "Bulk read upgrades select enabled handles only"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = "WHERE (?1 AND status='enabled') OR app_handle_id=?2 ORDER BY app_handle_id"
+new = "WHERE (?1 /* NON-VACUITY BREAK */) OR app_handle_id=?2 ORDER BY app_handle_id"
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_bulk_is_atomic_skips_disabled_and_creates_missing_module_grant"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-known-handle"
+guards = "An ordinary connection cannot stand in for an imported bot handle"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'if !grant.all_handles && handles.is_empty() {'
+new = 'if false && !grant.all_handles && handles.is_empty() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_requires_enabled_bot_connection"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-enabled-handle"
+guards = "A disabled bot handle cannot be upgraded explicitly"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'if status != "enabled" {'
+new = 'if false && status != "enabled" { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_requires_enabled_bot_connection"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-bot-connection"
+guards = "Read upgrades require an active direct-owned GitHub handle connection"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'if principal != "direct" || app != "github_rest" || connection_status != "active" {'
+new = 'if false && (principal != "direct" || app != "github_rest" || connection_status != "active") { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_requires_enabled_bot_connection"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-ceiling-risk"
+guards = "Read upgrades cannot mint above the stored connection risk ceiling"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'if !crate::manifest::Risk::parse(&risk).is_some_and(|risk| crate::manifest::Risk::Read.within(risk)) {'
+new = 'if false && !crate::manifest::Risk::parse(&risk).is_some_and(|risk| crate::manifest::Risk::Read.within(risk)) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_requires_enabled_bot_connection"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-catalog-risk"
+guards = "Read upgrades refuse catalog risk above read even for an allowlisted name"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'Some((risk, _)) if risk != "read" =>'
+new = 'Some((risk, _)) if false && risk != "read" => /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_preserves_inactive_catalog_and_refuses_risk_drift"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-catalog-status"
+guards = "Read upgrades never reactivate or authorize disabled or quarantined catalog rows"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'Some((_, status)) if status != "active" =>'
+new = 'Some((_, status)) if false && status != "active" => /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_preserves_inactive_catalog_and_refuses_risk_drift"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-seed-bounded"
+guards = "Catalog seeding for a read upgrade touches only requested missing rows"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'super::super::SeedMode::AddMissing, Some(&seeded)'
+new = 'super::super::SeedMode::AddMissing, None /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_seeds_only_requested_missing_rows"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-preview"
+guards = "Read upgrade previews persist no catalog rows, authority or audits"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'if grant.dry_run { tx.execute_batch("ROLLBACK TO bot_read_upgrade")?; }'
+new = 'if false && grant.dry_run { tx.execute_batch("ROLLBACK TO bot_read_upgrade")?; } /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::legacy_read_upgrade_seeds_and_serves_bot_read"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-seed-missing"
+guards = "Legacy bot connections seed newly requested reads from the reviewed manifest"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'if !seeded.is_empty() {'
+new = 'if false && !seeded.is_empty() { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::legacy_read_upgrade_seeds_and_serves_bot_read"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-ceiling-generation"
+guards = "Read upgrade ceiling additions bump the connection authority generation"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = '&ceiling, &additions, now)?;'
+new = '&ceiling, &[], now)?; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::legacy_read_upgrade_seeds_and_serves_bot_read"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-noop"
+guards = "Repeated read upgrades leave generations, authority and audits unchanged"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = '&ceiling, &additions, now)?;'
+new = '&ceiling, &actions, now)?; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::legacy_read_upgrade_seeds_and_serves_bot_read"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-module-insert"
+guards = "Read upgrades create missing carrier module grants on every enabled selected handle"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = '} else if op == "insert" {'
+new = '} else if false && op == "insert" { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_bulk_is_atomic_skips_disabled_and_creates_missing_module_grant"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-module-extend"
+guards = "Read upgrades extend the named module grant so an upgraded legacy bot can actually read"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'if op == "extend" {'
+new = 'if false && op == "extend" { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::legacy_read_upgrade_seeds_and_serves_bot_read"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-write-claim"
+guards = "Adding read authority preserves module grant generation and in-flight bot write claims"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'UPDATE grants SET action_selectors=?3 WHERE principal=?1 AND grant_id=?2'
+new = 'UPDATE grants SET action_selectors=?3, generation=generation+1 /* NON-VACUITY BREAK */ WHERE principal=?1 AND grant_id=?2'
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::read_upgrade_keeps_claimed_bot_write_live"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-audit-atomic"
+guards = "Read authority is not committed if the same-transaction audit cannot be written"
+file = "crates/plexus-core/src/store/github/read_grant.rs"
+old = 'super::super::append_audit_on_conn(tx, &audit, None, None, None, None)?;'
+new = 'let _ = super::super::append_audit_on_conn(tx, &audit, None, None, None, None); /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_audit_failure_rolls_back_authority"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-shared-import-list"
+guards = "New handle imports and operator upgrades use the same five bot-read action names"
+file = "crates/plexus-core/src/github/control/mod.rs"
+old = "aft.extend(\n            crate::github::reads::bot::GRANT_ACTIONS\n                .iter()\n                .map(|action| (*action).to_owned()),\n        );"
+new = '/* NON-VACUITY BREAK: omit the shared bot-read authority at import */'
+test_file = "crates/plexus-core/tests/it/github_control_surface.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_control_surface::import_and_read_upgrade_share_all_bot_read_actions"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-operator"
+guards = "Only direct operator authority can request read upgrades"
+file = "crates/plexus-core/src/github/control/mod.rs"
+old = "pub fn grant_read(\n    store: &PlexusStore,\n    principal: &str,\n    request: &crate::storage::github_store::GithubHandleReadGrant,\n) -> Result<Value, String> {\n    if principal != \"direct\" {"
+new = "pub fn grant_read(\n    store: &PlexusStore,\n    principal: &str,\n    request: &crate::storage::github_store::GithubHandleReadGrant,\n) -> Result<Value, String> {\n    if false && principal != \"direct\" { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bot_read_grant_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::read_grant_tests::read_upgrade_refuses_writes_unknown_actions_and_nonoperator"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-confirmation"
+guards = "Applied single and bulk read upgrades require the existing operator confirmation gate"
+file = "crates/plexus-module/src/operator_confirmation.rs"
+old = 'pub fn may_need_confirmation(method: &str, params: &Value) -> bool {'
+new = 'pub fn may_need_confirmation(method: &str, params: &Value) -> bool { if method == manifest::GITHUB_GRANT_OP && params["kind"] == "read" { return false; } /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/operator_confirmation_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::operator_confirmation_tests::bot_read_upgrade_confirmation_and_preview_are_fenced"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-read-upgrade-cli-preview"
+guards = "The read-kind admin command previews unless apply is explicit"
+file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+old = '"all_handles":all,"dry_run":!flags.has("--apply")'
+new = '"all_handles":all,"dry_run":flags.has("--apply") /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/bin/ck-plexus-admin.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--bin ck-plexus-admin"
+select = "expected"
+expect_red = ["bot_read_grant_cli_tests::read_kind_single_and_bulk_preview_apply_and_refuse_ambiguous_flags"]
+build_timeout_s = 3600
+timeout_s = 120

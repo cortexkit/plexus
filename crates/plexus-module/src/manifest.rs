@@ -312,7 +312,7 @@ pub fn build_with_launch_nonce_source(
                 },
                 ManagementOperation {
                     name: GITHUB_GRANT_OP.to_string(), kind: ManagementOperationKind::Mutate,
-                    description: Some("Add write abilities to one imported GitHub handle, widening its ceiling by exactly those writes and their implied reads and legs".to_string()),
+                    description: Some("Add write abilities or poll reads to an imported GitHub handle, or exact agent-bot reads to one or all enabled handles under a named carrier's module grant".to_string()),
                 },
                 ManagementOperation {
                     name: GITHUB_BIND_OP.to_string(), kind: ManagementOperationKind::Mutate,

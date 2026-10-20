@@ -102,7 +102,11 @@ pub(crate) fn summary(method: &str, params: &Value) -> Option<String> {
         manifest::GITHUB_GRANT_OP => format!(
             "grant {} authority on GitHub handle {}",
             label("kind", "invoke"),
-            label("app_handle_id", "the handle")
+            if params["all_handles"] == true {
+                "all enabled handles".to_owned()
+            } else {
+                label("app_handle_id", "the handle")
+            }
         ),
         _ => unreachable!("only authority-widening ceremonies need confirmation"),
     })

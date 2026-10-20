@@ -766,3 +766,43 @@ fn bot_request_requires_a_module_grant_even_with_a_delegating_stamp() {
         assert_eq!(reply.gate, "G6");
     }
 }
+
+#[test]
+fn import_and_read_upgrade_share_all_bot_read_actions() {
+    let expected = [
+        "github.repo.get",
+        "github.search.code",
+        "github.search.issues",
+        "github.actions.job.get",
+        "github.actions.job_log",
+    ];
+    assert_eq!(plexus_core::github::reads::bot::GRANT_ACTIONS, expected);
+    let store = store();
+    control::import(
+        &store,
+        "direct",
+        &inventory(),
+        &Credentials(AtomicUsize::new(0)),
+        &Reader(AtomicUsize::new(0)),
+        0,
+        false,
+    )
+    .unwrap();
+    let request = plexus_core::storage::github_store::GithubHandleReadGrant {
+        app_handle_id: Some("app-one".into()),
+        all_handles: false,
+        module: "reserved:aft".into(),
+        actions: expected.iter().map(|action| (*action).to_owned()).collect(),
+        dry_run: false,
+    };
+    let plan = control::grant_read(&store, "direct", &request).unwrap();
+    assert_eq!(
+        plan["handles"][0]["ceiling_additions"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        plan["handles"][0]["catalog_additions"],
+        serde_json::json!([])
+    );
+    assert_eq!(plan["handles"][0]["grants"][0]["op"], "unchanged");
+}

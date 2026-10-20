@@ -33,6 +33,16 @@ pub const ACTIONS: &[&str] = &[
 pub(crate) const JOB_GET_ACTION: &str = "github.actions.job.get";
 pub(crate) const JOB_LOG_ACTION: &str = "github.actions.job_log";
 
+/// Catalog authority needed for agent-bot reads, including both job-log legs.
+/// Import and operator upgrades use this same set of exact action names.
+pub const GRANT_ACTIONS: &[&str] = &[
+    ACTIONS[0],
+    ACTIONS[1],
+    ACTIONS[2],
+    JOB_GET_ACTION,
+    JOB_LOG_ACTION,
+];
+
 /// The media types `github.repo.get` may ask for, the first being the default.
 pub const ACCEPTED_MEDIA_TYPES: &[&str] = &[
     "application/vnd.github+json",

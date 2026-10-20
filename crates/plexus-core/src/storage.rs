@@ -9639,6 +9639,19 @@ pub(crate) fn seed_catalog_from_manifest_on_conn(
     app_key: &str,
     mode: SeedMode,
 ) -> rusqlite::Result<usize> {
+    seed_catalog_actions_from_manifest_on_conn(conn, principal, connection_id, app_key, mode, None)
+}
+
+/// Use the reviewed seeder for a bounded set of actions without reconciling
+/// unrelated catalog rows during an operator grant.
+pub(crate) fn seed_catalog_actions_from_manifest_on_conn(
+    conn: &rusqlite::Connection,
+    principal: &str,
+    connection_id: &str,
+    app_key: &str,
+    mode: SeedMode,
+    only: Option<&[String]>,
+) -> rusqlite::Result<usize> {
     let source: Option<String> = conn.query_row(
         "SELECT manifest_json FROM app_manifests WHERE principal=?1 AND key=?2 AND status='active'",
         (CATALOG_PRINCIPAL, app_key), |row| row.get(0),
@@ -9665,6 +9678,9 @@ pub(crate) fn seed_catalog_from_manifest_on_conn(
             skipped.insert("<unnamed>".to_string(), "action_name_missing");
             continue;
         };
+        if only.is_some_and(|names| !names.iter().any(|listed| listed == name)) {
+            continue;
+        }
         // An unclassified risk must not be seeded as a permissive read.
         let Some(parsed_risk) = action
             .get("risk")

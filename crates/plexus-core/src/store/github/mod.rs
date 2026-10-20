@@ -18,6 +18,9 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 use std::sync::Arc;
 
+mod read_grant;
+pub use read_grant::GithubHandleReadGrant;
+
 /// The credential reference identifies one App; an installation id is optional
 /// because the vault delivers a ready installation token by credential id.
 #[derive(Debug, Clone)]
