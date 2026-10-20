@@ -1,0 +1,31 @@
+{
+  "source": "https://docs.z.ai/devpack/mcp/search-mcp-server (tool/auth only; MCP wire shapes are synthetic contract fixtures, not claimed vendor captures)",
+  "success": {"result": {"content": [{"type": "text", "text": "{\"results\":[{\"title\":\" Z.AI search \",\"link\":\"https://example.com/search\",\"content\":\" Source excerpt. \",\"publish_date\":\"2026-06-18\"},{\"title\":\"Second source\",\"url\":\"https://example.org/source\",\"content\":\"Another excerpt.\",\"publish_date\":null}],\"answer\":\"ANSWER MUST NOT LEAK\"}"}]}},
+  "empty": {"result": {"content": [{"type":"text", "text":"[]"}]}},
+  "rpc_quota": {"error":{"code":-32000,"message":"Monthly QUOTA exhausted"}},
+  "rpc_credits": {"error":{"code":-32000,"message":"Request failed","data":{"detail":"Not enough credits"}}},
+  "rpc_balance": {"error":{"code":-32000,"message":"Insufficient balance"}},
+  "rpc_unavailable": {"error":{"code":-32000,"message":"Service unavailable"}},
+  "tool_quota": {"result":{"isError":true,"content":[{"type":"text","text":"Search failed"},{"type":"text","text":"No credits remain"}]}},
+  "tool_unavailable": {"result":{"isError":true,"content":[{"type":"text","text":"Search service unavailable"}]}},
+  "bad_request": {"status":400,"body":{"error":"quota word must not override bad request"}},
+  "unprocessable": {"status":422,"body":{"error":"credits must not override invalid arguments"}},
+  "payment_required": {"status":402,"body":{"error":"payment required"}},
+  "unauthorized": {"status":401,"body":{"error":"invalid key"}},
+  "forbidden": {"status":403,"body":{"error":"forbidden"}},
+  "rate_limited": {"status":429,"body":{"error":"credits exhausted"}},
+  "rate_limited_retry": {"status":429,"headers":"Retry-After: 7\r\n","body":{"error":"quota"}},
+  "server_error": {"status":500,"body":{"error":"quota word in gateway failure"}},
+  "malformed": {"result":{"content":[{"type":"text","text":"{\"answer\":\"no sources array\"}"}]}},
+  "invalid_json": {"raw":"not JSON"},
+  "no_body": {"raw":""},
+  "rpc_timeout": {"error":{"code":-32001,"message":"quota does not override timeout"}},
+  "local_outcomes": [
+    {"name":"not_sent","transmission":"not_sent","reason":"unavailable","cooldown":60000,"used":0},
+    {"name":"not_sent_retry","transmission":"not_sent","retry":9000,"reason":"throttled","cooldown":9000,"used":0},
+    {"name":"outcome_unknown","transmission":"unknown","reason":"unavailable","cooldown":60000,"used":1},
+    {"name":"timeout","transmission":"unknown","code":"timeout","reason":"unavailable","cooldown":60000,"used":1},
+    {"name":"completed_no_body","transmission":"sent","reason":"unavailable","cooldown":60000,"used":1}
+  ],
+  "capability_skip": {"query":"weather report","include_domains":["example.com"]}
+}

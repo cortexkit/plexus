@@ -359,6 +359,24 @@ impl WebSearchService {
                 };
                 let (connection, action) =
                     resolved.map_err(|refusal| SkipReason::for_refusal(&refusal))?;
+                // Active catalog rows carry the approved pin; refresh quarantines
+                // schema drift. Quarantined observations must never steer adapters.
+                let prepared = if action.status == "active" {
+                    match (backend, prepared) {
+                        (Some(backend), Some(prepared)) => Some(
+                            backend
+                                .prepare_reviewed(
+                                    prepared,
+                                    Some(&action.schema),
+                                    &connection.connection_id,
+                                )
+                                .map_err(|_| SkipReason::Capability)?,
+                        ),
+                        (_, prepared) => prepared,
+                    }
+                } else {
+                    prepared
+                };
                 // Once admission closes, retain capability and grant reasons but
                 // never enter another policy or per-call approval check.
                 if deadline_stopped {

@@ -51,7 +51,7 @@ pub use backend::{
     BraveRestBackend, DeepSeekRestBackend, ExaRestBackend, FirecrawlRestBackend, JinaRestBackend,
     KagiRestBackend, KimiRestBackend, OllamaRestBackend, ParallelRestBackend,
     PerplexityRestBackend, SearxngRestBackend, SyntheticRestBackend, TavilyRestBackend,
-    TinyFishRestBackend, WebSearchBackend, WebSearchResult, EXCERPT_MAX_CHARS,
+    TinyFishRestBackend, WebSearchBackend, WebSearchResult, ZaiMcpBackend, EXCERPT_MAX_CHARS,
 };
 pub use cache::{CacheKey, ResultCache, CACHE_CAPACITY, CACHE_TTL_MS};
 pub use chain::{ProviderSkip, SkipReason, WEB_SEARCH_ATTEMPT_BOUND, WEB_SEARCH_CHAIN_DEADLINE};
@@ -186,6 +186,7 @@ pub fn registered_backend(provider: &providers::ProviderName) -> Option<Arc<dyn 
         "synthetic" => Some(Arc::new(SyntheticRestBackend)),
         "tinyfish" => Some(Arc::new(TinyFishRestBackend)),
         "searxng" => Some(Arc::new(SearxngRestBackend)),
+        "zai" => Some(Arc::new(ZaiMcpBackend::default())),
         _ => None,
     }
 }

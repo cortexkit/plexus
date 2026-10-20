@@ -25,6 +25,7 @@ mod searxng;
 mod synthetic;
 mod tavily;
 mod tinyfish;
+mod zai;
 pub use brave::{BraveRestBackend, BRAVE_MAX_COUNT, BRAVE_MAX_QUERY_CHARS, BRAVE_MAX_QUERY_WORDS};
 pub use deepseek::{DeepSeekRestBackend, DEEPSEEK_MAX_COUNT, DEEPSEEK_MAX_QUERY_CHARS};
 pub use firecrawl::{FirecrawlRestBackend, FIRECRAWL_MAX_LIMIT, FIRECRAWL_MAX_QUERY_UTF16};
@@ -38,6 +39,7 @@ pub use searxng::SearxngRestBackend;
 pub use synthetic::SyntheticRestBackend;
 pub use tavily::{TavilyRestBackend, TAVILY_MAX_INCLUDE_DOMAINS, TAVILY_MAX_RESULTS};
 pub use tinyfish::{TinyFishRestBackend, TINYFISH_MAX_QUERY_CHARS};
+pub use zai::ZaiMcpBackend;
 
 /// Longest excerpt returned per result, in characters.
 pub const EXCERPT_MAX_CHARS: usize = 600;
@@ -80,6 +82,18 @@ pub trait WebSearchBackend: Send + Sync {
             .prepare_query(self.name(), query, now_ms)?;
         let vendor_args = self.vendor_args(&query, now_ms);
         Ok(super::capability::PreparedSearch { query, vendor_args })
+    }
+    /// Adapt an admitted request using only the action's stored reviewed schema.
+    /// Connection-dependent adapters may refuse unsupported schemas before any
+    /// policy wait, cooldown, allowance reservation or dispatch. Other backends
+    /// preserve their already-prepared arguments exactly.
+    fn prepare_reviewed(
+        &self,
+        prepared: super::capability::PreparedSearch,
+        _reviewed_schema: Option<&Value>,
+        _connection_id: &str,
+    ) -> Result<super::capability::PreparedSearch, super::capability::CapabilitySkip> {
+        Ok(prepared)
     }
     /// The vendor arguments for one validated query. `now_ms` anchors a
     /// recency window. In chain mode `prepare` already composed query operators:

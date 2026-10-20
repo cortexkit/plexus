@@ -1,0 +1,46 @@
+// Z.AI remote MCP search. Vendor documentation, reviewed 2026-10-20:
+// https://docs.z.ai/devpack/mcp/search-mcp-server
+// pins the Streamable HTTP endpoint and Authorization: Bearer header below.
+// It calls the tool webSearchPrime; the deployed MCP action is web_search_prime.
+// The vendor publishes no MCP argument schema. Plexus uses only the action's
+// discovered, reviewed, stored inputSchema: query:string if declared, otherwise
+// search_query:string; count:integer only when declared (otherwise local truncation).
+// Neither query field means a capability skip, never a speculative vendor call.
+// No REST schema or argument-shape retry is used. At rollout, tools/list discovery
+// and operator review must confirm this action and its inputSchema before a grant.
+// Results map title, link/url, content and publish_date; answer text is discarded.
+// Known gap: MCP RPC/tool quota wording currently gets the ordinary unavailable
+// skip (60 seconds). Provider-declared transport signals must carry quota evidence;
+// this adapter does not infer quota from vendor error prose.
+{
+  "schema_version": 1,
+  "key": "zai",
+  "name": "Z.AI Search",
+  "description": "Keyed web search through Z.AI's remote MCP service.",
+  "reuse_path": "mcp_direct",
+  "reuse_rationale": "Official hosted MCP search; reviewed discovered schema and governed read-only dispatch.",
+  "tier": "S1",
+  "transport": {
+    "kind": "mcp_remote",
+    "url": "https://api.z.ai/api/mcp/web_search_prime/mcp"
+  },
+  "auth": { "mode": "api_key" },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": { "required": [], "optional": [], "write_enabling": [] },
+  "actions_baseline": [
+    { "name": "web_search_prime", "risk": "read" }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}
