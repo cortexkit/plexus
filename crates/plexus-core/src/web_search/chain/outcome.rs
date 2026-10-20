@@ -81,6 +81,14 @@ pub(super) fn classify(
             cooldown_ms: THROTTLED_COOLDOWN_MS,
         };
     }
+    // A refused key is decided before any quota rule, so no backend's
+    // exhausted-status list can turn a 401 into a quota skip.
+    if status == Some(401) {
+        return Classified::MoveOn {
+            reason: SkipReason::Credential,
+            cooldown_ms: CREDENTIAL_COOLDOWN_MS,
+        };
+    }
     if status == Some(402)
         || status.is_some_and(|status| backend.exhausted_statuses().contains(&status))
         || ((matches!(status, Some(400..=499)) && status != Some(401) || mcp_error)
@@ -89,12 +97,6 @@ pub(super) fn classify(
         return Classified::MoveOn {
             reason: SkipReason::Quota,
             cooldown_ms: QUOTA_COOLDOWN_MS,
-        };
-    }
-    if status == Some(401) {
-        return Classified::MoveOn {
-            reason: SkipReason::Credential,
-            cooldown_ms: CREDENTIAL_COOLDOWN_MS,
         };
     }
     Classified::MoveOn {

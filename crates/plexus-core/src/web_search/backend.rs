@@ -80,8 +80,8 @@ pub trait WebSearchBackend: Send + Sync {
     /// plan, credits or spending limit is used up. The chain treats a listed
     /// status exactly like 402: a quota skip with a one-hour cooldown, so a
     /// provider whose free tier ran out is not retried every minute. Statuses
-    /// the chain already classifies first (400, 422 and 429) are never read
-    /// from this list.
+    /// the chain already classifies first (400, 401, 422 and 429) are never
+    /// read from this list, so a refused key always stays a credential failure.
     fn exhausted_statuses(&self) -> &'static [u16] {
         &[]
     }

@@ -228,6 +228,62 @@ fn provider_declared_exhausted_statuses_are_quota() {
     ));
 }
 
+/// A backend that wrongly declares 401 among its exhausted statuses.
+struct DeclaresCredentialStatusExhausted;
+
+impl WebSearchBackend for DeclaresCredentialStatusExhausted {
+    fn name(&self) -> &'static str {
+        "exa"
+    }
+    fn app_key(&self) -> &'static str {
+        ExaRestBackend.app_key()
+    }
+    fn action(&self) -> &'static str {
+        ExaRestBackend.action()
+    }
+    fn capability(&self) -> crate::web_search::capability::WebSearchCapability {
+        ExaRestBackend.capability()
+    }
+    fn vendor_args(&self, query: &WebSearchQuery, now_ms: i64) -> Value {
+        ExaRestBackend.vendor_args(query, now_ms)
+    }
+    fn map_reply(
+        &self,
+        reply: &Value,
+        max_results: usize,
+        fetched_at_ms: i64,
+    ) -> Result<Vec<WebSearchResult>, crate::web_search::backend::ReplyShapeError> {
+        ExaRestBackend.map_reply(reply, max_results, fetched_at_ms)
+    }
+    fn exhausted_statuses(&self) -> &'static [u16] {
+        &[401, 432]
+    }
+}
+
+#[test]
+fn a_declared_exhausted_401_is_still_a_credential_failure() {
+    let classified = |code: &str| match classify(
+        &DeclaresCredentialStatusExhausted,
+        &dispatch(failed(code, "redacted"), None),
+        QuotaSignal::Absent,
+        5,
+        0,
+    ) {
+        Classified::MoveOn {
+            reason,
+            cooldown_ms,
+        } => (reason, cooldown_ms),
+        _ => panic!("expected a failed attempt for {code}"),
+    };
+    assert_eq!(
+        classified("http_401"),
+        (SkipReason::Credential, 60_000),
+        "a refused key stays a credential failure whatever the backend declares"
+    );
+    // The rest of the declaration still applies.
+    assert_eq!(classified("http_432"), (SkipReason::Quota, 3_600_000));
+}
+
 #[test]
 fn credential_excludes_quota_body() {
     assert_move(
