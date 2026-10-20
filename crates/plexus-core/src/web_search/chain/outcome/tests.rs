@@ -176,6 +176,59 @@ fn quota_signal_matches_only_eligible_errors() {
 }
 
 #[test]
+fn provider_declared_exhausted_statuses_are_quota() {
+    use crate::web_search::backend::TavilyRestBackend;
+    let classified = |backend: &dyn WebSearchBackend, code: &str| match classify(
+        backend,
+        &dispatch(failed(code, "redacted"), None),
+        QuotaSignal::Absent,
+        5,
+        0,
+    ) {
+        Classified::MoveOn {
+            reason,
+            cooldown_ms,
+        } => (reason, cooldown_ms),
+        _ => panic!("expected a failed attempt for {code}"),
+    };
+    for code in ["http_432", "http_433"] {
+        assert_eq!(
+            classified(&TavilyRestBackend, code),
+            (SkipReason::Quota, 3_600_000),
+            "a status the provider declares as exhausted is quota, like 402"
+        );
+        assert_eq!(
+            classified(&ExaRestBackend, code),
+            (SkipReason::Unavailable, 60_000),
+            "the same status from a provider that does not declare it is another client error"
+        );
+    }
+    // Declaring exhaustion statuses leaves every other status where it was.
+    assert_eq!(
+        classified(&TavilyRestBackend, "http_402"),
+        (SkipReason::Quota, 3_600_000)
+    );
+    assert_eq!(
+        classified(&TavilyRestBackend, "http_401"),
+        (SkipReason::Credential, 60_000)
+    );
+    assert_eq!(
+        classified(&TavilyRestBackend, "http_403"),
+        (SkipReason::Unavailable, 60_000)
+    );
+    assert!(matches!(
+        classify(
+            &TavilyRestBackend,
+            &dispatch(failed("http_400", "redacted"), None),
+            QuotaSignal::Absent,
+            5,
+            0
+        ),
+        Classified::Reject
+    ));
+}
+
+#[test]
 fn credential_excludes_quota_body() {
     assert_move(
         failed("http_401", "quota"),

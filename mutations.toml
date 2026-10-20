@@ -17421,3 +17421,19 @@ expect_red = ["web_search::backend::tavily::tests::capability_serves_the_whole_t
 expect_message = "max_results is clamped to Tavily's maximum of 20"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-outcome-provider-exhausted-statuses"
+guards = "An HTTP status a provider declares as exhausted (Tavily's 432 and 433) is quota with a one-hour cooldown, like 402"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = "|| status.is_some_and(|status| backend.exhausted_statuses().contains(&status))"
+new = "|| false /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/outcome/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::outcome::tests::provider_declared_exhausted_statuses_are_quota"]
+expect_message = "a status the provider declares as exhausted is quota, like 402"
+build_timeout_s = 3600
+timeout_s = 120

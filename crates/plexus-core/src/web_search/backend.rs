@@ -76,6 +76,15 @@ pub trait WebSearchBackend: Send + Sync {
     fn instance_url(&self, _connection: &crate::storage::ConnectionRecord) -> Option<String> {
         None
     }
+    /// HTTP statuses, besides 402, with which this vendor says the account's
+    /// plan, credits or spending limit is used up. The chain treats a listed
+    /// status exactly like 402: a quota skip with a one-hour cooldown, so a
+    /// provider whose free tier ran out is not retried every minute. Statuses
+    /// the chain already classifies first (400, 422 and 429) are never read
+    /// from this list.
+    fn exhausted_statuses(&self) -> &'static [u16] {
+        &[]
+    }
 }
 
 /// Exa over its REST API: `catalog/exa_rest.jsonc`, action `search`

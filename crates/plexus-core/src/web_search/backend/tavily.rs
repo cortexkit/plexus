@@ -125,6 +125,14 @@ impl WebSearchBackend for TavilyRestBackend {
         }
         Ok(results)
     }
+
+    /// 432: "Key limit or Plan Limit exceeded"; 433: "PayGo limit exceeded"
+    /// (Tavily's API reference). Tavily never uses 402 for these, and neither
+    /// body names credits, quota or balance, so without this list a used-up
+    /// plan would look like any other client error and be retried every minute.
+    fn exhausted_statuses(&self) -> &'static [u16] {
+        &[432, 433]
+    }
 }
 
 fn time_range(recency: Recency) -> &'static str {

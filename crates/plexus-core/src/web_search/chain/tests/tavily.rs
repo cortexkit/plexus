@@ -110,8 +110,11 @@ fn tavily_service() -> WebSearchService {
 struct Recorded {
     result: Result<WebSearchResponse, WebSearchRefusal>,
     service: WebSearchService,
+    /// The request Tavily's attempt sent.
     request: String,
     vault: Arc<RecordingVault>,
+    /// The chain fields of the call's `web_search` audit row.
+    audit: Option<Value>,
 }
 
 impl Recorded {
@@ -127,13 +130,23 @@ impl Recorded {
 
 /// One search with order `tavily`, answered by the recorded reply `record`.
 fn recorded_search(record: &str) -> Recorded {
+    recorded_walk(record, &["tavily"])
+}
+
+/// One search with `order`, which must start with `tavily`. Tavily's attempt is
+/// answered by the recorded reply `record`; each later provider's attempt, by
+/// an Exa-shaped success. The fake server expects one request per provider.
+fn recorded_walk(record: &str, providers: &[&str]) -> Recorded {
+    assert_eq!(providers.first(), Some(&"tavily"));
     let recordings: Value =
         serde_json::from_str(include_str!("../../backend/tavily/fixtures.json")).unwrap();
     let response = recordings[record].clone();
     assert!(response.is_object(), "missing recorded response {record}");
     let manifest = shipped_manifest("tavily_rest.jsonc");
-    let (fixture, _) =
-        super::super::super::tests::granted_exa_engine(&format!("chain-tavily-{record}"));
+    let (fixture, _) = super::super::super::tests::granted_exa_engine(&format!(
+        "chain-tavily-{record}-{}",
+        providers.len()
+    ));
     connect(
         fixture.store(),
         CONNECTION,
@@ -147,25 +160,35 @@ fn recorded_search(record: &str) -> Recorded {
             .args_schema
             .clone(),
     );
-    order(&fixture, &["tavily"]);
+    order(&fixture, providers);
     // The server starts only after the store is set up, and waits longer than
     // the default for the request: on a loaded test host the store writes
     // before dispatch can outlast the default two-second accept deadline, and
     // the search would then fail to connect rather than see the recorded reply.
     let requests = Arc::new(Mutex::new(Vec::new()));
     let (endpoint, server) = crate::test_http::FixedRequestServer::start_with_deadline(
-        1,
+        providers.len(),
         "tavily",
         std::time::Duration::from_secs(30),
         {
             let requests = requests.clone();
-            move |_, received| {
+            move |index, received| {
                 requests.lock().unwrap().push(received.to_string());
-                let body = response["body"].as_str().unwrap();
+                let (status, headers, body) = if index == 0 {
+                    (
+                        response["status"].as_u64().unwrap(),
+                        response["headers"].as_str().unwrap(),
+                        response["body"].as_str().unwrap(),
+                    )
+                } else {
+                    (
+                        200,
+                        "",
+                        r#"{"results":[{"url":"https://example.org","title":"Fallback","text":"Weather"}]}"#,
+                    )
+                };
                 format!(
-                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    response["status"].as_u64().unwrap(),
-                    response["headers"].as_str().unwrap(),
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 )
             }
@@ -194,15 +217,24 @@ fn recorded_search(record: &str) -> Recorded {
     );
     if let Err(error) = server.join() {
         panic!(
-            "{record}: the search never reached the recorded Tavily endpoint ({error}): {result:?}"
+            "{record}: the search did not reach the recorded endpoint once per provider ({error}): {result:?}"
         );
     }
-    let request = requests.lock().unwrap().pop().unwrap();
+    let request = requests.lock().unwrap().remove(0);
+    let audit = engine
+        .store()
+        .list_audit("direct")
+        .unwrap()
+        .into_iter()
+        .find(|row| row.gate.as_deref() == Some("web_search"))
+        .and_then(|row| row.args_redaction_summary)
+        .map(|summary| serde_json::from_str(&summary).unwrap());
     Recorded {
         result,
         service,
         request,
         vault,
+        audit,
     }
 }
 
@@ -311,12 +343,34 @@ fn documented_rate_limits_are_throttled_for_the_retry_after_or_a_minute() {
 }
 
 #[test]
-fn documented_plan_and_pay_as_you_go_limits_are_other_client_errors() {
-    // 432 and 433 are neither 402 nor a body naming credits, quota or balance,
-    // so they take the unavailable row and are never reported to the vault.
+fn documented_plan_and_pay_as_you_go_limits_are_quota_and_fall_through() {
+    // Tavily declares 432 and 433 as exhausted statuses, so each is treated
+    // like 402: the walk moves to the next provider and Tavily cools down for
+    // an hour instead of being retried every minute. Neither is a credential
+    // failure, so neither is reported to the vault.
     for record in ["plan_limit", "pay_as_you_go_limit"] {
-        let recorded = assert_moved_on(record, SkipReason::Unavailable, 60_000);
+        let recorded = recorded_walk(record, &["tavily", "exa"]);
+        let response = recorded.result.as_ref().unwrap();
+        assert_eq!(
+            (response.backend.as_str(), response.results.len()),
+            ("exa", 1),
+            "{record} falls through to the next provider"
+        );
+        assert_eq!(recorded.cooldown(), Some(3_600_000), "{record} cooldown");
+        assert_eq!(
+            recorded.audit,
+            Some(
+                json!({"served_by": "exa", "skipped": [{"provider": "tavily", "reason": "quota"}]})
+            ),
+            "{record}"
+        );
+        assert_eq!(
+            *recorded.vault.requested.lock().unwrap(),
+            ["apikey:tavily", "test:exa"]
+        );
         assert!(recorded.vault.auth_failures.lock().unwrap().is_empty());
+
+        assert_moved_on(record, SkipReason::Quota, 3_600_000);
     }
 }
 

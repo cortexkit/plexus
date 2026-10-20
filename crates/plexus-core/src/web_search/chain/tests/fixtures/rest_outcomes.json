@@ -23,5 +23,10 @@
     "status": 403,
     "headers": "",
     "body": "{\"error\":\"quota exhausted\"}"
+  },
+  "undeclared_exhausted_status": {
+    "status": 432,
+    "headers": "",
+    "body": "{\"error\":\"plan limit exceeded\"}"
   }
 }

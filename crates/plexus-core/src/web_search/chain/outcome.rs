@@ -82,6 +82,7 @@ pub(super) fn classify(
         };
     }
     if status == Some(402)
+        || status.is_some_and(|status| backend.exhausted_statuses().contains(&status))
         || ((matches!(status, Some(400..=499)) && status != Some(401) || mcp_error)
             && quota_signal == QuotaSignal::Exhausted)
     {

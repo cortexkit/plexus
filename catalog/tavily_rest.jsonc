@@ -41,10 +41,14 @@
 //   true`. By default Tavily keeps results with no detectable date inside a
 //   time range; the tool's recency filter promises recent results only;
 // - Tavily reports a used-up plan or pay-as-you-go allowance as 432 or 433, not
-//   402, and neither body names credits, quota or balance. web_search's
-//   failure classification (crates/plexus-core/src/web_search/chain/outcome.rs)
-//   therefore treats both as another 4xx: the provider is skipped as
-//   unavailable for 60 seconds, not cooled down for an hour as quota.
+//   402, and neither body names credits, quota or balance. TavilyRestBackend
+//   therefore declares both as exhausted statuses
+//   (WebSearchBackend::exhausted_statuses), and web_search's failure
+//   classification (crates/plexus-core/src/web_search/chain/outcome.rs)
+//   treats them exactly like 402: a quota skip with a one-hour cooldown, after
+//   which the search moves to the next provider. Without that declaration
+//   they would be ordinary client errors with a 60-second cooldown, and an
+//   exhausted plan would be retried every minute until the month rolled over.
 //
 // The search action is read-risk and has no side effects, so a retry is safe.
 // No other Tavily endpoint is declared: web_search needs only search.

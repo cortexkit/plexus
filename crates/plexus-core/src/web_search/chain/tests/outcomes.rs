@@ -209,9 +209,17 @@ fn recorded_rest_attempt(record: &str, reason: SkipReason, cooldown_ms: i64) {
         serde_json::from_str(include_str!("fixtures/rest_outcomes.json")).unwrap();
     let response = recordings[record].clone();
     assert!(response.is_object(), "missing recorded response {record}");
-    let (endpoint, server) = crate::test_http::FixedRequestServer::start(
+    let (fixture, _) = super::super::super::tests::granted_exa_engine("chain-recorded-rest");
+    add_connection(&fixture, "tavily", "tavily", Some("direct"));
+    order(&fixture, &["exa", "tavily"]);
+    // The server starts only after the store is set up, and waits longer than
+    // the default for both requests: on a loaded test host the store writes
+    // before dispatch can outlast the default two-second accept deadline, and
+    // the search would then fail to connect rather than see the recorded reply.
+    let (endpoint, server) = crate::test_http::FixedRequestServer::start_with_deadline(
         2,
         "web-search-outcomes",
+        std::time::Duration::from_secs(30),
         move |index, received| {
             assert!(received.starts_with("POST /search HTTP/1.1"));
             let (status, headers, body) = if index == 0 {
@@ -230,9 +238,6 @@ fn recorded_rest_attempt(record: &str, reason: SkipReason, cooldown_ms: i64) {
             format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
         },
     );
-    let (fixture, _) = super::super::super::tests::granted_exa_engine("chain-recorded-rest");
-    add_connection(&fixture, "tavily", "tavily", Some("direct"));
-    order(&fixture, &["exa", "tavily"]);
     let transport = RestTransport::new(
         RestConfig::new(endpoint).with_actions(
             [(
@@ -303,4 +308,15 @@ fn recorded_rest_throttled_without_retry_uses_one_minute() {
 #[test]
 fn recorded_rest_redacted_quota_body_has_no_private_signal_yet() {
     recorded_rest_attempt("forbidden_quota", SkipReason::Unavailable, 60_000);
+}
+
+/// Exa declares no exhausted statuses, so a 432 from Exa is another client
+/// error, even though Tavily declares the same status as quota.
+#[test]
+fn recorded_rest_status_the_provider_does_not_declare_exhausted_is_another_client_error() {
+    recorded_rest_attempt(
+        "undeclared_exhausted_status",
+        SkipReason::Unavailable,
+        60_000,
+    );
 }
