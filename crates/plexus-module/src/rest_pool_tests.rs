@@ -141,6 +141,8 @@ fn scheduler_polls_again_while_the_rest_sweep_skips_a_busy_entry() {
                 args_schema: json!({"type": "object"}),
                 request_constants: None,
                 credentialless_tail: None,
+                text_path_parameters: None,
+                header_parameters: None,
             },
         )]));
         // An expired idle clock must not make an in-flight client evictable.

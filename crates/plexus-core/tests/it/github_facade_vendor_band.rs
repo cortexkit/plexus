@@ -2849,6 +2849,8 @@ fn validation_rest_engine(
         args_schema: json!({"type":"object"}),
         request_constants: None,
         credentialless_tail: None,
+        text_path_parameters: None,
+        header_parameters: None,
     };
     let transport = Arc::new(RestTransport::new(RestConfig::new(endpoint).with_actions(
         std::collections::HashMap::from([

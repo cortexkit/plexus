@@ -1,0 +1,141 @@
+// Jina Search REST (s.jina.ai): the `jina` provider of the web_search chain.
+//
+// Search only. Jina Reader (r.jina.ai), which fetches and converts one page,
+// is not declared: page reading is out of scope for web_search.
+//
+// Wire contract pinned from Jina's own documentation (read 2026-10-20):
+// - the search operation of Jina's published OpenAPI document,
+//   https://s.jina.ai/openapi.json (path /{q}, its parameters, headers,
+//   content types and listed responses);
+// - the Search section and rate-limit table of the Reader page,
+//   https://jina.ai/reader/#search and https://jina.ai/reader/#rate-limit;
+// - the README and search source of Jina's open-source server,
+//   https://github.com/jina-ai/reader (README.md, src/api/searcher.ts,
+//   src/services/serp/serper.ts), for the headers the OpenAPI omits.
+//
+// - method and path: GET https://s.jina.ai/<url-encoded query>; the OpenAPI
+//   path is /{q}. The query is sent as that whole path segment, fully
+//   percent-encoded (the manifest marks `q` a free-text path parameter, so
+//   a "/" in a query is sent as %2F rather than refused, and diagnostics
+//   print "/{q}", never the query). Jina also documents ?q= and POST forms;
+//   neither is used;
+// - auth: "Authorization: Bearer jina_...", so the key goes in
+//   `Authorization` with the `Bearer ` prefix. The OpenAPI says search
+//   requires a key, and the rate-limit table marks keyless search blocked.
+//   The connection is bound to the vault credential `apikey:jina`; plexus
+//   reads it by name at dispatch and never stores it;
+// - request fields used: `count` (query parameter, 0 to 20 in the OpenAPI;
+//   1 to 20 is sent), and one domain in the `X-Site` header (the server
+//   source reads `x-site` and turns it into a site: filter). JSON output
+//   comes from `Accept: application/json`, which the REST transport sends on
+//   every request. `X-Respond-With: no-content` is sent on every request as
+//   a reviewed constant: the server source then returns search listings
+//   without crawling each result page, which web_search never reads. The
+//   OpenAPI also documents num, page, gl, hl, location, engine/provider and
+//   crawler headers (X-Engine, X-Retain-Images and others); none are sent
+//   and they are not in the reviewed schema;
+// - reply: {code, status, data, meta}, where `data` is an array of results
+//   with `title`, `url`, `description` and, when page content is fetched,
+//   `content`; the OpenAPI result schema names a publication date
+//   `publishedTime`, and the server's SERP results name it `date`;
+// - errors: the OpenAPI lists 400, 401, 402, 403, 422, 429, 500 and 503,
+//   with an error object of `code`, `status`, `message` and an optional
+//   `readableMessage`. No Retry-After header is documented;
+// - limits: no query-length limit is documented (the Reader page says
+//   none); the rate-limit table gives s.jina.ai 100 requests per minute for
+//   free and paid keys and 1,000 for premium keys, tracked per key.
+//
+// Differences from the provider facts the web_search chain design started from
+// (GET https://s.jina.ai/<url-encoded query>; Bearer auth; count, max 20;
+// one domain via X-Site; title, url, description or content):
+// - none in method, path, auth, count or the result fields named there;
+// - X-Site is not in the OpenAPI document; it is read by Jina's server source
+//   and shown in its README. The source would also split a comma-separated
+//   list into several sites, but the design allows one domain, so the
+//   backend declares a maximum of one and two or more domains skip Jina;
+// - X-Respond-With: no-content is sent in addition, from the server source;
+//   it is not in the OpenAPI list of response formats. If Jina ignored it,
+//   the reply would only carry extra `content`, and `description` would
+//   still be read first;
+// - recency: Jina documents no date filter, so a search with recency skips
+//   Jina for capability instead of returning results of any age;
+// - query length: none is documented, so the tool's own 500-character limit
+//   applies;
+// - a publication date is reported from `date` or `publishedTime` when it is
+//   a parseable date, and dropped otherwise;
+// - empty results: Jina's search source answers a search that found nothing
+//   with an error that the OpenAPI lists as 422, not with an empty `data`.
+//   The chain treats every 400 and 422 as a rejected request without reading
+//   the body, so such a search is refused as web_search_request_rejected and
+//   is not retried on the next provider. A 200 with an empty `data` array is
+//   served as an empty result;
+// - classification needs no Jina-specific rule: 401 is a credential failure,
+//   402 a quota skip with the one-hour cooldown, 429 throttled for 60
+//   seconds (no Retry-After is documented), 403 another client error and
+//   500 and 503 server errors, all three unavailable for 60 seconds.
+//
+// The search action is read-risk and has no side effects, so a retry is safe.
+{
+  "schema_version": 1,
+  "key": "jina_rest",
+  "name": "Jina Search (REST)",
+  "description": "Web search over Jina's Search API (s.jina.ai), as a provider for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Documented REST API with a published OpenAPI spec and static API-key bearer auth; a search mutates no vendor-side state, so it maps to a read grant.",
+  "tier": "S1",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://s.jina.ai"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/{q}",
+        "parameters": "query",
+        "text_path_parameters": ["q"],
+        "header_parameters": {
+          "site": "X-Site",
+          "respond_with": "X-Respond-With"
+        },
+        "request_constants": {
+          "respond_with": "no-content"
+        },
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "q": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "count": { "type": "integer", "minimum": 1, "maximum": 20 },
+            "site": { "type": "string", "minLength": 1, "maxLength": 253 }
+          },
+          "required": ["q"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

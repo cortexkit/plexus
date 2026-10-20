@@ -625,6 +625,16 @@ impl RestTransport {
             }
         };
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        // Ingest refuses a header parameter that names a credential or
+        // transport header; refuse here too rather than let an argument
+        // replace either.
+        for (name, value) in &prepared.headers {
+            if headers.contains_key(name) {
+                eprintln!(warn transport: "REST header parameter would replace a reviewed header");
+                return local_not_sent();
+            }
+            headers.insert(name.clone(), value.clone());
+        }
         // Only GET may follow a redirect that rewrites the method; every other
         // method goes through the client that follows only 307 and 308.
         let facade_client;
@@ -694,8 +704,13 @@ fn request_failure_response(
 struct PreparedRequest {
     method: reqwest::Method,
     url: String,
+    /// The rendered path for diagnostics only: free-text placeholders keep
+    /// their `{name}`, so a caller's search text never reaches the log.
     path: String,
     body: Option<Value>,
+    /// Headers carried by `header_parameters` arguments, already validated as
+    /// one-line visible-ASCII values.
+    headers: Vec<(reqwest::header::HeaderName, HeaderValue)>,
 }
 
 /// Render the action's path template against the invocation args and decide
@@ -718,6 +733,8 @@ fn prepare_request(
         Some((path, query)) => (path, Some(query).filter(|query| !query.is_empty())),
         None => (base, None),
     };
+    let (template, text_values, args) = fill_text_path_parameters(operation, args)?;
+    let args = &args;
     let (path, mut remaining) = if let Some(constants) = &operation.request_constants {
         let mut merged = if args.is_null() {
             Map::new()
@@ -730,12 +747,20 @@ fn prepare_request(
             }
             merged.insert(key.clone(), value.clone());
         }
-        render_path(&operation.path, &Value::Object(merged))?
+        render_path(&template, &Value::Object(merged))?
     } else {
         // Without constants, preserve the existing treatment of non-object args:
         // a placeholder-free operation can still be called without arguments.
-        render_path(&operation.path, args)?
+        render_path(&template, args)?
     };
+    // The URL carries each free-text value; the diagnostic path names its
+    // placeholder instead.
+    let mut log_path = path.clone();
+    let mut path = path;
+    for value in &text_values {
+        path = path.replace(&value.marker, &value.encoded);
+        log_path = log_path.replace(&value.marker, &format!("{{{}}}", value.name));
+    }
     if has_dot_segment(&path) {
         return Err(RestError::DotSegment);
     }
@@ -746,7 +771,9 @@ fn prepare_request(
         remaining.remove("owner");
         remaining.remove("repo");
     }
+    let headers = take_header_parameters(operation, &mut remaining)?;
     let mut url = format!("{}{}", base_path.trim_end_matches('/'), path);
+    let path = log_path;
     if let Some(query) = base_query {
         url.push(if url.contains('?') { '&' } else { '?' });
         url.push_str(query);
@@ -771,7 +798,86 @@ fn prepare_request(
         url,
         path,
         body,
+        headers,
     })
+}
+
+/// One free-text path placeholder filled by [`fill_text_path_parameters`].
+struct TextPathValue {
+    /// Stands in for the value in the template until `render_path` has run.
+    /// It holds NUL bytes, which neither a template nor an encoded value can
+    /// contain, so it can only match its own position.
+    marker: String,
+    name: String,
+    encoded: String,
+}
+
+/// Replace the operation's free-text path placeholders with markers, so the
+/// ordinary placeholders can still be rendered and checked by `render_path`.
+/// Returns that template, each filled placeholder, and the arguments left for
+/// the ordinary placeholders, query or body.
+///
+/// A free-text value is encoded as one path segment: every byte outside the
+/// RFC 3986 unreserved set is escaped, so `/`, `?`, `#`, `%`, `{` and `}`
+/// cannot change the route, start a query, or form a new placeholder. A value
+/// that is exactly `.` or `..` would still be read as a dot segment, and is
+/// refused by the dot-segment check on the rendered path.
+fn fill_text_path_parameters(
+    operation: &HttpOperation,
+    args: &Value,
+) -> Result<(String, Vec<TextPathValue>, Value), RestError> {
+    let Some(names) = operation
+        .text_path_parameters
+        .as_ref()
+        .filter(|names| !names.is_empty())
+    else {
+        return Ok((operation.path.clone(), Vec::new(), args.clone()));
+    };
+    let mut remaining = args.as_object().ok_or(RestError::Configuration)?.clone();
+    let mut template = operation.path.clone();
+    let mut filled = Vec::with_capacity(names.len());
+    for (index, name) in names.iter().enumerate() {
+        let placeholder = format!("{{{name}}}");
+        let value = remaining.remove(name).ok_or(RestError::Configuration)?;
+        let text = scalar_to_string(&value).ok_or(RestError::Configuration)?;
+        if text.is_empty() || !template.contains(&placeholder) {
+            return Err(RestError::Configuration);
+        }
+        let marker = format!("\0{index}\0");
+        template = template.replace(&placeholder, &marker);
+        filled.push(TextPathValue {
+            marker,
+            name: name.clone(),
+            encoded: percent_encode_component(&text),
+        });
+    }
+    Ok((template, filled, Value::Object(remaining)))
+}
+
+/// Remove the operation's header-parameter arguments from `remaining` and
+/// return them as headers. An absent or null argument sends no header. A
+/// value that is not a scalar, or not one line of visible ASCII, refuses the
+/// request: sending it elsewhere or dropping it would change the search.
+fn take_header_parameters(
+    operation: &HttpOperation,
+    remaining: &mut Map<String, Value>,
+) -> Result<Vec<(reqwest::header::HeaderName, HeaderValue)>, RestError> {
+    let mut headers = Vec::new();
+    for (argument, header) in operation.header_parameters.iter().flatten() {
+        let value = match remaining.remove(argument) {
+            None | Some(Value::Null) => continue,
+            Some(value) => value,
+        };
+        let text = scalar_to_string(&value).ok_or(RestError::Configuration)?;
+        let name = reqwest::header::HeaderName::from_bytes(header.as_bytes())
+            .map_err(|_| RestError::Configuration)?;
+        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_graphic() || byte == b' ') {
+            return Err(RestError::Configuration);
+        }
+        let value = HeaderValue::from_str(&text).map_err(|_| RestError::Configuration)?;
+        headers.push((name, value));
+    }
+    Ok(headers)
 }
 
 fn reqwest_method(method: HttpMethod) -> reqwest::Method {
@@ -1447,6 +1553,8 @@ mod tests {
             args_schema: json!({"type": "object"}),
             request_constants: None,
             credentialless_tail: None,
+            text_path_parameters: None,
+            header_parameters: None,
         }
     }
 

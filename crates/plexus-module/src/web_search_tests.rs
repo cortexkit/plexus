@@ -437,6 +437,8 @@ fn different_connection_facade_calls_progress_during_a_rest_pool_sweep() {
                 args_schema: json!({"type": "object"}),
                 request_constants: None,
                 credentialless_tail: None,
+                text_path_parameters: None,
+                header_parameters: None,
             },
         )]));
         // Vendor expiry must not release the busy entry during the progress

@@ -249,6 +249,8 @@ fn recorded_rest_attempt(record: &str, reason: SkipReason, cooldown_ms: i64) {
                     parameters: None,
                     request_constants: None,
                     credentialless_tail: None,
+                    text_path_parameters: None,
+                    header_parameters: None,
                 },
             )]
             .into(),

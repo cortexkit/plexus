@@ -185,6 +185,23 @@ pub struct HttpOperation {
     /// any headers from the credentialed API request to the storage service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentialless_tail: Option<CredentiallessTail>,
+    /// Path placeholders that carry free text, such as a search query sent as
+    /// the whole path (`GET /{q}`). Ordinary placeholders refuse a value with
+    /// `/` or `\` because it could reach another endpoint; a free-text value
+    /// is instead percent-encoded as one segment (`/` becomes `%2F`), so it
+    /// can only ever name the reviewed route. Values that are a dot segment
+    /// (`.` or `..`) are still refused. Diagnostics print the placeholder,
+    /// never the text, so a caller's query never reaches the log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_path_parameters: Option<Vec<String>>,
+    /// Arguments sent as request headers instead of in the query or body,
+    /// keyed by argument name (a caller argument in `args_schema`, or a key
+    /// of `request_constants` for a fixed header), valued by header name. An
+    /// absent or null argument sends no header. Header names may not repeat a credential
+    /// header or one the transport sets itself, and a value must be one line
+    /// of visible ASCII.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_parameters: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1088,6 +1105,18 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
             }
             (Some(http), true) => {
                 validate_http_operation(&action.name, http)?;
+                // A header parameter with a credential's header name would let
+                // an argument replace the credential, or send it twice.
+                if http.header_parameters.iter().flatten().any(|(_, header)| {
+                    manifest.credential_bindings.iter().any(|binding| {
+                        binding.key.eq_ignore_ascii_case(header)
+                    })
+                }) {
+                    return Err(ManifestError::InvalidField(format!(
+                        "action '{}' http.header_parameters must not name a credential header",
+                        action.name
+                    )));
+                }
                 if let (Some(constants), Some(poll)) = (&http.request_constants, &action.poll) {
                     let since_key = poll
                         .request_since_field
@@ -1188,14 +1217,99 @@ fn validate_http_operation(action_name: &str, http: &HttpOperation) -> Result<()
         )));
     }
     let properties = http.args_schema.get("properties");
-    for placeholder in path_placeholders(path)? {
+    let placeholders = path_placeholders(path)?;
+    for placeholder in &placeholders {
         let declared = properties
-            .and_then(|properties| properties.get(&placeholder))
+            .and_then(|properties| properties.get(placeholder))
             .is_some();
         if !declared {
             return Err(ManifestError::InvalidField(format!(
                 "action '{}' http.path placeholder '{placeholder}' is not a property in args_schema",
                 action_name
+            )));
+        }
+    }
+    validate_request_shape_extensions(action_name, http, &placeholders)
+}
+
+/// Headers the REST transport sets itself or that frame the HTTP message. A
+/// header parameter naming one could override the reviewed request: replace
+/// the JSON `Accept`, change the body framing, or send a cookie.
+const TRANSPORT_OWNED_HEADERS: &[&str] = &[
+    "accept",
+    "authorization",
+    "connection",
+    "content-length",
+    "content-type",
+    "cookie",
+    "expect",
+    "host",
+    "keep-alive",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "user-agent",
+];
+
+/// Validate `text_path_parameters` and `header_parameters`: each must name an
+/// argument the operation can actually receive, and a header parameter must
+/// be a legal header name the transport does not already own. Collisions with
+/// credential headers are checked by the caller, which knows the bindings.
+fn validate_request_shape_extensions(
+    action_name: &str,
+    http: &HttpOperation,
+    placeholders: &[String],
+) -> Result<(), ManifestError> {
+    let extended =
+        http.text_path_parameters.is_some() || http.header_parameters.is_some();
+    if extended && http.credentialless_tail.is_some() {
+        // The tail downloaders build their own requests and would ignore both.
+        return Err(ManifestError::InvalidField(format!(
+            "action '{action_name}' credentialless_tail cannot be combined with text_path_parameters or header_parameters"
+        )));
+    }
+    for name in http.text_path_parameters.iter().flatten() {
+        if !placeholders.contains(name)
+            || http
+                .request_constants
+                .as_ref()
+                .is_some_and(|constants| constants.contains_key(name))
+        {
+            return Err(ManifestError::InvalidField(format!(
+                "action '{action_name}' http.text_path_parameters entry '{name}' must be a path placeholder that is not a request constant"
+            )));
+        }
+    }
+    let properties = http.args_schema.get("properties");
+    let mut seen = std::collections::BTreeSet::new();
+    for (argument, header) in http.header_parameters.iter().flatten() {
+        let constant = http
+            .request_constants
+            .as_ref()
+            .is_some_and(|constants| constants.contains_key(argument));
+        if !constant
+            && properties
+                .and_then(|properties| properties.get(argument))
+                .is_none()
+        {
+            return Err(ManifestError::InvalidField(format!(
+                "action '{action_name}' http.header_parameters argument '{argument}' is neither a property in args_schema nor a request constant"
+            )));
+        }
+        if placeholders.contains(argument) {
+            return Err(ManifestError::InvalidField(format!(
+                "action '{action_name}' http.header_parameters argument '{argument}' is also a path placeholder"
+            )));
+        }
+        let lower = header.to_ascii_lowercase();
+        if reqwest::header::HeaderName::from_bytes(header.as_bytes()).is_err()
+            || TRANSPORT_OWNED_HEADERS.contains(&lower.as_str())
+            || !seen.insert(lower)
+        {
+            return Err(ManifestError::InvalidField(format!(
+                "action '{action_name}' http.header_parameters header '{header}' must be a valid, unique header name the transport does not set itself"
             )));
         }
     }
