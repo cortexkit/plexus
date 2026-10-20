@@ -60,6 +60,13 @@ pub(super) fn classify(
         }
         _ => (None, false),
     };
+    // MCP transport diagnostics have already discarded vendor prose. A fixed
+    // code preserves its quota observation; direct isError bodies are still
+    // available here and must be inspected before mapping ordinary results.
+    let mcp_quota = code == Some("mcp_quota_exhausted")
+        || (mcp_error
+            && matches!(&dispatched.outcome, TransportOutcome::Completed { response: Some(body) }
+                if crate::mcp_remote::names_exhausted_quota(body)));
     let status = code.and_then(|code| code.strip_prefix("http_")?.parse::<u16>().ok());
     // Request errors stop the walk before any body inspection or retry hint.
     if matches!(status, Some(400 | 422)) {
@@ -90,6 +97,7 @@ pub(super) fn classify(
         };
     }
     if status == Some(402)
+        || mcp_quota
         || status.is_some_and(|status| backend.exhausted_statuses().contains(&status))
         || ((matches!(status, Some(400..=499)) && status != Some(401) || mcp_error)
             && quota_signal == QuotaSignal::Exhausted)

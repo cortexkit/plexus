@@ -74,6 +74,7 @@ pub enum CapabilityFailure {
     Length,
     DomainFilter,
     Recency,
+    Schema,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
