@@ -20064,3 +20064,20 @@ expect_red = ["manifest::error_signals_tests::specialized_rest_shapes_refuse_ign
 expect_message = "called `Result::unwrap_err()` on an `Ok` value"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "error-signals-rest-success-boundary"
+guards = "Successful REST data cannot emit error signals even when a declared status/pointer/value matches. This property is held at two layers: the non-2xx evaluation guard and the success constructor dropping the computed signal; both must be broken together to observe the failure."
+edits = [
+  { file = "crates/plexus-core/src/rest_api.rs", old = 'let signal = if !(200..300).contains(&status) {', new = 'let signal = if true { /* NON-VACUITY BREAK */' },
+  { file = "crates/plexus-core/src/rest_api.rs", old = 'TransportResponse::success(body)', new = 'TransportResponse::success(body).with_error_signal(signal) /* NON-VACUITY BREAK */' }
+]
+test_file = "crates/plexus-core/src/web_search/chain/tests/signals.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::signals::declared_rest_success_cannot_emit_error_signals_and_serves_results"]
+expect_message = "successful REST data must never carry an error signal"
+build_timeout_s = 3600
+timeout_s = 120
