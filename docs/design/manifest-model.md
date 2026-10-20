@@ -59,9 +59,13 @@ Only vendor-documented stable fields belong here, with a dated official citation
 in the catalog. No substring, regex, or prose inference is supported. Transports
 evaluate only error replies for the dispatched action, before replacing vendor
 diagnostics with fixed messages. Only the fixed signal reaches classification.
-HTTP 401 always wins; otherwise a signal precedes status/retry rules. Credential
-rejection reports the same definite 401 to the credential source as an HTTP 401.
-Quota skips for one hour; no-results serves an empty search. Undeclared actions
+An HTTP 401 is always treated as a rejected credential, whatever signal a rule
+would give. Otherwise a matched signal decides the outcome ahead of the ordinary
+status rules (429 throttling with its retry delay, 400 and 422 as a rejected
+request). A `credential_rejected` signal reports the same definite failure to
+the credential source that an HTTP 401 does. In web search's provider chain,
+`quota_exhausted` skips that provider for one hour, and `no_results` returns an
+empty result list instead of stopping the search. Undeclared actions
 retain their existing behavior. Older binaries reject `error_signals`: deploy the
 binary first and restore the old catalog before binary rollback.
 
