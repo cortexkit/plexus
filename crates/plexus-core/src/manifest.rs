@@ -1108,9 +1108,10 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
                 // A header parameter with a credential's header name would let
                 // an argument replace the credential, or send it twice.
                 if http.header_parameters.iter().flatten().any(|(_, header)| {
-                    manifest.credential_bindings.iter().any(|binding| {
-                        binding.key.eq_ignore_ascii_case(header)
-                    })
+                    manifest
+                        .credential_bindings
+                        .iter()
+                        .any(|binding| binding.key.eq_ignore_ascii_case(header))
                 }) {
                     return Err(ManifestError::InvalidField(format!(
                         "action '{}' http.header_parameters must not name a credential header",
@@ -1262,8 +1263,7 @@ fn validate_request_shape_extensions(
     http: &HttpOperation,
     placeholders: &[String],
 ) -> Result<(), ManifestError> {
-    let extended =
-        http.text_path_parameters.is_some() || http.header_parameters.is_some();
+    let extended = http.text_path_parameters.is_some() || http.header_parameters.is_some();
     if extended && http.credentialless_tail.is_some() {
         // The tail downloaders build their own requests and would ignore both.
         return Err(ManifestError::InvalidField(format!(
@@ -1639,7 +1639,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 24);
+        assert_eq!(count, 25);
     }
 
     /// Each of these pins a rule the dispatch path DEPENDS on but cannot
@@ -2130,6 +2130,122 @@ mod tests {
         let error = ingest_value(document).expect_err("blank constant key");
         assert!(
             error.to_string().contains("http.request_constants keys"),
+            "{error}"
+        );
+    }
+
+    /// A REST search whose whole path is a free-text query and whose site
+    /// filter and a fixed option travel as headers.
+    fn text_path_manifest_value() -> Value {
+        let mut document = rest_manifest_value();
+        document["actions_baseline"][0]["http"] = serde_json::json!({
+            "method": "GET",
+            "path": "/{q}",
+            "text_path_parameters": ["q"],
+            "header_parameters": {"site": "X-Site", "respond_with": "X-Respond-With"},
+            "request_constants": {"respond_with": "no-content"},
+            "args_schema": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}, "site": {"type": "string"}},
+                "required": ["q"]
+            }
+        });
+        document
+    }
+
+    #[test]
+    fn text_path_and_header_parameters_ingest_and_round_trip() {
+        let ingested = ingest_value(text_path_manifest_value()).expect("text path manifest");
+        let operation = ingested.manifest.actions_baseline[0].http.as_ref().unwrap();
+        assert_eq!(operation.text_path_parameters, Some(vec!["q".to_string()]));
+        assert_eq!(
+            operation.header_parameters.as_ref().unwrap()["site"],
+            "X-Site"
+        );
+        let serialized = serde_json::to_value(&ingested.manifest).unwrap();
+        assert_eq!(
+            ingest_value(serialized).unwrap().manifest,
+            ingested.manifest
+        );
+        // Older manifests serialize without either field, so their content
+        // hashes do not change.
+        let legacy = ingest_value(rest_manifest_value()).unwrap();
+        let legacy = serde_json::to_value(&legacy.manifest).unwrap();
+        let http = &legacy["actions_baseline"][0]["http"];
+        assert!(http.get("text_path_parameters").is_none());
+        assert!(http.get("header_parameters").is_none());
+    }
+
+    #[test]
+    fn text_path_parameters_must_name_a_placeholder_that_is_not_a_constant() {
+        for (path, names, constants) in [
+            ("/{q}", serde_json::json!(["site"]), serde_json::json!({})),
+            ("/search", serde_json::json!(["q"]), serde_json::json!({})),
+            (
+                "/{q}",
+                serde_json::json!(["q"]),
+                serde_json::json!({"q": "fixed"}),
+            ),
+        ] {
+            let mut document = text_path_manifest_value();
+            let http = &mut document["actions_baseline"][0]["http"];
+            http["path"] = serde_json::json!(path);
+            http["text_path_parameters"] = names.clone();
+            http["request_constants"] = constants.clone();
+            http["header_parameters"] = serde_json::json!({});
+            let error = ingest_value(document).expect_err("text path entry must be refused");
+            assert!(
+                error.to_string().contains("text_path_parameters"),
+                "{path} {names} {constants}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn header_parameters_refuse_credential_transport_unknown_and_repeated_headers() {
+        for (headers, expected) in [
+            (
+                serde_json::json!({"site": "Authorization"}),
+                "does not set itself",
+            ),
+            (serde_json::json!({"site": "Accept"}), "does not set itself"),
+            (
+                serde_json::json!({"site": "Content-Length"}),
+                "does not set itself",
+            ),
+            (
+                serde_json::json!({"site": "X Site"}),
+                "valid, unique header name",
+            ),
+            (
+                serde_json::json!({"site": "X-Site", "respond_with": "x-site"}),
+                "valid, unique header name",
+            ),
+            (
+                serde_json::json!({"other": "X-Other"}),
+                "neither a property",
+            ),
+            (
+                serde_json::json!({"q": "X-Query"}),
+                "also a path placeholder",
+            ),
+        ] {
+            let mut document = text_path_manifest_value();
+            document["actions_baseline"][0]["http"]["header_parameters"] = headers.clone();
+            let error = ingest_value(document).expect_err("header parameter must be refused");
+            assert!(error.to_string().contains(expected), "{headers}: {error}");
+        }
+        // A header carrying a credential is refused under any spelling, so an
+        // argument can never replace the key or send a second one.
+        let mut document = text_path_manifest_value();
+        document["credential_bindings"][0]["key"] = serde_json::json!("X-Api-Key");
+        document["actions_baseline"][0]["http"]["header_parameters"] =
+            serde_json::json!({"site": "x-api-key"});
+        let error = ingest_value(document).expect_err("credential header must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("must not name a credential header"),
             "{error}"
         );
     }

@@ -5,74 +5,80 @@
 //
 // Wire contract pinned from Jina's own documentation (read 2026-10-20):
 // - the search operation of Jina's published OpenAPI document,
-//   https://s.jina.ai/openapi.json (path /{q}, its parameters, headers,
-//   content types and listed responses);
+//   https://s.jina.ai/openapi.json (path /{q}, its parameters, headers and
+//   listed responses);
+// - the Search API guide, https://docs.jina.ai/reader-api (Authorization,
+//   X-Site and X-Respond-With headers);
 // - the Search section and rate-limit table of the Reader page,
 //   https://jina.ai/reader/#search and https://jina.ai/reader/#rate-limit;
 // - the README and search source of Jina's open-source server,
 //   https://github.com/jina-ai/reader (README.md, src/api/searcher.ts,
-//   src/services/serp/serper.ts), for the headers the OpenAPI omits.
+//   src/services/serp/serper.ts), where the documents are silent.
 //
-// - method and path: GET https://s.jina.ai/<url-encoded query>; the OpenAPI
-//   path is /{q}. The query is sent as that whole path segment, fully
-//   percent-encoded (the manifest marks `q` a free-text path parameter, so
-//   a "/" in a query is sent as %2F rather than refused, and diagnostics
-//   print "/{q}", never the query). Jina also documents ?q= and POST forms;
-//   neither is used;
-// - auth: "Authorization: Bearer jina_...", so the key goes in
-//   `Authorization` with the `Bearer ` prefix. The OpenAPI says search
-//   requires a key, and the rate-limit table marks keyless search blocked.
-//   The connection is bound to the vault credential `apikey:jina`; plexus
-//   reads it by name at dispatch and never stores it;
-// - request fields used: `count` (query parameter, 0 to 20 in the OpenAPI;
-//   1 to 20 is sent), and one domain in the `X-Site` header (the server
-//   source reads `x-site` and turns it into a site: filter). JSON output
-//   comes from `Accept: application/json`, which the REST transport sends on
-//   every request. `X-Respond-With: no-content` is sent on every request as
-//   a reviewed constant: the server source then returns search listings
-//   without crawling each result page, which web_search never reads. The
-//   OpenAPI also documents num, page, gl, hl, location, engine/provider and
-//   crawler headers (X-Engine, X-Retain-Images and others); none are sent
-//   and they are not in the reviewed schema;
+// - method and path: GET https://s.jina.ai/<url-encoded query>, the OpenAPI
+//   path /{q} and the README's form. The query is sent as that whole path
+//   segment, fully percent-encoded (the manifest marks `q` a free-text path
+//   parameter, so a "/" in a query is sent as %2F rather than refused, and
+//   diagnostics print "/{q}", never the query). Jina also documents a ?q=
+//   form (Reader page) and POST with a JSON body (Search API guide); neither
+//   is used;
+// - auth: "Authorization: Bearer <key>" (guide and OpenAPI), so the key goes
+//   in `Authorization` with the `Bearer ` prefix. The rate-limit table marks
+//   keyless search blocked. The connection is bound to the vault credential
+//   `apikey:jina`; plexus reads it by name at dispatch and never stores it;
+// - request fields used: `count` (query parameter; the OpenAPI and server
+//   source accept 0 to 20, default 10; 1 to 20 is sent), and one domain in
+//   the `X-Site` header (guide). JSON output comes from
+//   `Accept: application/json`, which the REST transport sends on every
+//   request. `X-Respond-With: no-content` is sent on every request as a
+//   reviewed constant: the guide says it leaves page content out, and the
+//   server source then returns the search listings without fetching each
+//   result page, which web_search never reads. The OpenAPI also documents
+//   `num` (an alias of count), `site` as a query parameter, gl, hl, location,
+//   page, provider and crawler headers; none are sent and they are not in
+//   the reviewed schema;
 // - reply: {code, status, data, meta}, where `data` is an array of results
-//   with `title`, `url`, `description` and, when page content is fetched,
-//   `content`; the OpenAPI result schema names a publication date
-//   `publishedTime`, and the server's SERP results name it `date`;
-// - errors: the OpenAPI lists 400, 401, 402, 403, 422, 429, 500 and 503,
-//   with an error object of `code`, `status`, `message` and an optional
-//   `readableMessage`. No Retry-After header is documented;
-// - limits: no query-length limit is documented (the Reader page says
-//   none); the rate-limit table gives s.jina.ai 100 requests per minute for
-//   free and paid keys and 1,000 for premium keys, tracked per key.
+//   with `title`, `url`, `description` (the listing snippet) and `content`
+//   (empty when no page content is fetched); the server's listings may carry
+//   a `date`, and fetched pages a `publishedTime`;
+// - errors: the OpenAPI lists 400 ParamValidationError, 401
+//   AuthenticationFailedError/AuthenticationRequiredError, 402
+//   InsufficientBalanceError, 403 AbuseAlleviationError, 422
+//   AssertionFailureError, 429 RateLimitTriggeredError, 500
+//   DownstreamServiceError and 503 ServiceBadAttemptError, as JSON bodies.
+//   No Retry-After header is documented;
+// - limits: no query-length limit is documented (the OpenAPI `q` has no
+//   maxLength); the rate-limit table gives s.jina.ai 100 requests per minute
+//   for free and paid keys and 1,000 for premium keys.
 //
 // Differences from the provider facts the web_search chain design started from
 // (GET https://s.jina.ai/<url-encoded query>; Bearer auth; count, max 20;
 // one domain via X-Site; title, url, description or content):
 // - none in method, path, auth, count or the result fields named there;
-// - X-Site is not in the OpenAPI document; it is read by Jina's server source
-//   and shown in its README. The source would also split a comma-separated
-//   list into several sites, but the design allows one domain, so the
-//   backend declares a maximum of one and two or more domains skip Jina;
-// - X-Respond-With: no-content is sent in addition, from the server source;
-//   it is not in the OpenAPI list of response formats. If Jina ignored it,
-//   the reply would only carry extra `content`, and `description` would
-//   still be read first;
+// - X-Site is in the Search API guide but not in the OpenAPI document, which
+//   lists a `site` query parameter instead. The README and server source
+//   also accept several sites (repeated `site` parameters, or a list split on
+//   ", " in the header); the design allows one domain, so the backend
+//   declares a maximum of one and two or more domains skip Jina;
+// - X-Respond-With: no-content is sent in addition. If Jina ignored it, the
+//   reply would only carry extra `content`, and `description` would still be
+//   read first;
 // - recency: Jina documents no date filter, so a search with recency skips
 //   Jina for capability instead of returning results of any age;
 // - query length: none is documented, so the tool's own 500-character limit
 //   applies;
 // - a publication date is reported from `date` or `publishedTime` when it is
 //   a parseable date, and dropped otherwise;
-// - empty results: Jina's search source answers a search that found nothing
-//   with an error that the OpenAPI lists as 422, not with an empty `data`.
-//   The chain treats every 400 and 422 as a rejected request without reading
-//   the body, so such a search is refused as web_search_request_rejected and
-//   is not retried on the next provider. A 200 with an empty `data` array is
-//   served as an empty result;
+// - empty results: the search source answers a search that found nothing
+//   with an AssertionFailureError, the OpenAPI's 422, not with an empty
+//   `data`. The chain treats every 400 and 422 as a rejected request without
+//   reading the body, so such a search is refused as
+//   web_search_request_rejected and is not retried on the next provider. A
+//   200 with an empty `data` array is served as an empty result;
 // - classification needs no Jina-specific rule: 401 is a credential failure,
 //   402 a quota skip with the one-hour cooldown, 429 throttled for 60
-//   seconds (no Retry-After is documented), 403 another client error and
-//   500 and 503 server errors, all three unavailable for 60 seconds.
+//   seconds (or a Retry-After, if one is ever sent), 403 another client error
+//   and 500 and 503 server errors, all three unavailable for 60 seconds.
 //
 // The search action is read-risk and has no side effects, so a retry is safe.
 {

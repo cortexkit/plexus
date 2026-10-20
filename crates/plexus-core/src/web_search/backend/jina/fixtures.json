@@ -1,0 +1,68 @@
+{
+  "_source": "Built from Jina's Search API documentation: the search operation and response schemas of https://s.jina.ai/openapi.json, the Search section of https://jina.ai/reader/, and the reply and error shapes of Jina's open-source server (https://github.com/jina-ai/reader). The success body follows the documented {code, status, data, meta} reply, with data[] results of title, url, description, an empty content (X-Respond-With: no-content asks for none) and per-result usage; the second result carries a date. Its titles, descriptions and token counts are illustrative. content_only is a result whose description is empty, so the page content fills in. empty is a 200 with an empty data array. no_results is the 422 Jina's server answers when a search finds nothing. The malformed body carries a data object instead of a data array. Each error status is one the OpenAPI operation lists, and each body names the error schema the OpenAPI gives for that status (ParamValidationError, AuthenticationFailedError, InsufficientBalanceError, AbuseAlleviationError, AssertionFailureError, RateLimitTriggeredError, DownstreamServiceError, ServiceBadAttemptError). The OpenAPI does not expand those schemas, so the body fields (data, code, name, status, message, readableMessage) and the messages are illustrative. Jina documents no Retry-After header; rate_limited_retry checks that one is honoured if sent.",
+  "success": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"code\":200,\"status\":20000,\"data\":[{\"title\":\"Reader API - Jina AI\",\"url\":\"https://jina.ai/reader/\",\"description\":\"Convert a URL to LLM-friendly input, by simply adding r.jina.ai in front.\",\"content\":\"\",\"usage\":{\"tokens\":100}},{\"title\":\"jina-ai/reader: Convert any URL to an LLM-friendly input\",\"url\":\"https://github.com/jina-ai/reader\",\"description\":\"Convert any URL to an LLM-friendly input with a simple prefix https://r.jina.ai/\",\"content\":\"\",\"date\":\"2024-04-11T00:00:00.000Z\",\"usage\":{\"tokens\":100}}],\"meta\":{\"usage\":{\"tokens\":200}}}"
+  },
+  "content_only": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"code\":200,\"status\":20000,\"data\":[{\"title\":\"Jina AI\",\"url\":\"https://jina.ai/\",\"description\":\"\",\"content\":\"Your Search Foundation, Supercharged.\",\"publishedTime\":\"2024-05-01\",\"usage\":{\"tokens\":1000}}],\"meta\":{\"usage\":{\"tokens\":1000}}}"
+  },
+  "empty": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"code\":200,\"status\":20000,\"data\":[],\"meta\":{\"usage\":{\"tokens\":0}}}"
+  },
+  "malformed": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"code\":200,\"status\":20000,\"data\":{\"title\":\"Reader API - Jina AI\",\"url\":\"https://jina.ai/reader/\"}}"
+  },
+  "no_results": {
+    "status": 422,
+    "headers": "",
+    "body": "{\"data\":null,\"code\":422,\"name\":\"AssertionFailureError\",\"status\":42206,\"message\":\"No search results available for query\",\"readableMessage\":\"AssertionFailureError: No search results available for query\"}"
+  },
+  "bad_request": {
+    "status": 400,
+    "headers": "",
+    "body": "{\"data\":null,\"code\":400,\"name\":\"ParamValidationError\",\"status\":40001,\"message\":\"Invalid parameter count\",\"readableMessage\":\"ParamValidationError: Invalid parameter count\"}"
+  },
+  "unauthorized": {
+    "status": 401,
+    "headers": "",
+    "body": "{\"data\":null,\"code\":401,\"name\":\"AuthenticationFailedError\",\"status\":40103,\"message\":\"Invalid API key, please get a new one from https://jina.ai\",\"readableMessage\":\"AuthenticationFailedError: Invalid API key\"}"
+  },
+  "payment_required": {
+    "status": 402,
+    "headers": "",
+    "body": "{\"data\":null,\"code\":402,\"name\":\"InsufficientBalanceError\",\"status\":40203,\"message\":\"Account balance not enough to run this query, please recharge.\",\"readableMessage\":\"InsufficientBalanceError: Account balance not enough to run this query, please recharge.\"}"
+  },
+  "forbidden": {
+    "status": 403,
+    "headers": "",
+    "body": "{\"data\":null,\"code\":403,\"name\":\"AbuseAlleviationError\",\"status\":40302,\"message\":\"Access denied\",\"readableMessage\":\"AbuseAlleviationError: Access denied\"}"
+  },
+  "rate_limited_retry": {
+    "status": 429,
+    "headers": "Retry-After: 7\r\n",
+    "body": "{\"data\":null,\"code\":429,\"name\":\"RateLimitTriggeredError\",\"status\":42903,\"message\":\"Rate limit exceeded\",\"readableMessage\":\"RateLimitTriggeredError: Rate limit exceeded\"}"
+  },
+  "rate_limited_no_retry": {
+    "status": 429,
+    "headers": "",
+    "body": "{\"data\":null,\"code\":429,\"name\":\"RateLimitTriggeredError\",\"status\":42903,\"message\":\"Rate limit exceeded\",\"readableMessage\":\"RateLimitTriggeredError: Rate limit exceeded\"}"
+  },
+  "server_error": {
+    "status": 500,
+    "headers": "",
+    "body": "{\"data\":null,\"code\":500,\"name\":\"DownstreamServiceError\",\"status\":50001,\"message\":\"Downstream service failed\",\"readableMessage\":\"DownstreamServiceError: Downstream service failed\"}"
+  },
+  "service_unavailable": {
+    "status": 503,
+    "headers": "",
+    "body": "{\"data\":null,\"code\":503,\"name\":\"ServiceBadAttemptError\",\"status\":50301,\"message\":\"Service temporarily unavailable\",\"readableMessage\":\"ServiceBadAttemptError: Service temporarily unavailable\"}"
+  }
+}

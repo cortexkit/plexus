@@ -871,7 +871,11 @@ fn take_header_parameters(
         let text = scalar_to_string(&value).ok_or(RestError::Configuration)?;
         let name = reqwest::header::HeaderName::from_bytes(header.as_bytes())
             .map_err(|_| RestError::Configuration)?;
-        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_graphic() || byte == b' ') {
+        if text.is_empty()
+            || !text
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        {
             return Err(RestError::Configuration);
         }
         let value = HeaderValue::from_str(&text).map_err(|_| RestError::Configuration)?;
@@ -1494,6 +1498,191 @@ mod tests {
             get.url,
             "https://api.github.com/graphql?owner=org&repo=repo"
         );
+    }
+
+    /// A GET whose whole path is a free-text search query and whose site
+    /// filter and a fixed option travel as headers, as Jina's search does.
+    fn text_path_search_op() -> HttpOperation {
+        let mut operation = http_op(HttpMethod::Get, "/{q}");
+        operation.text_path_parameters = Some(vec!["q".into()]);
+        operation.header_parameters = Some(std::collections::BTreeMap::from([
+            ("site".to_string(), "X-Site".to_string()),
+            ("respond_with".to_string(), "X-Respond-With".to_string()),
+        ]));
+        operation.request_constants = Some(std::collections::BTreeMap::from([(
+            "respond_with".into(),
+            json!("no-content"),
+        )]));
+        operation
+    }
+
+    #[test]
+    fn a_free_text_path_value_is_one_encoded_segment_and_never_logged() {
+        let prepared = prepare_request(
+            "https://s.example",
+            &text_path_search_op(),
+            &json!({"q": "a/b\\c?d=e#f %2e{q}", "count": 3, "site": "jina.ai"}),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.url, "https://s.example/a%2Fb%5Cc%3Fd%3De%23f%20%252e%7Bq%7D?count=3",
+            "every reserved character is escaped, so the value stays one path segment"
+        );
+        assert_eq!(
+            prepared.path, "/{q}",
+            "the diagnostic path names the placeholder, never the text"
+        );
+        assert_eq!(prepared.body, None);
+        let headers: Vec<(String, String)> = prepared
+            .headers
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_string()))
+            .collect();
+        assert_eq!(
+            headers,
+            [
+                ("x-respond-with".to_string(), "no-content".to_string()),
+                ("x-site".to_string(), "jina.ai".to_string()),
+            ],
+            "header arguments and constants become headers, not query parameters"
+        );
+    }
+
+    #[test]
+    fn a_free_text_path_value_that_is_a_dot_segment_is_refused() {
+        for q in [".", ".."] {
+            assert!(
+                matches!(
+                    prepare_request(
+                        "https://s.example",
+                        &text_path_search_op(),
+                        &json!({"q": q})
+                    ),
+                    Err(RestError::DotSegment)
+                ),
+                "{q} would resolve to another path"
+            );
+        }
+        // An ordinary placeholder still refuses a separator.
+        assert!(matches!(
+            prepare_request(
+                "https://s.example",
+                &http_op(HttpMethod::Get, "/{q}"),
+                &json!({"q": "a/b"})
+            ),
+            Err(RestError::DotSegment)
+        ));
+        assert!(
+            matches!(
+                prepare_request(
+                    "https://s.example",
+                    &text_path_search_op(),
+                    &json!({"count": 3})
+                ),
+                Err(RestError::Configuration)
+            ),
+            "a missing free-text value is refused"
+        );
+    }
+
+    #[test]
+    fn header_arguments_are_one_visible_ascii_line_or_absent() {
+        let operation = text_path_search_op();
+        for site in [json!(null), json!("jina.ai")] {
+            let prepared = prepare_request(
+                "https://s.example",
+                &operation,
+                &json!({"q": "x", "site": site}),
+            )
+            .unwrap();
+            assert_eq!(
+                prepared
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.as_str() == "x-site"),
+                !site.is_null(),
+                "a null header argument sends no header"
+            );
+            assert_eq!(prepared.url, "https://s.example/x");
+        }
+        for site in [
+            json!("a\r\nX-Injected: 1"),
+            json!("é.example"),
+            json!(""),
+            json!(["a"]),
+        ] {
+            assert!(
+                matches!(
+                    prepare_request(
+                        "https://s.example",
+                        &operation,
+                        &json!({"q": "x", "site": site})
+                    ),
+                    Err(RestError::Configuration)
+                ),
+                "{site} must be refused"
+            );
+        }
+        assert!(
+            matches!(
+                prepare_request(
+                    "https://s.example",
+                    &operation,
+                    &json!({"q": "x", "respond_with": "markdown"})
+                ),
+                Err(RestError::ConstantArgument(key)) if key == "respond_with"
+            ),
+            "a caller cannot replace a constant header"
+        );
+    }
+
+    #[test]
+    fn a_text_path_search_reaches_the_wire_with_its_headers() {
+        let (endpoint, task) = start_server(1, |_, received| {
+            assert_eq!(request_line(received), "GET /two%20words?count=2 HTTP/1.1");
+            let lower = received.to_ascii_lowercase();
+            assert!(lower.contains("\r\nx-site: jina.ai\r\n"), "{received}");
+            assert!(
+                lower.contains("\r\nx-respond-with: no-content\r\n"),
+                "{received}"
+            );
+            assert!(
+                lower.contains("\r\nauthorization: bearer key\r\n"),
+                "{received}"
+            );
+            http_response(200, r#"{"data":[]}"#)
+        });
+        let transport =
+            RestTransport::new(config(endpoint, vec![("search", text_path_search_op())]));
+        let result = transport.dispatch(
+            request(
+                "rest",
+                "search",
+                json!({"q": "two words", "count": 2, "site": "jina.ai"}),
+            ),
+            &ResolvedCredential::new(b"key".to_vec(), None, 1),
+        );
+        task.join().expect("the search reached the wire");
+        assert_eq!(result.response, Some(json!({"data": []})));
+    }
+
+    #[test]
+    fn a_header_argument_never_replaces_a_credential_header() {
+        let mut operation = http_op(HttpMethod::Get, "/search");
+        operation.header_parameters = Some(std::collections::BTreeMap::from([(
+            "token".to_string(),
+            "Authorization".to_string(),
+        )]));
+        let transport = RestTransport::new(config(
+            "http://127.0.0.1:9".into(),
+            vec![("search", operation)],
+        ));
+        let result = transport.dispatch(
+            request("rest", "search", json!({"token": "Bearer other"})),
+            &ResolvedCredential::new(b"key".to_vec(), None, 1),
+        );
+        assert_eq!(result.transmission, TransmissionState::NotSent);
+        assert_eq!(result.error_code.as_deref(), Some("rest_transport_error"));
     }
 
     #[test]

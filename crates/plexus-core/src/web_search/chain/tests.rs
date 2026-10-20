@@ -9,6 +9,7 @@ mod cache;
 mod deadline;
 mod deepseek;
 mod firecrawl;
+mod jina;
 mod outcomes;
 mod tavily;
 
