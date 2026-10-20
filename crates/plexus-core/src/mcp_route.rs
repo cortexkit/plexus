@@ -371,6 +371,7 @@ fn adapter_refusal_response(
         served_from: None,
         observed_at_ms: None,
         retry_after_ms,
+        error_signal: None,
     }
 }
 

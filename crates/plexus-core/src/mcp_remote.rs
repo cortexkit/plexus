@@ -144,6 +144,7 @@ pub struct McpRemoteConfig {
     /// when the connection uses an operator-supplied endpoint override.
     pub app_key: Option<String>,
     pub credential_bindings: Vec<CredentialBinding>,
+    pub error_signals: std::collections::HashMap<String, Vec<crate::manifest::ErrorSignalRule>>,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     /// How long this connection's pooled entry (HTTP client plus MCP session)
@@ -164,6 +165,7 @@ impl McpRemoteConfig {
             endpoint: endpoint.into(),
             app_key: None,
             credential_bindings: Vec::new(),
+            error_signals: std::collections::HashMap::new(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
@@ -182,9 +184,11 @@ impl McpRemoteConfig {
     }
 
     pub fn from_manifest(manifest: &crate::manifest::AppManifest) -> Self {
-        Self::new(manifest.transport.url.clone())
+        let mut config = Self::new(manifest.transport.url.clone())
             .with_bindings(manifest.credential_bindings.clone())
-            .with_app_key(manifest.key.clone())
+            .with_app_key(manifest.key.clone());
+        config.error_signals = crate::error_signals::from_manifest(manifest);
+        config
     }
 }
 
@@ -570,7 +574,7 @@ impl McpRemoteTransport {
                     "tools/list",
                     params,
                 );
-                let response = self
+                let (response, _) = self
                     .rpc_with_reconnect(&mut state, &config, body, credential)
                     .map_err(McpCallError::into_remote)?;
                 bytes = bytes.saturating_add(
@@ -761,7 +765,7 @@ impl McpRemoteTransport {
         config: &McpRemoteConfig,
         body: Value,
         credential: &ResolvedCredential,
-    ) -> Result<Value, McpCallError> {
+    ) -> Result<(Value, Option<crate::manifest::ErrorSignal>), McpCallError> {
         let mut retry = true;
         loop {
             let initialized_reply = match self.ensure_initialized(state, config, credential) {
@@ -786,14 +790,21 @@ impl McpRemoteTransport {
                 reset_session(state);
                 continue;
             }
-            return classify_reply(reply, state).map_err(|error| {
-                let error = McpCallError::Remote(error);
-                if before_call {
-                    McpCallError::BeforeCall(Box::new(error))
-                } else {
-                    error
-                }
-            });
+            let signal = reply.error_signal;
+            return classify_reply(reply, state)
+                .map(|value| (value, signal))
+                .map_err(|error| {
+                    let error = McpCallError::Remote(error);
+                    let error = match signal {
+                        Some(signal) => McpCallError::Signaled(signal, Box::new(error)),
+                        None => error,
+                    };
+                    if before_call {
+                        McpCallError::BeforeCall(Box::new(error))
+                    } else {
+                        error
+                    }
+                });
         }
     }
 
@@ -838,7 +849,16 @@ impl McpRemoteTransport {
         let response = with_request_deadline(builder, deadline)
             .send()
             .map_err(AttemptError::Request)?;
-        let mut reply = decode_response(response, body.get("id"), Some(responder))?;
+        let signals = if body.get("method").and_then(Value::as_str) == Some("tools/call") {
+            body.pointer("/params/name")
+                .and_then(Value::as_str)
+                .and_then(|action| config.error_signals.get(action))
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        } else {
+            &[]
+        };
+        let mut reply = decode_response(response, body.get("id"), Some(responder), signals)?;
         reply.sent_session = state.session_id.is_some();
         Ok(reply)
     }
@@ -876,7 +896,7 @@ impl McpRemoteTransport {
         if (200..300).contains(&status) {
             return Ok(None);
         }
-        let mut reply = decode_response(response, None, None)?;
+        let mut reply = decode_response(response, None, None, &[])?;
         reply.sent_session = state.session_id.is_some();
         Ok(Some(reply))
     }
@@ -974,7 +994,7 @@ impl Transport for McpRemoteTransport {
             }
         };
         match outcome {
-            Ok(response) => {
+            Ok((response, signal)) => {
                 let Ok(result) = tool_result_from_response(response) else {
                     eprintln!(warn transport: "MCP vendor response was invalid");
                     return TransportResponse::unknown_with_error(
@@ -998,7 +1018,7 @@ impl Transport for McpRemoteTransport {
                 {
                     let error_text = tool_error_text(&result);
                     match grep_app_tool_error_response(
-                        config.app_key.as_deref(),
+                        config.app_key.as_deref().filter(|_| signal.is_none()),
                         &request.action,
                         &error_text,
                     ) {
@@ -1026,7 +1046,8 @@ impl Transport for McpRemoteTransport {
                     return TransportResponse::vendor_error(
                         "mcp_tool_error",
                         "MCP vendor request failed",
-                    );
+                    )
+                    .with_error_signal(signal);
                 }
                 // Delivered verbatim. This body previously passed through
                 // `redact_value`, which fingerprints any field whose NAME
@@ -1047,6 +1068,9 @@ impl Transport for McpRemoteTransport {
 
 fn call_error_response(error: McpCallError) -> TransportResponse {
     match error {
+        McpCallError::Signaled(signal, error) => {
+            call_error_response(*error).with_error_signal(Some(signal))
+        }
         McpCallError::BeforeCall(error) => {
             let mut response = call_error_response(*error);
             response.transmission = TransmissionState::NotSent;
@@ -1089,6 +1113,7 @@ fn call_error_response(error: McpCallError) -> TransportResponse {
                 served_from: None,
                 observed_at_ms: None,
                 retry_after_ms: None,
+                error_signal: None,
             },
             McpRemoteError::VendorStatus(status) if status >= 500 => {
                 TransportResponse::unknown_with_error(
@@ -1177,6 +1202,7 @@ impl DiscoveredAction {
 
 #[derive(Clone)]
 struct HttpReply {
+    error_signal: Option<crate::manifest::ErrorSignal>,
     status: u16,
     retry_after: Option<Duration>,
     /// The JSON-RPC message, or `Null` for a refusal whose body was not JSON.
@@ -1201,6 +1227,7 @@ enum AttemptError {
 }
 
 enum McpCallError {
+    Signaled(crate::manifest::ErrorSignal, Box<McpCallError>),
     BeforeCall(Box<McpCallError>),
     Remote(McpRemoteError),
     Http(HttpAttemptFailure),
@@ -1209,6 +1236,7 @@ enum McpCallError {
 impl McpCallError {
     fn into_remote(self) -> McpRemoteError {
         match self {
+            Self::Signaled(_, error) => error.into_remote(),
             Self::BeforeCall(error) => error.into_remote(),
             Self::Remote(error) => error,
             Self::Http(HttpAttemptFailure::Timeout) => McpRemoteError::Timeout,
@@ -1253,6 +1281,7 @@ fn decode_response(
     response: Response,
     expected_id: Option<&Value>,
     responder: Option<SseResponder<'_>>,
+    signals: &[crate::manifest::ErrorSignalRule],
 ) -> Result<HttpReply, AttemptError> {
     let status = response.status().as_u16();
     let path = response.url().path().to_owned();
@@ -1268,9 +1297,10 @@ fn decode_response(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if let Some(delay) = retry_after {
+    if let Some(delay) = retry_after.filter(|_| signals.is_empty()) {
         eprintln!(warn transport: "MCP vendor throttle: status={status} path={path} retry_after_ms={}", duration_ms(delay));
         return Ok(HttpReply {
+            error_signal: None,
             status,
             retry_after,
             body: Value::Null,
@@ -1278,6 +1308,7 @@ fn decode_response(
             sent_session: false,
         });
     }
+    let headers = response.headers().clone();
     if (300..400).contains(&status) {
         // A redirect the policy declined: another origin, a status that would
         // turn this POST into a GET, or too many hops. The agent sees only the
@@ -1290,6 +1321,7 @@ fn decode_response(
             eprintln!(warn transport: "MCP SSE response failed or exceeded its limit: status={status} path={path}");
         })?;
         return Ok(HttpReply {
+            error_signal: mcp_error_signal(signals, status, &headers, &body),
             status,
             retry_after,
             body,
@@ -1315,15 +1347,28 @@ fn decode_response(
     }
     let text = body.text;
     if !success {
-        crate::rest_api::log_vendor_error(
-            "MCP",
-            &reqwest::Method::POST,
-            &path,
-            status,
-            &text,
-            None,
-        );
+        if let Some(delay) = retry_after {
+            eprintln!(warn transport: "MCP vendor throttle: status={status} path={path} retry_after_ms={}", duration_ms(delay));
+        } else {
+            crate::rest_api::log_vendor_error(
+                "MCP",
+                &reqwest::Method::POST,
+                &path,
+                status,
+                &text,
+                None,
+            );
+        }
         return Ok(HttpReply {
+            error_signal: crate::error_signals::evaluate(
+                signals,
+                status,
+                &headers,
+                (!body.truncated)
+                    .then(|| serde_json::from_str::<Value>(&text).ok())
+                    .flatten()
+                    .as_ref(),
+            ),
             status,
             retry_after,
             body: Value::Null,
@@ -1350,12 +1395,28 @@ fn decode_response(
         Err(error) => return Err(AttemptError::Local(error)),
     };
     Ok(HttpReply {
+        error_signal: mcp_error_signal(signals, status, &headers, &body),
         status,
         retry_after,
         body,
         session_id,
         sent_session: false,
     })
+}
+
+fn mcp_error_signal(
+    signals: &[crate::manifest::ErrorSignalRule],
+    status: u16,
+    headers: &HeaderMap,
+    body: &Value,
+) -> Option<crate::manifest::ErrorSignal> {
+    if body.get("error").is_some()
+        || body.pointer("/result/isError").and_then(Value::as_bool) == Some(true)
+    {
+        crate::error_signals::evaluate(signals, status, headers, Some(body))
+    } else {
+        None
+    }
 }
 
 /// The JSON-RPC response to request `expected_id` in a server-sent-event body.
@@ -1667,6 +1728,7 @@ pub(crate) fn poisoned_lock_response() -> TransportResponse {
         served_from: None,
         observed_at_ms: None,
         retry_after_ms: None,
+        error_signal: None,
     }
 }
 
@@ -1684,6 +1746,7 @@ fn local_error_response(error: McpRemoteError) -> TransportResponse {
             served_from: None,
             observed_at_ms: None,
             retry_after_ms: None,
+            error_signal: None,
         },
     }
 }
@@ -4157,3 +4220,7 @@ mod annotation_observation_tests {
 #[cfg(test)]
 #[path = "mcp_remote_safety_tests.rs"]
 mod safety_tests;
+
+#[cfg(test)]
+#[path = "mcp_remote_signal_tests.rs"]
+mod signal_tests;

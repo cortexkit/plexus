@@ -49,20 +49,18 @@
 //   date; a relative age such as "2 days ago" is dropped, not guessed;
 // - every request also sends `text_decorations=false`, so titles and
 //   descriptions arrive without highlighting markup;
-// - a missing or invalid key: Brave's reference documents no 401. Clients
-//   that call the live API report an invalid key as HTTP 422 with
-//   error.code SUBSCRIPTION_TOKEN_INVALID (for example
-//   kennbroorg/iKy backend/factories/search_providers.py and
-//   perminder-klair/subwave controller/src/routes/settings/llm.ts, the
-//   latter "verified live"). web_search classifies every 400 and 422 as a
-//   rejected request without reading the body, so with a wrong key every
-//   ordered search stops at Brave with web_search_request_rejected: no
-//   cooldown and no fallthrough to the next provider. The rollout's live
-//   check sends a real Brave search with the stored key to catch this
-//   before an order containing brave is set;
-// - a used-up monthly quota is a 429 like any rate limit, so web_search
-//   treats it as throttled: a 60-second cooldown (no Retry-After is
-//   documented), not the one-hour quota cooldown.
+// - undeclared credential gap (official authentication guide and API reference
+//   above, read 2026-10-20): neither establishes a stable invalid-key code for
+//   422. Third-party clients report error.code SUBSCRIPTION_TOKEN_INVALID, but
+//   that is not a vendor-owned contract, so no credential signal is declared;
+// - monthly quota: the official rate-limiting guide above (read 2026-10-20)
+//   defines X-RateLimit-Remaining as second/monthly comma-separated windows,
+//   with zero remaining meaning exhausted. On 429 the exact second element
+//   "0" declares quota_exhausted, giving the one-hour quota cooldown. Other
+//   429s retain ordinary throttling. Vendor wording never becomes a signal.
+//
+// Deploy a binary supporting error_signals before this catalog. Older binaries
+// reject the field; restore the previous catalog before rolling the binary back.
 //
 // The search action is read-risk and has no side effects, so a retry is safe.
 // No other Brave endpoint is declared: web_search needs only web search.
@@ -99,6 +97,17 @@
     {
       "name": "search",
       "risk": "read",
+      "error_signals": [
+        {
+          "status": 429,
+          "signal": "quota_exhausted",
+          "matches": {
+            "kind": "header",
+            "name": "X-RateLimit-Remaining",
+            "condition": { "kind": "comma_separated_element", "index": 1, "value": "0" }
+          }
+        }
+      ],
       "http": {
         "method": "GET",
         "path": "/res/v1/web/search",

@@ -3535,7 +3535,7 @@ timeout_s = 120
 [[control]]
 id = "mcp-refusal-classified-by-status"
 guards = "An MCP refusal whose body is not JSON is classified by its HTTP status, not failed as a protocol error"
-edits = [{ file = "crates/plexus-core/src/mcp_remote.rs", old = "if !success {\n        crate::rest_api::log_vendor_error(", new = "if false && !success { /* NON-VACUITY BREAK */\n        crate::rest_api::log_vendor_error(" }, { file = "crates/plexus-core/src/mcp_remote.rs", old = "Err(_) if !success => Value::Null,", new = "Err(_) if false => Value::Null, // NON-VACUITY BREAK" }]
+edits = [{ file = "crates/plexus-core/src/mcp_remote.rs", old = "if !success {\n        if let Some(delay) = retry_after {", new = "if false && !success { /* NON-VACUITY BREAK */\n        if let Some(delay) = retry_after {" }, { file = "crates/plexus-core/src/mcp_remote.rs", old = "Err(_) if !success => Value::Null,", new = "Err(_) if false => Value::Null, // NON-VACUITY BREAK" }]
 test_file = "crates/plexus-core/src/mcp_remote.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -16372,16 +16372,16 @@ timeout_s = 120
 
 [[control]]
 id = "web-search-outcome-private-quota-signal"
-guards = "A private quota signal applies only to eligible client or MCP errors"
+guards = "A manifest-declared quota signal precedes status and retry rules except for 401"
 file = "crates/plexus-core/src/web_search/chain/outcome.rs"
-old = 'quota_signal == QuotaSignal::Exhausted'
-new = 'quota_signal == QuotaSignal::Exhausted && false /* NON-VACUITY BREAK */'
+old = 'if let Some(signal) = dispatched.error_signal {'
+new = 'if let Some(signal) = dispatched.error_signal.filter(|_| false) { /* NON-VACUITY BREAK */'
 test_file = "crates/plexus-core/src/web_search/chain/outcome/tests.rs"
 runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::chain::outcome::tests::quota_signal_matches_only_eligible_errors"]
+expect_red = ["web_search::chain::outcome::tests::declared_quota_precedes_status_and_retry_except_401"]
 build_timeout_s = 3600
 timeout_s = 120
 
@@ -16389,8 +16389,8 @@ timeout_s = 120
 id = "web-search-outcome-credential"
 guards = "HTTP 401 is credential failure and the next search skips the connection for sixty seconds"
 file = "crates/plexus-core/src/web_search/chain/outcome.rs"
-old = 'if status == Some(401) {'
-new = 'if status == Some(401) && false { /* NON-VACUITY BREAK */'
+old = 'if status == Some(401) || code == Some("handle_credential_rejected") {'
+new = 'if false && (status == Some(401) || code == Some("handle_credential_rejected")) { /* NON-VACUITY BREAK */'
 test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -16497,7 +16497,7 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::chain::outcome::tests::quota_signal_matches_only_eligible_errors"]
+expect_red = ["web_search::chain::outcome::tests::declared_quota_precedes_status_and_retry_except_401"]
 build_timeout_s = 3600
 timeout_s = 120
 [[control]]
@@ -19744,4 +19744,323 @@ list_command = ["python3", "-B", "-c", '''from pathlib import Path; text = Path(
 test_count_pattern = "Ran {count} test"
 expect_red = ["RolloutContract.test_live_steps_remain_pending_and_governed"]
 expect_message = "live steps must remain pending until deployment"
+timeout_s = 120
+
+[[control]]
+id = "error-signals-closed-manifest"
+guards = "Error-signal rules refuse unknown fields at ingest"
+file = "crates/plexus-core/src/manifest.rs"
+old = '''#[serde(deny_unknown_fields)]
+pub struct ErrorSignalRule {'''
+new = '''/* NON-VACUITY BREAK */
+pub struct ErrorSignalRule {'''
+test_file = "crates/plexus-core/src/manifest/error_signals_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::error_signals_tests::error_signals_are_closed_at_every_level"]
+expect_message = "unknown error signal fields must refuse"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-overlap-ingest"
+guards = "Same-status overlapping error signals refuse before dispatch"
+file = "crates/plexus-core/src/error_signals.rs"
+old = 'previous.status == rule.status && !disjoint(&previous.matches, &rule.matches)'
+new = 'previous.status == rule.status && !disjoint(&previous.matches, &rule.matches) && false /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/manifest/error_signals_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::error_signals_tests::overlapping_error_signals_refuse_before_dispatch"]
+expect_message = "called `Result::unwrap_err()` on an `Ok` value"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-json-exact"
+guards = "A body predicate compares the exact JSON pointer value, not presence or wording"
+file = "crates/plexus-core/src/error_signals.rs"
+old = 'body.and_then(|body| body.pointer(pointer)) == Some(value)'
+new = 'body.and_then(|body| body.pointer(pointer)).is_some() /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/error_signals.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["error_signals::tests::predicates_match_exact_values_not_vendor_wording"]
+expect_message = "JSON error signals must match only the exact reviewed pointer and value"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-header-window"
+guards = "Monthly quota uses the exact second comma-separated remaining value"
+file = "crates/plexus-core/src/error_signals.rs"
+old = '.nth(*index)'
+new = '.nth(0) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/error_signals.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["error_signals::tests::monthly_header_requires_the_exact_second_element"]
+expect_message = "monthly quota must match only the second exact header element"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-rest-manifest-to-chain"
+guards = "REST carries the dispatched action's reviewed quota rule from manifest to chain"
+file = "crates/plexus-core/src/rest_api.rs"
+old = 'config.error_signals = crate::error_signals::from_manifest(manifest);'
+new = 'config.error_signals = HashMap::new(); /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/signals.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::signals::declared_rest_quota_overrides_429_retry"]
+expect_message = "declared quota must reach the chain through transport and governance"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-credential-classification"
+guards = "A declared non-401 bad key skips as credential failure instead of request rejection"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = '''ErrorSignal::CredentialRejected => Classified::MoveOn {
+                reason: SkipReason::Credential,'''
+new = '''ErrorSignal::CredentialRejected => Classified::MoveOn {
+                reason: SkipReason::Unavailable, /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/web_search/chain/tests/signals.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::signals::declared_rest_bad_key_reports_401_to_vault"]
+expect_message = "declared credential rejection must skip as a bad key"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-credential-vault-report"
+guards = "A declared non-401 definite bad key follows exactly the 401 vault-reporting path"
+file = "crates/plexus-core/src/transport.rs"
+old = 'if self.error_signal == Some(crate::manifest::ErrorSignal::CredentialRejected) {'
+new = 'if self.error_signal == Some(crate::manifest::ErrorSignal::CredentialRejected) && false { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/signals.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::signals::declared_rest_bad_key_reports_401_to_vault"]
+expect_message = "declared credential rejection must report exactly the same vault status as 401"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-no-results-empty"
+guards = "A declared no-results 422 serves an empty search instead of stopping as bad request"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'ErrorSignal::NoResults => Classified::Serve(Vec::new()),'
+new = 'ErrorSignal::NoResults => Classified::Reject, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/signals.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::signals::declared_rest_no_results_serves_empty_instead_of_rejecting_422"]
+expect_message = "declared no_results must serve an empty search"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-mcp-tool"
+guards = "All three fixed signals survive MCP tool-error diagnostic stripping"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = '''"mcp_tool_error",
+                        "MCP vendor request failed",
+                    )
+                    .with_error_signal(signal);'''
+new = '''"mcp_tool_error",
+                        "MCP vendor request failed",
+                    )
+                    .with_error_signal(None); /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/mcp_remote_signal_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::signal_tests::declared_mcp_tool_errors_carry_only_fixed_signals"]
+expect_message = "MCP tool error must retain only the fixed declared signal"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-mcp-rpc"
+guards = "All three fixed signals survive MCP JSON-RPC error classification"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = 'let signal = reply.error_signal;'
+new = 'let signal = if reply.body.get("error").is_some() { None } else { reply.error_signal }; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/mcp_remote_signal_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::signal_tests::declared_mcp_rpc_errors_carry_only_fixed_signals"]
+expect_message = "MCP RPC error must retain only the fixed declared signal"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-mcp-http"
+guards = "MCP HTTP error body and header predicates are evaluated before stripping and throttling"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = '''error_signal: crate::error_signals::evaluate(
+                signals,'''
+new = '''error_signal: crate::error_signals::evaluate(
+                &[], /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/mcp_remote_signal_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::signal_tests::declared_mcp_http_errors_match_raw_body_and_headers_before_throttling"]
+expect_message = "MCP HTTP error body signal must survive throttling"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-undeclared-exa"
+guards = "Undeclared Exa REST replies retain exactly the old payload and status behavior"
+file = "crates/plexus-core/src/error_signals.rs"
+old = 'rules.iter().find_map(|rule| {'
+new = 'if rules.is_empty() { return Some(ErrorSignal::QuotaExhausted); } /* NON-VACUITY BREAK */ rules.iter().find_map(|rule| {'
+test_file = "crates/plexus-core/src/rest_api/signal_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::signal_tests::exa_without_declarations_is_byte_for_byte_unchanged"]
+expect_message = "undeclared Exa errors must remain byte-for-byte unchanged"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-undeclared-github"
+guards = "Undeclared GitHub MCP errors retain exactly the old payload and status behavior"
+file = "crates/plexus-core/src/error_signals.rs"
+old = 'rules.iter().find_map(|rule| {'
+new = 'if rules.is_empty() { return Some(ErrorSignal::QuotaExhausted); } /* NON-VACUITY BREAK */ rules.iter().find_map(|rule| {'
+test_file = "crates/plexus-core/src/mcp_remote_signal_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::signal_tests::github_without_declarations_is_byte_for_byte_unchanged"]
+expect_message = "undeclared GitHub tool errors must remain byte-for-byte unchanged"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-brave-catalog"
+guards = "The shipped Brave manifest distinguishes exhausted monthly quota from short rate limits"
+file = "catalog/brave_rest.jsonc"
+old = '"condition": { "kind": "comma_separated_element", "index": 1, "value": "0" }'
+new = '"condition": { "kind": "comma_separated_element", "index": 0, "value": "0" } // NON-VACUITY BREAK'
+test_file = "crates/plexus-core/src/web_search/chain/tests/brave.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::brave::documented_short_rate_limit_is_throttled_for_a_minute"]
+expect_message = "rate_limited must move on"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-401-precedence"
+guards = "A manifest can never turn HTTP 401 into empty success or a quota skip"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = 'if status == Some(401) || code == Some("handle_credential_rejected") {'
+new = 'if false && (status == Some(401) || code == Some("handle_credential_rejected")) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/signals.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::outcomes::signals::declared_rest_401_never_becomes_empty_or_quota"]
+expect_message = "declared credential rejection must skip as a bad key"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-mcp-success-boundary"
+guards = "Successful MCP result data cannot emit an error signal even if a reviewed value matches"
+edits = [
+  { file = "crates/plexus-core/src/mcp_remote.rs", old = '''if body.get("error").is_some()
+        || body.pointer("/result/isError").and_then(Value::as_bool) == Some(true)''', new = 'if true /* NON-VACUITY BREAK */' },
+  { file = "crates/plexus-core/src/mcp_remote.rs", old = 'TransportResponse::success(decode_tool_result(result))', new = 'TransportResponse::success(decode_tool_result(result)).with_error_signal(signal) /* NON-VACUITY BREAK */' }
+]
+test_file = "crates/plexus-core/src/mcp_remote_signal_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::signal_tests::mcp_success_and_other_actions_cannot_emit_error_signals"]
+expect_message = "matching successful data is not an error signal"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-exact-header"
+guards = "Exact response-header predicates preserve only the reviewed complete value"
+file = "crates/plexus-core/src/error_signals.rs"
+old = 'HeaderCondition::Exact { value: expected } => value == expected,'
+new = 'HeaderCondition::Exact { value: expected } => value != expected, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/mcp_remote_signal_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_remote::signal_tests::declared_mcp_http_errors_match_raw_body_and_headers_before_throttling"]
+expect_message = "MCP HTTP header signal must survive throttling"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-jina-no-assertion-header"
+guards = "Plexus never requests Jina's X-Assert-Status-Code assertion"
+edits = [
+  { file = "catalog/jina_rest.jsonc", old = '"respond_with": "X-Respond-With"', new = '"respond_with": "X-Respond-With", "assert_status": "X-Assert-Status-Code" // NON-VACUITY BREAK' },
+  { file = "catalog/jina_rest.jsonc", old = '"respond_with": "no-content"', new = '"respond_with": "no-content", "assert_status": "200" // NON-VACUITY BREAK' }
+]
+test_file = "crates/plexus-core/src/web_search/chain/tests/jina.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::jina::a_documented_success_is_served_from_a_bearer_get_with_the_query_as_the_path"]
+expect_message = "Jina searches must not request a page-status assertion"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "error-signals-specialized-shapes-refuse"
+guards = "Unsupported specialized GitHub REST shapes refuse error-signal declarations instead of ignoring them"
+file = "crates/plexus-core/src/manifest.rs"
+old = 'if let Some(shape) = specialized_shape {'
+new = 'if let Some(shape) = specialized_shape.filter(|_| false) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/manifest/error_signals_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::error_signals_tests::specialized_rest_shapes_refuse_ignored_signal_declarations"]
+expect_message = "called `Result::unwrap_err()` on an `Ok` value"
+build_timeout_s = 3600
 timeout_s = 120

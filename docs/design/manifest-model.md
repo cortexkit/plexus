@@ -40,6 +40,31 @@ semantics.
 
 ## Supported controls and descriptive metadata
 
+Ordinary REST and remote MCP actions may declare a closed `error_signals` list.
+Specialized GitHub REST read-envelope, job-log and artifact-file shapes refuse
+declarations at ingest, naming the action and shape, because their custom response
+paths do not evaluate these predicates. A rule
+contains `status`, `signal` (`quota_exhausted`, `credential_rejected`, or
+`no_results`), and `matches`: either `{"kind":"json","pointer":"/error/code",
+"value":"REVIEWED_CODE"}` or a response `header` with a `name` and `condition`.
+Header conditions are `exact` (`value`) or `comma_separated_element` (zero-based
+`index` and exact `value`, ignoring only surrounding space/tab). JSON pointers
+address the complete REST error body or MCP JSON-RPC envelope, never parsed text
+inside an MCP content block. Different fields can coexist, so ingest
+conservatively rejects same-status rules unless different exact values of the
+same field or header element prove them disjoint. Header names are case-insensitive;
+repeated headers never match. Truncated or invalid JSON cannot match a body rule.
+
+Only vendor-documented stable fields belong here, with a dated official citation
+in the catalog. No substring, regex, or prose inference is supported. Transports
+evaluate only error replies for the dispatched action, before replacing vendor
+diagnostics with fixed messages. Only the fixed signal reaches classification.
+HTTP 401 always wins; otherwise a signal precedes status/retry rules. Credential
+rejection reports the same definite 401 to the credential source as an HTTP 401.
+Quota skips for one hour; no-results serves an empty search. Undeclared actions
+retain their existing behavior. Older binaries reject `error_signals`: deploy the
+binary first and restore the old catalog before binary rollback.
+
 `availability` and `reuse_rationale` are display/review metadata, not connection
 or governance gates. In particular, `gated` is not an operator admission switch.
 No production decision plane is wired: S3/S4 actions refuse regardless of those

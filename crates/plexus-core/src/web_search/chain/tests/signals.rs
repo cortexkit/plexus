@@ -1,0 +1,100 @@
+use super::*;
+use crate::manifest::{ingest_value, ErrorSignal};
+use crate::rest_api::{RestConfig, RestTransport};
+
+fn declared_rest_attempt(status: u16, signal: ErrorSignal) {
+    let (fixture, _) =
+        super::super::super::super::tests::granted_exa_engine("declared-rest-signal");
+    order(&fixture, &["exa"]);
+    let body = r#"{"error":{"code":"REVIEWED"},"detail":"private vendor wording"}"#;
+    let (endpoint, server) = crate::test_http::FixedRequestServer::start_with_deadline(
+        1,
+        "declared-rest-signal",
+        std::time::Duration::from_secs(30),
+        move |_, _| {
+            format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nRetry-After: 2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+        },
+    );
+    let mut manifest = crate::manifest::catalog_fixture("exa_rest.jsonc");
+    manifest["actions_baseline"][0]["error_signals"] = json!([{
+        "status":status,"signal":signal,"matches":{"kind":"json","pointer":"/error/code","value":"REVIEWED"}
+    }]);
+    let manifest = ingest_value(manifest).unwrap().manifest;
+    let mut config = RestConfig::from_manifest(&manifest);
+    config.base_url = endpoint;
+    let credentials = Arc::new(ReportingCredentials::default());
+    let engine = GovernanceEngine::new(
+        fixture.store().clone(),
+        credentials.clone(),
+        Arc::new(RestTransport::new(config)),
+    );
+    let service = service();
+    let result = service.search(
+        &engine,
+        "direct",
+        json!({"query":"weather report"}).as_object().unwrap(),
+    );
+    server.join().unwrap();
+    if status == 401 || signal == ErrorSignal::CredentialRejected {
+        assert_eq!(
+            result,
+            Err(unavailable(&[("exa", SkipReason::Credential)])),
+            "declared credential rejection must skip as a bad key"
+        );
+        assert_eq!(
+            *credentials.0.lock().unwrap(),
+            vec![401],
+            "declared credential rejection must report exactly the same vault status as 401"
+        );
+        assert_eq!(
+            service.chain_cooldowns.lock().unwrap().get("exa"),
+            Some(&(NOW + 60_000))
+        );
+    } else if signal == ErrorSignal::QuotaExhausted {
+        assert_eq!(
+            result,
+            Err(unavailable(&[("exa", SkipReason::Quota)])),
+            "declared quota must reach the chain through transport and governance"
+        );
+        assert_eq!(
+            service.chain_cooldowns.lock().unwrap().get("exa"),
+            Some(&(NOW + 3_600_000))
+        );
+        assert!(credentials.0.lock().unwrap().is_empty());
+    } else {
+        let result = result.expect("declared no_results must serve an empty search");
+        assert!(
+            result.results.is_empty(),
+            "declared no_results must be empty"
+        );
+        assert_eq!(result.backend, "exa");
+        assert!(service.chain_cooldowns.lock().unwrap().is_empty());
+        assert!(credentials.0.lock().unwrap().is_empty());
+    }
+    let rows = engine.store().list_audit("direct").unwrap();
+    assert!(
+        !format!("{rows:?}").contains("private vendor wording"),
+        "vendor text must not escape transport"
+    );
+}
+
+#[test]
+fn declared_rest_quota_overrides_429_retry() {
+    declared_rest_attempt(429, ErrorSignal::QuotaExhausted);
+}
+
+#[test]
+fn declared_rest_bad_key_reports_401_to_vault() {
+    declared_rest_attempt(422, ErrorSignal::CredentialRejected);
+}
+
+#[test]
+fn declared_rest_no_results_serves_empty_instead_of_rejecting_422() {
+    declared_rest_attempt(422, ErrorSignal::NoResults);
+}
+
+#[test]
+fn declared_rest_401_never_becomes_empty_or_quota() {
+    declared_rest_attempt(401, ErrorSignal::NoResults);
+    declared_rest_attempt(401, ErrorSignal::QuotaExhausted);
+}

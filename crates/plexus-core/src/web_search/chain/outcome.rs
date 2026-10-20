@@ -1,4 +1,4 @@
-//! First-match outcome classification. Vendor diagnostics never leave this module.
+//! Classification consumes fixed transport signals, never raw vendor diagnostics.
 
 use super::*;
 use crate::governance::DispatchOutcome;
@@ -18,33 +18,18 @@ pub(super) enum Classified {
     },
 }
 
-/// Whether a provider's failed reply said its quota or credit is used up, for a
-/// provider that reports that with a status other than 402. Only the HTTP
-/// transport may set this, from the raw reply, because the error text this
-/// classifier receives has already had vendor wording removed; recovering the
-/// signal by reading that text is not possible and must not be attempted.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum QuotaSignal {
-    Absent,
-    // The transport does not expose this signal yet; keep its classification
-    // separate from caller-facing diagnostics when that seam becomes available.
-    #[allow(dead_code)]
-    Exhausted,
-}
-
 pub(super) fn classify(
     backend: &dyn WebSearchBackend,
     dispatched: &DispatchOutcome,
-    quota_signal: QuotaSignal,
     max_results: usize,
     fetched_at_ms: i64,
 ) -> Classified {
-    let (code, mcp_error) = match &dispatched.outcome {
+    let code = match &dispatched.outcome {
         TransportOutcome::Completed {
             response: Some(body),
         } => {
             if body.get("isError").and_then(Value::as_bool) == Some(true) {
-                (None, true)
+                None
             } else {
                 return match backend.map_reply(body, max_results, fetched_at_ms) {
                     Ok(results) => Classified::Serve(results),
@@ -56,12 +41,33 @@ pub(super) fn classify(
             }
         }
         TransportOutcome::VendorFailed { code, .. } | TransportOutcome::NotSent { code, .. } => {
-            (Some(code.as_str()), code.starts_with("mcp_"))
+            Some(code.as_str())
         }
-        _ => (None, false),
+        _ => None,
     };
     let status = code.and_then(|code| code.strip_prefix("http_")?.parse::<u16>().ok());
-    // Request errors stop the walk before any body inspection or retry hint.
+    // HTTP 401 is authoritative even when a manifest declares a different signal.
+    if status == Some(401) || code == Some("handle_credential_rejected") {
+        return Classified::MoveOn {
+            reason: SkipReason::Credential,
+            cooldown_ms: CREDENTIAL_COOLDOWN_MS,
+        };
+    }
+    if let Some(signal) = dispatched.error_signal {
+        use crate::manifest::ErrorSignal;
+        return match signal {
+            ErrorSignal::QuotaExhausted => Classified::MoveOn {
+                reason: SkipReason::Quota,
+                cooldown_ms: QUOTA_COOLDOWN_MS,
+            },
+            ErrorSignal::CredentialRejected => Classified::MoveOn {
+                reason: SkipReason::Credential,
+                cooldown_ms: CREDENTIAL_COOLDOWN_MS,
+            },
+            ErrorSignal::NoResults => Classified::Serve(Vec::new()),
+        };
+    }
+    // Undeclared request errors still stop the walk before any retry hint.
     if matches!(status, Some(400 | 422)) {
         return Classified::Reject;
     }
@@ -81,18 +87,8 @@ pub(super) fn classify(
             cooldown_ms: THROTTLED_COOLDOWN_MS,
         };
     }
-    // A refused key is decided before any quota rule, so no backend's
-    // exhausted-status list can turn a 401 into a quota skip.
-    if status == Some(401) {
-        return Classified::MoveOn {
-            reason: SkipReason::Credential,
-            cooldown_ms: CREDENTIAL_COOLDOWN_MS,
-        };
-    }
     if status == Some(402)
         || status.is_some_and(|status| backend.exhausted_statuses().contains(&status))
-        || ((matches!(status, Some(400..=499)) && status != Some(401) || mcp_error)
-            && quota_signal == QuotaSignal::Exhausted)
     {
         return Classified::MoveOn {
             reason: SkipReason::Quota,

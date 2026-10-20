@@ -367,6 +367,7 @@ pub(crate) fn throttle_refusal(transport: &str, remaining: Duration) -> Transpor
         served_from: None,
         observed_at_ms: None,
         retry_after_ms: Some(duration_ms(remaining)),
+        error_signal: None,
     }
 }
 
@@ -413,6 +414,7 @@ pub(crate) fn throttled_response(transport: &str, delay: Duration) -> TransportR
         served_from: None,
         observed_at_ms: None,
         retry_after_ms: Some(duration_ms(delay)),
+        error_signal: None,
     }
 }
 

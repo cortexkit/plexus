@@ -55,13 +55,19 @@ pub struct TransportResponse {
     pub observed_at_ms: Option<u64>,
     /// Adapter-supplied cooldown remaining before a request may be retried.
     pub retry_after_ms: Option<u64>,
+    /// Fixed manifest-declared signal; never raw vendor diagnostics.
+    pub error_signal: Option<crate::manifest::ErrorSignal>,
 }
 
 impl TransportResponse {
     /// Return the provider HTTP status encoded by an auth rejection without
-    /// exposing any vendor response body. HTTP 403 is a vendor permission
-    /// refusal, not evidence that the credential itself was rejected.
+    /// exposing any vendor response body. Without a reviewed credential signal,
+    /// treat HTTP 403 as a permission refusal; it does not establish that the
+    /// credential was rejected.
     pub fn provider_auth_status(&self) -> Option<u16> {
+        if self.error_signal == Some(crate::manifest::ErrorSignal::CredentialRejected) {
+            return Some(401);
+        }
         let code = self.error_code.as_deref()?;
         code.strip_prefix("http_")
             .and_then(|status| status.parse::<u16>().ok())
@@ -79,11 +85,20 @@ impl TransportResponse {
             served_from: None,
             observed_at_ms: None,
             retry_after_ms: None,
+            error_signal: None,
         }
     }
 
     pub(crate) fn not_sent(mut self) -> Self {
         self.transmission = TransmissionState::NotSent;
+        self
+    }
+
+    pub(crate) fn with_error_signal(
+        mut self,
+        signal: Option<crate::manifest::ErrorSignal>,
+    ) -> Self {
+        self.error_signal = signal;
         self
     }
 
@@ -105,6 +120,7 @@ impl TransportResponse {
             served_from: None,
             observed_at_ms: None,
             retry_after_ms: None,
+            error_signal: None,
         }
     }
 
@@ -123,6 +139,7 @@ impl TransportResponse {
             served_from: None,
             observed_at_ms: None,
             retry_after_ms: None,
+            error_signal: None,
         }
     }
 
@@ -137,6 +154,7 @@ impl TransportResponse {
             served_from: None,
             observed_at_ms: None,
             retry_after_ms: None,
+            error_signal: None,
         }
     }
 }
@@ -342,6 +360,7 @@ impl Transport for MockTransport {
                 served_from: None,
                 observed_at_ms: None,
                 retry_after_ms: None,
+                error_signal: None,
             },
             MockResponse::VendorError { code, message } => {
                 TransportResponse::vendor_error(&code, &message)
@@ -359,6 +378,7 @@ impl Transport for MockTransport {
                 served_from: None,
                 observed_at_ms: None,
                 retry_after_ms: retry_after_ms.filter(|delay| *delay != 0),
+                error_signal: None,
             },
             MockResponse::OutcomeUnknown => TransportResponse::unknown(),
             MockResponse::TransientNotSent { message } => {
@@ -431,6 +451,7 @@ mod tests {
             served_from: None,
             observed_at_ms: None,
             retry_after_ms: None,
+            error_signal: None,
         };
         assert_eq!(response.provider_auth_status(), Some(401));
 
@@ -445,6 +466,7 @@ mod tests {
                 served_from: None,
                 observed_at_ms: None,
                 retry_after_ms: None,
+                error_signal: None,
             };
             assert_eq!(response.provider_auth_status(), None);
         }

@@ -315,6 +315,12 @@ fn a_documented_success_is_served_from_a_bearer_get_with_the_query_as_the_path()
     assert_eq!(body, "", "a GET sends no body");
     let headers = header_lines(head);
     assert!(
+        headers
+            .iter()
+            .all(|header| !header.starts_with("x-assert-status-code:")),
+        "Jina searches must not request a page-status assertion"
+    );
+    assert!(
         headers.contains(&"authorization: bearer test-credential".to_string()),
         "the key travels as a bearer token: {head}"
     );
@@ -371,8 +377,8 @@ fn a_reply_with_only_content_is_served_from_content() {
 
 #[test]
 fn documented_bad_requests_reject_without_a_cooldown() {
-    // Jina answers a search that finds nothing with a 422; like every 400 and
-    // 422, it is refused without reading the body and never retried elsewhere.
+    // The legacy fixture named no_results is an AssertionFailureError, not a
+    // documented no-results discriminator. An undeclared 422 still rejects.
     for record in ["bad_request", "no_results"] {
         let recorded = recorded_search(record);
         assert_eq!(

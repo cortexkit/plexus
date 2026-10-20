@@ -170,6 +170,54 @@ pub struct ActionBaseline {
     /// `transport.kind` is `rest_api` and forbidden otherwise (see `validate`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<HttpOperation>,
+    /// Reviewed error predicates, evaluated only inside the transport before
+    /// vendor diagnostics are replaced by fixed caller-facing messages.
+    /// Supported on ordinary REST and remote MCP actions. Specialized GitHub
+    /// read-envelope, job-log and artifact-file REST shapes refuse declarations
+    /// because their custom response paths do not evaluate these predicates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_signals: Option<Vec<ErrorSignalRule>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorSignal {
+    QuotaExhausted,
+    CredentialRejected,
+    NoResults,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ErrorSignalRule {
+    /// HTTP status, including 200 for an MCP JSON-RPC or tool error.
+    pub status: u16,
+    pub signal: ErrorSignal,
+    pub matches: ErrorMatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ErrorMatch {
+    /// Pointer into the REST error body or the complete MCP JSON-RPC envelope.
+    Json { pointer: String, value: Value },
+    Header {
+        name: String,
+        condition: HeaderCondition,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HeaderCondition {
+    Exact {
+        value: String,
+    },
+    /// Zero-based element; only surrounding HTTP whitespace is ignored.
+    CommaSeparatedElement {
+        index: usize,
+        value: String,
+    },
 }
 
 /// One HTTP operation a REST action maps onto: a method, a path template whose
@@ -799,6 +847,30 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
     }
     let mut action_names = std::collections::BTreeSet::new();
     for action in &manifest.actions_baseline {
+        if let Some(rules) = &action.error_signals {
+            let specialized_shape = if manifest.transport.kind == TransportKind::RestApi {
+                action
+                    .http
+                    .as_ref()
+                    .and_then(|http| http.credentialless_tail.as_ref())
+                    .map(|tail| match tail.kind {
+                        CredentiallessTailKind::JobLog => "job_log",
+                        CredentiallessTailKind::ArtifactFile => "artifact_file",
+                    })
+                    .or_else(|| {
+                        crate::github::reads::bot::envelope_shape(&action.name)
+                            .map(|_| "read_envelope")
+                    })
+            } else {
+                None
+            };
+            if let Some(shape) = specialized_shape {
+                return Err(ManifestError::InvalidField(format!(
+                    "action '{}' error_signals are unsupported for specialized REST shape '{shape}'", action.name
+                )));
+            }
+            crate::error_signals::validate(rules)?;
+        }
         if action.name.is_empty()
             || !action
                 .name
@@ -1771,7 +1843,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    fn load_catalog(name: &str) -> Value {
+    pub(super) fn load_catalog(name: &str) -> Value {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../catalog")
             .join(name);
@@ -2019,7 +2091,7 @@ mod tests {
         );
     }
 
-    fn rest_manifest_value() -> Value {
+    pub(super) fn rest_manifest_value() -> Value {
         serde_json::json!({
             "schema_version": 1,
             "key": "restdemo",
@@ -2846,4 +2918,13 @@ mod tests {
             .expect("poll shape");
         assert_eq!(poll.request_since_field.as_deref(), Some("after"));
     }
+}
+
+#[cfg(test)]
+#[path = "manifest/error_signals_tests.rs"]
+mod error_signals_tests;
+
+#[cfg(test)]
+pub(crate) fn catalog_fixture(name: &str) -> Value {
+    tests::load_catalog(name)
 }

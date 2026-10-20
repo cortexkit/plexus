@@ -69,12 +69,12 @@
 //   applies;
 // - a publication date is reported from `date` or `publishedTime` when it is
 //   a parseable date, and dropped otherwise;
-// - empty results: the search source answers a search that found nothing
-//   with an AssertionFailureError, the OpenAPI's 422, not with an empty
-//   `data`. The chain treats every 400 and 422 as a rejected request without
-//   reading the body, so such a search is refused as
-//   web_search_request_rejected and is not retried on the next provider. A
-//   200 with an empty `data` array is served as an empty result;
+// - empty results: the official OpenAPI (https://s.jina.ai/openapi.json,
+//   read 2026-10-20) documents 422 AssertionFailureError for a mismatch of
+//   X-Assert-Status-Code, not as a stable no-results code. Plexus declares no
+//   such request header and its reviewed schema cannot supply it. A 422 is
+//   therefore unexpected and still stops as a rejected request; no no_results
+//   signal is declared. A 200 with empty `data` is served as an empty result;
 // - classification needs no Jina-specific rule: 401 is a credential failure,
 //   402 a quota skip with the one-hour cooldown, 429 throttled for 60
 //   seconds (or a Retry-After, if one is ever sent), 403 another client error

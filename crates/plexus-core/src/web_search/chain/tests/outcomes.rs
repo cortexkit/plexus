@@ -308,7 +308,7 @@ fn recorded_rest_throttled_without_retry_uses_one_minute() {
 }
 
 #[test]
-fn recorded_rest_redacted_quota_body_has_no_private_signal_yet() {
+fn recorded_rest_undeclared_quota_body_remains_unavailable() {
     recorded_rest_attempt("forbidden_quota", SkipReason::Unavailable, 60_000);
 }
 
@@ -322,3 +322,6 @@ fn recorded_rest_status_the_provider_does_not_declare_exhausted_is_another_clien
         60_000,
     );
 }
+
+#[path = "signals.rs"]
+mod signals;

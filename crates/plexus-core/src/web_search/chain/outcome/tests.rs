@@ -8,6 +8,7 @@ fn dispatch(outcome: TransportOutcome, retry_after_ms: Option<u64>) -> DispatchO
         transmission: TransmissionState::Sent,
         retryability: Retryability::Terminal,
         retry_after_ms,
+        error_signal: None,
         outcome,
     }
 }
@@ -23,7 +24,6 @@ fn classify_fixture(outcome: TransportOutcome, retry: Option<u64>) -> Classified
     classify(
         &ExaRestBackend,
         &dispatch(outcome, retry),
-        QuotaSignal::Absent,
         5,
         1_790_000_000_000,
     )
@@ -117,55 +117,68 @@ fn throttled_without_retry_uses_one_minute() {
 }
 
 #[test]
-fn quota_signal_matches_only_eligible_errors() {
+fn declared_quota_precedes_status_and_retry_except_401() {
+    let mut mcp = dispatch(
+        TransportOutcome::Completed {
+            response: Some(json!({"isError":true,"content":[]})),
+        },
+        None,
+    );
+    mcp.error_signal = Some(crate::manifest::ErrorSignal::QuotaExhausted);
+    assert!(
+        matches!(
+            classify(&ExaRestBackend, &mcp, 5, 0),
+            Classified::MoveOn {
+                reason: SkipReason::Quota,
+                cooldown_ms: 3_600_000
+            }
+        ),
+        "MCP isError must consume the fixed quota signal"
+    );
     assert_move(
         failed("http_402", "payment required"),
         None,
         SkipReason::Quota,
         3_600_000,
     );
-    for outcome in [
-        failed("http_403", "redacted"),
-        failed("http_409", "redacted"),
-        failed("mcp_tool_error", "redacted"),
-        TransportOutcome::Completed {
-            response: Some(json!({"isError":true, "content":[]})),
-        },
+    for code in [
+        "http_400",
+        "http_422",
+        "http_429",
+        "http_403",
+        "http_500",
+        "mcp_tool_error",
     ] {
-        assert!(matches!(
-            classify(
-                &ExaRestBackend,
-                &dispatch(outcome, None),
-                QuotaSignal::Exhausted,
-                5,
-                0
+        let mut dispatched = dispatch(failed(code, "redacted"), Some(20));
+        dispatched.error_signal = Some(crate::manifest::ErrorSignal::QuotaExhausted);
+        assert!(
+            matches!(
+                classify(&ExaRestBackend, &dispatched, 5, 0),
+                Classified::MoveOn {
+                    reason: SkipReason::Quota,
+                    cooldown_ms: 3_600_000
+                }
             ),
-            Classified::MoveOn {
-                reason: SkipReason::Quota,
-                cooldown_ms: 3_600_000
-            }
-        ));
-    }
-    for (code, reason) in [
-        ("http_400", None),
-        ("http_422", None),
-        ("http_429", Some(SkipReason::Throttled)),
-        ("http_401", Some(SkipReason::Credential)),
-        ("http_500", Some(SkipReason::Unavailable)),
-    ] {
-        let classified = classify(
-            &ExaRestBackend,
-            &dispatch(failed(code, "redacted"), None),
-            QuotaSignal::Exhausted,
-            5,
-            0,
+            "declared quota must override status and retry"
         );
-        match reason {
-            None => assert!(matches!(classified, Classified::Reject)),
-            Some(expected) => assert!(
-                matches!(classified, Classified::MoveOn { reason, .. } if reason == expected)
+    }
+    for signal in [
+        crate::manifest::ErrorSignal::QuotaExhausted,
+        crate::manifest::ErrorSignal::NoResults,
+        crate::manifest::ErrorSignal::CredentialRejected,
+    ] {
+        let mut dispatched = dispatch(failed("http_401", "redacted"), Some(20));
+        dispatched.error_signal = Some(signal);
+        assert!(
+            matches!(
+                classify(&ExaRestBackend, &dispatched, 5, 0),
+                Classified::MoveOn {
+                    reason: SkipReason::Credential,
+                    cooldown_ms: 60_000
+                }
             ),
-        }
+            "401 must remain a credential failure"
+        );
     }
     assert_move(
         failed("http_403", "quota"),
@@ -181,7 +194,6 @@ fn provider_declared_exhausted_statuses_are_quota() {
     let classified = |backend: &dyn WebSearchBackend, code: &str| match classify(
         backend,
         &dispatch(failed(code, "redacted"), None),
-        QuotaSignal::Absent,
         5,
         0,
     ) {
@@ -220,7 +232,6 @@ fn provider_declared_exhausted_statuses_are_quota() {
         classify(
             &TavilyRestBackend,
             &dispatch(failed("http_400", "redacted"), None),
-            QuotaSignal::Absent,
             5,
             0
         ),
@@ -265,7 +276,6 @@ fn a_declared_exhausted_401_is_still_a_credential_failure() {
     let classified = |code: &str| match classify(
         &DeclaresCredentialStatusExhausted,
         &dispatch(failed(code, "redacted"), None),
-        QuotaSignal::Absent,
         5,
         0,
     ) {

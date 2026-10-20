@@ -357,9 +357,8 @@ fn documented_empty_replies_are_served_empty() {
     }
 }
 
-/// Brave answers a wrong key with 422 too (SUBSCRIPTION_TOKEN_INVALID). Every
-/// 422 is a rejected request whose body is never read, so it stops the walk
-/// without a cooldown and is not reported to the vault.
+/// No official stable bad-key code is declared. An undeclared 422 therefore
+/// remains a rejected request without a cooldown or a vault auth report.
 #[test]
 fn documented_422_replies_reject_without_a_cooldown() {
     for record in ["validation_failed", "token_invalid"] {
@@ -377,26 +376,27 @@ fn documented_422_replies_reject_without_a_cooldown() {
 }
 
 #[test]
-fn documented_rate_and_monthly_quota_limits_are_throttled_for_a_minute() {
-    // Brave documents no Retry-After, so both take the one-minute default.
+fn documented_short_rate_limit_is_throttled_for_a_minute() {
     assert_moved_on("rate_limited", SkipReason::Throttled, 60_000);
-    assert_moved_on("monthly_quota_used", SkipReason::Throttled, 60_000);
 }
 
 #[test]
-fn a_throttled_brave_falls_through_to_the_next_provider() {
+fn documented_monthly_quota_is_skipped_for_an_hour() {
+    assert_moved_on("monthly_quota_used", SkipReason::Quota, 3_600_000);
+}
+
+#[test]
+fn an_exhausted_brave_falls_through_to_the_next_provider() {
     let recorded = recorded_walk("monthly_quota_used", &["brave", "exa"]);
     let response = recorded.result.as_ref().unwrap();
     assert_eq!(
         (response.backend.as_str(), response.results.len()),
         ("exa", 1)
     );
-    assert_eq!(recorded.cooldown(), Some(60_000));
+    assert_eq!(recorded.cooldown(), Some(3_600_000));
     assert_eq!(
         recorded.audit,
-        Some(
-            json!({"served_by": "exa", "skipped": [{"provider": "brave", "reason": "throttled"}]})
-        )
+        Some(json!({"served_by": "exa", "skipped": [{"provider": "brave", "reason": "quota"}]}))
     );
     assert_eq!(
         *recorded.vault.requested.lock().unwrap(),

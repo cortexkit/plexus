@@ -183,6 +183,7 @@ pub mod code_search;
 pub mod consent_card;
 pub mod credentials;
 pub mod decision_plane;
+mod error_signals;
 pub mod event_envelope;
 pub mod event_key;
 pub mod fingerprint;

@@ -851,6 +851,7 @@ pub struct DispatchOutcome {
     pub retryability: Retryability,
     /// Optional vendor retry delay in milliseconds, when the transport supplied one.
     pub retry_after_ms: Option<u64>,
+    pub error_signal: Option<crate::manifest::ErrorSignal>,
     pub outcome: TransportOutcome,
 }
 
@@ -863,6 +864,7 @@ impl DispatchOutcome {
     ) -> Self {
         Self {
             retry_after_ms: None,
+            error_signal: None,
             reconciliation: None,
             reservation_id: reservation.reservation_id.clone(),
             transmission: TransmissionState::NotSent,
@@ -2963,6 +2965,7 @@ where
                             reservation,
                             DispatchOutcome {
                                 retry_after_ms: None,
+                                error_signal: None,
                                 reconciliation: None,
                                 reservation_id: reservation.reservation_id.clone(),
                                 transmission: TransmissionState::NotSent,
@@ -3162,6 +3165,7 @@ where
                 reservation,
                 DispatchOutcome {
                     retry_after_ms: None,
+                    error_signal: None,
                     reservation_id: reservation.reservation_id.clone(),
                     reconciliation: None,
                     transmission: TransmissionState::NotSent,
@@ -3427,6 +3431,7 @@ where
                     reservation,
                     DispatchOutcome {
                         retry_after_ms: response.retry_after_ms,
+                        error_signal: response.error_signal,
                         reconciliation: None,
                         reservation_id: reservation.reservation_id.clone(),
                         transmission: response.transmission,
@@ -3471,6 +3476,7 @@ where
 
         let dispatch = DispatchOutcome {
             retry_after_ms: response.retry_after_ms,
+            error_signal: response.error_signal,
             reconciliation,
             reservation_id: reservation.reservation_id.clone(),
             transmission: response.transmission,

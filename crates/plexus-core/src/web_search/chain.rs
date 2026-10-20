@@ -471,7 +471,6 @@ impl WebSearchService {
                 let results = match outcome::classify(
                     backend.as_ref(),
                     &dispatched,
-                    outcome::QuotaSignal::Absent,
                     usize::from(prepared.query.max_results),
                     crate::storage::now_ms(),
                 ) {

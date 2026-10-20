@@ -68,6 +68,7 @@ pub struct RestConfig {
     pub credential_bindings: Vec<CredentialBinding>,
     /// Declared HTTP operation per action name, from the manifest baseline.
     pub actions: HashMap<String, HttpOperation>,
+    pub error_signals: HashMap<String, Vec<crate::manifest::ErrorSignalRule>>,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     /// How long this connection's pooled entry (its HTTP client and throttle
@@ -91,6 +92,7 @@ impl RestConfig {
             private_endpoint: false,
             credential_bindings: Vec::new(),
             actions: HashMap::new(),
+            error_signals: HashMap::new(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
@@ -115,6 +117,7 @@ impl RestConfig {
             .with_bindings(manifest.credential_bindings.clone())
             .with_actions(actions_from_manifest(manifest));
         config.private_endpoint = manifest.transport.url_from_connection;
+        config.error_signals = crate::error_signals::from_manifest(manifest);
         config
     }
 }
@@ -690,6 +693,11 @@ impl RestTransport {
             prepared_path,
             github_facade,
             config.private_endpoint,
+            config
+                .error_signals
+                .get(&request.action)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
         )
     }
 }
@@ -1152,7 +1160,15 @@ fn classify_response(
     path: &str,
     github_facade: bool,
 ) -> TransportResponse {
-    classify_response_with_privacy(response, throttle_until, method, path, github_facade, false)
+    classify_response_with_privacy(
+        response,
+        throttle_until,
+        method,
+        path,
+        github_facade,
+        false,
+        &[],
+    )
 }
 
 fn classify_response_with_privacy(
@@ -1162,14 +1178,16 @@ fn classify_response_with_privacy(
     path: &str,
     github_facade: bool,
     private_endpoint: bool,
+    signals: &[crate::manifest::ErrorSignalRule],
 ) -> TransportResponse {
     let status = response.status().as_u16();
     let retry_after = response_throttle(status, response.headers());
-    if let Some(delay) = retry_after {
+    if let Some(delay) = retry_after.filter(|_| signals.is_empty()) {
         *throttle_until = throttle_deadline(Instant::now(), delay);
         eprintln!(warn transport: "REST vendor throttle: status={status} retry_after_ms={}", duration_ms(delay));
         return crate::http_support::throttled_response("REST", delay);
     }
+    let headers = response.headers().clone();
     let permissions = accepted_github_permissions(response.headers());
     let location = (!private_endpoint && (300..400).contains(&status))
         .then(|| redirect_location_for_log(response.headers()));
@@ -1208,6 +1226,19 @@ fn classify_response_with_privacy(
         );
     }
     let text = body.text;
+    let signal = if !(200..300).contains(&status) {
+        let parsed = (!body.truncated)
+            .then(|| serde_json::from_str::<Value>(&text).ok())
+            .flatten();
+        crate::error_signals::evaluate(signals, status, &headers, parsed.as_ref())
+    } else {
+        None
+    };
+    if let Some(delay) = retry_after {
+        *throttle_until = throttle_deadline(Instant::now(), delay);
+        eprintln!(warn transport: "REST vendor throttle: status={status} retry_after_ms={}", duration_ms(delay));
+        return crate::http_support::throttled_response("REST", delay).with_error_signal(signal);
+    }
     if !(200..300).contains(&status) && !private_endpoint {
         log_rest_error(method, path, status, &text, permissions.as_deref());
     }
@@ -1230,6 +1261,7 @@ fn classify_response_with_privacy(
             served_from: None,
             observed_at_ms: None,
             retry_after_ms: None,
+            error_signal: signal,
         };
     }
     if !(200..300).contains(&status) {
@@ -1237,16 +1269,18 @@ fn classify_response_with_privacy(
             return TransportResponse::vendor_error(
                 "repository_redirected",
                 "Repository moved or redirected; update its binding before retrying",
-            );
+            )
+            .with_error_signal(signal);
         }
         if status >= 500 {
             return TransportResponse::unknown_with_error(
                 &format!("http_{status}"),
                 "REST gateway response was not definitive",
-            );
+            )
+            .with_error_signal(signal);
         }
-        // A 403 proves the credential authenticated but cannot use this resource,
-        // so it is a terminal vendor failure rather than a credential failure.
+        // Without a reviewed credential signal, treat 403 as a permission refusal
+        // rather than evidence that the credential itself was rejected.
         // Some vendors use 403 for revoked credentials, but such a credential
         // fails every action on its connection and connection health detects it
         // without poisoning the shared credential. Misclassifying a permission
@@ -1265,7 +1299,7 @@ fn classify_response_with_privacy(
                 result.error_message = Some(serde_json::json!({"errors": errors}).to_string());
             }
         }
-        return result;
+        return result.with_error_signal(signal);
     }
     let body = if text.is_empty() {
         Value::Null
@@ -1291,6 +1325,7 @@ fn local_not_sent() -> TransportResponse {
         served_from: None,
         observed_at_ms: None,
         retry_after_ms: None,
+        error_signal: None,
     }
 }
 
@@ -3200,3 +3235,7 @@ mod local_diagnostic_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rest_api/signal_tests.rs"]
+mod signal_tests;
