@@ -17677,3 +17677,131 @@ expect_red = ["web_search::chain::tests::deepseek::a_documented_success_is_serve
 expect_message = "the key travels as a bearer token"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-firecrawl-query-length-utf16"
+guards = "Firecrawl's 500 query limit is counted in UTF-16 code units, so a valid tool query of 251 emoji (502 units) skips Firecrawl without dispatch"
+file = "crates/plexus-core/src/web_search/backend/firecrawl.rs"
+old = "unit: QueryLengthUnit::Utf16CodeUnits,"
+new = "unit: QueryLengthUnit::UnicodeScalars, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/firecrawl/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::firecrawl::tests::capability_skips_a_query_over_500_utf16_code_units"]
+expect_message = "a query over Firecrawl's 500-unit limit must skip"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-firecrawl-capability-result-count"
+guards = "Firecrawl's capability clamps limit to its documented maximum of 100"
+file = "crates/plexus-core/src/web_search/backend/firecrawl.rs"
+old = "max_results: FIRECRAWL_MAX_LIMIT,"
+new = "max_results: u8::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/firecrawl/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::firecrawl::tests::capability_serves_the_whole_tool_envelope_natively"]
+expect_message = "limit is clamped to Firecrawl's maximum of 100"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-firecrawl-capability-domain-count"
+guards = "Firecrawl's capability admits no more domains than the reviewed schema's includeDomains maxItems, so an oversized list skips instead of being refused by schema review"
+file = "crates/plexus-core/src/web_search/backend/firecrawl.rs"
+old = "max_domains: MAX_INCLUDE_DOMAINS,"
+new = "max_domains: usize::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/firecrawl/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::firecrawl::tests::capability_skips_more_domains_than_the_reviewed_schema_takes"]
+expect_message = "more domains than the reviewed schema takes must skip"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-firecrawl-include-domains"
+guards = "Every requested domain reaches Firecrawl in includeDomains; dropping them would silently widen the search"
+file = "crates/plexus-core/src/web_search/backend/firecrawl.rs"
+old = "args[\"includeDomains\"] = json!(query.include_domains);"
+new = "let _ = &query.include_domains; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/firecrawl/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::firecrawl::tests::vendor_args_use_firecrawls_documented_field_names"]
+expect_message = "a filtered search maps every filter to Firecrawl's documented fields"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-firecrawl-tbs-recency"
+guards = "A recency window reaches Firecrawl as its tbs time filter; dropping it would return results of any age"
+file = "crates/plexus-core/src/web_search/backend/firecrawl.rs"
+old = "args[\"tbs\"] = Value::String(tbs(recency).to_string());"
+new = "let _ = tbs(recency); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/firecrawl/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::firecrawl::tests::vendor_args_use_firecrawls_documented_field_names"]
+expect_message = "a filtered search maps every filter to Firecrawl's documented fields"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-firecrawl-web-source"
+guards = "Firecrawl is asked for web results only, the data.web section the backend reads"
+file = "crates/plexus-core/src/web_search/backend/firecrawl.rs"
+old = "\"sources\": [{\"type\": \"web\"}],"
+new = "\"sources\": [{\"type\": \"news\"}], /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/firecrawl/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::firecrawl::tests::vendor_args_use_firecrawls_documented_field_names"]
+expect_message = "a filtered search maps every filter to Firecrawl's documented fields"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-firecrawl-missing-web-is-empty"
+guards = "A successful Firecrawl reply whose data object has no web section is an empty result, served without failover, not a shape error"
+file = "crates/plexus-core/src/web_search/backend/firecrawl.rs"
+old = "None => Ok(&[]),"
+new = "None => Err(ReplyShapeError(String::new())), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/firecrawl/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::firecrawl::tests::a_reply_without_web_results_is_an_empty_success"]
+expect_message = "a data object without web results found nothing"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-firecrawl-bearer-authorization"
+guards = "The shipped Firecrawl manifest sends the key as Authorization: Bearer <key>, the authentication scheme Firecrawl documents for its API"
+file = "catalog/firecrawl_rest.jsonc"
+old = "\"prefix\": \"Bearer \","
+new = "\"prefix\": \"\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/firecrawl.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::firecrawl::a_documented_success_is_served_from_a_bearer_post_to_v2_search"]
+expect_message = "the key travels as a bearer token"
+build_timeout_s = 3600
+timeout_s = 120
