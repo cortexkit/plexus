@@ -49,7 +49,8 @@ use crate::transport::Transport;
 
 pub use backend::{
     BraveRestBackend, DeepSeekRestBackend, ExaRestBackend, FirecrawlRestBackend, JinaRestBackend,
-    KagiRestBackend, TavilyRestBackend, WebSearchBackend, WebSearchResult, EXCERPT_MAX_CHARS,
+    KagiRestBackend, KimiRestBackend, TavilyRestBackend, WebSearchBackend, WebSearchResult,
+    EXCERPT_MAX_CHARS,
 };
 pub use cache::{CacheKey, ResultCache, CACHE_CAPACITY, CACHE_TTL_MS};
 pub use chain::{ProviderSkip, SkipReason, WEB_SEARCH_ATTEMPT_BOUND, WEB_SEARCH_CHAIN_DEADLINE};
@@ -177,6 +178,7 @@ pub fn registered_backend(provider: &providers::ProviderName) -> Option<Arc<dyn 
         "firecrawl" => Some(Arc::new(FirecrawlRestBackend)),
         "jina" => Some(Arc::new(JinaRestBackend)),
         "kagi" => Some(Arc::new(KagiRestBackend)),
+        "kimi" => Some(Arc::new(KimiRestBackend)),
         _ => None,
     }
 }

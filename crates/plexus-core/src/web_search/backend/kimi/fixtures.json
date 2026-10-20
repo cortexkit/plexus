@@ -1,0 +1,63 @@
+{
+  "_source": "Built from Kimi's own documentation and client (read 2026-10-20). The request and reply shapes are those of Kimi's CLI SearchWeb tool (https://github.com/MoonshotAI/kimi-cli, src/kimi_cli/tools/web/search.py), which posts to https://api.kimi.com/coding/v1/search, and of Kimi API Platform's Web Search Basic reference (https://platform.kimi.ai/docs/api/tools-search), which documents the same schema and the error statuses. The first success item is the reference's documented response example verbatim; the second is built from the same schema with the empty date and empty text the reference says unknown fields carry. empty is the documented 'empty array when nothing matches'. malformed is a 200 without search_results, which the reference marks required. Error bodies use the documented ErrorResponse envelope ({error: {message, type}}) with each status's documented type and typical message; 401 and 403 are documented as status codes with no error body. The 429 record carries the documented X-RateLimit-Limit, X-RateLimit-Remaining and X-RateLimit-Reset headers and no Retry-After; rate_limited_retry is illustrative (no Retry-After is documented) and checks that one is honoured if sent.",
+  "success": {
+    "status": 200,
+    "headers": "X-Msh-Track-Id: 3f2b7c1e9a\r\nX-Msh-Chat-Id: toolgw-3f2b7c1e9a\r\n",
+    "body": "{\"search_results\": [{\"authority\": \"S\", \"date\": \"2026-06-01\", \"icon\": \"https://platform.kimi.ai/favicon.ico\", \"mime\": \"text/html\", \"site_name\": \"Kimi API Open Platform\", \"snippet\": \"Documentation entry of the Kimi API open platform.\", \"text\": \"\", \"title\": \"API Overview - Kimi API Open Platform\", \"url\": \"https://platform.kimi.ai/docs/api/overview\"}, {\"authority\": \"A\", \"date\": \"\", \"icon\": \"\", \"mime\": \"text/html\", \"site_name\": \"GitHub\", \"snippet\": \"Kimi Code CLI is an AI agent that runs in the terminal.\", \"text\": \"\", \"title\": \"MoonshotAI/kimi-cli - GitHub\", \"url\": \"https://github.com/MoonshotAI/kimi-cli\"}]}"
+  },
+  "empty": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"search_results\": []}"
+  },
+  "malformed": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"results\": [{\"title\": \"API Overview - Kimi API Open Platform\", \"url\": \"https://platform.kimi.ai/docs/api/overview\"}]}"
+  },
+  "bad_request": {
+    "status": 400,
+    "headers": "",
+    "body": "{\"error\": {\"message\": \"limit must be between 1 and 20\", \"type\": \"invalid_request\"}}"
+  },
+  "unauthorized": {
+    "status": 401,
+    "headers": "",
+    "body": ""
+  },
+  "forbidden": {
+    "status": 403,
+    "headers": "",
+    "body": ""
+  },
+  "client_canceled": {
+    "status": 408,
+    "headers": "",
+    "body": "{\"error\": {\"message\": \"client canceled the request\", \"type\": \"client_canceled\"}}"
+  },
+  "rate_limited": {
+    "status": 429,
+    "headers": "X-RateLimit-Limit: 5\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1790596801\r\n",
+    "body": "{\"error\": {\"message\": \"project qps limit exceeded\", \"type\": \"rate_limited\"}}"
+  },
+  "rate_limited_retry": {
+    "status": 429,
+    "headers": "Retry-After: 7\r\n",
+    "body": "{\"error\": {\"message\": \"rate limit store unavailable\", \"type\": \"rate_limit_unavailable\"}}"
+  },
+  "server_error": {
+    "status": 500,
+    "headers": "",
+    "body": "{\"error\": {\"message\": \"internal error\", \"type\": \"internal_error\"}}"
+  },
+  "upstream_failed": {
+    "status": 502,
+    "headers": "",
+    "body": "{\"error\": {\"message\": \"upstream service failed\", \"type\": \"upstream_failed\"}}"
+  },
+  "timeout": {
+    "status": 504,
+    "headers": "",
+    "body": "{\"error\": {\"message\": \"request timeout\", \"type\": \"timeout\"}}"
+  }
+}

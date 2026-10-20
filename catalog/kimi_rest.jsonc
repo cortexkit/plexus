@@ -1,0 +1,136 @@
+// Kimi Code web search REST (api.kimi.com/coding/v1/search): the `kimi`
+// provider of the web_search chain.
+//
+// Search only, and only the API-key path. Kimi's login-session (OAuth) path
+// is out of scope, and Kimi's chat completions endpoint is never declared. The
+// search endpoint returns result links, so this provider is built.
+//
+// Wire contract pinned from Kimi's own documentation and its own client
+// (read 2026-10-20):
+// - the Kimi Code CLI configuration reference,
+//   https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files.html
+//   ("Complete example" and "services"): the built-in web search service
+//   `moonshot_search` has `base_url = "https://api.kimi.com/coding/v1/search"`
+//   and an `api_key`;
+// - Kimi's official CLI, https://github.com/MoonshotAI/kimi-cli:
+//   src/kimi_cli/tools/web/search.py (the SearchWeb tool: request, headers,
+//   Params with limit 1 to 20, the Response and SearchResult models) and
+//   src/kimi_cli/ui/shell/setup.py (the Kimi Code platform's API key is
+//   written as the moonshot_search api_key);
+// - Kimi API Platform's "Web Search Basic" reference,
+//   https://platform.kimi.ai/docs/api/tools-search, which documents the same
+//   request and reply schema (text_query, limit 1 to 20, search_results[])
+//   and its error statuses for the Moonshot platform's endpoint
+//   POST https://api.moonshot.ai/v1/tools/search. The Kimi Code endpoint has
+//   no reference page of its own, so its error statuses are read from there.
+//
+// - method and path: POST https://api.kimi.com/coding/v1/search with a JSON
+//   body. The transport URL is the host and the path carries
+//   /coding/v1/search;
+// - auth: `Authorization: Bearer <key>` (search.py sends
+//   "Authorization": f"Bearer {api_key}"; the platform reference's security
+//   scheme is http bearer). The key is the Kimi Code console API key, the one
+//   Kimi's CLI configures for this endpoint. The connection is bound to the
+//   vault credential `apikey:kimi-for-coding`; plexus reads it by name at
+//   dispatch and never stores it;
+// - request fields used: `text_query` (required, "must not be empty"; no
+//   maximum length documented) and `limit` (1 to 20, default 5). Kimi's CLI
+//   also sends `enable_page_crawling` and `timeout_seconds`, and the
+//   platform reference lists `include_content` and `timeout_seconds`; none
+//   are sent and they are not in the reviewed schema, so the vendor's own
+//   defaults apply (no page content). No domain filter and no date filter is
+//   documented;
+// - reply: {search_results: [...]}, "an empty array when nothing matches".
+//   Each item's `title`, `url`, `snippet` and `date` (the platform example
+//   shows "2026-06-01") are read. `site_name`, `authority`, `icon`, `mime`
+//   and the page text (`text`, or `content` in the CLI's model) are never
+//   read. The platform reference returns string fields as "" when it has no
+//   data;
+// - errors (platform reference): 400 invalid_request (bad body, missing
+//   text_query, limit out of range), 401 with no body (missing or invalid
+//   key), 403 with no body (account inactive or suspended), 408
+//   client_canceled, 429 rate_limited or rate_limit_unavailable (with
+//   X-RateLimit-Limit, X-RateLimit-Remaining and sometimes X-RateLimit-Reset
+//   headers, no Retry-After), 500 internal_error, 502 upstream_failed and
+//   504 timeout. No 402 is documented.
+//
+// Differences from the provider facts the web_search chain design started from
+// (POST https://api.kimi.com/coding/v1/search; bearer, Moonshot search key;
+// text_query and limit, max 20; search_results[].title, url, snippet, date):
+// - credential: the key is a Kimi Code console key, bound as
+//   `apikey:kimi-for-coding`, not a Moonshot platform key under `apikey:kimi`.
+//   This is the vault name agreed with the vault's owners, and it matches the
+//   key Kimi's own CLI sends to this endpoint. A Moonshot platform key belongs
+//   to the separate api.moonshot.ai/v1/tools/search endpoint, which is not
+//   declared;
+// - domains and recency: Kimi documents neither a domain nor a date filter,
+//   and no query operator for either, so a search that asks for domains or a
+//   recency window skips Kimi for capability instead of being answered with
+//   results from any site or of any age;
+// - query length: none is documented, so the tool's own 500-character limit
+//   applies;
+// - a publication date is reported from `date` only when it parses as a date;
+//   an empty `date` reports none;
+// - outcome classification: 400 is a rejected request; 401 is a credential
+//   failure; 429 (rate or concurrency limit) is throttled for 60 seconds,
+//   since no Retry-After is documented; 403, 408, 500, 502 and 504 are
+//   unavailable for 60 seconds. Kimi documents no status for a used-up plan
+//   quota, so no reply is classified as quota;
+// - Kimi's CLI also sends its own User-Agent and an X-Msh-Tool-Call-Id header.
+//   Neither is documented as required, and this manifest sends neither.
+//
+// The search action is read-risk and has no side effects, so a retry is safe.
+{
+  "schema_version": 1,
+  "key": "kimi_rest",
+  "name": "Kimi Code Search (REST)",
+  "description": "Web search over Kimi Code's search API (api.kimi.com/coding/v1/search), as a provider for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Small JSON REST API with static API-key bearer auth, used by Kimi's own CLI; a search mutates no vendor-side state, so it maps to a read grant.",
+  "tier": "S1",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://api.kimi.com"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/coding/v1/search",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "text_query": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 20 }
+          },
+          "required": ["text_query"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

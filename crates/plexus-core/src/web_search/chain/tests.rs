@@ -11,6 +11,7 @@ mod deepseek;
 mod firecrawl;
 mod jina;
 mod kagi;
+mod kimi;
 mod outcomes;
 mod tavily;
 
