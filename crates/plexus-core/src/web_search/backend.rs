@@ -13,8 +13,10 @@ use super::query::WebSearchQuery;
 use crate::poller::iso8601;
 
 mod brave;
+mod deepseek;
 mod tavily;
 pub use brave::{BraveRestBackend, BRAVE_MAX_COUNT, BRAVE_MAX_QUERY_CHARS, BRAVE_MAX_QUERY_WORDS};
+pub use deepseek::{DeepSeekRestBackend, DEEPSEEK_MAX_COUNT, DEEPSEEK_MAX_QUERY_CHARS};
 pub use tavily::{TavilyRestBackend, TAVILY_MAX_INCLUDE_DOMAINS, TAVILY_MAX_RESULTS};
 
 /// Longest excerpt returned per result, in characters.

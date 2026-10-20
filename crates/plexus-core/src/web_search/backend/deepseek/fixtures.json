@@ -1,0 +1,53 @@
+{
+  "_source": "Built from DeepSeek's Search API reference (https://api-docs.deepseek.com/api/search/) and Search & Fetch guide (https://api-docs.deepseek.com/guides/search/). The success body is the reference's populated example result, followed by a second result with a null date and an empty summary, built from the same schema. The empty body is the documented no-match reply (an empty results array); the malformed body drops results. Error bodies use the documented OpenAI-compatible error object (message, type, param null, code); the guide publishes one such example (the 400 one here), so the messages and types of the other statuses are illustrative. No Retry-After header is documented.",
+  "success": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"results\":[{\"rerank_score\":2.4,\"title\":\"DeepSeek V4 model released\",\"url\":\"https://example.com/deepseek-v4\",\"snippet\":\"DeepSeek V4 is now available, with tool calling and long-context support.\",\"summary\":\"DeepSeek has released the V4 model. The release adds improved tool calling and long-context support for agent workflows.\",\"content\":\"\",\"site_name\":\"Example News\",\"site_icon\":\"https://example.com/favicon.ico\",\"date\":\"2026-06-01T00:00:00+00:00\",\"authority\":3},{\"rerank_score\":1.1,\"title\":\"DeepSeek on GitHub\",\"url\":\"https://github.com/deepseek-ai\",\"snippet\":\"DeepSeek's open-source repositories.\",\"summary\":\"\",\"content\":\"\",\"site_name\":null,\"site_icon\":null,\"date\":null,\"authority\":-1}]}"
+  },
+  "empty": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"results\":[]}"
+  },
+  "malformed": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"data\":[{\"title\":\"DeepSeek V4 model released\",\"url\":\"https://example.com/deepseek-v4\"}]}"
+  },
+  "bad_request": {
+    "status": 400,
+    "headers": "",
+    "body": "{\"error\":{\"message\":\"'count' must be between 1 and 50\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_request_error\"}}"
+  },
+  "unauthorized": {
+    "status": 401,
+    "headers": "",
+    "body": "{\"error\":{\"message\":\"Authentication Fails, Your api key is invalid\",\"type\":\"authentication_error\",\"param\":null,\"code\":\"invalid_request_error\"}}"
+  },
+  "insufficient_balance": {
+    "status": 402,
+    "headers": "",
+    "body": "{\"error\":{\"message\":\"Insufficient Balance\",\"type\":\"unknown_error\",\"param\":null,\"code\":\"invalid_request_error\"}}"
+  },
+  "request_timeout": {
+    "status": 408,
+    "headers": "",
+    "body": "{\"error\":{\"message\":\"Request body read timed out\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_request_error\"}}"
+  },
+  "qps_exceeded": {
+    "status": 429,
+    "headers": "",
+    "body": "{\"error\":{\"message\":\"Rate limit reached for search QPS\",\"type\":\"rate_limit_error\",\"param\":null,\"code\":\"rate_limit_error\"}}"
+  },
+  "server_error": {
+    "status": 500,
+    "headers": "",
+    "body": "{\"error\":{\"message\":\"Internal server error\",\"type\":\"server_error\",\"param\":null,\"code\":\"server_error\"}}"
+  },
+  "gateway_timeout": {
+    "status": 504,
+    "headers": "",
+    "body": "{\"error\":{\"message\":\"Downstream request timed out\",\"type\":\"server_error\",\"param\":null,\"code\":\"server_error\"}}"
+  }
+}

@@ -7,6 +7,7 @@ mod allowance;
 mod brave;
 mod cache;
 mod deadline;
+mod deepseek;
 mod outcomes;
 mod tavily;
 

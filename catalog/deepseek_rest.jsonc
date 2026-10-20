@@ -1,0 +1,112 @@
+// DeepSeek Search REST: the `deepseek` provider of the web_search chain.
+//
+// Wire contract pinned from DeepSeek's own documentation (read 2026-10-20):
+// - Search & Fetch guide, https://api-docs.deepseek.com/guides/search/;
+// - Search API reference, https://api-docs.deepseek.com/api/search/.
+//
+// - method and path: POST /v1/tools/search on https://api.deepseek.com, with
+//   a JSON body;
+// - auth: the same bearer authentication as the rest of the DeepSeek API,
+//   "Authorization: Bearer <DeepSeek API Key>", so the key goes in
+//   `Authorization` with the `Bearer ` prefix. The connection is bound to the
+//   vault credential `apikey:deepseek`; plexus reads it by name at dispatch
+//   and never stores it;
+// - request fields: `query` (required; "Must contain 1 to 128 Unicode
+//   characters and cannot be all whitespace"; supports operators) and `count`
+//   (1 to 50, default 10). The reference also documents `ori_question`,
+//   `localization` and `need_content`; web_search sends none of them, and
+//   they are not in the reviewed schema;
+// - operators inside `query`: `site:` ("Multiple sites can be joined with
+//   OR": `DeepSeek site:github.com OR site:huggingface.co`) and `after:`
+//   (`DeepSeek after:2025` or `DeepSeek after:2025-01-01`), combined by
+//   appending them to the terms, as in the guide's example
+//   "DeepSeek site:github.com OR site:huggingface.co lang:en after:2025". No
+//   grouping with parentheses is documented, so none is sent;
+// - reply: `results[]` (empty when nothing matches), each with `title`,
+//   `url`, `snippet`, `summary`, `content` (empty unless need_content),
+//   `site_name`, `site_icon`, `rerank_score`, `authority` and `date`
+//   ("publication time in UTC using RFC 3339, or null when unknown");
+// - documented errors, in the OpenAI-compatible error object
+//   (error.message, type, param, code): 400 invalid request, 401 missing or
+//   invalid key, 402 insufficient balance, 408 request-body read timed out,
+//   413 body too large, 429 QPS limit exceeded (100 per account for Search),
+//   500 internal error and 504 downstream timeout. 403 and 404 are documented
+//   for Fetch only. No Retry-After header is documented;
+// - billing: per successful request, where a Search request counts only when
+//   it returns HTTP 200 with a non-empty `results` array.
+//
+// Differences from the provider facts the web_search chain design started from
+// (Bearer auth; query of 1 to 128 characters and count of 1 to 50; domains as
+// site:a OR site:b; recency as after:YYYY-MM-DD; results[].title, url,
+// summary and date, RFC 3339 or null; 402 balance, 429 QPS):
+// - none in the wire contract itself. The guide also documents `before:`,
+//   `lang:` and exclusion operators, which web_search does not use;
+// - the guide does not say whether operators count toward the 128-character
+//   limit. DeepSeekRestBackend checks the limit on the final query, operators
+//   included, so a long query with domains or a recency window skips DeepSeek
+//   as a capability mismatch instead of being sent or cut short;
+// - the guide does not say whether `after:` includes the named day. The bound
+//   sent is the UTC day the recency window starts on (a week back for
+//   "week"), so at worst results from that first day are left out;
+// - a result whose `summary` is empty takes its `snippet` as the excerpt;
+// - with no Retry-After, a 429 is throttled with the 60-second default
+//   cooldown; a 402 is a quota skip with the one-hour cooldown. 408 and 413
+//   are other client errors: unavailable for 60 seconds.
+//
+// The search action is read-risk and has no side effects, so a retry is safe.
+// No other DeepSeek endpoint is declared: web_search needs only search, and
+// page fetching is out of scope.
+{
+  "schema_version": 1,
+  "key": "deepseek_rest",
+  "name": "DeepSeek Search (REST)",
+  "description": "Web search over DeepSeek's Search API, as a provider for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Documented REST API with a published reference and static API-key bearer auth; search mutates no vendor-side state, so it maps to a read grant.",
+  "tier": "S1",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://api.deepseek.com"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/v1/tools/search",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "count": { "type": "integer", "minimum": 1, "maximum": 50 }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}
