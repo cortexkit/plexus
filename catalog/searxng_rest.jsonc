@@ -1,0 +1,60 @@
+// SearXNG JSON Search API (official contract read 2026-10-20):
+// https://docs.searxng.org/dev/search_api.html
+// https://docs.searxng.org/dev/result_types/main/mainresult.html
+// https://docs.searxng.org/admin/settings/settings_search.html (language choices)
+// GET <connection instance>/search with format=json, q, language=all and optional
+// time_range=day|month|year. JSON must be enabled by the instance administrator;
+// a disabled format returns 403. No request body or vendor count field is sent.
+// Results map title, url, content and optional publishedDate, with local count
+// and excerpt bounds. An empty results array is a served empty search.
+//
+// The operator supplies --instance-url when issuing the connection ticket, never
+// in this manifest or agent-facing connect arguments. Connect copies the ticket's
+// address onto the connection. HTTPS is allowed; HTTP is loopback-only after URL parsing.
+// Inline credentials, query strings and fragments are refused. No auth or the
+// vault reference apikey:searxng is supported (Authorization: Bearer). Basic auth
+// is deliberately unsupported. The instance address is private diagnostic data.
+//
+// SearXNG documents no query or count maximum: use the tool's local 500-character
+// and 20-result bounds. Engine-specific site: filters are not guaranteed, so
+// domain requests skip this provider. The API has no week time_range; a week
+// request also skips rather than silently broadening its publication window.
+{
+  "schema_version": 1,
+  "key": "searxng_rest",
+  "name": "SearXNG Search (REST)",
+  "description": "Operator-hosted SearXNG JSON search for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Documented GET JSON search API; the operator chooses the instance per connection.",
+  "tier": "S1",
+  "transport": { "kind": "rest_api", "url_from_connection": true },
+  "auth": { "mode": "optional_api_key" },
+  "credential_bindings": [
+    { "ref_role": "api_key", "placement": "header", "key": "Authorization", "prefix": "Bearer ", "required": true }
+  ],
+  "resource_filters": { "required": [], "optional": [], "write_enabling": [] },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/search",
+        "parameters": "query",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "q": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "format": { "type": "string", "enum": ["json"] },
+            "language": { "type": "string", "enum": ["all"] },
+            "time_range": { "type": "string", "enum": ["day", "month", "year"] }
+          },
+          "required": ["q", "format", "language"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": { "ask_first_risk": ["write", "destructive"], "rate_limit": { "calls_per_min": 30 } },
+  "availability": "ga"
+}

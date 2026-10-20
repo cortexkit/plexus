@@ -3212,6 +3212,14 @@ fn facade_connections_connect(call: &FacadeArguments<'_>) -> Result<Value, Modul
     let arguments = call.arguments;
     let principal_key = call.principal_key;
     Ok({
+        // The destination is approved on the operator's ticket. Accepting it
+        // here would let a ticket holder redirect the bound bearer key.
+        if arguments.contains_key("instance_url") {
+            return Ok(
+                json!({"error":{"code":"argument_undeclared", "field":"instance_url",
+                "message":"argument_undeclared{field: instance_url}", "transmission":"not_sent"}}),
+            );
+        }
         let Some(ticket_id) = arguments.get("ticket_id").and_then(Value::as_str) else {
             return Ok(
                 json!({"error": {"code": "invalid_request", "message": "connect requires ticket_id"}}),
@@ -5681,6 +5689,111 @@ mod tests {
     use super::*;
     use subc_protocol::session::ModuleControlRequest;
     use subc_protocol::{BindIdentity, RouteTarget};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn searxng_connect_stores_private_instance_and_allows_anonymous_or_named_bearer() {
+        let (_scratch, store, state) = two_connection_fixture("searxng-connect");
+        let manifest = plexus_core::ingest_value(
+            serde_json::from_str(
+                &subc_jsonc::jsonc_to_json(include_str!("../../../catalog/searxng_rest.jsonc"))
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        store.upsert_manifest("system", &manifest).unwrap();
+        let address = "https://private-instance-canary.invalid/secret-instance-path";
+        for bearer in [false, true] {
+            let id = format!("searxng-{bearer}");
+            let mut params =
+                json!({"app_key":"searxng_rest", "connection_id":id, "instance_url":address});
+            if bearer {
+                params["credential_id"] = json!("apikey:searxng");
+            }
+            for invalid in [
+                Value::Null,
+                json!("http://localhost:80@evil.invalid"),
+                json!("https://user:password@private-instance-canary.invalid"),
+            ] {
+                let mut bad = params.clone();
+                bad["instance_url"] = invalid;
+                let refused = ceremony::issue_ticket(&state, "direct", &bad);
+                assert_eq!(refused["error"]["code"], "invalid_request");
+                assert!(store.connection("direct", &id).unwrap().is_none());
+                assert!(!refused.to_string().contains("private-instance-canary"));
+                assert!(!refused.to_string().contains("evil.invalid"));
+            }
+            let issue = ceremony::issue_ticket(&state, "direct", &params);
+            let ticket = issue["result"]["ticket_id"]
+                .as_str()
+                .expect("SearXNG enrollment");
+            assert!(store
+                .connection("direct", &id)
+                .unwrap()
+                .unwrap()
+                .instance_url
+                .is_none());
+            assert!(!issue.to_string().contains("private-instance-canary"));
+            let invoke = |args: &Value| {
+                facade_connections_connect(&FacadeArguments {
+                    state: &state,
+                    arguments: args.as_object().unwrap(),
+                    principal_key: "direct",
+                    op: Some("connect"),
+                })
+                .unwrap()
+            };
+            let refused =
+                invoke(&json!({"ticket_id":ticket,"instance_url":"https://attacker.invalid"}));
+            assert_eq!(refused["error"]["code"], "argument_undeclared");
+            assert_eq!(refused["error"]["field"], "instance_url");
+            assert_eq!(
+                store.connection("direct", &id).unwrap().unwrap().status,
+                "pending"
+            );
+            let reply = invoke(&json!({"ticket_id":ticket}));
+            assert_eq!(reply["result"]["discovery"], "complete", "{reply}");
+            assert!(!reply.to_string().contains("private-instance-canary"));
+            let record = store.connection("direct", &id).unwrap().unwrap();
+            assert_eq!(record.instance_url.as_ref().unwrap().as_str(), address);
+            assert_eq!(record.has_credential_binding, bearer);
+        }
+        for params in [
+            json!({"app_key":"searxng_rest","credential_id":"apikey:other","instance_url":address}),
+            json!({"app_key":"exa_rest","credential_id":"apikey:exa","instance_url":address}),
+        ] {
+            let rejected = ceremony::issue_ticket(&state, "direct", &params);
+            assert_eq!(rejected["error"]["code"], "invalid_request");
+        }
+        store.set_web_search_order(&["searxng".into()]).unwrap();
+        refresh_store_health(&state, &health_probe_principals(&state));
+        let health = serde_json::to_value(connector_home_health(&state))
+            .unwrap()
+            .to_string();
+        assert!(health.contains("searxng"));
+        assert!(!health.contains("private-instance-canary"));
+        assert!(!health.contains("secret-instance-path"));
+    }
+
+    #[test]
+    fn searxng_connections_schema_digest_stays_unchanged_and_excludes_instance_url() {
+        let module = manifest::build("plexus");
+        let subc_protocol::manifest::ProviderRole::ToolProvider { tools, .. } = &module.provides[0]
+        else {
+            panic!("tool provider")
+        };
+        let schema = &tools
+            .iter()
+            .find(|tool| tool.name == manifest::CONNECTIONS_TOOL)
+            .unwrap()
+            .schema;
+        assert_eq!(
+            plexus_core::jcs_sha256(schema).unwrap(),
+            "sha256:bb9507643e8d6c3c7c45cce4699c7baa12311b8523b1b0fa04af676ae6cce895"
+        );
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(schema["properties"].get("instance_url").is_none());
+    }
 
     #[tokio::test]
     async fn undecodable_control_bind_refuses_only_that_request_and_loop_survives() {

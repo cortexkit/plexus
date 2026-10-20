@@ -16,6 +16,7 @@ mod ollama;
 mod outcomes;
 mod parallel;
 mod perplexity;
+mod searxng;
 mod synthetic;
 mod tavily;
 mod tinyfish;
@@ -93,8 +94,16 @@ fn add_connection(engine: &Engine, id: &str, provider: &str, caller: Option<&str
             &json!({"required": [], "optional": [], "write_enabling": []}),
         )
         .unwrap();
+    let instance = (provider == "searxng")
+        .then(|| crate::instance_url::InstanceUrl::parse("https://fixture.invalid/").unwrap());
     let ticket = store
-        .create_binding_ticket("direct", id, b"test:search")
+        .create_binding_ticket_with_instance(
+            "direct",
+            id,
+            "credential_reference",
+            b"test:search",
+            instance.as_ref(),
+        )
         .unwrap();
     store
         .connect_with_ticket("direct", &ticket.ticket_id)

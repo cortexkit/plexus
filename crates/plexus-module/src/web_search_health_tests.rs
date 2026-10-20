@@ -69,8 +69,16 @@ fn add_owned_connection(
     store
         .insert_connection(owner, connection_id, app_key, "pending", &resource_filters)
         .unwrap();
+    let instance = (app_key == "searxng_rest")
+        .then(|| plexus_core::instance_url::InstanceUrl::parse(INSTANCE).unwrap());
     let ticket = store
-        .create_binding_ticket(owner, connection_id, HANDLE)
+        .create_binding_ticket_with_instance(
+            owner,
+            connection_id,
+            "credential_reference",
+            HANDLE,
+            instance.as_ref(),
+        )
         .unwrap();
     store
         .connect_with_ticket(owner, &ticket.ticket_id)

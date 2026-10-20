@@ -50,8 +50,8 @@ use crate::transport::Transport;
 pub use backend::{
     BraveRestBackend, DeepSeekRestBackend, ExaRestBackend, FirecrawlRestBackend, JinaRestBackend,
     KagiRestBackend, KimiRestBackend, OllamaRestBackend, ParallelRestBackend,
-    PerplexityRestBackend, SyntheticRestBackend, TavilyRestBackend, TinyFishRestBackend,
-    WebSearchBackend, WebSearchResult, EXCERPT_MAX_CHARS,
+    PerplexityRestBackend, SearxngRestBackend, SyntheticRestBackend, TavilyRestBackend,
+    TinyFishRestBackend, WebSearchBackend, WebSearchResult, EXCERPT_MAX_CHARS,
 };
 pub use cache::{CacheKey, ResultCache, CACHE_CAPACITY, CACHE_TTL_MS};
 pub use chain::{ProviderSkip, SkipReason, WEB_SEARCH_ATTEMPT_BOUND, WEB_SEARCH_CHAIN_DEADLINE};
@@ -185,6 +185,7 @@ pub fn registered_backend(provider: &providers::ProviderName) -> Option<Arc<dyn 
         "perplexity" => Some(Arc::new(PerplexityRestBackend)),
         "synthetic" => Some(Arc::new(SyntheticRestBackend)),
         "tinyfish" => Some(Arc::new(TinyFishRestBackend)),
+        "searxng" => Some(Arc::new(SearxngRestBackend)),
         _ => None,
     }
 }

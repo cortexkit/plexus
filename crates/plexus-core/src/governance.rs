@@ -4305,18 +4305,23 @@ where
     /// permanently uncallable, and the reverse calls a credentialed vendor
     /// anonymously.
     ///
-    /// Only the vendor's REVIEWED MANIFEST may waive the credential. Deciding
-    /// from the connection's own state instead — say, from the absence of a
-    /// stored binding — would turn a credential failure into anonymous access,
-    /// which is the difference between "this vendor needs nothing" and "this
-    /// connection lost its credential". Because the waiver is only reachable
-    /// through the manifest arm below, a caller cannot open that door by
-    /// mistake.
+    /// Only the vendor's REVIEWED MANIFEST may waive the credential. A missing
+    /// binding alone never permits anonymous access: the manifest must declare
+    /// no auth or an optional key. If an optional key is bound, it must resolve;
+    /// a vault failure must not silently downgrade that connection to anonymous.
     fn credential_material(
         &self,
         connection: &ConnectionRecord,
     ) -> Result<CredentialMaterial, CredentialDenial> {
         if self.manifest_is_credential_free(&connection.app_key) {
+            return Ok(CredentialMaterial::Waived);
+        }
+        if !connection.has_credential_binding
+            && self
+                .store
+                .manifest_has_optional_credential(&connection.app_key)
+                .unwrap_or(false)
+        {
             return Ok(CredentialMaterial::Waived);
         }
         if let Some(seams) = &self.seams {

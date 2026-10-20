@@ -1,0 +1,18 @@
+{
+  "success": {"status":200,"headers":"","body":"{\"query\":\"weather\",\"results\":[{\"title\":\"Weather report\",\"url\":\"https://example.org/weather\",\"content\":\"Forecast summary\",\"publishedDate\":\"2026-10-19T12:30:00Z\"}]}"},
+  "empty": {"status":200,"headers":"","body":"{\"query\":\"weather\",\"results\":[]}"},
+  "bad_request": {"status":400,"headers":"","body":"invalid query"},
+  "unprocessable": {"status":422,"headers":"","body":"invalid parameters"},
+  "payment_required": {"status":402,"headers":"","body":"quota"},
+  "unauthorized": {"status":401,"headers":"","body":"unauthorized"},
+  "forbidden": {"status":403,"headers":"","body":"JSON output disabled"},
+  "not_found": {"status":404,"headers":"","body":"not found"},
+  "rate_limited": {"status":429,"headers":"","body":"too many requests"},
+  "rate_limited_retry": {"status":429,"headers":"Retry-After: 7\r\n","body":"too many requests"},
+  "server_error": {"status":500,"headers":"","body":"internal error"},
+  "malformed": {"status":200,"headers":"","body":"{\"error\":\"not results\"}"},
+  "invalid_json": {"status":200,"headers":"","body":"not JSON"},
+  "no_body": {"status":200,"headers":"","body":""},
+  "capability_skip": {"include_domains":["example.org"],"reason":"capability"},
+  "local_outcomes": ["not_sent","not_sent_retry","outcome_unknown","timeout","completed_without_body"]
+}

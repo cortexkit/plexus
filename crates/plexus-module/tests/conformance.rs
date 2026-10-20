@@ -2008,9 +2008,10 @@ async fn every_shipped_manifest_is_reachable_through_the_operator_ceremony() {
         let value: Value = serde_json::from_str(&normalized).expect("parse shipped JSON");
         let ingested = ingest_value(value).expect("ingest shipped manifest");
         let app_key = ingested.manifest.key;
+        // SearXNG permits anonymous enrollment, not the synthetic totality credential.
         let credential_free = matches!(
             ingested.manifest.auth.mode,
-            plexus_core::manifest::AuthMode::None
+            plexus_core::manifest::AuthMode::None | plexus_core::manifest::AuthMode::OptionalApiKey
         );
         let binary = admin_binary.clone();
         let connection_file = daemon.connection_file_path.clone();
@@ -2027,6 +2028,11 @@ async fn every_shipped_manifest_is_reachable_through_the_operator_ceremony() {
                 .arg("*");
             if !credential_free {
                 command.arg("--credential-id").arg("test:operator_totality");
+            }
+            if invoked_app == "searxng_rest" {
+                command
+                    .arg("--instance-url")
+                    .arg("https://searxng-fixture.invalid");
             }
             bounded::child_output(
                 &mut command,

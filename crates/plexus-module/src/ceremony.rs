@@ -2,8 +2,9 @@
 //!
 //! Everything an agent can do with a connection through the module's tools
 //! needs authority that has to come from somewhere: `connections op=connect`
-//! redeems a binding ticket (a one-time token that attaches a credential to a
-//! connection), `configure`/`revoke` need a connection-admin grant, and every
+//! redeems a binding ticket (a one-time token that activates a connection with
+//! its enrolled credential or reviewed anonymous mode), `configure`/`revoke`
+//! need a connection-admin grant, and every
 //! `invoke` needs a grant covering that action. None of these can be created
 //! through the tools, by design: the enrollment secret must never be a tool
 //! argument. So the operations that create and manage authority are served
@@ -17,8 +18,8 @@
 //!
 //! 1. the vendor's reviewed manifest limits the maximum risk and the actions
 //!    a ticket may authorize;
-//! 2. the ticket carries a credential reference, whose vault read is proven
-//!    before the ticket is issued, and the limits it was issued with;
+//! 2. the ticket carries its authority limits and either a credential reference,
+//!    whose vault read is proven before issuance, or a reviewed anonymous mode;
 //!    redeeming it sets the connection's initial ceiling; only an explicit
 //!    operator widening ceremony may later add reviewed actions;
 //! 3. the connection's ceiling limits every grant minted against it;
@@ -92,6 +93,9 @@ pub(crate) fn rebind_credential(
             )
         }
     };
+    if connection.app_key == "searxng_rest" && id != "apikey:searxng" {
+        return json!({"error": {"code": "invalid_request", "message": "SearXNG requires apikey:searxng"}});
+    }
     // App handles have their own reference and generation. Changing the ordinary
     // binding would have no effect on their dispatch authority, so refuse it.
     match state
@@ -258,6 +262,23 @@ pub(crate) fn issue_ticket(state: &Arc<ModuleState>, principal_key: &str, params
     let Some(app_key) = params.get("app_key").and_then(Value::as_str) else {
         return json!({"error": {"code": "invalid_request", "message": "issue_ticket requires app_key"}});
     };
+    let instance = match (app_key, params.get("instance_url")) {
+        ("searxng_rest", Some(Value::String(value))) => {
+            match plexus_core::instance_url::InstanceUrl::parse(value) {
+                Ok(url) => Some(url),
+                Err(message) => {
+                    return json!({"error":{"code":"invalid_request","message":message}})
+                }
+            }
+        }
+        ("searxng_rest", _) => {
+            return json!({"error":{"code":"invalid_request","message":"SearXNG requires instance_url"}})
+        }
+        (_, None) => None,
+        (_, Some(_)) => {
+            return json!({"error":{"code":"invalid_request","message":"instance_url is only supported for SearXNG"}})
+        }
+    };
     // Only the reviewed manifest may waive a credential, never operator input.
     // Direct-principal admission is the enrollment authority for anonymous vendors.
     let credential_free = match state.store().manifest_requires_no_credential(app_key) {
@@ -270,11 +291,24 @@ pub(crate) fn issue_ticket(state: &Arc<ModuleState>, principal_key: &str, params
             );
         }
     };
+    let optional_credential = match state.store().manifest_has_optional_credential(app_key) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::wire::store_failure(
+                "manifest read",
+                "manifest could not be read",
+                &error,
+            )
+        }
+    };
     let credential_id = params.get("credential_id").and_then(Value::as_str);
     if params.get("credential_id").is_some() && credential_id.is_none() {
         return json!({"error": {"code": "invalid_request", "message": "credential_id must be a string"}});
     }
     if let Some(id) = credential_id {
+        if app_key == "searxng_rest" && id != "apikey:searxng" {
+            return json!({"error": {"code": "invalid_request", "message": "SearXNG requires apikey:searxng or no credential"}});
+        }
         if credential_free || !plexus_core::credentials::valid_credential_id(id) {
             return json!({"error": {"code": "invalid_request", "message": "supply a well-formed credential_id only for a credentialed vendor"}});
         }
@@ -284,7 +318,7 @@ pub(crate) fn issue_ticket(state: &Arc<ModuleState>, principal_key: &str, params
     }
     let reference_bytes = match credential_id {
         Some(id) => id.as_bytes().to_vec(),
-        None if credential_free => Vec::new(),
+        None if credential_free || optional_credential => Vec::new(),
         None => {
             return json!({"error": {"code": "invalid_request", "message": "issue_ticket requires credential_id"}});
         }
@@ -327,19 +361,20 @@ pub(crate) fn issue_ticket(state: &Arc<ModuleState>, principal_key: &str, params
     // The ticket carries the maximum risk and allowed actions. Redeeming it
     // copies those limits to a connection that has none yet. Preserve an
     // existing connection's limits permanently.
-    let ref_role = if credential_free {
+    let anonymous = credential_free || (optional_credential && credential_id.is_none());
+    let ref_role = if anonymous {
         plexus_core::NO_CREDENTIAL_REF_ROLE
     } else {
         "credential_reference"
     };
     // The audit row is written in the issue's own transaction, so a ticket
     // never exists without its record.
-    let fingerprint = if credential_free {
+    let fingerprint = if anonymous {
         None
     } else {
         Some(plexus_core::fingerprint(&reference_bytes))
     };
-    match state.store().issue_binding_ticket_audited(
+    match state.store().issue_binding_ticket_audited_at_instance(
         principal_key,
         &connection_id,
         app_key,
@@ -356,6 +391,7 @@ pub(crate) fn issue_ticket(state: &Arc<ModuleState>, principal_key: &str, params
                 fingerprint.as_deref(),
             )
         },
+        instance.as_ref(),
     ) {
         Ok(Err(refusal)) => refusal_response(&refusal),
         Ok(Ok(ticket)) => {

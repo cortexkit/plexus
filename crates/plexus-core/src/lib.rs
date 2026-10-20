@@ -191,6 +191,7 @@ pub mod github_identity;
 pub mod governance;
 mod grant_journal;
 pub mod import_store;
+pub mod instance_url;
 pub mod jcs;
 pub mod manifest;
 mod mcp_payload;

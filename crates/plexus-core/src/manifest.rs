@@ -55,7 +55,11 @@ pub enum Tier {
 #[serde(deny_unknown_fields)]
 pub struct Transport {
     pub kind: TransportKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
+    /// Use the validated address stored on the connection, never a catalog URL.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub url_from_connection: bool,
 }
 
 /// The manifest spelling of a transport kind, for refusal messages.
@@ -95,6 +99,8 @@ pub struct Auth {
 pub enum AuthMode {
     Oauth,
     ApiKey,
+    /// An absent binding is anonymous; a present binding must resolve as bearer.
+    OptionalApiKey,
     AppInstall,
     None,
 }
@@ -654,12 +660,18 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
             "key must be a non-empty lowercase vendor key".to_string(),
         ));
     }
-    // The base URL carries the connection's credential on every request, so a
-    // plaintext scheme would put a bearer token on the wire in clear. Checking
+    // A fixed base URL may carry the connection's credential, so a plaintext
+    // scheme could put a bearer token on the wire in clear. Checking
     // only for emptiness accepted `http://`, and worse accepted anything at all
     // — the action-path guard below refuses a path that redirects to another
     // host, which is pointless if the base itself may name one freely.
-    if !transport_url_is_acceptable(&manifest.transport.url) {
+    if manifest.transport.url_from_connection {
+        if manifest.transport.kind != TransportKind::RestApi || !manifest.transport.url.is_empty() {
+            return Err(ManifestError::InvalidField(
+                "transport.url_from_connection requires rest_api with no transport.url".into(),
+            ));
+        }
+    } else if !transport_url_is_acceptable(&manifest.transport.url) {
         return Err(ManifestError::InvalidField(format!(
             "transport.url must be an https:// endpoint (http:// is permitted only for loopback), got '{}'",
             manifest.transport.url
@@ -671,10 +683,21 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
         ));
     }
     let mut headers = std::collections::BTreeSet::new();
+    if manifest.auth.mode == AuthMode::OptionalApiKey
+        && (manifest.credential_bindings.len() != 1
+            || !manifest.credential_bindings[0]
+                .key
+                .eq_ignore_ascii_case("Authorization")
+            || manifest.credential_bindings[0].prefix != "Bearer ")
+    {
+        return Err(ManifestError::InvalidField(
+            "optional_api_key supports only one Authorization Bearer binding".into(),
+        ));
+    }
     for binding in &manifest.credential_bindings {
         let primary_role = binding.ref_role == "primary"
             || match manifest.auth.mode {
-                AuthMode::ApiKey => binding.ref_role == "api_key",
+                AuthMode::ApiKey | AuthMode::OptionalApiKey => binding.ref_role == "api_key",
                 AuthMode::Oauth => matches!(
                     binding.ref_role.as_str(),
                     "oauth" | "oauth_token" | "access_token"
@@ -1329,7 +1352,7 @@ fn validate_request_shape_extensions(
 /// `@` is a username and password, so the request goes to `evil.com` while a
 /// split on `:` reads the host as `localhost`. Comparing the parsed host is the
 /// only way the check and the connection agree on which machine is meant.
-fn transport_url_is_acceptable(url: &str) -> bool {
+pub(crate) fn transport_url_is_acceptable(url: &str) -> bool {
     // The parser forgives surrounding whitespace; a reviewed manifest should
     // not need forgiving, and this keeps the accepted set no wider than the
     // literal-prefix check it replaces.
@@ -1639,7 +1662,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 32);
+        assert_eq!(count, 33);
     }
 
     /// Each of these pins a rule the dispatch path DEPENDS on but cannot

@@ -57,12 +57,14 @@ enum RestError {
     DotSegment,
 }
 
-/// Per-connection REST settings. The base URL is intentionally a plain string:
-/// it comes from the reviewed manifest (or a harness endpoint override) and is
-/// not a secret.
+/// Per-connection REST settings. Fixed vendor URLs come from the reviewed
+/// manifest; operator-selected instances come from validated connection state
+/// and are hidden from diagnostics, including their host names.
 #[derive(Clone, PartialEq)]
 pub struct RestConfig {
     pub base_url: String,
+    /// Operator-selected instance addresses must not appear even as log origins.
+    pub private_endpoint: bool,
     pub credential_bindings: Vec<CredentialBinding>,
     /// Declared HTTP operation per action name, from the manifest baseline.
     pub actions: HashMap<String, HttpOperation>,
@@ -86,6 +88,7 @@ impl RestConfig {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            private_endpoint: false,
             credential_bindings: Vec::new(),
             actions: HashMap::new(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
@@ -108,9 +111,11 @@ impl RestConfig {
     }
 
     pub fn from_manifest(manifest: &AppManifest) -> Self {
-        Self::new(manifest.transport.url.clone())
+        let mut config = Self::new(manifest.transport.url.clone())
             .with_bindings(manifest.credential_bindings.clone())
-            .with_actions(actions_from_manifest(manifest))
+            .with_actions(actions_from_manifest(manifest));
+        config.private_endpoint = manifest.transport.url_from_connection;
+        config
     }
 }
 
@@ -124,7 +129,14 @@ impl fmt::Debug for RestConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RestConfig")
-            .field("base_url", &redacted_endpoint(&self.base_url))
+            .field(
+                "base_url",
+                &if self.private_endpoint {
+                    "[redacted]".to_string()
+                } else {
+                    redacted_endpoint(&self.base_url)
+                },
+            )
             .field("credential_binding_count", &self.credential_bindings.len())
             .field("action_count", &self.actions.len())
             .field("connect_timeout", &self.connect_timeout)
@@ -661,6 +673,9 @@ impl RestTransport {
         let response = match with_request_deadline(builder, deadline).send() {
             Ok(response) => response,
             Err(error) => {
+                if config.private_endpoint {
+                    return private_request_failure(error);
+                }
                 return request_failure_response(error, prepared_method, prepared_path);
             }
         };
@@ -668,18 +683,31 @@ impl RestTransport {
         if std::mem::take(&mut state.panic_after_send) {
             panic!("injected panic after the request was sent");
         }
-        classify_response(
+        classify_response_with_privacy(
             response,
             &mut state.throttle_until,
             prepared_method,
             prepared_path,
             github_facade,
+            config.private_endpoint,
         )
     }
 }
 
 fn timeout_response() -> TransportResponse {
     TransportResponse::timeout("REST")
+}
+
+fn private_request_failure(error: reqwest::Error) -> TransportResponse {
+    let failure = classify_reqwest_error(&error);
+    eprintln!(warn transport: "REST private endpoint request failed: {failure:?}");
+    match failure {
+        HttpAttemptFailure::Timeout => timeout_response(),
+        HttpAttemptFailure::Connect => local_not_sent(),
+        other => other
+            .outcome_unknown_response()
+            .unwrap_or_else(TransportResponse::unknown),
+    }
 }
 
 fn request_failure_response(
@@ -1124,6 +1152,17 @@ fn classify_response(
     path: &str,
     github_facade: bool,
 ) -> TransportResponse {
+    classify_response_with_privacy(response, throttle_until, method, path, github_facade, false)
+}
+
+fn classify_response_with_privacy(
+    response: Response,
+    throttle_until: &mut Option<Instant>,
+    method: &reqwest::Method,
+    path: &str,
+    github_facade: bool,
+    private_endpoint: bool,
+) -> TransportResponse {
     let status = response.status().as_u16();
     let retry_after = response_throttle(status, response.headers());
     if let Some(delay) = retry_after {
@@ -1132,8 +1171,7 @@ fn classify_response(
         return crate::http_support::throttled_response("REST", delay);
     }
     let permissions = accepted_github_permissions(response.headers());
-    let location = (300..400)
-        .contains(&status)
+    let location = (!private_endpoint && (300..400).contains(&status))
         .then(|| redirect_location_for_log(response.headers()));
     let body_limit = if (200..300).contains(&status) {
         MAX_RESPONSE_BODY_BYTES
@@ -1146,7 +1184,11 @@ fn classify_response(
         // so the outcome is unknown. Only a real timeout is reported as one;
         // a reset or decode failure keeps its own code.
         Err(BodyReadFailure { failure, cause }) => {
-            eprintln!(warn transport: "REST response body failed on {} {}: {:?}: {cause}", method, path.split('?').next().unwrap_or(path), failure);
+            if private_endpoint {
+                eprintln!(warn transport: "REST private endpoint response body failed: {failure:?}");
+            } else {
+                eprintln!(warn transport: "REST response body failed on {} {}: {:?}: {cause}", method, path.split('?').next().unwrap_or(path), failure);
+            }
             return match failure {
                 HttpAttemptFailure::Timeout => timeout_response(),
                 failure => failure
@@ -1166,7 +1208,7 @@ fn classify_response(
         );
     }
     let text = body.text;
-    if !(200..300).contains(&status) {
+    if !(200..300).contains(&status) && !private_endpoint {
         log_rest_error(method, path, status, &text, permissions.as_deref());
     }
     if let Some(location) = location {

@@ -351,10 +351,17 @@ impl CatalogReconciler {
         let (manifest, prepared) =
             self.load_connection(principal, connection_id, endpoint_override)?;
         // Whether a credential is required is decided by the REVIEWED MANIFEST,
-        // never by what the connection happens to hold: a missing binding on a
-        // vendor that declares an auth mode is a failure, not permission to
-        // call it anonymously.
-        if matches!(manifest.auth.mode, AuthMode::None) {
+        // never inferred just from a missing binding. Only auth.mode = none or
+        // optional_api_key permits an anonymous request. A bound optional key
+        // must still resolve; its failure never falls back to anonymous access.
+        if matches!(manifest.auth.mode, AuthMode::None)
+            || (manifest.auth.mode == AuthMode::OptionalApiKey
+                && !self
+                    .store
+                    .connection(principal, connection_id)?
+                    .ok_or(CatalogError::Credential)?
+                    .has_credential_binding)
+        {
             return Ok((manifest, prepared, ResolvedCredential::anonymous()));
         }
         let handle = self
@@ -427,6 +434,14 @@ impl CatalogReconciler {
             }
             TransportKind::RestApi => {
                 let mut rest_connection = RestConnection::from_manifest(connection_id, &manifest);
+                if manifest.transport.url_from_connection {
+                    rest_connection.config.base_url = connection
+                        .instance_url
+                        .as_ref()
+                        .ok_or(CatalogError::Manifest)?
+                        .as_str()
+                        .to_string();
+                }
                 if let Some(endpoint) = endpoint_override {
                     // Only the base URL moves to the override; the per-action
                     // HTTP shapes and credential bindings still come from the

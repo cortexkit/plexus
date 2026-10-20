@@ -1125,6 +1125,11 @@ CREATE TABLE github_bot_rate_limit (
 ALTER TABLE audit_journal ADD COLUMN scope_on_behalf_of_agent TEXT;
 "#,
     },
+    Migration {
+        version: 57,
+        statements: "ALTER TABLE connections ADD COLUMN instance_url TEXT;
+                     ALTER TABLE binding_tickets ADD COLUMN instance_url TEXT;",
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
@@ -1219,7 +1224,8 @@ pub struct ConnectionSummary {
     pub generation: i64,
 }
 
-/// Full non-secret connection state used by the governance engine.
+/// Full connection state used by governance. Private instance addresses have a
+/// redacted debug projection and are omitted from public connection summaries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionRecord {
     pub connection_id: String,
@@ -1230,6 +1236,7 @@ pub struct ConnectionRecord {
     pub health_state: Value,
     pub generation: i64,
     pub has_credential_binding: bool,
+    pub instance_url: Option<crate::instance_url::InstanceUrl>,
 }
 
 /// What `PlexusStore::delete_connection` found, and did when applied.
@@ -2487,6 +2494,7 @@ pub struct BindingTicket {
     pub ref_role: String,
     pub expires_at: i64,
     pub status: String,
+    pub instance_url: Option<crate::instance_url::InstanceUrl>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3097,7 +3105,7 @@ impl PlexusStore {
         self.inner.with_read(|conn| {
             conn.query_row(
                 "SELECT connection_id, principal, app_key, status, resource_filters,
-                        health_state, generation, credential_binding IS NOT NULL
+                        health_state, generation, credential_binding IS NOT NULL, instance_url
                  FROM connections WHERE principal = ?1 AND connection_id = ?2",
                 (principal, connection_id),
                 map_connection_row,
@@ -3129,7 +3137,7 @@ impl PlexusStore {
             conn.prepare(
                 "SELECT connection.connection_id, connection.principal, connection.app_key,
                         connection.status, connection.resource_filters, connection.health_state,
-                        connection.generation, connection.credential_binding IS NOT NULL
+                        connection.generation, connection.credential_binding IS NOT NULL, connection.instance_url
                  FROM connections AS connection
                  WHERE connection.connection_id = ?2
                    AND EXISTS (
@@ -7242,6 +7250,28 @@ impl PlexusStore {
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_binding_ticket_with_instance(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        ref_role: &str,
+        credential_id_bytes: &[u8],
+        instance: Option<&crate::instance_url::InstanceUrl>,
+    ) -> Result<BindingTicket, StoreError> {
+        self.write_binding_ticket(
+            principal,
+            connection_id,
+            None,
+            ref_role,
+            credential_id_bytes,
+            &Ceiling::unrestricted_for_tests(),
+            None,
+            instance,
+        )?
+        .map_err(|refusal| StoreError::Backend(format!("binding ticket refused: {refusal}")))
+    }
+
     /// Store a validated vault id under `credential_reference`, or NULL under
     /// `none` for a manifest-reviewed credential-free vendor. The ticket carries
     /// the permanent authority ceiling; no resolved secret enters SQLite.
@@ -7266,6 +7296,7 @@ impl PlexusStore {
             ref_role,
             credential_id_bytes,
             ceiling,
+            None,
             None,
         )?
         .map_err(|refusal| StoreError::Backend(format!("binding ticket refused: {refusal}")))
@@ -7299,6 +7330,7 @@ impl PlexusStore {
             credential_id_bytes,
             ceiling,
             None,
+            None,
         )
     }
 
@@ -7324,6 +7356,38 @@ impl PlexusStore {
             credential_id_bytes,
             ceiling,
             Some(audit),
+            None,
+        )
+    }
+
+    /// Issue an operator-approved destination with its ticket, never through
+    /// the agent-facing connect arguments. The address stays out of the audit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_binding_ticket_audited_at_instance(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        app_key: &str,
+        ref_role: &str,
+        credential_id_bytes: &[u8],
+        ceiling: &Ceiling,
+        audit: &dyn Fn(&BindingTicket) -> AuditRecord,
+        instance: Option<&crate::instance_url::InstanceUrl>,
+    ) -> Result<Result<BindingTicket, CeremonyRefusal>, StoreError> {
+        if instance.is_some() && app_key != "searxng_rest" {
+            return Err(StoreError::Backend(
+                "instance_url is only supported for SearXNG".into(),
+            ));
+        }
+        self.write_binding_ticket(
+            principal,
+            connection_id,
+            Some(app_key),
+            ref_role,
+            credential_id_bytes,
+            ceiling,
+            Some(audit),
+            instance,
         )
     }
 
@@ -7337,6 +7401,7 @@ impl PlexusStore {
         credential_id_bytes: &[u8],
         ceiling: &Ceiling,
         audit: AuditFor<'_, BindingTicket>,
+        instance: Option<&crate::instance_url::InstanceUrl>,
     ) -> Result<Result<BindingTicket, CeremonyRefusal>, StoreError> {
         let credential_free = ref_role == NO_CREDENTIAL_REF_ROLE;
         if credential_free != credential_id_bytes.is_empty() {
@@ -7370,6 +7435,7 @@ impl PlexusStore {
             ref_role: ref_role.to_string(),
             expires_at,
             status: "issued".to_string(),
+            instance_url: instance.cloned(),
         };
         let refusal = self.inner.with_conn_fenced(|conn| {
             let existing: Option<(String, String, Option<String>, Option<String>)> = conn
@@ -7431,8 +7497,8 @@ impl PlexusStore {
             conn.execute(
                 "INSERT INTO binding_tickets
                     (ticket_id, principal, connection_id, ref_role, expires_at, status,
-                     created_at_ms, risk_ceiling, action_selectors)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'issued', ?6, ?7, ?8)",
+                     created_at_ms, risk_ceiling, action_selectors, instance_url)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'issued', ?6, ?7, ?8, ?9)",
                 rusqlite::params![
                     ticket_id,
                     principal,
@@ -7441,7 +7507,8 @@ impl PlexusStore {
                     expires_at,
                     now,
                     risk,
-                    selectors
+                    selectors,
+                    instance.map(|url| url.as_str())
                 ],
             )?;
             append_audit_for(conn, audit, &ticket)?;
@@ -7531,6 +7598,15 @@ impl PlexusStore {
         Ok(matches!(
             manifest.auth.mode,
             crate::manifest::AuthMode::None
+        ))
+    }
+
+    /// Only a reviewed optional bearer manifest may accept a ticket with or
+    /// without an API-key reference.
+    pub fn manifest_has_optional_credential(&self, app_key: &str) -> Result<bool, StoreError> {
+        Ok(matches!(
+            self.parsed_manifest(CATALOG_PRINCIPAL, app_key)?,
+            Some(Ok(manifest)) if manifest.auth.mode == crate::manifest::AuthMode::OptionalApiKey
         ))
     }
 
@@ -7969,12 +8045,13 @@ impl PlexusStore {
         principal: &str,
         ticket_id: &str,
     ) -> Result<Option<ConnectionSummary>, StoreError> {
+        type TicketRow = (String, i64, String, String, String, String, Option<String>);
         let now = now_ms();
         self.inner.with_conn_fenced(|conn| {
-            let ticket: Option<(String, i64, String, String, String, String)> = conn
+            let ticket: Option<TicketRow> = conn
                 .query_row(
                     "SELECT connection_id, expires_at, status, risk_ceiling, action_selectors,
-                            ref_role
+                            ref_role, instance_url
                      FROM binding_tickets
                      WHERE principal = ?1 AND ticket_id = ?2",
                     (principal, ticket_id),
@@ -7986,6 +8063,7 @@ impl PlexusStore {
                             row.get(3)?,
                             row.get(4)?,
                             row.get(5)?,
+                            row.get(6)?,
                         ))
                     },
                 )
@@ -7997,6 +8075,7 @@ impl PlexusStore {
                 ceiling_risk,
                 ceiling_selectors,
                 ref_role,
+                instance_address,
             )) = ticket
             else {
                 return Ok(None);
@@ -8007,6 +8086,17 @@ impl PlexusStore {
                      WHERE principal = ?1 AND ticket_id = ?2 AND status = 'issued'",
                     (principal, ticket_id),
                 )?;
+                return Ok(None);
+            }
+            let app_key: String = conn.query_row(
+                "SELECT app_key FROM connections WHERE principal=?1 AND connection_id=?2",
+                (principal, &connection_id), |row| row.get(0),
+            )?;
+            let instance = match instance_address.as_deref().map(crate::instance_url::InstanceUrl::parse).transpose() {
+                Ok(instance) => instance,
+                Err(_) => return Ok(None),
+            };
+            if (app_key == "searxng_rest") != instance.is_some() {
                 return Ok(None);
             }
             // A credentialed enrollment must have written its binding before it
@@ -8030,7 +8120,7 @@ impl PlexusStore {
                             updated_at_ms = ?1,
                             ceiling_selectors = CASE WHEN ceiling_risk IS NULL
                                 THEN ?5 ELSE ceiling_selectors END,
-                            ceiling_risk = COALESCE(ceiling_risk, ?4)
+                            ceiling_risk = COALESCE(ceiling_risk, ?4), instance_url = ?6
                      WHERE principal = ?2 AND connection_id = ?3 AND status = 'pending'
                        AND {binding_check}"
                 ),
@@ -8039,7 +8129,8 @@ impl PlexusStore {
                     principal,
                     connection_id.as_str(),
                     ceiling_risk,
-                    ceiling_selectors
+                    ceiling_selectors,
+                    instance.as_ref().map(|url| url.as_str())
                 ],
             )?;
             if changed == 0 {
@@ -10393,6 +10484,9 @@ fn map_connection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRec
         health_state: parse_json_column(&health)?,
         generation: row.get(6)?,
         has_credential_binding: row.get(7)?,
+        instance_url: row
+            .get::<_, Option<String>>(8)?
+            .and_then(|url| crate::instance_url::InstanceUrl::parse(&url).ok()),
     })
 }
 
@@ -11017,6 +11111,118 @@ mod tests {
             },
         };
         PlexusStore::open(&descriptor).expect("open audit retention store")
+    }
+
+    #[test]
+    fn searxng_migration_57_is_additive_across_forward_rollback_and_forward_again() {
+        let descriptor = StorageDescriptor {
+            module_id: "plexus".into(),
+            storage_namespace: "searxng-migration".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: ":memory:".into(),
+            },
+        };
+        let inner = open_sqlite(&descriptor).unwrap();
+        let boundary = MIGRATIONS.iter().position(|m| m.version == 57).unwrap();
+        inner.migrate("plexus", &MIGRATIONS[..boundary]).unwrap();
+        let old_insert = |inner: &SqliteStore, id: &str| {
+            inner.with_conn_fenced(|conn| {
+                conn.execute("INSERT INTO connections (principal,connection_id,app_key,status,created_at_ms,updated_at_ms) VALUES ('direct',?1,'public','pending',1,1)",[id])?;
+                conn.execute("INSERT INTO binding_tickets (ticket_id,principal,connection_id,ref_role,expires_at,status,created_at_ms,risk_ceiling,action_selectors) VALUES (?1,'direct',?1,'none',?2,'issued',1,'read','[]')",(id,now_ms()+600_000))?;
+                Ok(())
+            }).unwrap();
+        };
+        old_insert(&inner, "before");
+        assert_eq!(inner.migrate("plexus", MIGRATIONS).unwrap().applied, 1);
+        let store = PlexusStore {
+            inner,
+            grant_journal: None,
+            outbox_ready: tokio::sync::Notify::new(),
+            ci_runs: Default::default(),
+            manifest_cache: Default::default(),
+        };
+        assert!(store
+            .connection("direct", "before")
+            .unwrap()
+            .unwrap()
+            .instance_url
+            .is_none());
+        assert!(
+            store
+                .connect_with_ticket("direct", "before")
+                .unwrap()
+                .is_some(),
+            "a pre-migration ticket still connects without an address"
+        );
+        store
+            .insert_connection(
+                "direct",
+                "sx",
+                "searxng_rest",
+                "pending",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let address =
+            crate::instance_url::InstanceUrl::parse("https://private-migration.invalid/base")
+                .unwrap();
+        let ticket = store
+            .create_binding_ticket_with_instance(
+                "direct",
+                "sx",
+                NO_CREDENTIAL_REF_ROLE,
+                &[],
+                Some(&address),
+            )
+            .unwrap();
+        store
+            .connect_with_ticket("direct", &ticket.ticket_id)
+            .unwrap()
+            .unwrap();
+        let rollback = store
+            .inner
+            .migrate("plexus", &MIGRATIONS[..boundary])
+            .unwrap();
+        assert!(rollback.store_ahead());
+        let older_rows: Vec<(String, String)> = store
+            .inner
+            .with_read(|conn| {
+                conn.prepare("SELECT connection_id,status FROM connections ORDER BY connection_id")?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(
+            older_rows,
+            vec![
+                ("before".into(), "active".into()),
+                ("sx".into(), "active".into())
+            ]
+        );
+        old_insert(&store.inner, "rollback");
+        assert_eq!(
+            store.inner.migrate("plexus", MIGRATIONS).unwrap().applied,
+            0
+        );
+        assert!(store
+            .connect_with_ticket("direct", "rollback")
+            .unwrap()
+            .is_some());
+        assert!(store
+            .connection("direct", "rollback")
+            .unwrap()
+            .unwrap()
+            .instance_url
+            .is_none());
+        assert_eq!(
+            store
+                .connection("direct", "sx")
+                .unwrap()
+                .unwrap()
+                .instance_url,
+            Some(address)
+        );
     }
 
     fn reservation_store() -> PlexusStore {

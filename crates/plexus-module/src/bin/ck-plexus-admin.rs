@@ -144,9 +144,13 @@ recipients-list --connection <id> [--agent <id>]
     Add/remove previews and applied changes are audited. Approval never adds an entry.
 
 issue-ticket --app <key> --actions a,b,c|'*' [--credential-id <id>]
-             [--risk read|write|destructive] [--connection <id>]
+             [--risk read|write|destructive] [--connection <id>] [--instance-url <url>]
    Supply a vault credential id. Omit it when the
-  reviewed manifest declares auth.mode=none. A reference must be readable by reserved:plexus.
+  reviewed manifest declares auth.mode=none or optional_api_key. A reference must be readable by reserved:plexus.
+  SearXNG requires --instance-url and accepts only apikey:searxng or no key.
+  The instance must be HTTPS (HTTP only to loopback), without credentials, query
+  or fragment. Only the operator's ticket may choose the destination; connect
+  takes no instance argument. --instance-url is refused for every other app.
   --risk and --actions set the connection's initial authority ceiling;
   every later grant must fit inside it. --actions is required; pass '*' to
   request every action the vendor declares, stored as a concrete list.
@@ -462,6 +466,7 @@ fn accepted_flags(command: &str) -> Option<&'static [&'static str]> {
             "--app",
             "--actions",
             "--credential-id",
+            "--instance-url",
             "--risk",
             "--connection",
             "--handle-file",
@@ -695,6 +700,9 @@ fn rebind_credential_lines(result: &Value) -> Vec<String> {
 fn issue_ticket_request(flags: &Flags, auth_mode: &str) -> Result<(&'static str, Value), Failure> {
     let app = flags.required("--app")?;
     let credential_free = auth_mode.eq_ignore_ascii_case("none");
+    let optional_credential = auth_mode.eq_ignore_ascii_case("OptionalApiKey")
+        || auth_mode.eq_ignore_ascii_case("optional_api_key");
+    let instance = ticket_instance(flags)?;
     if flags.value("--handle-file").is_some() {
         return Err(Failure::usage(
             "handle_bindings_removed: use --credential-id",
@@ -715,18 +723,37 @@ fn issue_ticket_request(flags: &Flags, auth_mode: &str) -> Result<(&'static str,
             return Err(Failure::usage("invalid --credential-id"));
         }
         params["credential_id"] = json!(id);
-    } else if !credential_free {
+    } else if !credential_free && !optional_credential {
         return Err(Failure::usage("required --credential-id"));
     }
     params["action_selectors"] = json!(flags.action_selectors()?);
+    if let Some(instance) = instance {
+        params["instance_url"] = json!(instance.as_str());
+    }
     if let Some(connection) = flags.value("--connection") {
         params["connection_id"] = json!(connection);
     }
     Ok((plexus_module::manifest::ADMIN_ISSUE_TICKET_OP, params))
 }
 
+fn ticket_instance(
+    flags: &Flags,
+) -> Result<Option<plexus_core::instance_url::InstanceUrl>, Failure> {
+    match (flags.required("--app")?, flags.value("--instance-url")) {
+        ("searxng_rest", Some(value)) => plexus_core::instance_url::InstanceUrl::parse(value)
+            .map(Some)
+            .map_err(Failure::usage),
+        ("searxng_rest", None) => Err(Failure::usage("SearXNG requires --instance-url")),
+        (_, Some(_)) => Err(Failure::usage(
+            "--instance-url is only supported for SearXNG",
+        )),
+        (_, None) => Ok(None),
+    }
+}
+
 fn validate_ticket_flags(flags: &Flags) -> Result<(), Failure> {
     flags.required("--app")?;
+    ticket_instance(flags)?;
     flags.action_selectors()?;
     if flags.value("--handle-file").is_some() {
         return Err(Failure::usage(
@@ -2326,6 +2353,81 @@ mod tests {
         assert_eq!(method, "plexus.admin.issue_ticket");
         assert_eq!(params["app_key"], "deepwiki");
         assert!(params.get("handle").is_none(), "{params}");
+    }
+
+    #[test]
+    fn searxng_ticket_supports_anonymous_or_bearer_with_operator_instance() {
+        for credential in [None, Some("apikey:searxng")] {
+            let mut args = vec![
+                "--app",
+                "searxng_rest",
+                "--actions",
+                "*",
+                "--instance-url",
+                "https://PRIVATE.invalid:443/base/",
+            ];
+            if let Some(id) = credential {
+                args.extend(["--credential-id", id]);
+            }
+            let flags = flags(&args);
+            validate_ticket_flags(&flags).unwrap();
+            for mode in ["OptionalApiKey", "optional_api_key"] {
+                let (_, params) = issue_ticket_request(&flags, mode).unwrap();
+                assert_eq!(params["instance_url"], "https://private.invalid/base");
+                assert_eq!(
+                    params.get("credential_id").and_then(Value::as_str),
+                    credential
+                );
+            }
+        }
+        assert!(issue_ticket_request(
+            &flags(&[
+                "--app",
+                "deepwiki",
+                "--actions",
+                "*",
+                "--credential-id",
+                "apikey:other"
+            ]),
+            "none"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn searxng_instance_flags_refuse_unsafe_addresses_missing_instances_and_other_apps() {
+        for address in [
+            "http://remote.invalid",
+            "http://localhost:80@remote.invalid",
+            "https://user:pass@private.invalid",
+            "https://private.invalid?token=key",
+            "https://private.invalid/#fragment",
+        ] {
+            let flags = flags(&[
+                "--app",
+                "searxng_rest",
+                "--actions",
+                "*",
+                "--instance-url",
+                address,
+            ]);
+            let error =
+                validate_ticket_flags(&flags).expect_err("unsafe instance flag must be refused");
+            assert!(!error.message.contains("private.invalid"));
+            assert!(!error.message.contains("remote.invalid"));
+        }
+        assert!(
+            validate_ticket_flags(&flags(&["--app", "searxng_rest", "--actions", "*"])).is_err()
+        );
+        assert!(validate_ticket_flags(&flags(&[
+            "--app",
+            "linear",
+            "--actions",
+            "*",
+            "--instance-url",
+            "https://private.invalid"
+        ]))
+        .is_err());
     }
 
     #[test]

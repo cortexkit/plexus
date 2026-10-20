@@ -19393,3 +19393,108 @@ expect_red = ["web_search::backend::tinyfish::tests::mapping_bounds_count_and_un
 expect_message = "mapping must respect the caller's local result count"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "searxng-instance-outbound-address"
+guards = "Operator-selected SearXNG instances obey the parsed outbound rule: HTTPS or HTTP loopback only"
+file = "crates/plexus-core/src/instance_url.rs"
+old = "if !crate::manifest::transport_url_is_acceptable(value) {"
+new = "if false && !crate::manifest::transport_url_is_acceptable(value) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/instance_url.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["instance_url::tests::searxng_address_validation_parses_before_outbound_admission"]
+expect_message = "unsafe address admitted"
+build_timeout_s = 3600
+
+[[control]]
+id = "searxng-instance-debug-redaction"
+guards = "Connection debug projections never disclose a private instance host or path"
+file = "crates/plexus-core/src/instance_url.rs"
+old = "formatter.write_str(\"InstanceUrl([redacted])\")"
+new = "formatter.write_str(&format!(\"InstanceUrl({})\", self.0)) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/instance_url.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["instance_url::tests::searxng_instance_debug_never_discloses_the_address"]
+expect_message = "private-instance-canary"
+build_timeout_s = 3600
+
+[[control]]
+id = "searxng-rest-config-private-endpoint"
+guards = "Connection-selected REST endpoints are marked private so configuration diagnostics hide the entire instance address"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "config.private_endpoint = manifest.transport.url_from_connection;"
+new = "config.private_endpoint = false; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/searxng.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::searxng::rest_config_diagnostics_hide_the_entire_instance_address"]
+expect_message = "instance host must be redacted"
+build_timeout_s = 3600
+
+[[control]]
+id = "searxng-private-vendor-diagnostic"
+guards = "A private instance's error body cannot echo its address into operator diagnostics"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "if !(200..300).contains(&status) && !private_endpoint {"
+new = "if !(200..300).contains(&status) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/searxng.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::searxng::private_endpoint_diagnostics_never_print_instance_or_reflected_vendor_text"]
+expect_message = "private instance leaked in diagnostics"
+build_timeout_s = 3600
+
+[[control]]
+id = "searxng-private-redirect-diagnostic"
+guards = "A redirect from a private SearXNG instance cannot print its address in a Location diagnostic"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "let location = (!private_endpoint && (300..400).contains(&status))"
+new = "let location = ((300..400).contains(&status)) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/searxng.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::searxng::private_endpoint_diagnostics_never_print_instance_or_reflected_vendor_text"]
+expect_message = "private instance leaked in diagnostics"
+build_timeout_s = 3600
+
+[[control]]
+id = "searxng-ticket-copies-approved-instance"
+guards = "Connect atomically copies the operator-approved ticket destination onto the connection"
+file = "crates/plexus-core/src/storage.rs"
+old = "instance_url = ?6"
+new = "instance_url = CASE WHEN ?6 IS NOT NULL THEN NULL ELSE NULL END /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/searxng.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::searxng::tickets_require_an_instance_and_store_it_without_exposing_it_in_summaries"]
+expect_message = "assertion `left == right` failed"
+build_timeout_s = 3600
+
+[[control]]
+id = "searxng-connect-refuses-agent-instance"
+guards = "An agent redeeming a ticket cannot supply or override the operator-approved instance address"
+file = "crates/plexus-module/src/lib.rs"
+old = "if arguments.contains_key(\"instance_url\") {"
+new = "if false && arguments.contains_key(\"instance_url\") { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::searxng_connect_stores_private_instance_and_allows_anonymous_or_named_bearer"]
+expect_message = "argument_undeclared"
+build_timeout_s = 3600
