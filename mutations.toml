@@ -17456,7 +17456,7 @@ timeout_s = 120
 
 [[control]]
 id = "web-search-brave-capability-word-limit"
-guards = "A final Brave q over Brave's documented 75-word limit skips Brave rather than being sent"
+guards = "A final Brave query string (the q parameter, operators included) over Brave's documented 75-word limit skips Brave rather than being sent"
 file = "crates/plexus-core/src/web_search/backend/brave.rs"
 old = "if prepared.query.split_whitespace().count() > BRAVE_MAX_QUERY_WORDS {"
 new = "if false { /* NON-VACUITY BREAK */"
@@ -17568,7 +17568,7 @@ timeout_s = 120
 
 [[control]]
 id = "web-search-brave-subscription-token-header"
-guards = "The shipped Brave manifest sends the key bare in X-Subscription-Token, the header Brave authenticates"
+guards = "The shipped Brave manifest sends the key bare in X-Subscription-Token, the header Brave's authentication guide requires"
 file = "catalog/brave_rest.jsonc"
 old = "\"key\": \"X-Subscription-Token\","
 new = "\"key\": \"Authorization\", /* NON-VACUITY BREAK */"

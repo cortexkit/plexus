@@ -23,8 +23,9 @@ use crate::web_search::query::{Recency, WebSearchQuery, MAX_INCLUDE_DOMAINS};
 /// Brave's documented `count` maximum.
 pub const BRAVE_MAX_COUNT: u8 = 20;
 /// The longest final `q` sent to Brave, in characters, counted after the
-/// `site:` operators for requested domains are added. Brave documents 600;
-/// this is the tool's own query limit, which keeps inside it.
+/// `site:` operators for requested domains are added. Brave documents a
+/// 600-character limit; 500 is the web_search tool's own query limit
+/// (`MAX_QUERY_CHARS`), which sits below it.
 pub const BRAVE_MAX_QUERY_CHARS: usize = 500;
 /// Brave's documented maximum number of words in `q`, operators included.
 pub const BRAVE_MAX_QUERY_WORDS: usize = 75;
