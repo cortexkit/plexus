@@ -55,7 +55,10 @@ impl CkcredRoutePeer for Vault {
         }
         match operation {
             "credential.get_scoped" => {
-                assert!(params["credential_id"] == ID || params["credential_id"] == std::str::from_utf8(HANDLE).unwrap());
+                assert!(
+                    params["credential_id"] == ID
+                        || params["credential_id"] == std::str::from_utf8(HANDLE).unwrap()
+                );
                 let resolved_id = *self.resolved_id.lock().unwrap();
                 let payload = if resolved_id.is_some() {
                     MISMATCH_TOKEN
@@ -74,62 +77,70 @@ impl CkcredRoutePeer for Vault {
 }
 
 struct Fixture {
-    path: Scratch,
+    path: DiagnosticStorePath,
     state: Arc<ModuleState>,
     vault: Arc<Vault>,
     transport: Arc<MockTransport>,
     credentials: Arc<CkcredCredentialSource<Vault>>,
 }
 
+pub(super) fn prepare_log_fixture() -> DiagnosticStorePath {
+    Fixture::new("credential-diagnostic").path
+}
+
 impl Fixture {
     fn new(label: &str) -> Self {
-        let (path, store, _) = two_connection_fixture_with_retire_status(label,"pending");
-        let ticket = store
-            .create_binding_ticket("direct", CONNECTION, HANDLE)
-            .unwrap();
-        store
-            .connect_with_ticket("direct", &ticket.ticket_id)
-            .unwrap()
-            .unwrap();
-        let schema = json!({"type": "object"});
-        store
-            .upsert_catalog_action(&CatalogActionInput {
-                connection_id: CONNECTION.into(),
-                principal: "direct".into(),
-                name: "search".into(),
-                title: None,
-                schema: schema.clone(),
-                schema_hash: plexus_core::jcs_sha256(&schema).unwrap(),
-                risk: "read".into(),
-                severity: "S0".into(),
-                ask_first: false,
-                status: "active".into(),
-                quarantine_reason: None,
-                reconciliation: None,
-            })
-            .unwrap();
-        store
-            .insert_grant(&GrantInput {
-                grant_id: "grant-rebind".into(),
-                principal: "direct".into(),
-                connection_id: CONNECTION.into(),
-                grantee_principal: "direct".into(),
-                risk_ceiling: "read".into(),
-                action_selectors: vec!["search".into()],
-                authority_kind: "invoke".into(),
-                expires_at: None,
-            })
-            .unwrap();
-        store
-            .insert_policy(&PolicyInput {
-                policy_id: "policy-rebind".into(),
-                principal: "direct".into(),
-                connection_id: CONNECTION.into(),
-                action_selector: "search".into(),
-                effect: "allow".into(),
-                expires_at: None,
-            })
-            .unwrap();
+        let (path, store, _) = two_connection_fixture_with_retire_status(label, "pending");
+        // A diagnostic child reuses the parent's binding and authority rows;
+        // consuming another binding ticket would change the scenario it observes.
+        if !path.is_prepared() {
+            let ticket = store
+                .create_binding_ticket("direct", CONNECTION, HANDLE)
+                .unwrap();
+            store
+                .connect_with_ticket("direct", &ticket.ticket_id)
+                .unwrap()
+                .unwrap();
+            let schema = json!({"type": "object"});
+            store
+                .upsert_catalog_action(&CatalogActionInput {
+                    connection_id: CONNECTION.into(),
+                    principal: "direct".into(),
+                    name: "search".into(),
+                    title: None,
+                    schema: schema.clone(),
+                    schema_hash: plexus_core::jcs_sha256(&schema).unwrap(),
+                    risk: "read".into(),
+                    severity: "S0".into(),
+                    ask_first: false,
+                    status: "active".into(),
+                    quarantine_reason: None,
+                    reconciliation: None,
+                })
+                .unwrap();
+            store
+                .insert_grant(&GrantInput {
+                    grant_id: "grant-rebind".into(),
+                    principal: "direct".into(),
+                    connection_id: CONNECTION.into(),
+                    grantee_principal: "direct".into(),
+                    risk_ceiling: "read".into(),
+                    action_selectors: vec!["search".into()],
+                    authority_kind: "invoke".into(),
+                    expires_at: None,
+                })
+                .unwrap();
+            store
+                .insert_policy(&PolicyInput {
+                    policy_id: "policy-rebind".into(),
+                    principal: "direct".into(),
+                    connection_id: CONNECTION.into(),
+                    action_selector: "search".into(),
+                    effect: "allow".into(),
+                    expires_at: None,
+                })
+                .unwrap();
+        }
         let vault = Arc::new(Vault::default());
         let credentials = Arc::new(CkcredCredentialSource::new(vault.clone()));
         let transport = Arc::new(MockTransport::default());
@@ -559,11 +570,26 @@ fn enrollment_handle_is_refused_by_name_without_writing_rows() {
     let fixture = Fixture::new("removed-handle-input");
     let before = fixture.snapshot();
     for handle in [json!("ckh_removed"), Value::Null, json!(42)] {
-        let response = management_call(&fixture.state, Principal::Direct, manifest::ADMIN_ISSUE_TICKET_OP,
-            json!({"app_key": "retire_rest", "connection_id": "must-not-exist", "handle": handle, "credential_id": ID}));
-        assert_eq!(response["error"]["code"], "handle_bindings_removed", "{response}");
-        assert!(response["error"]["message"].as_str().unwrap().contains("credential_id"));
-        assert!(fixture.state.store().connection("direct", "must-not-exist").unwrap().is_none());
+        let response = management_call(
+            &fixture.state,
+            Principal::Direct,
+            manifest::ADMIN_ISSUE_TICKET_OP,
+            json!({"app_key": "retire_rest", "connection_id": "must-not-exist", "handle": handle, "credential_id": ID}),
+        );
+        assert_eq!(
+            response["error"]["code"], "handle_bindings_removed",
+            "{response}"
+        );
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("credential_id"));
+        assert!(fixture
+            .state
+            .store()
+            .connection("direct", "must-not-exist")
+            .unwrap()
+            .is_none());
         assert_eq!(fixture.snapshot(), before);
     }
     assert!(fixture.vault.calls.lock().unwrap().is_empty());

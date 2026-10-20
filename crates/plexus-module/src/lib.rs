@@ -6000,9 +6000,9 @@ mod tests {
         assert!(!line.contains('\n'), "{line}");
     }
 
-    async fn selection_health_scenario(scenario: &str) {
+    fn prepare_selection_fixture() -> Scratch {
         let path = Scratch::database("selection");
-        let store = Arc::new(
+        let _store = Arc::new(
             PlexusStore::open(&StorageDescriptor {
                 module_id: "plexus".into(),
                 storage_namespace: path.to_string_lossy().into_owned(),
@@ -6016,6 +6016,13 @@ mod tests {
         let conn = rusqlite::Connection::open(&path).unwrap();
         let now = plexus_core::storage::now_ms();
         conn.execute("INSERT INTO trigger_subscriptions (subscription_id, principal, connection_id, action, cadence_s, cursor_kind, cursor_state, schema_hash, status, last_polled_at_ms, consecutive_vendor_failures, created_at_ms) VALUES ('watch', 'selection-owner', 'unused', 'read', 300, 'sync_token', '{}', 'hash', 'active', ?1, 4, 0)", [now - 301_000]).unwrap();
+        path
+    }
+
+    async fn selection_health_scenario(scenario: &str) {
+        let path = diagnostic_store_path(prepare_selection_fixture);
+        let store = open_diagnostic_store(&path);
+        let conn = rusqlite::Connection::open(&path).unwrap();
         // Cadence-due but held in exponential backoff, so a valid selection polls nothing.
         if scenario != "backoff" {
             conn.execute(
@@ -6123,9 +6130,49 @@ mod tests {
         );
     }
 
-    const PREPARED_HEALTH_STORE: &str = "PLEXUS_PREPARED_HEALTH_STORE";
+    const PREPARED_DIAGNOSTIC_STORE: &str = "PLEXUS_PREPARED_DIAGNOSTIC_STORE";
 
-    fn open_health_probe_store(path: &Path) -> Arc<PlexusStore> {
+    // Directory cleanup belongs to the capturing parent. A child borrows its
+    // prepared database instead of creating a second fixture or seeding it again.
+    enum DiagnosticStorePath {
+        Owned(Scratch),
+        Prepared(PathBuf),
+    }
+
+    impl DiagnosticStorePath {
+        fn new(label: &str) -> Self {
+            match std::env::var_os(PREPARED_DIAGNOSTIC_STORE) {
+                Some(path) => Self::Prepared(path.into()),
+                None => Self::Owned(Scratch::database(label)),
+            }
+        }
+
+        fn is_prepared(&self) -> bool {
+            matches!(self, Self::Prepared(_))
+        }
+
+        fn path(&self) -> &Path {
+            match self {
+                Self::Owned(scratch) => scratch.path(),
+                Self::Prepared(path) => path,
+            }
+        }
+    }
+
+    impl std::ops::Deref for DiagnosticStorePath {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            self.path()
+        }
+    }
+
+    impl AsRef<Path> for DiagnosticStorePath {
+        fn as_ref(&self) -> &Path {
+            self.path()
+        }
+    }
+
+    fn open_diagnostic_store(path: &Path) -> Arc<PlexusStore> {
         Arc::new(
             PlexusStore::open(&StorageDescriptor {
                 module_id: "plexus".into(),
@@ -6139,19 +6186,17 @@ mod tests {
         )
     }
 
-    fn health_probe_path(prepare: fn() -> Scratch) -> (Option<Scratch>, PathBuf) {
-        if let Some(path) = std::env::var_os(PREPARED_HEALTH_STORE) {
-            (None, PathBuf::from(path))
+    fn diagnostic_store_path(prepare: fn() -> Scratch) -> DiagnosticStorePath {
+        if let Some(path) = std::env::var_os(PREPARED_DIAGNOSTIC_STORE) {
+            DiagnosticStorePath::Prepared(path.into())
         } else {
-            let scratch = prepare();
-            let path = scratch.path().to_path_buf();
-            (Some(scratch), path)
+            DiagnosticStorePath::Owned(prepare())
         }
     }
 
     fn prepare_health_probe_fixture() -> Scratch {
         let path = Scratch::database("health-probe");
-        let store = open_health_probe_store(&path);
+        let store = open_diagnostic_store(&path);
         // REST catalog refresh uses the manifest's actions, not a vendor request.
         let source = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa_rest.jsonc"),
@@ -6192,8 +6237,8 @@ mod tests {
 
     fn health_probe_scenario(scenario: &str) {
         logging::init_child();
-        let (_scratch, path) = health_probe_path(prepare_health_probe_fixture);
-        let store = open_health_probe_store(&path);
+        let path = diagnostic_store_path(prepare_health_probe_fixture);
+        let store = open_diagnostic_store(&path);
         let owners = ["direct", "probe-owner", "z-other-owner"];
         let state = ModuleState {
             health: Arc::new(health::HealthState::new()),
@@ -6397,7 +6442,7 @@ mod tests {
     /// observer process runs the probe and checks the resulting status.
     fn prepare_imported_handle_probe_fixture() -> Scratch {
         let path = Scratch::database("handle-probe");
-        let store = open_health_probe_store(&path);
+        let store = open_diagnostic_store(&path);
         let source = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/github_rest.jsonc"),
         )
@@ -6433,8 +6478,8 @@ mod tests {
 
     fn imported_handle_probe_scenario(status: &str) {
         logging::init_child();
-        let (_scratch, path) = health_probe_path(prepare_imported_handle_probe_fixture);
-        let store = open_health_probe_store(&path);
+        let path = diagnostic_store_path(prepare_imported_handle_probe_fixture);
+        let store = open_diagnostic_store(&path);
         let connection_id = "github-handle-app-probe";
         let imported = store.connection("direct", connection_id).unwrap().unwrap();
         assert!(
@@ -7113,7 +7158,9 @@ mod tests {
     /// `direct` and no credential bindings. Credential checks cannot resolve
     /// credentials for either connection and log a failure on each pass while
     /// that connection remains active.
-    fn two_connection_fixture(label: &str) -> (Scratch, Arc<PlexusStore>, Arc<ModuleState>) {
+    fn two_connection_fixture(
+        label: &str,
+    ) -> (DiagnosticStorePath, Arc<PlexusStore>, Arc<ModuleState>) {
         two_connection_fixture_with_retire_status(label, "active")
     }
 
@@ -7125,8 +7172,8 @@ mod tests {
     fn two_connection_fixture_with_retire_status(
         label: &str,
         retire_status: &str,
-    ) -> (Scratch, Arc<PlexusStore>, Arc<ModuleState>) {
-        let path = Scratch::database(label);
+    ) -> (DiagnosticStorePath, Arc<PlexusStore>, Arc<ModuleState>) {
+        let path = DiagnosticStorePath::new(label);
         let store = Arc::new(
             PlexusStore::open(&StorageDescriptor {
                 module_id: "plexus".into(),
@@ -7138,29 +7185,31 @@ mod tests {
             })
             .unwrap(),
         );
-        let source = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa_rest.jsonc"),
-        )
-        .unwrap();
-        let ingested = plexus_core::ingest_value(
-            serde_json::from_str(&subc_jsonc::jsonc_to_json(&source).unwrap()).unwrap(),
-        )
-        .unwrap();
-        store.upsert_manifest("system", &ingested).unwrap();
-        for id in ["conn-retire-rest", "conn-keep-rest"] {
-            store
-                .insert_connection(
-                    "direct",
-                    id,
-                    &ingested.manifest.key,
-                    if id == "conn-retire-rest" {
-                        retire_status
-                    } else {
-                        "active"
-                    },
-                    &json!({}),
-                )
-                .unwrap();
+        if !path.is_prepared() {
+            let source = std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa_rest.jsonc"),
+            )
+            .unwrap();
+            let ingested = plexus_core::ingest_value(
+                serde_json::from_str(&subc_jsonc::jsonc_to_json(&source).unwrap()).unwrap(),
+            )
+            .unwrap();
+            store.upsert_manifest("system", &ingested).unwrap();
+            for id in ["conn-retire-rest", "conn-keep-rest"] {
+                store
+                    .insert_connection(
+                        "direct",
+                        id,
+                        &ingested.manifest.key,
+                        if id == "conn-retire-rest" {
+                            retire_status
+                        } else {
+                            "active"
+                        },
+                        &json!({}),
+                    )
+                    .unwrap();
+            }
         }
         let state = Arc::new(ModuleState {
             health: Arc::new(health::HealthState::new()),
@@ -7554,12 +7603,22 @@ mod tests {
             "tests::health_probe_listing_error_fixture"
             | "tests::health_probe_connection_error_fixture"
             | "tests::health_probe_principals_error_fixture" => {
-                Some(prepare_health_probe_fixture())
+                Some(DiagnosticStorePath::Owned(prepare_health_probe_fixture()))
             }
             "tests::health_probe_imported_handle_fixture"
             | "tests::health_probe_imported_handle_degraded_fixture" => {
-                Some(prepare_imported_handle_probe_fixture())
+                Some(DiagnosticStorePath::Owned(prepare_imported_handle_probe_fixture()))
             }
+            "tests::selection_log_fixture" => Some(DiagnosticStorePath::Owned(prepare_selection_fixture())),
+            "tests::revoke_then_probe_fixture" | "tests::route_capacity_log_fixture" => {
+                let (path, store, state) = two_connection_fixture("diagnostic-connections");
+                drop(state);
+                drop(store);
+                Some(path)
+            }
+            "tests::credential_rebind::reference_binding_log_fixture"
+            | "tests::credential_rebind::reference_dispatch_rejects_mismatched_resolved_id_without_sending_or_leaking"
+            | "tests::credential_rebind::rebind_rejects_mismatched_resolved_id_without_mutating_or_leaking" => Some(credential_rebind::prepare_log_fixture()),
             _ => None,
         };
         let mut command =
@@ -7568,7 +7627,7 @@ mod tests {
             .args(["--exact", test, "--nocapture"])
             .env("PLEXUS_LOG_STDERR_CHILD", "1");
         if let Some(scratch) = &prepared {
-            command.env(PREPARED_HEALTH_STORE, scratch.path());
+            command.env(PREPARED_DIAGNOSTIC_STORE, scratch.path());
         }
         let output = bounded::child_output(
             &mut command,

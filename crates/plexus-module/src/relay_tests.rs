@@ -223,6 +223,29 @@ fn fixture(name: &str) -> (Scratch, Arc<PlexusStore>, String) {
         SELECT 'pr-watch',principal,connection_id,'list_pull_requests',cadence_s,cursor_kind,schema_hash,status,created_at_ms,fixed_args,project_id,project_source,last_polled_at_ms FROM trigger_subscriptions WHERE subscription_id='{sub}';"));
     (scratch, store, sub)
 }
+
+const PREPARED_RELAY_LOG_STORE: &str = "PLEXUS_PREPARED_RELAY_LOG_STORE";
+
+// Prepare the database before starting the diagnostic child so first-time schema
+// migrations do not consume its execution deadline. The child still reopens the
+// real store and performs the exchange or injected fault.
+fn prepare_relay_log_fixture(label: &str) -> Scratch {
+    let (scratch, store, _) = fixture(label);
+    drop(store);
+    scratch
+}
+
+fn relay_log_fixture(label: &str) -> (Option<Scratch>, Arc<PlexusStore>, std::path::PathBuf) {
+    if let Some(path) = std::env::var_os(PREPARED_RELAY_LOG_STORE) {
+        let path = std::path::PathBuf::from(path);
+        let store = crate::bus::tests::open_test_store(&path);
+        (None, store, path)
+    } else {
+        let (scratch, store, _) = fixture(label);
+        let path = scratch.path().to_path_buf();
+        (Some(scratch), store, path)
+    }
+}
 fn kind_watch(store: &PlexusStore, action: &str) -> String {
     let (connection, app) = if action == "list_workflow_runs" {
         let source =
@@ -1414,10 +1437,12 @@ async fn unknown_frames_and_out_of_order_events_are_protocol_errors() {
 async fn relay_4001_logs_one_redacted_rejection_transition() {
     const TEST: &str = "relay::tests::relay_4001_logs_one_redacted_rejection_transition";
     if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
+        let prepared = prepare_relay_log_fixture("relay-4001-log");
         let output = crate::bounded::child_output(
             std::process::Command::new(std::env::current_exe().expect("test executable"))
                 .args(["--exact", TEST, "--nocapture"])
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+                .env("PLEXUS_LOG_STDERR_CHILD", "1")
+                .env(PREPARED_RELAY_LOG_STORE, prepared.path()),
             Duration::from_secs(30),
             "relay rejection diagnostic test child",
         )
@@ -1447,7 +1472,7 @@ async fn relay_4001_logs_one_redacted_rejection_transition() {
     }
 
     diagnostic_logging::init_child();
-    let (_scratch, store, _) = fixture("relay-4001-log");
+    let (_scratch, store, _path) = relay_log_fixture("relay-4001-log");
     let secret = b"relay-log-secret";
     let credentials = Arc::new(StubCredentialSource::with_default_success(secret.to_vec()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2118,10 +2143,12 @@ async fn a_regained_connector_home_redials_within_the_claim_refresh_interval() {
 async fn local_store_failures_log_the_underlying_cause() {
     const TEST: &str = "relay::tests::local_store_failures_log_the_underlying_cause";
     if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
+        let prepared = prepare_relay_log_fixture("relay-commit-log");
         let output = crate::bounded::child_output(
             std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", TEST, "--nocapture"])
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+                .env("PLEXUS_LOG_STDERR_CHILD", "1")
+                .env(PREPARED_RELAY_LOG_STORE, prepared.path()),
             Duration::from_secs(30),
             "local store diagnostic child",
         )
@@ -2135,8 +2162,11 @@ async fn local_store_failures_log_the_underlying_cause() {
         return;
     }
     diagnostic_logging::init_child();
-    let (scratch, store, _) = fixture("relay-commit-log");
-    sql(&scratch, "DROP TABLE relay_cursor");
+    let (_scratch, store, path) = relay_log_fixture("relay-commit-log");
+    Connection::open(path)
+        .unwrap()
+        .execute("DROP TABLE relay_cursor", [])
+        .unwrap();
     let result = tokio::task::spawn_blocking(move || store.relay_cursor("github")).await;
     assert!(local_store_failed("event commit", result));
 }

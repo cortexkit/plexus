@@ -25,7 +25,7 @@ fn inventory() -> Value {
 }
 
 struct Case {
-    path: Scratch,
+    path: DiagnosticStorePath,
     state: Arc<ModuleState>,
     method: &'static str,
     params: Value,

@@ -2541,6 +2541,7 @@ runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 expect_red = ["relay::tests::relay_4001_logs_one_redacted_rejection_transition"]
+select = "expected"
 expect_message = "expected one 4001 diagnostic line"
 build_timeout_s = 3600
 
@@ -19922,16 +19923,16 @@ timeout_s = 120
 
 [[control]]
 id = "zai-throttling-closed-outcome"
-guards = "ZAI MCP throttling retains its closed reason and bounded cooldown"
+guards = "ZAI MCP throttling honors its explicit retry-after cooldown"
 file = "crates/plexus-core/src/web_search/chain/outcome.rs"
-old = "if throttled {"
-new = "if false && throttled { /* NON-VACUITY BREAK */"
+old = "retry_after_ms.min(MAX_THROTTLED_COOLDOWN_MS)"
+new = "THROTTLED_COOLDOWN_MS /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/chain/tests/zai.rs"
 runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
 expect_red = ["web_search::chain::tests::zai::mcp_other_errors_have_closed_outcomes_and_cooldowns"]
-expect_message = "rate_limited"
+expect_message = "rate_limited_retry"
 build_timeout_s = 3600
 timeout_s = 120

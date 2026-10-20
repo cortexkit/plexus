@@ -1443,7 +1443,7 @@ pub mod tests {
         (scratch, store)
     }
 
-    fn open_test_store(path: &Path) -> Arc<PlexusStore> {
+    pub(crate) fn open_test_store(path: &Path) -> Arc<PlexusStore> {
         let descriptor = StorageDescriptor {
             module_id: "plexus".to_string(),
             storage_namespace: "test".to_string(),
