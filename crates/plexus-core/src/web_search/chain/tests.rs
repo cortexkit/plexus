@@ -12,6 +12,7 @@ mod firecrawl;
 mod jina;
 mod kagi;
 mod kimi;
+mod ollama;
 mod outcomes;
 mod tavily;
 

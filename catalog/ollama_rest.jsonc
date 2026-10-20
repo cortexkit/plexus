@@ -1,0 +1,125 @@
+// Ollama cloud web search REST (ollama.com/api/web_search): the `ollama`
+// provider of the web_search chain.
+//
+// Search only. This is Ollama's hosted search API on ollama.com, not a local
+// Ollama server; no model runs and Ollama's chat and generate endpoints are
+// never declared. The search endpoint returns result links, so this provider
+// is built.
+//
+// Wire contract pinned from Ollama's own documentation and its own client
+// (read 2026-10-20):
+// - the web search capability page,
+//   https://docs.ollama.com/capabilities/web-search ("Authentication", "Web
+//   search API": request, response and the cURL example);
+// - the API introduction, https://docs.ollama.com/api (cloud base URL
+//   https://ollama.com/api; "Cloud requests need an API key", supplied in the
+//   `Authorization: Bearer` header);
+// - the error page, https://docs.ollama.com/api/errors (statuses and the
+//   {"error": "..."} JSON body);
+// - Ollama's official Python client, https://github.com/ollama/ollama-python:
+//   ollama/_client.py (web_search posts to the fixed URL
+//   https://ollama.com/api/web_search and requires an
+//   "Authorization: Bearer ..." header) and ollama/_types.py
+//   (WebSearchRequest: query, max_results; WebSearchResponse: results of
+//   WebSearchResult with content, title and url).
+//
+// - method and path: POST https://ollama.com/api/web_search with a JSON body.
+//   The transport URL is the host and the path carries /api/web_search;
+// - auth: `Authorization: Bearer <key>`, an API key created at
+//   https://ollama.com/settings/keys (OLLAMA_API_KEY in Ollama's examples). The
+//   connection is bound to the vault credential `apikey:ollama-cloud`; plexus
+//   reads it by name at dispatch and never stores it;
+// - request fields used: `query` (string, required; no length limit
+//   documented) and `max_results` (integer, optional, "default 5, max 10"; no
+//   minimum documented, so the schema takes 1 to 10). Nothing else is
+//   documented and nothing else is sent. No domain filter, no date filter and
+//   no query operator is documented;
+// - reply: {results: [...]}, each with `title`, `url` and `content` (the
+//   documented "relevant content snippet"). All three are read; nothing else
+//   is documented. The Python client types each as optional;
+// - errors (error page, for the whole API): 400 Bad Request, 404 Not Found,
+//   429 Too Many Requests ("e.g. when rate limit exceeded"), 500 Internal
+//   Server Error and 502 Bad Gateway, with an {"error": "..."} body. 401 and
+//   403 are not on that page; Ollama's cloud usage reference documents them
+//   for its own endpoint (GET /api/usage) as invalid credentials and a
+//   suspended account, and they are read the same way here. No 402, no quota
+//   status, no Retry-After and no rate figure is documented for web search.
+//
+// Differences from the provider facts the web_search chain design started from
+// (POST https://ollama.com/api/web_search; bearer; query and max_results, max
+// 10; site: in query; results[].title, url, content):
+// - credential: the vault record is `apikey:ollama-cloud`, not
+//   `apikey:ollama`. This is the vault name agreed with the vault's owners and
+//   already recorded in the web_search provider table; the key is an
+//   ollama.com account key, which a local Ollama server does not use;
+// - domains: Ollama documents no `site:` operator (or any operator). Requested
+//   domains are still sent as `site:` operators appended to `query` in the
+//   plain `terms site:a OR site:b` form, without parentheses, and the
+//   500-character limit applies to that final string. That Ollama's search
+//   honours them is the design's assumption, not a documented fact;
+// - recency: none is documented, so a search with a recency window skips
+//   Ollama for capability instead of being answered with results of any age;
+// - query length: none is documented, so the tool's own 500-character limit
+//   applies, counted after the `site:` operators are added;
+// - dates: the reply carries no date, so no result reports a publication date;
+// - outcome classification: 400 is a rejected request; 401 is a credential
+//   failure; 429 is throttled for 60 seconds, or for its Retry-After if one is
+//   sent; 403, 404, 500 and 502 are unavailable for 60 seconds. Ollama
+//   documents no status for a used-up plan, so no reply is classified as
+//   quota unless it is a 402 or its body names credits or quota.
+//
+// The search action is read-risk and has no side effects, so a retry is safe.
+{
+  "schema_version": 1,
+  "key": "ollama_rest",
+  "name": "Ollama Web Search (REST)",
+  "description": "Web search over Ollama's cloud web search API (ollama.com/api/web_search), as a provider for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Small JSON REST API with static API-key bearer auth, used by Ollama's own clients; a search mutates no vendor-side state, so it maps to a read grant.",
+  "tier": "S1",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://ollama.com"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/api/web_search",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "max_results": { "type": "integer", "minimum": 1, "maximum": 10 }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

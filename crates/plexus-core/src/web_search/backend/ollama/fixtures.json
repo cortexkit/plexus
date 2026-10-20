@@ -1,0 +1,58 @@
+{
+  "_source": "Built from Ollama's own documentation (read 2026-10-20). success is the documented response example of https://docs.ollama.com/capabilities/web-search verbatim, with each item's title, url and content. empty is a results array with no items, built from the same documented schema (Ollama shows no empty example). malformed is a 200 without results, the only documented top-level field. Error bodies use the documented error format of https://docs.ollama.com/api/errors ({\"error\": \"...\"}) for the statuses that page lists (400, 404, 429, 500, 502); their messages are illustrative, since none is documented for web search. 401 and 403 are the statuses Ollama's cloud usage reference (https://docs.ollama.com/api/cloud-usage) documents for invalid credentials and a suspended account, with the same error body. rate_limited carries no Retry-After, as none is documented for web search; rate_limited_retry carries the Retry-After the cloud usage reference documents for its own 429 and checks that one is honoured if sent.",
+  "success": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"results\": [{\"title\": \"Ollama\", \"url\": \"https://ollama.com/\", \"content\": \"Cloud models are now available...\"}, {\"title\": \"What is Ollama? Introduction to the AI model management tool\", \"url\": \"https://www.hostinger.com/tutorials/what-is-ollama\", \"content\": \"Ariffud M. 6min Read...\"}, {\"title\": \"Ollama Explained: Transforming AI Accessibility and Language ...\", \"url\": \"https://www.geeksforgeeks.org/artificial-intelligence/ollama-explained-transforming-ai-accessibility-and-language-processing/\", \"content\": \"Data Science Data Science Projects Data Analysis...\"}]}"
+  },
+  "empty": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"results\": []}"
+  },
+  "malformed": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"web\": [{\"title\": \"Ollama\", \"url\": \"https://ollama.com/\"}]}"
+  },
+  "bad_request": {
+    "status": 400,
+    "headers": "",
+    "body": "{\"error\": \"max_results must be between 1 and 10\"}"
+  },
+  "unauthorized": {
+    "status": 401,
+    "headers": "",
+    "body": "{\"error\": \"unauthorized\"}"
+  },
+  "forbidden": {
+    "status": 403,
+    "headers": "",
+    "body": "{\"error\": \"account suspended\"}"
+  },
+  "not_found": {
+    "status": 404,
+    "headers": "",
+    "body": "{\"error\": \"not found\"}"
+  },
+  "rate_limited": {
+    "status": 429,
+    "headers": "",
+    "body": "{\"error\": \"too many requests\"}"
+  },
+  "rate_limited_retry": {
+    "status": 429,
+    "headers": "Retry-After: 7\r\n",
+    "body": "{\"error\": \"too many requests\"}"
+  },
+  "server_error": {
+    "status": 500,
+    "headers": "",
+    "body": "{\"error\": \"internal server error\"}"
+  },
+  "bad_gateway": {
+    "status": 502,
+    "headers": "",
+    "body": "{\"error\": \"bad gateway\"}"
+  }
+}
