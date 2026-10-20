@@ -102,7 +102,7 @@ fn deepseek_service() -> WebSearchService {
 struct Recorded {
     result: Result<WebSearchResponse, WebSearchRefusal>,
     service: WebSearchService,
-    /// The request DeepSeek's attempt sent.
+    /// The request sent in DeepSeek's attempt.
     request: String,
     vault: Arc<RecordingVault>,
     /// The chain fields of the call's `web_search` audit row.

@@ -17581,3 +17581,99 @@ expect_red = ["web_search::chain::tests::brave::a_documented_success_is_served_f
 expect_message = "the key travels bare in X-Subscription-Token"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-deepseek-capability-query-length"
+guards = "DeepSeek's capability declares its documented 128-character query limit, so a 200-character query skips DeepSeek without dispatch"
+file = "crates/plexus-core/src/web_search/backend/deepseek.rs"
+old = "max: DEEPSEEK_MAX_QUERY_CHARS,"
+new = "max: usize::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/deepseek/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::deepseek::tests::capability_skips_a_200_character_query"]
+expect_message = "a query over DeepSeek's 128-character limit must skip"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-deepseek-length-after-operators"
+guards = "DeepSeek's 128-character limit is checked on the final query after the site: and after: operators are added, not on the caller's terms alone"
+file = "crates/plexus-core/src/web_search/backend/deepseek.rs"
+old = "let prepared = admission.prepare_query(self.name(), &composed, now_ms)?;"
+new = "let mut prepared = admission.prepare_query(self.name(), query, now_ms)?; prepared.query = composed.query.clone(); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/deepseek/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::deepseek::tests::capability_checks_the_final_query_after_operators"]
+expect_message = "a query that only exceeds 128 characters once its operators are added must skip"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-deepseek-domains-as-site-operators"
+guards = "Every requested domain reaches DeepSeek as a site: operator joined by OR inside query; dropping them would silently widen the search"
+file = "crates/plexus-core/src/web_search/backend/deepseek.rs"
+old = "parts.push(sites.join(\" OR \"));"
+new = "let _ = sites; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/deepseek/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::deepseek::tests::vendor_args_compose_domains_and_recency_as_documented_operators"]
+expect_message = "domains become site:a OR site:b and recency becomes after:YYYY-MM-DD"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-deepseek-recency-as-after-operator"
+guards = "A recency window reaches DeepSeek as an after:YYYY-MM-DD operator inside query; dropping it would return results of any age"
+file = "crates/plexus-core/src/web_search/backend/deepseek.rs"
+old = "if let Some(recency) = query.recency {"
+new = "if let Some(recency) = None::<crate::web_search::query::Recency> { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/deepseek/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::deepseek::tests::vendor_args_compose_domains_and_recency_as_documented_operators"]
+expect_message = "domains become site:a OR site:b and recency becomes after:YYYY-MM-DD"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-deepseek-capability-result-count"
+guards = "DeepSeek's capability clamps count to its documented maximum of 50"
+file = "crates/plexus-core/src/web_search/backend/deepseek.rs"
+old = "max_results: DEEPSEEK_MAX_COUNT,"
+new = "max_results: u8::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/deepseek/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::deepseek::tests::capability_clamps_count_and_accepts_every_recency_and_domain_count"]
+expect_message = "count is clamped to DeepSeek's maximum of 50"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-deepseek-bearer-authorization"
+guards = "The shipped DeepSeek manifest sends the key as Authorization: Bearer, the scheme DeepSeek authenticates"
+file = "catalog/deepseek_rest.jsonc"
+old = "\"prefix\": \"Bearer \","
+new = "\"prefix\": \"\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/deepseek.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::deepseek::a_documented_success_is_served_from_a_bearer_post_to_tools_search"]
+expect_message = "the key travels as a bearer token"
+build_timeout_s = 3600
+timeout_s = 120
