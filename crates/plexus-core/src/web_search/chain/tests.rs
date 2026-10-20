@@ -18,6 +18,7 @@ mod parallel;
 mod perplexity;
 mod synthetic;
 mod tavily;
+mod tinyfish;
 
 const NOW: i64 = 1_790_000_000_000;
 type Engine = GovernanceEngine<StubCredentialSource, MockTransport>;

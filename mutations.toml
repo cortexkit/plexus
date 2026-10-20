@@ -19249,3 +19249,147 @@ select = "expected"
 expect_red = ["web_search::backend::synthetic::tests::mapping_bounds_count_and_unicode_excerpts_and_drops_unlinked_items"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-tinyfish-header-key"
+guards = "TinyFish's raw vault key travels in X-API-Key, never in an Authorization header or URL"
+file = "catalog/tinyfish_rest.jsonc"
+old = "\"key\": \"X-API-Key\""
+new = "\"key\": \"Wrong-API-Key\" /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/tinyfish.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::tinyfish::keyed_get_sends_native_query_filters_and_header_key_without_a_body"]
+expect_message = "the vault key must travel in X-API-Key"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tinyfish-get-method"
+guards = "TinyFish search uses the documented GET method with query parameters"
+file = "catalog/tinyfish_rest.jsonc"
+old = "\"method\": \"GET\","
+new = "\"method\": \"POST\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/tinyfish.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::tinyfish::keyed_get_sends_native_query_filters_and_header_key_without_a_body"]
+expect_message = "search must use GET"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tinyfish-root-path"
+guards = "TinyFish search targets the documented root path, not an invented search route"
+file = "catalog/tinyfish_rest.jsonc"
+old = "\"path\": \"/\","
+new = "\"path\": \"/search\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/tinyfish.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::tinyfish::keyed_get_sends_native_query_filters_and_header_key_without_a_body"]
+expect_message = "search must use the documented root path"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tinyfish-query-length"
+guards = "TinyFish preparation skips queries beyond the documented 2000-character bound"
+file = "crates/plexus-core/src/web_search/backend/tinyfish.rs"
+old = "max: TINYFISH_MAX_QUERY_CHARS,"
+new = "max: usize::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tinyfish/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tinyfish::tests::capability_skips_queries_beyond_2000_characters_and_tool_domain_envelope"]
+expect_message = "requests beyond the declared envelope must skip TinyFish"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tinyfish-native-domains"
+guards = "TinyFish include_domains is a comma-separated string preserving every requested domain"
+file = "crates/plexus-core/src/web_search/backend/tinyfish.rs"
+old = "query.include_domains.join(\",\")"
+new = "query.include_domains.join(\"|\") /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tinyfish/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tinyfish::tests::capability_serves_native_domains_and_every_recency_without_changing_query"]
+expect_message = "native domains and recency must survive unchanged query preparation"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tinyfish-native-recency"
+guards = "TinyFish receives each requested freshness window in minutes, not days"
+file = "crates/plexus-core/src/web_search/backend/tinyfish.rs"
+old = "recency.days() * 24 * 60"
+new = "recency.days() /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tinyfish/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tinyfish::tests::capability_serves_native_domains_and_every_recency_without_changing_query"]
+expect_message = "native domains and recency must survive unchanged query preparation"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tinyfish-capability-local-count"
+guards = "TinyFish preparation clamps the local result count to the tool maximum of 20; no vendor count parameter is documented"
+file = "crates/plexus-core/src/web_search/backend/tinyfish.rs"
+old = "max_results: MAX_RESULTS_LIMIT,"
+new = "max_results: u8::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tinyfish/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tinyfish::tests::capability_clamps_result_count_locally_to_20"]
+expect_message = "local result count must clamp to 20"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tinyfish-snippet-mapping"
+guards = "TinyFish excerpts come from the documented snippet, not from titles or an answer"
+file = "crates/plexus-core/src/web_search/backend/tinyfish.rs"
+old = "text(\"snippet\")"
+new = "text(\"title\") /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tinyfish/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tinyfish::tests::documented_results_map_title_url_snippet_and_optional_date"]
+expect_message = "TinyFish results must map title, url, snippet and optional date"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-tinyfish-mapping-local-count"
+guards = "TinyFish reply mapping bounds results locally because its documented API has no count parameter"
+file = "crates/plexus-core/src/web_search/backend/tinyfish.rs"
+old = ".take(max_results.min(MAX_RESULTS_LIMIT as usize))"
+new = ".take(usize::MAX) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/tinyfish/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tinyfish::tests::mapping_bounds_count_and_unicode_excerpts_and_drops_unlinked_items"]
+expect_message = "mapping must respect the caller's local result count"
+build_timeout_s = 3600
+timeout_s = 120

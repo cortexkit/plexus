@@ -1,0 +1,70 @@
+// TinyFish Search REST: the `tinyfish` provider of the web_search chain.
+//
+// Wire contract pinned from TinyFish's official documentation (read 2026-10-20):
+// https://docs.tinyfish.ai/api-reference/search-the-web (OpenAPI GET /), and
+// https://docs.tinyfish.ai/search-api/reference (parameters, results and errors).
+// - GET https://api.search.tinyfish.ai/ with arguments in the query string.
+// - X-API-Key carries the raw key, with no prefix. Connections bind the vault
+//   credential apikey:tinyfish; plexus reads it at dispatch, never stores it,
+//   and never puts it in the URL.
+// - query: required string, 1–2000 characters in the OpenAPI schema.
+// - include_domains: comma-separated hostnames, not an array or site: operators.
+//   No vendor domain-count bound is published; we admit the tool's 20 domains.
+// - recency_minutes: integer 1–5256000. Tool day/week/month/year windows map to
+//   1440/10080/43200/525600 minutes (24 hours/7 days/30 days/365 days).
+// - Response: results[].title, url and snippet; optional date is normalized to
+//   RFC 3339 only when parseable. An empty results array is a served empty search.
+// - Error body: {error:{code,message,details?},request_id?}; documented statuses
+//   400,401,402,403,404,429,500,503. HTTP 402 denotes insufficient credits or
+//   exhausted free allowance. A 429 is throttled regardless of its body.
+//
+// Compared with the initial provider constraints (GET root; X-API-Key; query,
+// num_results, include domains, recency_minutes; title/url/snippet), current
+// official docs and OpenAPI contain NO num_results/count parameter. We omit it
+// rather than risk a rejected request, and truncate results locally to the
+// caller's requested count, capped at the tool's 20. There is no claimed vendor
+// result-count maximum. The docs also specify the native include_domains string
+// and the 2000-character query bound absent from those constraints; it is counted
+// in Unicode scalar values, as for JSON Schema string lengths. Native filters
+// leave query unchanged. Only documented fields are sent. Tool validation still
+// applies its narrower 500-character query envelope before backend admission.
+//
+// Search is a read-risk Pure action: no idempotency stanza or vendor mutation.
+{
+  "schema_version": 1,
+  "key": "tinyfish_rest",
+  "name": "TinyFish Search (REST)",
+  "description": "Keyed TinyFish Search API as a provider for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Documented keyed GET search API with native domain and freshness filters; search has no side effects.",
+  "tier": "S1",
+  "transport": { "kind": "rest_api", "url": "https://api.search.tinyfish.ai" },
+  "auth": { "mode": "api_key" },
+  "credential_bindings": [
+    { "ref_role": "api_key", "placement": "header", "key": "X-API-Key", "prefix": "", "required": true }
+  ],
+  "resource_filters": { "required": [], "optional": [], "write_enabling": [] },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/",
+        "parameters": "query",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "include_domains": { "type": "string", "minLength": 1 },
+            "recency_minutes": { "type": "integer", "minimum": 1, "maximum": 5256000 }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": { "ask_first_risk": ["write", "destructive"], "rate_limit": { "calls_per_min": 30 } },
+  "availability": "ga"
+}

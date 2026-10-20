@@ -1,0 +1,21 @@
+{
+  "_source": "Recorded-shape fixtures from TinyFish's official https://docs.tinyfish.ai/api-reference/search-the-web and https://docs.tinyfish.ai/search-api/reference (read 2026-10-20). Success follows the documented query/results/total_results/page envelope and title/url/snippet item example; the second item and optional date are illustrative. Standard error objects follow the documented schema; values and Retry-After are illustrative, not captured authenticated replies. 422 and quota-bearing 403 are shared-classifier probes, not documented TinyFish error meanings. Local transport states (timeout, NotSent, OutcomeUnknown, missing body) are tested separately. Capability skip exceeds the documented query-length bound; public tool validation currently has a narrower envelope.",
+  "success": {"status": 200, "headers": "", "body": "{\"query\":\"web automation tools\",\"results\":[{\"position\":1,\"site_name\":\"example.com\",\"title\":\"Best Web Automation Tools\",\"url\":\"https://example.com/web-automation-tools\",\"snippet\":\"Top web automation tools for 2026...\",\"date\":\"2026-06-18\"},{\"position\":2,\"site_name\":\"example.org\",\"title\":\"Another Source\",\"url\":\"https://example.org/source\",\"snippet\":\"Another page excerpt.\"}],\"total_results\":2,\"page\":0}"},
+  "empty": {"status": 200, "headers": "", "body": "{\"query\":\"web automation tools\",\"results\":[],\"total_results\":0,\"page\":0}"},
+  "malformed": {"status": 200, "headers": "", "body": "{\"answer\":\"Not a search result\"}"},
+  "invalid_json": {"status": 200, "headers": "", "body": "not JSON"},
+  "no_body": {"status": 200, "headers": "", "body": ""},
+  "bad_request": {"status": 400, "headers": "", "body": "{\"error\":{\"code\":\"INVALID_INPUT\",\"message\":\"quota text must not override validation\"}}"},
+  "unprocessable": {"status": 422, "headers": "", "body": "{\"error\":{\"code\":\"INVALID_INPUT\",\"message\":\"insufficient balance must not override validation\"}}"},
+  "payment_required": {"status": 402, "headers": "", "body": "{\"error\":{\"code\":\"INSUFFICIENT_CREDITS\",\"message\":\"Add funds or wait for the daily reset\"}}"},
+  "free_allowance": {"status": 402, "headers": "", "body": "{\"error\":{\"code\":\"FREE_ALLOWANCE_EXHAUSTED\",\"message\":\"Wait for the daily reset\"}}"},
+  "quota_forbidden": {"status": 403, "headers": "", "body": "{\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"insufficient credits\"}}"},
+  "unauthorized": {"status": 401, "headers": "", "body": "{\"error\":{\"code\":\"INVALID_API_KEY\",\"message\":\"quota must not override invalid key\"}}"},
+  "forbidden": {"status": 403, "headers": "", "body": "{\"error\":{\"code\":\"FORBIDDEN\",\"message\":\"Search request forbidden by upstream\"}}"},
+  "not_found": {"status": 404, "headers": "", "body": "{\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"Search API is not available\"}}"},
+  "rate_limited": {"status": 429, "headers": "", "body": "{\"error\":{\"code\":\"RATE_LIMIT_EXCEEDED\",\"message\":\"quota text is hidden by REST throttling\"}}"},
+  "rate_limited_retry": {"status": 429, "headers": "Retry-After: 7\r\n", "body": "{\"error\":{\"code\":\"RATE_LIMIT_EXCEEDED\",\"message\":\"Rate limit exceeded\"}}"},
+  "server_error": {"status": 500, "headers": "", "body": "{\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"Internal server error\"}}"},
+  "service_unavailable": {"status": 503, "headers": "", "body": "{\"error\":{\"code\":\"SERVICE_BUSY\",\"message\":\"Search service unavailable\"}}"},
+  "capability_skip": {"query_chars": 2001}
+}

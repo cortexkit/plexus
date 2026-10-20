@@ -23,6 +23,7 @@ mod parallel;
 mod perplexity;
 mod synthetic;
 mod tavily;
+mod tinyfish;
 pub use brave::{BraveRestBackend, BRAVE_MAX_COUNT, BRAVE_MAX_QUERY_CHARS, BRAVE_MAX_QUERY_WORDS};
 pub use deepseek::{DeepSeekRestBackend, DEEPSEEK_MAX_COUNT, DEEPSEEK_MAX_QUERY_CHARS};
 pub use firecrawl::{FirecrawlRestBackend, FIRECRAWL_MAX_LIMIT, FIRECRAWL_MAX_QUERY_UTF16};
@@ -34,6 +35,7 @@ pub use parallel::ParallelRestBackend;
 pub use perplexity::PerplexityRestBackend;
 pub use synthetic::SyntheticRestBackend;
 pub use tavily::{TavilyRestBackend, TAVILY_MAX_INCLUDE_DOMAINS, TAVILY_MAX_RESULTS};
+pub use tinyfish::{TinyFishRestBackend, TINYFISH_MAX_QUERY_CHARS};
 
 /// Longest excerpt returned per result, in characters.
 pub const EXCERPT_MAX_CHARS: usize = 600;
