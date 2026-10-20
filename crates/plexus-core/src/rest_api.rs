@@ -1681,8 +1681,14 @@ mod tests {
             request("rest", "search", json!({"token": "Bearer other"})),
             &ResolvedCredential::new(b"key".to_vec(), None, 1),
         );
+        // Nothing listens on the discard port, so a request that was built
+        // and sent would fail to connect with a different error code.
         assert_eq!(result.transmission, TransmissionState::NotSent);
-        assert_eq!(result.error_code.as_deref(), Some("rest_transport_error"));
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("rest_transport_error"),
+            "a header argument must not replace the credential header"
+        );
     }
 
     #[test]

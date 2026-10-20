@@ -17805,3 +17805,195 @@ expect_red = ["web_search::chain::tests::firecrawl::a_documented_success_is_serv
 expect_message = "the key travels as a bearer token"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-jina-capability-domain-count"
+guards = "Jina's capability admits one domain, the single site filter X-Site carries, so a search with two domains skips Jina instead of being sent with one dropped"
+file = "crates/plexus-core/src/web_search/backend/jina.rs"
+old = "max_domains: JINA_MAX_DOMAINS,"
+new = "max_domains: usize::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/jina/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::jina::tests::capability_takes_one_domain_and_skips_two"]
+expect_message = "two domains must skip Jina, which takes one site filter"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-jina-capability-result-count"
+guards = "Jina's capability clamps count to its documented maximum of 20"
+file = "crates/plexus-core/src/web_search/backend/jina.rs"
+old = "max_results: JINA_MAX_COUNT,"
+new = "max_results: u8::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/jina/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::jina::tests::capability_clamps_count_to_20"]
+expect_message = "count is clamped to Jina's maximum of 20"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-jina-capability-no-recency"
+guards = "Jina documents no date filter, so a search with a recency window skips Jina instead of returning results of any age"
+file = "crates/plexus-core/src/web_search/backend/jina.rs"
+old = "supported: &[],"
+new = "supported: ALL_RECENCIES, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/jina/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::jina::tests::capability_skips_every_recency_window"]
+expect_message = "Jina has no date filter, so a recency window must skip it"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-jina-site-filter"
+guards = "The one requested domain reaches Jina as the site argument sent in X-Site; dropping it would silently widen the search"
+file = "crates/plexus-core/src/web_search/backend/jina.rs"
+old = "args[\"site\"] = Value::String(site.clone());"
+new = "let _ = site; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/jina/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::jina::tests::vendor_args_send_the_query_count_and_one_site"]
+expect_message = "a one-domain search sends that domain as the site filter"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-jina-content-fallback"
+guards = "A Jina result with an empty description takes its excerpt from content"
+file = "crates/plexus-core/src/web_search/backend/jina.rs"
+old = ".unwrap_or_else(|| text(\"content\"));"
+new = ".unwrap_or_default(); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/jina/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::jina::tests::content_fills_in_when_a_result_has_no_description"]
+expect_message = "content fills in when description is empty"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-jina-bearer-authorization"
+guards = "The shipped Jina manifest sends the key as Authorization: Bearer <key>, the authentication scheme Jina documents for its Search API"
+file = "catalog/jina_rest.jsonc"
+old = "\"prefix\": \"Bearer \","
+new = "\"prefix\": \"\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/jina.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::jina::a_documented_success_is_served_from_a_bearer_get_with_the_query_as_the_path"]
+expect_message = "the key travels as a bearer token"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "rest-text-path-value-percent-encoded"
+guards = "A free-text path value is percent-encoded as one segment, so a search query containing / ? # or % cannot change the route or start a query string"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "encoded: percent_encode_component(&text),"
+new = "encoded: text.clone(), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::tests::a_free_text_path_value_is_one_encoded_segment_and_never_logged"]
+expect_message = "every reserved character is escaped, so the value stays one path segment"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "rest-text-path-value-not-logged"
+guards = "The diagnostic path of a request with a free-text path value names its placeholder, so a caller's search text never reaches the log"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "log_path = log_path.replace(&value.marker, &format!(\"{{{}}}\", value.name));"
+new = "log_path = log_path.replace(&value.marker, &value.encoded); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::tests::a_free_text_path_value_is_one_encoded_segment_and_never_logged"]
+expect_message = "the diagnostic path names the placeholder, never the text"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "rest-header-parameter-never-replaces-reviewed-header"
+guards = "At dispatch, a header argument that would replace a header the transport already set (such as the credential) refuses the request instead"
+file = "crates/plexus-core/src/rest_api.rs"
+old = "if headers.contains_key(name) {"
+new = "if false { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::tests::a_header_argument_never_replaces_a_credential_header"]
+expect_message = "a header argument must not replace the credential header"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "manifest-header-parameter-transport-owned"
+guards = "Ingest refuses a header parameter naming a header the transport sets itself or that frames the message (Accept, Content-Length and the like)"
+file = "crates/plexus-core/src/manifest.rs"
+old = "|| TRANSPORT_OWNED_HEADERS.contains(&lower.as_str())"
+new = "|| false /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::header_parameters_refuse_credential_transport_unknown_and_repeated_headers"]
+expect_message = "must not name a credential header"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "manifest-header-parameter-credential-header"
+guards = "Ingest refuses a header parameter naming one of the manifest's credential headers, in any letter case"
+file = "crates/plexus-core/src/manifest.rs"
+old = ".any(|binding| binding.key.eq_ignore_ascii_case(header))"
+new = ".any(|binding| binding.key == \"\" && binding.key.eq_ignore_ascii_case(header)) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::header_parameters_refuse_credential_transport_unknown_and_repeated_headers"]
+expect_message = "credential header must be refused"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "manifest-text-path-parameter-is-placeholder"
+guards = "Ingest refuses a text_path_parameters entry that is not a placeholder of the action's path"
+file = "crates/plexus-core/src/manifest.rs"
+old = "if !placeholders.contains(name)"
+new = "if false /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::text_path_parameters_must_name_a_placeholder_that_is_not_a_constant"]
+expect_message = "text path entry must be refused"
+build_timeout_s = 3600
+timeout_s = 120
