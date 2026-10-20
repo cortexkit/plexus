@@ -64,9 +64,9 @@ pub const PROVIDER_NAMES: &[ProviderName] = &[
         name: "zai",
         app_key: "zai",
         manifest: "catalog/zai.jsonc",
-        // Official MCP tool, not a REST action:
+        // Runtime MCP action; the vendor overview calls it webSearchPrime.
         // https://docs.z.ai/devpack/mcp/search-mcp-server#supported-tools
-        action: "webSearchPrime",
+        action: "web_search_prime",
         credential: VaultCredential::Required("apikey:zai"),
     },
 ];
@@ -144,7 +144,7 @@ mod tests {
                 name: "zai",
                 app_key: "zai",
                 manifest: "catalog/zai.jsonc",
-                action: "webSearchPrime",
+                action: "web_search_prime",
                 credential: VaultCredential::Required("apikey:zai"),
             })
         );

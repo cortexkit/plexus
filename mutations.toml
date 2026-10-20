@@ -19513,3 +19513,169 @@ select = "expected"
 expect_red = ["storage::tests::searxng_instance_ticket_requirements_come_from_the_reviewed_manifest"]
 expect_message = "instance manifest must admit its approved destination"
 build_timeout_s = 3600
+
+[[control]]
+id = "zai-reviewed-query-precedence"
+guards = "ZAI prefers query when both query and search_query are declared in the reviewed pin"
+file = "crates/plexus-core/src/web_search/backend/zai.rs"
+old = 'let query_field = if declares("query") {'
+new = 'let query_field = if false { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/zai/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::zai::tests::reviewed_query_field_is_preferred_and_declared_count_is_sent"]
+expect_message = "assertion `left == right` failed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-reviewed-search-query-variant"
+guards = "ZAI sends search_query when that is the only reviewed query field"
+file = "crates/plexus-core/src/web_search/backend/zai.rs"
+old = '''} else if declares("search_query") {
+            "search_query"'''
+new = '''} else if declares("search_query") {
+            "query" /* NON-VACUITY BREAK */'''
+test_file = "crates/plexus-core/src/web_search/backend/zai/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::zai::tests::reviewed_search_query_variant_is_used_without_argument_retries"]
+expect_message = "assertion `left == right` failed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-reviewed-count-present"
+guards = "ZAI sends count when the reviewed schema declares it"
+file = "crates/plexus-core/src/web_search/backend/zai.rs"
+old = 'if declares("count") {'
+new = 'if false { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/zai/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::zai::tests::reviewed_query_field_is_preferred_and_declared_count_is_sent"]
+expect_message = "assertion `left == right` failed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-reviewed-count-absent"
+guards = "ZAI omits count when the reviewed schema does not declare it, enforcing the count locally"
+file = "crates/plexus-core/src/web_search/backend/zai.rs"
+old = 'if declares("count") {'
+new = 'if true { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/zai/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::zai::tests::undeclared_count_is_omitted_for_both_query_variants"]
+expect_message = "assertion `left == right` failed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-reviewed-neither-query-skip"
+guards = "ZAI skips before dispatch and accounting when the reviewed schema declares neither query field"
+file = "crates/plexus-core/src/web_search/backend/zai.rs"
+old = '''return Err(CapabilitySkip {
+                provider: "zai",
+                reason: CapabilitySkipReason::Capability,
+                failed: CapabilityFailure::Schema,
+            });'''
+new = 'return Ok(prepared); /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/zai.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::zai::capability_skips_filters_and_missing_reviewed_query_without_side_effects"]
+expect_message = "schema"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-domain-capability-skip"
+guards = "ZAI cannot honor domain filters and skips them rather than widening a search"
+file = "crates/plexus-core/src/web_search/backend/zai.rs"
+old = 'max_domains: 0,'
+new = 'max_domains: 20, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/zai/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::zai::tests::capability_serves_unfiltered_and_skips_domains_or_recency"]
+expect_message = "unwrap_err()"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-recency-capability-skip"
+guards = "ZAI cannot honor recency filters and skips them rather than widening a search"
+file = "crates/plexus-core/src/web_search/backend/zai.rs"
+old = 'supported: &[],'
+new = 'supported: ALL_RECENCIES, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/zai/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::zai::tests::capability_serves_unfiltered_and_skips_domains_or_recency"]
+expect_message = "unwrap_err()"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-quarantine-before-schema-hook"
+guards = "A quarantined observed schema never reaches the schema-aware backend hook"
+file = "crates/plexus-core/src/web_search/chain.rs"
+old = 'let prepared = if action.status == "active" {'
+new = 'let prepared = if true { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/zai.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::zai::quarantined_zai_never_reaches_schema_hook"]
+expect_message = "quarantined Z.AI action reached schema hook"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-drop-synthesized-answer"
+guards = "ZAI contributes cited source content, never its synthesized answer text"
+file = "crates/plexus-core/src/web_search/backend/zai.rs"
+old = 'excerpt: truncate_chars(text("content"), EXCERPT_MAX_CHARS),'
+new = 'excerpt: truncate_chars(reply.get("answer").and_then(Value::as_str).unwrap_or(text("content")), EXCERPT_MAX_CHARS), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/zai/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::zai::tests::mapping_uses_sources_only_with_link_url_dates_and_bounded_excerpts"]
+expect_message = "ANSWER MUST NOT LEAK"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-unsupported-schema-log-once"
+guards = "An unsupported reviewed schema emits one operator diagnostic per connection, not one per search"
+file = "crates/plexus-core/src/web_search/backend/zai.rs"
+old = '.insert(connection_id.to_string())'
+new = '.insert(connection_id.to_string()) | true /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/zai/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::zai::tests::missing_reviewed_query_fields_skip_and_log_only_once_per_connection"]
+expect_message = "unsupported schema must log once per connection"
+build_timeout_s = 3600
+timeout_s = 120

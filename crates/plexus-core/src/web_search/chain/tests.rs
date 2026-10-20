@@ -20,6 +20,7 @@ mod searxng;
 mod synthetic;
 mod tavily;
 mod tinyfish;
+mod zai;
 
 const NOW: i64 = 1_790_000_000_000;
 type Engine = GovernanceEngine<StubCredentialSource, MockTransport>;
