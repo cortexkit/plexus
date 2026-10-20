@@ -18621,3 +18621,147 @@ expect_red = ["web_search::backend::parallel::tests::documented_sources_map_only
 expect_message = "First excerpt"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-perplexity-bearer"
+guards = "Perplexity's named vault key is sent as a bearer token, never in a URL or another auth scheme"
+file = "catalog/perplexity_rest.jsonc"
+old = '"prefix": "Bearer "'
+new = '"prefix": "Basic " /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/perplexity.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::perplexity::keyed_search_post_sends_bearer_query_count_domain_and_recency"]
+expect_message = "the vault key must travel as a bearer token"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-perplexity-search-path"
+guards = "Perplexity uses the Search API, never chat completions or an answer endpoint"
+file = "catalog/perplexity_rest.jsonc"
+old = '"path": "/search"'
+new = '"path": "/chat/completions" /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/perplexity/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::perplexity::tests::shipped_manifest_pins_bearer_search_not_completions_and_closed_schema"]
+expect_message = "/search"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-perplexity-literal-query"
+guards = "The caller's query is sent literally using the documented query field"
+file = "crates/plexus-core/src/web_search/backend/perplexity.rs"
+old = '"query": query.query,'
+new = '"query": "rewritten query", /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/perplexity/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::perplexity::tests::native_fields_preserve_literal_query_count_domains_and_each_recency"]
+expect_message = "native query, count, domain and recency fields must be preserved"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-perplexity-native-domains"
+guards = "Perplexity preserves every requested domain in its native allowlist"
+file = "crates/plexus-core/src/web_search/backend/perplexity.rs"
+old = 'args["search_domain_filter"] = json!(query.include_domains);'
+new = 'let _ = &query.include_domains; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/perplexity/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::perplexity::tests::native_fields_preserve_literal_query_count_domains_and_each_recency"]
+expect_message = "native query, count, domain and recency fields must be preserved"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-perplexity-native-recency"
+guards = "Perplexity honors each recency window instead of returning an unfiltered search"
+file = "crates/plexus-core/src/web_search/backend/perplexity.rs"
+old = 'args["search_recency_filter"] = json!(match recency {'
+new = 'args["wrong_recency_filter"] = json!(match recency { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/perplexity/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::perplexity::tests::native_fields_preserve_literal_query_count_domains_and_each_recency"]
+expect_message = "native query, count, domain and recency fields must be preserved"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-perplexity-query-envelope"
+guards = "Direct preparation beyond the declared character envelope skips Perplexity"
+file = "crates/plexus-core/src/web_search/backend/perplexity.rs"
+old = 'max: MAX_QUERY_CHARS,'
+new = 'max: usize::MAX, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/perplexity/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::perplexity::tests::capability_skips_direct_preparation_beyond_query_and_domain_envelopes"]
+expect_message = "requests beyond the declared envelope must skip Perplexity"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-perplexity-domain-envelope"
+guards = "Direct preparation beyond the vendor's twenty-domain limit skips Perplexity"
+file = "crates/plexus-core/src/web_search/backend/perplexity.rs"
+old = 'max_domains: PERPLEXITY_MAX_DOMAINS,'
+new = 'max_domains: usize::MAX, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/perplexity/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::perplexity::tests::capability_skips_direct_preparation_beyond_query_and_domain_envelopes"]
+expect_message = "requests beyond the declared envelope must skip Perplexity"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-perplexity-web-result-cap"
+guards = "Perplexity clamps result counts to twenty for web search rather than adopting the people-search cap"
+file = "crates/plexus-core/src/web_search/backend/perplexity.rs"
+old = 'max_results: PERPLEXITY_MAX_RESULTS,'
+new = 'max_results: u8::MAX, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/perplexity/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::perplexity::tests::capability_serves_full_tool_envelope_and_clamps_to_twenty_web_results"]
+expect_message = "web search must clamp to twenty results"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-perplexity-source-snippets-only"
+guards = "Neutral excerpts come from linked search sources, never Perplexity's generated answer text"
+file = "crates/plexus-core/src/web_search/backend/perplexity.rs"
+old = 'excerpt: truncate_chars(text("snippet"), EXCERPT_MAX_CHARS),'
+new = 'excerpt: truncate_chars(reply.get("answer").and_then(Value::as_str).unwrap_or_default(), EXCERPT_MAX_CHARS), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/perplexity/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::perplexity::tests::documented_results_map_links_and_source_metadata_never_generated_answers"]
+expect_message = "only linked sources, never generated answer text or last_updated, may become results"
+build_timeout_s = 3600
+timeout_s = 120

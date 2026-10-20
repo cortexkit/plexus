@@ -1,0 +1,19 @@
+{
+  "_source": "Recorded-shape fixtures written from Perplexity's official Search API reference (https://docs.perplexity.ai/api-reference/search-post, read 2026-10-20). Success follows the documented ranked results array with title, url, snippet, date and last_updated; source text is illustrative. Generated answer/choices fields are defensive probes, not documented Search API output. Error bodies are illustrative, never live credentials or queries. HTTP statuses exercise the shared outcome rows; local transmission states are tested separately. Capability skips use direct preparation because the full valid tool envelope fits this API.",
+  "success": {"status": 200, "headers": "", "body": "{\"id\":\"search_example\",\"results\":[{\"title\":\"Example Article Title\",\"url\":\"https://example.com/article\",\"snippet\":\"A short excerpt from the article relevant to the query...\",\"date\":\"2025-01-23\",\"last_updated\":\"2025-09-25\"},{\"title\":\"Another Relevant Source\",\"url\":\"https://example.org/source\",\"snippet\":\"Another excerpt showing the structured result format.\",\"date\":null,\"last_updated\":\"2025-08-12\"}],\"answer\":\"Generated answer must never escape\",\"choices\":[{\"message\":{\"content\":\"Generated completion must never escape\"}}]}"},
+  "empty": {"status": 200, "headers": "", "body": "{\"id\":\"search_empty\",\"results\":[],\"answer\":\"No link results\"}"},
+  "malformed": {"status": 200, "headers": "", "body": "{\"id\":\"search_malformed\",\"answer\":\"Not a search result\"}"},
+  "invalid_json": {"status": 200, "headers": "", "body": "not JSON"},
+  "no_body": {"status": 200, "headers": "", "body": ""},
+  "bad_request": {"status": 400, "headers": "", "body": "{\"error\":\"quota in an invalid request must not be scanned\"}"},
+  "unprocessable": {"status": 422, "headers": "", "body": "{\"detail\":[{\"loc\":[\"body\",\"query\"],\"msg\":\"insufficient balance must not override validation\",\"type\":\"missing\"}]}"},
+  "payment_required": {"status": 402, "headers": "", "body": "{\"error\":\"payment required\"}"},
+  "quota_forbidden": {"status": 403, "headers": "", "body": "{\"error\":\"insufficient credits\"}"},
+  "unauthorized": {"status": 401, "headers": "", "body": "{\"error\":\"quota must not override invalid key\"}"},
+  "forbidden": {"status": 403, "headers": "", "body": "{\"error\":\"access forbidden\"}"},
+  "not_found": {"status": 404, "headers": "", "body": "{\"error\":\"not found\"}"},
+  "rate_limited": {"status": 429, "headers": "", "body": "{\"error\":\"quota text is hidden by REST throttling\"}"},
+  "rate_limited_retry": {"status": 429, "headers": "Retry-After: 7\r\n", "body": "{\"error\":\"rate limited\"}"},
+  "server_error": {"status": 500, "headers": "", "body": "{\"error\":\"internal server error\"}"},
+  "capability_skip": {"query_chars": 501, "domain_count": 21}
+}

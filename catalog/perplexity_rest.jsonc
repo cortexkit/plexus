@@ -1,0 +1,73 @@
+// Perplexity's keyed Search API, provider `perplexity` for web_search.
+// Only search result links are returned; no completions or answer endpoint is used.
+//
+// Wire contract pinned from Perplexity's official documentation (read 2026-10-20):
+// - https://docs.perplexity.ai/api-reference/search-post
+// - https://docs.perplexity.ai/docs/search/quickstart
+// - https://docs.perplexity.ai/docs/search/filters/domain-filter
+// - https://docs.perplexity.ai/docs/search/filters/date-time-filters
+//
+// POST https://api.perplexity.ai/search, JSON, Authorization: Bearer <API key>.
+// The connection binds vault credential apikey:perplexity, resolved at dispatch.
+// The manifest stores neither a key nor an inline token URL. Search is read/Pure.
+//
+// Field-name differences: the conceptual query/count/domain/recency fields map
+// to vendor fields as follows. query is literal; count is max_results, domains use
+// search_domain_filter, and recency in search_recency_filter. The documented
+// max_results schema allows 1–50, but its description limits ordinary web search
+// to 20; values over 20 require people search, which this backend never selects.
+// The default search_type is web. Domain filtering natively accepts up to 20
+// entries (253 characters each); only the tool's bare-hostname allowlist is sent,
+// never the vendor's optional denylist or path syntax. Recency supports hour,
+// day, week, month and year; the tool exposes the latter four. Absent filters
+// are omitted rather than replaced with invented defaults or query operators.
+// The vendor publishes no query-length maximum; the declared envelope uses the
+// tool's 500 Unicode-character cap. All valid tool queries and filters fit it;
+// capability skip tests exercise direct preparation beyond that envelope.
+//
+// Reply mapping uses results[].url, title, snippet (bounded to the neutral excerpt
+// limit), and date (publication date, only when parseable). last_updated is not
+// a publication date. id, server_time, answer, choices and other generated text
+// are ignored. Empty results serve an empty search; missing/non-array results
+// fail mapping. This is /search, never /chat/completions, Sonar or a session API.
+{
+  "schema_version": 1,
+  "key": "perplexity_rest",
+  "name": "Perplexity Search (REST)",
+  "description": "Keyed Perplexity Search API result links for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Small keyed JSON Search API with native domain and recency filters; no model or answer endpoint is used.",
+  "tier": "S1",
+  "transport": { "kind": "rest_api", "url": "https://api.perplexity.ai" },
+  "auth": { "mode": "api_key" },
+  "credential_bindings": [
+    { "ref_role": "api_key", "placement": "header", "key": "Authorization", "prefix": "Bearer ", "required": true }
+  ],
+  "resource_filters": { "required": [], "optional": [], "write_enabling": [] },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/search",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "max_results": { "type": "integer", "minimum": 1, "maximum": 20 },
+            "search_domain_filter": {
+              "type": "array", "minItems": 1, "maxItems": 20,
+              "items": { "type": "string", "minLength": 1, "maxLength": 253 }
+            },
+            "search_recency_filter": { "type": "string", "enum": ["day", "week", "month", "year"] }
+          },
+          "required": ["query", "max_results"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": { "ask_first_risk": ["write", "destructive"], "rate_limit": { "calls_per_min": 30 } },
+  "availability": "ga"
+}
