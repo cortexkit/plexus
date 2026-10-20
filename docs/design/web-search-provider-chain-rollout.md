@@ -224,12 +224,12 @@ not merely switching the executable back.
 
 ## 3. Credentials and connections (pending: run at deploy)
 
-**User/CKCRED responsibility:** the user stores each provider's key through
-CKCRED's own login flow under the exact vault name in the inventory. Plexus
+**The user's responsibility:** the user stores each provider's key through the
+vault's own login flow under the exact vault name in the inventory. Plexus
 neither creates keys nor stores secret bytes. No vault command is supplied here:
-this repository does not define that login interface. Plexus already has a
-category-wide vault read permission covering the web-search keys (confirmed
-live with Exa on 2026-10-20); **no per-key vault grant step is needed**. This
+this repository does not define that login interface. Plexus's vault read
+permission covers every web-search key (`apikey:<provider>`) as one category,
+so **no per-key vault grant step is needed**. This
 existing vault permission is separate from each caller's Plexus invoke grants.
 Do not print, export, copy into a manifest, or retrieve a raw key for a probe.
 
@@ -301,7 +301,7 @@ Missing/unreadable credentials can appear as discovery
 created; do not mint another connection. At dispatch the governed failure code
 is `credential_missing`; a one-provider chain can surface
 `web_search_unavailable` with reason `unavailable`. Record the audit code, not
-vendor text. Ask the user/CKCRED to fix the stored key and retry the governed
+vendor text. Ask the user to fix the stored key and retry the governed
 probe only after resolving the failure. A schema quarantine is not a key error.
 
 ## 4. Caller grants and reviewed schema (pending: run at deploy)
