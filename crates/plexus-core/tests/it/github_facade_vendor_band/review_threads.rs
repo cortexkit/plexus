@@ -1,7 +1,6 @@
 use super::*;
 use plexus_core::rest_api::{RestConfig, RestTransport};
 use std::sync::Mutex;
-use std::time::Duration;
 
 const ACTION: &str = "github.pr.review_threads";
 const QUERY: &str = "query($owner: String!, $repo: String!, $pr: Int!, $after: String) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr) { reviewThreads(first: 100, after: $after) { nodes { id isResolved isOutdated path line comments(first: 1) { nodes { author { login __typename } body url } } } pageInfo { hasNextPage endCursor } } } } }";
@@ -23,10 +22,9 @@ fn review_threads_wire_uses_only_fixed_query_and_bound_app_token_on_every_page()
     let (_scratch, store, _, _, scope) = setup("review-threads-wire", &[(ACTION, "read")]);
     let captured = Arc::new(Mutex::new(Vec::new()));
     let sent = captured.clone();
-    let (endpoint, server) = validation_http::FixedRequestServer::start_with_deadline(
+    let (endpoint, server) = validation_http::FixedRequestServer::start(
         3,
         "review threads",
-        Duration::from_secs(15),
         move |index, raw| {
             captured.lock().unwrap().push(raw.to_owned());
             let body = json!({"data":{"repository":{"pullRequest":{"reviewThreads":{

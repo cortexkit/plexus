@@ -7,9 +7,6 @@ use std::time::Duration;
 const READY_QUERY: &str = "mutation($pullRequestId: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $pullRequestId}) { pullRequest { url number isDraft } } }";
 const DRAFT_QUERY: &str = "mutation($pullRequestId: ID!) { convertPullRequestToDraft(input: {pullRequestId: $pullRequestId}) { pullRequest { url number isDraft } } }";
 const URL: &str = "https://github.com/org/repo/pull/7";
-// The default HTTP fixture stops accepting after two seconds, but these calls
-// prepare credentials and commit governance receipts before each HTTP leg.
-const ADMISSION_WAIT: Duration = Duration::from_secs(15);
 
 struct BotToken;
 impl HandleCredentialProvider for BotToken {
@@ -73,10 +70,9 @@ impl ReadyRun {
         );
         let sent = Arc::new(Mutex::new(Vec::new()));
         let captured = sent.clone();
-        let (endpoint, server) = validation_http::FixedRequestServer::start_with_deadline(
+        let (endpoint, server) = validation_http::FixedRequestServer::start(
             responses.len(),
             "PR ready",
-            ADMISSION_WAIT,
             move |index, raw| {
                 captured.lock().unwrap().push(raw.to_owned());
                 let body = responses[index].to_string();
@@ -170,7 +166,7 @@ fn pr_ready_fixture_waits_for_credential_preparation_before_each_http_leg() {
         ) -> Result<ResolvedCredential, &'static str> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == self.delayed_leg {
                 // Model a slow vault reply without consuming CPU. It exceeds
-                // the server helper's default two-second accept deadline, so
+                // the former two-second accept deadline, so
                 // the fixture must keep listening during credential preparation.
                 std::thread::sleep(crate::bounded::WAIT + Duration::from_millis(500));
             }

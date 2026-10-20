@@ -1573,15 +1573,17 @@ build_timeout_s = 3600
 
 [[control]]
 id = "bus-adapter-delayed-outbox-read"
-guards = "The notice deadline tolerates a three-second blocking-pool dispatch delay"
+guards = "The NATS notice deadline starts after the blocking-pool outbox read, not during it"
 file = "crates/plexus-module/src/bus.rs"
-old = "const REAL_NATS_NOTICE_DEADLINE: Duration = REAL_NATS_STEP_DEADLINE;"
-new = "const REAL_NATS_NOTICE_DEADLINE: Duration = Duration::from_secs(2); /* NON-VACUITY BREAK */"
+old = "tokio::time::timeout(OUTBOX_DRAIN_DEADLINE, started.notified())\n                .await\n                .expect(\"outbox preparation must reach the publisher\");"
+new = "/* NON-VACUITY BREAK: time SQLite preparation as NATS latency. */"
 test_file = "crates/plexus-module/src/bus.rs"
 runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 expect_red = ["bus::tests::real_nats_adapter_tolerates_delayed_outbox_read_before_publish"]
+select = "expected"
+expect_message = "real adapter must send notice"
 build_timeout_s = 3600
 
 [[control]]
@@ -19513,3 +19515,65 @@ select = "expected"
 expect_red = ["storage::tests::searxng_instance_ticket_requirements_come_from_the_reviewed_manifest"]
 expect_message = "instance manifest must admit its approved destination"
 build_timeout_s = 3600
+
+[[control]]
+id = "test-store-race-worker-budget"
+guards = "Store-backed race completion does not use a short channel-handoff deadline"
+file = "crates/plexus-core/tests/support/bounded.rs"
+old = "pub const STORE_WORK_WAIT: Duration = Duration::from_secs(10);"
+new = "pub const STORE_WORK_WAIT: Duration = WAIT; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/it/call_withdrawal.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["call_withdrawal::the_withdrawal_race_waits_for_a_delayed_store_worker"]
+expect_message = "scheduler worker completion"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "withdrawal-before-delayed-claim-cancels"
+guards = "A successful withdrawal cancels the approval before a delayed claimant can send"
+file = "crates/plexus-core/src/storage.rs"
+old = "let cancelled = conn.execute("
+new = "if std::hint::black_box(true) { return Ok(WithdrawAnswer::Withdrawn); } /* NON-VACUITY BREAK */ let cancelled = conn.execute("
+test_file = "crates/plexus-core/tests/it/call_withdrawal.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["call_withdrawal::the_withdrawal_race_waits_for_a_delayed_store_worker"]
+expect_message = "withdrawn but also sent"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "test-http-admission-owned-by-caller"
+guards = "An HTTP fixture remains available during preparation before every request"
+edits = [{ file = "crates/plexus-core/tests/support/http_server.rs", old = "for index in 0..expected {", new = "for index in 0..expected { let deadline = std::time::Instant::now() + bounded::WAIT; /* NON-VACUITY BREAK */" }, { file = "crates/plexus-core/tests/support/http_server.rs", old = "if stop.load(Ordering::SeqCst) {", new = "if stop.load(Ordering::SeqCst) || std::time::Instant::now() >= deadline {" }]
+test_file = "crates/plexus-core/tests/bounded_waits.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test bounded_waits"
+select = "expected"
+expect_red = ["http_fixture_keeps_accepting_during_preparation_between_requests"]
+expect_message = "fixture must admit requests after preparation"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "test-http-missing-request-observed"
+guards = "Caller-owned admission still reports missing requests at completion"
+file = "crates/plexus-core/tests/support/http_server.rs"
+old = "return Err(format!(\n                                \"{label}: expected {expected} requests, got {}\",\n                                received.load(Ordering::SeqCst)\n                            ));"
+new = "return Ok(()); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/bounded_waits.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test bounded_waits"
+select = "expected"
+expect_red = ["http_fixture_reports_missing_requests_when_the_caller_finishes"]
+expect_message = "called `Result::unwrap_err()` on an `Ok` value"
+build_timeout_s = 3600
+timeout_s = 60

@@ -549,7 +549,11 @@ fn simultaneous_nonce_claims_have_exactly_one_owner() {
     barrier.wait();
     let claims: Vec<_> = workers
         .into_iter()
-        .map(|worker| worker.join().expect("claim worker completion"))
+        .map(|worker| {
+            worker
+                .join_timeout(crate::bounded::STORE_WORK_WAIT)
+                .expect("claim worker completion")
+        })
         .collect();
     assert_eq!(
         claims

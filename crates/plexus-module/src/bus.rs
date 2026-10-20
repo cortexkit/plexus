@@ -1170,13 +1170,16 @@ pub mod tests {
         let task = tokio::spawn(async move {
             tokio::time::timeout(exchange_deadline, async move {
             loop {
-                let (socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await.expect("loopback accept deadline").unwrap();
+                let (socket, _) = listener.accept().await.unwrap();
                 let (read, mut write) = socket.into_split();
                 write.write_all(b"INFO {\"server_id\":\"test\",\"version\":\"2.10.0\",\"proto\":1,\"nonce\":\"nonce\",\"headers\":true,\"max_payload\":1048576}\r\n").await.unwrap();
                 let mut read = BufReader::new(read);
                 let mut line = String::new();
                 let mut sid = String::new();
-                while { line.clear(); tokio::time::timeout(step_deadline, read.read_line(&mut line)).await.expect("loopback CONNECT/command deadline").unwrap_or(0) > 0 } {
+                // An idle connection is owned by the test: SQLite or credential
+                // preparation may precede the next command. Only the whole-exchange
+                // watchdog, not a short idle timer, bounds these intervals.
+                while { line.clear(); read.read_line(&mut line).await.unwrap_or(0) > 0 } {
                     if let Some(info) = line.strip_prefix("CONNECT ") {
                         let info: Value = serde_json::from_str(info.trim()).unwrap();
                         auth_tx.send(info["jwt"].as_str().unwrap_or_default().into()).await.unwrap();
@@ -1191,7 +1194,7 @@ pub mod tests {
                         let mut payload = vec![0; size + 2];
                         tokio::time::timeout(step_deadline, read.read_exact(&mut payload)).await.expect("loopback payload deadline").unwrap();
                         publish_tx.send(()).await.unwrap();
-                        tokio::time::timeout(step_deadline, release.notified()).await.expect("loopback ack release deadline");
+                        release.notified().await;
                         let body = r#"{"stream":"events","seq":7}"#;
                         let response = format!("MSG {reply} {sid} {}\r\n{body}\r\n", body.len());
                         if write.write_all(response.as_bytes()).await.is_err() { break; }
@@ -1436,16 +1439,20 @@ pub mod tests {
 
     pub fn test_store(name: &str) -> (Scratch, Arc<PlexusStore>) {
         let scratch = Scratch::database(name);
+        let store = open_test_store(&scratch);
+        (scratch, store)
+    }
+
+    fn open_test_store(path: &Path) -> Arc<PlexusStore> {
         let descriptor = StorageDescriptor {
             module_id: "plexus".to_string(),
             storage_namespace: "test".to_string(),
             isolation: cortexkit_store_types::Isolation::Module,
             backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: scratch.to_string_lossy().into_owned(),
+                path: path.to_string_lossy().into_owned(),
             },
         };
-        let store = Arc::new(PlexusStore::open(&descriptor).expect("open test plexus store"));
-        (scratch, store)
+        Arc::new(PlexusStore::open(&descriptor).expect("open test plexus store"))
     }
 
     pub fn seed_connection_and_subscription(store: &PlexusStore, conn_id: &str) -> String {
@@ -2114,62 +2121,55 @@ pub mod tests {
                 ProductionSessions { path: None }.renew(session).await
             }
         }
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let (_scratch, store) = test_store("stop_real_ack");
-            let sub = seed_connection_and_subscription(&store, "conn-1");
-            let key = format!("{:064x}", 1);
-            insert_test_event(
-                &store,
-                &sub,
-                &key,
-                "github_issue_changed",
-                "owner/repo",
-                &json!({}),
-            );
-            let (url, _auth, mut received, _ack, server) = loopback().await;
-            let state = Arc::new(ModuleState {
-                runtime: crate::runtime_for_test(store.clone()),
-                health: Arc::new(crate::health::HealthState::new()),
-            });
-            let (shutdown, stop) = mpsc::channel(1);
-            let task = spawn_outbox_drain(
-                state,
-                stop,
-                Arc::new(RealFixture {
-                    credential: credential(url),
-                }),
-            );
-            tokio::time::timeout(Duration::from_secs(2), received.recv())
-                .await
-                .expect("notice before stop deadline")
-                .unwrap();
-            drop(shutdown);
-            tokio::time::timeout(Duration::from_secs(1), task)
-                .await
-                .expect("stop must cancel real ack wait")
-                .unwrap();
-            assert!(store
-                .canonical_event_by_key(&key)
-                .unwrap()
-                .unwrap()
-                .published_at_ms
-                .is_none());
-            server.abort();
-        })
-        .await
-        .expect("real session shutdown deadline");
+        let (_scratch, store) = test_store("stop_real_ack");
+        let sub = seed_connection_and_subscription(&store, "conn-1");
+        let key = format!("{:064x}", 1);
+        insert_test_event(
+            &store,
+            &sub,
+            &key,
+            "github_issue_changed",
+            "owner/repo",
+            &json!({}),
+        );
+        let (url, _auth, mut received, _ack, server) = loopback().await;
+        let state = Arc::new(ModuleState {
+            runtime: crate::runtime_for_test(store.clone()),
+            health: Arc::new(crate::health::HealthState::new()),
+        });
+        let (shutdown, stop) = mpsc::channel(1);
+        let task = spawn_outbox_drain(
+            state,
+            stop,
+            Arc::new(RealFixture {
+                credential: credential(url),
+            }),
+        );
+        tokio::time::timeout(OUTBOX_DRAIN_DEADLINE, received.recv())
+            .await
+            .expect("notice before stop deadline")
+            .unwrap();
+        drop(shutdown);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("stop must cancel real ack wait")
+            .unwrap();
+        assert!(store
+            .canonical_event_by_key(&key)
+            .unwrap()
+            .unwrap()
+            .published_at_ms
+            .is_none());
+        server.abort();
     }
 
-    // On a loaded machine, a blocking-worker dispatch delay of about three
-    // seconds exhausts a two-second notice wait before the adapter even
-    // publishes. Allow twice that delay for
-    // each step, including the server's command wait, without releasing the ack
-    // until the pending-marker assertions have run.
+    // Start transport deadlines at publish entry, not at the preceding SQLite
+    // read. A slow blocking-worker dispatch is not a slow NATS publication.
     const REAL_NATS_STEP_DEADLINE: Duration = Duration::from_secs(6);
-    const REAL_NATS_NOTICE_DEADLINE: Duration = REAL_NATS_STEP_DEADLINE;
 
     struct AckObservedPublisher {
         inner: NatsEventPublisher,
+        started: Arc<tokio::sync::Notify>,
         acked: Arc<tokio::sync::Notify>,
     }
 
@@ -2182,6 +2182,7 @@ pub mod tests {
             digest: ContentDigest,
             headers: Headers,
         ) -> Result<PublishReceipt, String> {
+            self.started.notify_one();
             let receipt = self.inner.publish(subject, id, digest, headers).await?;
             self.acked.notify_one();
             Ok(receipt)
@@ -2217,23 +2218,23 @@ pub mod tests {
             .unwrap();
         runtime.block_on(assert_real_nats_ack_ordering(
             "real_adapter_delayed_read",
-            Duration::from_secs(3),
+            REAL_NATS_STEP_DEADLINE + Duration::from_secs(1),
         ));
     }
 
     async fn assert_real_nats_ack_ordering(name: &str, outbox_read_delay: Duration) {
+        let (_scratch, store) = test_store(name);
+        let sub = seed_connection_and_subscription(&store, "conn-1");
+        let key = format!("{:064x}", 1);
+        insert_test_event(
+            &store,
+            &sub,
+            &key,
+            "github_issue_changed",
+            "owner/repo",
+            &json!({}),
+        );
         tokio::time::timeout(Duration::from_secs(30), async {
-            let (_scratch, store) = test_store(name);
-            let sub = seed_connection_and_subscription(&store, "conn-1");
-            let key = format!("{:064x}", 1);
-            insert_test_event(
-                &store,
-                &sub,
-                &key,
-                "github_issue_changed",
-                "owner/repo",
-                &json!({}),
-            );
             let (url, _auth, mut received, ack, server) =
                 loopback_with_deadlines(REAL_NATS_STEP_DEADLINE, Duration::from_secs(30)).await;
             let cred = credential(url);
@@ -2241,12 +2242,14 @@ pub mod tests {
                 .await
                 .unwrap();
             let acked = Arc::new(tokio::sync::Notify::new());
+            let started = Arc::new(tokio::sync::Notify::new());
             let publisher = AckObservedPublisher {
                 inner: NatsEventPublisher {
                     connection,
                     stream_name: account.streams().event.clone(),
                 },
                 acked: acked.clone(),
+                started: started.clone(),
             };
             let delayed_worker = if outbox_read_delay.is_zero() {
                 None
@@ -2267,7 +2270,10 @@ pub mod tests {
                 tokio::spawn(
                     async move { drain_v1_pass(&db, &account, &publisher, 1, &|| true).await },
                 );
-            tokio::time::timeout(REAL_NATS_NOTICE_DEADLINE, received.recv())
+            tokio::time::timeout(OUTBOX_DRAIN_DEADLINE, started.notified())
+                .await
+                .expect("outbox preparation must reach the publisher");
+            tokio::time::timeout(REAL_NATS_STEP_DEADLINE, received.recv())
                 .await
                 .expect("real adapter must send notice")
                 .expect("server observes HPUB");
@@ -2714,18 +2720,20 @@ pub mod tests {
 
     #[tokio::test]
     async fn real_nats_stream_stores_both_versions_with_distinct_transport_ids() {
+        let (_scratch, store) = test_store("real-v2-stream");
+        let sub = seed_connection_and_subscription(&store, "conn-1");
+        let key = "c".repeat(64);
+        insert_test_event(
+            &store,
+            &sub,
+            &key,
+            "github_issue_changed",
+            "owner/repo",
+            &json!({"number":7}),
+        );
+        // Schema migration and fixture writes are not a JetStream exchange.
+        // Start the transport watchdog only once the database is ready.
         tokio::time::timeout(Duration::from_secs(10), async {
-            let (_scratch, store) = test_store("real-v2-stream");
-            let sub = seed_connection_and_subscription(&store, "conn-1");
-            let key = "c".repeat(64);
-            insert_test_event(
-                &store,
-                &sub,
-                &key,
-                "github_issue_changed",
-                "owner/repo",
-                &json!({"number":7}),
-            );
             let data = Scratch::directory("real-v2-nats-data");
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -3068,6 +3076,20 @@ pub mod tests {
 
         const CHILD: &str = "PLEXUS_DUPLICATE_RETRY_CHILD";
         if std::env::var_os(CHILD).is_none() {
+            // Prepare the durable fixture before timing the diagnostic child.
+            // The child reopens it to exercise the real restart/retry path, but
+            // does not spend its log-observation budget creating a fresh schema.
+            let (scratch, store) = test_store("duplicate-crash-retry");
+            let sub = seed_connection_and_subscription(&store, "conn-1");
+            insert_test_event(
+                &store,
+                &sub,
+                &"d".repeat(64),
+                "github_issue_changed",
+                "owner/repo",
+                &json!({"number":7}),
+            );
+            drop(store);
             let output = crate::bounded::child_output(
                 std::process::Command::new(std::env::current_exe().unwrap())
                     .args([
@@ -3075,7 +3097,7 @@ pub mod tests {
                         "bus::tests::duplicate_retry_after_publish_before_stamp_finishes_both_versions",
                         "--nocapture",
                     ])
-                    .env(CHILD, "1"),
+                    .env(CHILD, scratch.path()),
                 Duration::from_secs(30),
                 "duplicate retry diagnostic child",
             )
@@ -3119,17 +3141,8 @@ pub mod tests {
         let handle = cortexkit_log::init(config).unwrap();
         assert!(handle.fallback_active());
 
-        let (_scratch, store) = test_store("duplicate-crash-retry");
-        let sub = seed_connection_and_subscription(&store, "conn-1");
+        let store = open_test_store(Path::new(&std::env::var_os(CHILD).unwrap()));
         let key = "d".repeat(64);
-        insert_test_event(
-            &store,
-            &sub,
-            &key,
-            "github_issue_changed",
-            "owner/repo",
-            &json!({"number":7}),
-        );
         let account = AccountNames::derive("box_test").unwrap();
         let instant = std::time::Instant::now();
         let publisher = MemoryPublisher(InMemoryBus::new_with_deduplication_clock(

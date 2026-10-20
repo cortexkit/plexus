@@ -1,8 +1,42 @@
 #[path = "support/bounded.rs"]
 mod bounded;
+#[path = "support/http_server.rs"]
+mod http_server;
 
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+#[test]
+fn http_fixture_keeps_accepting_during_preparation_between_requests() {
+    use std::io::{Read, Write};
+    let (url, server) = http_server::FixedRequestServer::start(2, "slow preparation", |_, _| {
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+    });
+    for _ in 0..2 {
+        std::thread::sleep(bounded::WAIT + Duration::from_millis(500));
+        let mut socket = std::net::TcpStream::connect(url.trim_start_matches("http://"))
+            .expect("fixture must admit requests after preparation");
+        socket.set_read_timeout(Some(bounded::WAIT)).unwrap();
+        socket
+            .write_all(b"GET / HTTP/1.1\r\nHost: fixture\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+    }
+    server.join().unwrap();
+}
+
+#[test]
+fn http_fixture_reports_missing_requests_when_the_caller_finishes() {
+    let (_url, server) = http_server::FixedRequestServer::start(1, "missing request", |_, _| {
+        panic!("no request was sent")
+    });
+    assert_eq!(
+        server.join().unwrap_err(),
+        "missing request: expected 1 requests, got 0"
+    );
+}
 
 #[test]
 #[cfg(unix)]

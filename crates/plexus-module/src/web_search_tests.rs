@@ -423,7 +423,7 @@ fn different_connection_facade_calls_progress_during_a_rest_pool_sweep() {
             REPLY.len()
         )
     };
-    let (first_url, first_server) = test_http::FixedRequestServer::start_with_deadline(1, "first vendor", Duration::from_secs(20), move |_, _| {
+    let (first_url, first_server) = test_http::FixedRequestServer::start(1, "first vendor", move |_, _| {
         first_arrived.blocking_send(()).unwrap();
         first_release.recv_timeout(Duration::from_secs(60)).expect("release first vendor");
         response()
@@ -483,7 +483,7 @@ fn different_connection_facade_calls_progress_during_a_rest_pool_sweep() {
         let _ = swept.send(sweep_rest.sweep_idle());
     });
     let sweep_result = tokio::time::timeout(Duration::from_secs(5), &mut sweep).await;
-    let (second_url, second_server) = test_http::FixedRequestServer::start_with_deadline(1, "second vendor", Duration::from_secs(20), move |_, _| {
+    let (second_url, second_server) = test_http::FixedRequestServer::start(1, "second vendor", move |_, _| {
         second_arrived.blocking_send(()).unwrap();
         second_release.recv_timeout(Duration::from_secs(60)).expect("release second vendor");
         response()

@@ -810,7 +810,7 @@ fn pause_at_contact(
     *hook.lock().unwrap() = Some(Box::new(move || {
         // A late hook must not rendezvous with a controller that already failed.
         let _ = entered_tx.send(());
-        let _ = resume_rx.recv_timeout(bounded::WAIT);
+        let _ = resume_rx.recv_timeout(bounded::STORE_WORK_WAIT);
     }));
     (entered_rx, resume_tx)
 }
@@ -830,14 +830,14 @@ fn concurrent_first_calls_claim_before_reads_and_write_once() {
             let request = request.clone();
             move || f.request(&request, "race")
         });
-        let contact = entered.recv_timeout(bounded::WAIT);
+        let contact = entered.recv_timeout(bounded::STORE_WORK_WAIT);
         let loser = contact.as_ref().ok().map(|_| {
             bounded::Task::spawn({
                 let f = f.clone();
                 let request = request.clone();
                 move || f.request(&request, "race")
             })
-            .join()
+            .join_timeout(bounded::STORE_WORK_WAIT)
         });
         let actions_before_resume = f.github.actions();
         // Release/disconnect before any assertion, even if notification or the
@@ -845,10 +845,12 @@ fn concurrent_first_calls_claim_before_reads_and_write_once() {
         let _ = resume.send(());
         drop(resume);
         drop(entered);
-        let winner = first.join();
-        contact.expect("first call must reach the read hook within 2s");
-        let loser = loser.unwrap().expect("losing call finishes within 2s");
-        let winner = winner.expect("winning call finishes within 2s");
+        let winner = first.join_timeout(bounded::STORE_WORK_WAIT);
+        contact.expect("first call must reach the read hook within the store-work deadline");
+        let loser = loser
+            .unwrap()
+            .expect("losing call finishes within the store-work deadline");
+        let winner = winner.expect("winning call finishes within the store-work deadline");
         assert_eq!(
             loser["result"]["refusal_code"], "nonce_in_flight",
             "{loser}"
@@ -903,22 +905,24 @@ fn concurrent_approved_retries_mutate_once() {
             let f = f.clone();
             move || f.request(&comment(), "approved-race")
         });
-        let contact = entered.recv_timeout(bounded::WAIT);
+        let contact = entered.recv_timeout(bounded::STORE_WORK_WAIT);
         let loser = contact.as_ref().ok().map(|_| {
             bounded::Task::spawn({
                 let f = f.clone();
                 move || f.request(&comment(), "approved-race")
             })
-            .join()
+            .join_timeout(bounded::STORE_WORK_WAIT)
         });
         let actions_before_resume = f.github.actions();
         let _ = resume.send(());
         drop(resume);
         drop(entered);
-        let winner = first.join();
-        contact.expect("approved retry must reach the write hook within 2s");
-        let loser = loser.unwrap().expect("losing retry finishes within 2s");
-        let winner = winner.expect("winning retry finishes within 2s");
+        let winner = first.join_timeout(bounded::STORE_WORK_WAIT);
+        contact.expect("approved retry must reach the write hook within the store-work deadline");
+        let loser = loser
+            .unwrap()
+            .expect("losing retry finishes within the store-work deadline");
+        let winner = winner.expect("winning retry finishes within the store-work deadline");
         assert_eq!(
             loser["result"]["refusal_code"], "nonce_in_flight",
             "{loser}"

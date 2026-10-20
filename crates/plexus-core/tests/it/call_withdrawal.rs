@@ -277,10 +277,21 @@ fn a_claim_before_the_withdrawal_sends_exactly_once() {
 /// without depending on which thread the scheduler runs first.
 #[test]
 fn a_withdrawal_and_the_claim_never_both_win() {
+    withdrawal_claim_race(40, std::time::Duration::ZERO);
+}
+
+#[test]
+fn the_withdrawal_race_waits_for_a_delayed_store_worker() {
+    withdrawal_claim_race(
+        1,
+        crate::bounded::WAIT + std::time::Duration::from_millis(500),
+    );
+}
+
+fn withdrawal_claim_race(rounds: u32, scheduler_delay: std::time::Duration) {
     let fixture = Arc::new(fixture("race"));
 
-    const ROUNDS: u32 = 40;
-    for round in 1..=ROUNDS {
+    for round in 1..=rounds {
         let call_key = format!("race-{round}");
         let request_id = fixture.park(AFT, Some(&call_key), u64::from(round));
         fixture.approve_and_hold(&request_id);
@@ -291,6 +302,8 @@ fn a_withdrawal_and_the_claim_never_both_win() {
         let scheduler_barrier = Arc::clone(&barrier);
         let scheduler = crate::bounded::Task::spawn(move || {
             scheduler_barrier.wait();
+            // Model descheduling or disk latency without consuming a CPU.
+            std::thread::sleep(scheduler_delay);
             scheduler_fixture.engine.retry_waiting_approvals(16)
         });
         let withdrawal_fixture = Arc::clone(&fixture);
@@ -301,8 +314,12 @@ fn a_withdrawal_and_the_claim_never_both_win() {
             withdrawal_fixture.withdraw(AFT, &withdrawal_call_key, None)
         });
         barrier.wait();
-        scheduler.join().expect("scheduler worker completion");
-        let answer = withdrawal.join().expect("withdrawal worker completion");
+        scheduler
+            .join_timeout(crate::bounded::STORE_WORK_WAIT)
+            .expect("scheduler worker completion");
+        let answer = withdrawal
+            .join_timeout(crate::bounded::STORE_WORK_WAIT)
+            .expect("withdrawal worker completion");
 
         let sent = fixture.sent() - sent_before;
         assert!(sent <= 1, "round {round}: sent {sent} times");

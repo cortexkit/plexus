@@ -2731,7 +2731,11 @@ fn a_concurrent_pair_with_one_approval_dispatches_exactly_once() {
     barrier.wait();
     let completed = racers
         .into_iter()
-        .map(|racer| racer.join().expect("racer completion"))
+        .map(|racer| {
+            racer
+                .join_timeout(bounded::STORE_WORK_WAIT)
+                .expect("racer completion")
+        })
         .filter(|sent| *sent)
         .count();
     assert_eq!(completed, 1, "exactly one racer may dispatch");

@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub struct FixedRequestServer {
     task: Option<bounded::Task<Result<(), String>>>,
@@ -14,7 +14,7 @@ pub struct FixedRequestServer {
     received: Arc<AtomicUsize>,
     expected: usize,
     label: &'static str,
-    wait: Duration,
+    join_wait: Duration,
 }
 
 impl FixedRequestServer {
@@ -22,15 +22,15 @@ impl FixedRequestServer {
     where
         F: Fn(usize, &str) -> String + Send + 'static,
     {
-        Self::start_with_deadline(expected, label, bounded::WAIT, handler)
+        Self::start_with_deadline(expected, label, Duration::from_secs(6), handler)
     }
 
-    /// Keep fixture admission alive through the caller's bounded progress check.
-    /// Use a longer deadline when dispatch first has to finish durable writes.
+    /// The deadline bounds cleanup after the caller finishes its requests.
+    /// Admission follows the server's lifetime, not elapsed preparation time.
     pub fn start_with_deadline<F>(
         expected: usize,
         label: &'static str,
-        wait: Duration,
+        join_wait: Duration,
         handler: F,
     ) -> (String, Self)
     where
@@ -46,9 +46,11 @@ impl FixedRequestServer {
             let received = received.clone();
             bounded::Task::spawn(move || {
                 for index in 0..expected {
-                    let deadline = Instant::now() + wait;
+                    // The owner may still be preparing credentials or committing
+                    // receipts between HTTP legs. Only join/drop ends admission;
+                    // elapsed preparation time is not a missing request.
                     let mut socket = loop {
-                        if stop.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                        if stop.load(Ordering::SeqCst) {
                             return Err(format!(
                                 "{label}: expected {expected} requests, got {}",
                                 received.load(Ordering::SeqCst)
@@ -117,7 +119,7 @@ impl FixedRequestServer {
                 received,
                 expected,
                 label,
-                wait,
+                join_wait,
             },
         )
     }
@@ -125,12 +127,14 @@ impl FixedRequestServer {
     // Preserve the helpers' join interface so every existing caller gets the
     // same deadline and request-count diagnostic, rather than bespoke cleanup.
     pub fn join(mut self) -> Result<(), String> {
+        // Calls are synchronous: by join, all expected requests must have been
+        // served. Cancel a missing accept now instead of timing caller setup.
+        self.stop.store(true, Ordering::SeqCst);
         let result = self
             .task
             .take()
             .unwrap()
-            .join_timeout(self.wait.max(Duration::from_secs(6)));
-        self.stop.store(true, Ordering::SeqCst);
+            .join_timeout(self.join_wait.max(Duration::from_secs(6)));
         result.map_err(|error| {
             format!(
                 "{}: expected {} requests, got {}; {error}",

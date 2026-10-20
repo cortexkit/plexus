@@ -9,6 +9,12 @@ use std::time::{Duration, Instant};
 
 pub const WAIT: Duration = Duration::from_secs(2);
 
+// Store-backed race workers include serialized durable writes, not just a
+// channel handoff. Ordinary full-run withdrawal rounds reached 1.175 s; shared
+// disk stalls have also exceeded 2 s. Keep an order-of-magnitude margin over
+// that measured round while retaining a finite deadlock watchdog.
+pub const STORE_WORK_WAIT: Duration = Duration::from_secs(10);
+
 /// Kill a long-running test service and reap it without blocking indefinitely.
 /// A timed-out destructor must not defeat the test's outer async deadline.
 pub fn kill_and_wait_within(
