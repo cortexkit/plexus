@@ -18141,3 +18141,163 @@ expect_red = ["web_search::backend::kagi::tests::capability_skips_a_query_or_dom
 expect_message = "more domains than declared must skip"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-kimi-bearer-authorization"
+guards = "The shipped Kimi manifest sends the Kimi Code key as Authorization: Bearer <key>, as Kimi's own CLI sends it to the search endpoint"
+file = "catalog/kimi_rest.jsonc"
+old = "\"prefix\": \"Bearer \","
+new = "\"prefix\": \"\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/kimi.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::kimi::a_documented_success_is_served_from_a_bearer_post_to_coding_v1_search"]
+expect_message = "the key travels as a bearer token"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kimi-coding-search-path"
+guards = "The shipped Kimi manifest posts to /coding/v1/search, the Kimi Code endpoint the coding key is valid for, not the Moonshot platform's tools path"
+file = "catalog/kimi_rest.jsonc"
+old = "\"path\": \"/coding/v1/search\","
+new = "\"path\": \"/v1/tools/search\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kimi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kimi::tests::the_shipped_manifest_pins_kimis_bearer_post_to_coding_v1_search"]
+expect_message = "/coding/v1/search"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kimi-text-query-field"
+guards = "The caller's query reaches Kimi in text_query, the request field Kimi documents"
+file = "crates/plexus-core/src/web_search/backend/kimi.rs"
+old = "\"text_query\": query.query,"
+new = "\"query\": query.query, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kimi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kimi::tests::vendor_args_send_only_text_query_and_limit"]
+expect_message = "the query travels as text_query"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kimi-capability-no-domains"
+guards = "Kimi's capability declares no domain filter, so a search asking for any domain skips Kimi instead of being answered from every site"
+file = "crates/plexus-core/src/web_search/backend/kimi.rs"
+old = "max_domains: 0,"
+new = "max_domains: 20, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kimi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kimi::tests::capability_skips_any_domain_or_recency_window"]
+expect_message = "a single requested domain must skip Kimi"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kimi-capability-no-recency"
+guards = "Kimi's capability declares no recency filter, so a search with a recency window skips Kimi instead of being answered with results of any age"
+file = "crates/plexus-core/src/web_search/backend/kimi.rs"
+old = "supported: &[],"
+new = "supported: ALL_RECENCIES, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kimi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kimi::tests::capability_skips_any_domain_or_recency_window"]
+expect_message = "recency window must skip Kimi"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kimi-capability-result-count"
+guards = "Kimi's capability clamps limit to its documented maximum of 20, the bound in the shipped schema"
+file = "crates/plexus-core/src/web_search/backend/kimi.rs"
+old = "max_results: KIMI_MAX_LIMIT,"
+new = "max_results: u8::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kimi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kimi::tests::capability_clamps_limit_to_20"]
+expect_message = "limit is clamped to Kimi's documented maximum of 20"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kimi-capability-query-length"
+guards = "Kimi's capability declares the tool's 500-character query envelope, since Kimi documents none; a longer query skips Kimi without dispatch"
+file = "crates/plexus-core/src/web_search/backend/kimi.rs"
+old = "max: MAX_QUERY_CHARS,"
+new = "max: usize::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kimi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kimi::tests::capability_skips_a_query_beyond_the_declared_envelope"]
+expect_message = "a query over the declared 500-character envelope must skip"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kimi-snippet-excerpt"
+guards = "A Kimi result's excerpt is its documented snippet field"
+file = "crates/plexus-core/src/web_search/backend/kimi.rs"
+old = "excerpt: truncate_chars(&text(\"snippet\"), EXCERPT_MAX_CHARS),"
+new = "excerpt: truncate_chars(&text(\"site_name\"), EXCERPT_MAX_CHARS), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kimi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kimi::tests::a_documented_reply_maps_search_results_title_url_snippet_and_date"]
+expect_message = "each result is its title, url, snippet and date"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kimi-date-published"
+guards = "A Kimi result's publication date is read from its documented date field"
+file = "crates/plexus-core/src/web_search/backend/kimi.rs"
+old = "published_at: rfc3339_date(&text(\"date\")),"
+new = "published_at: rfc3339_date(&text(\"published\")), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kimi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kimi::tests::a_documented_reply_maps_search_results_title_url_snippet_and_date"]
+expect_message = "each result is its title, url, snippet and date"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-kimi-empty-url-dropped"
+guards = "A Kimi result whose url is the empty string Kimi returns for missing data is dropped, never served as a result with no link"
+file = "crates/plexus-core/src/web_search/backend/kimi.rs"
+old = ".filter(|url| !url.is_empty())"
+new = ".filter(|_| true) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/kimi/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::kimi::tests::mapping_drops_results_without_a_url_bounds_excerpts_and_reads_only_valid_dates"]
+expect_message = "a result whose url is missing or empty is dropped"
+build_timeout_s = 3600
+timeout_s = 120
