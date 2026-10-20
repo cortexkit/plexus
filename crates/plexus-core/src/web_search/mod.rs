@@ -48,8 +48,8 @@ use crate::storage::{AuditRecord, CatalogAction, ConnectionRecord, PlexusStore, 
 use crate::transport::Transport;
 
 pub use backend::{
-    BraveRestBackend, DeepSeekRestBackend, ExaRestBackend, TavilyRestBackend, WebSearchBackend,
-    WebSearchResult, EXCERPT_MAX_CHARS,
+    BraveRestBackend, DeepSeekRestBackend, ExaRestBackend, FirecrawlRestBackend, TavilyRestBackend,
+    WebSearchBackend, WebSearchResult, EXCERPT_MAX_CHARS,
 };
 pub use cache::{CacheKey, ResultCache, CACHE_CAPACITY, CACHE_TTL_MS};
 pub use chain::{ProviderSkip, SkipReason, WEB_SEARCH_ATTEMPT_BOUND, WEB_SEARCH_CHAIN_DEADLINE};
@@ -174,6 +174,7 @@ pub fn registered_backend(provider: &providers::ProviderName) -> Option<Arc<dyn 
         "tavily" => Some(Arc::new(TavilyRestBackend)),
         "brave" => Some(Arc::new(BraveRestBackend)),
         "deepseek" => Some(Arc::new(DeepSeekRestBackend)),
+        "firecrawl" => Some(Arc::new(FirecrawlRestBackend)),
         _ => None,
     }
 }

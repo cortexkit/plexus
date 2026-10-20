@@ -1,0 +1,58 @@
+{
+  "_source": "Built from Firecrawl's Search endpoint reference and OpenAPI operation (https://docs.firecrawl.dev/api-reference/endpoint/search), Search guide (https://docs.firecrawl.dev/features/search) and error catalog (https://docs.firecrawl.dev/api-reference/errors). The success body follows the documented reply schema and the guide's web example (title, description, url, position) with the top-level success, data, warning, id and creditsUsed fields; its titles, descriptions and id are illustrative. The empty body leaves data.web out, as Firecrawl's open-source server does when a source finds nothing; empty_array is the other form a reply with no results could take. The malformed body puts results in a bare data array instead of a data object. Error bodies use the documented {success: false, error} shape with the catalog's typical error strings; the 408 and 500 values are the endpoint schema's own examples. The 429 Retry-After header is documented in seconds, sent when available.",
+  "success": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"success\":true,\"data\":{\"web\":[{\"url\":\"https://www.firecrawl.dev/\",\"title\":\"Firecrawl - The Web Data API for AI\",\"description\":\"The web crawling, scraping, and search API for AI. Built for scale.\",\"position\":1},{\"url\":\"https://github.com/firecrawl/firecrawl\",\"title\":\"firecrawl/firecrawl: Turn entire websites into LLM-ready markdown\",\"description\":\"Firecrawl is an API service that takes a URL, crawls it, and converts it into clean markdown or structured data.\",\"position\":2}]},\"warning\":null,\"id\":\"019a0000-0000-7000-8000-000000000001\",\"creditsUsed\":2}"
+  },
+  "empty": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"success\":true,\"data\":{},\"warning\":null,\"id\":\"019a0000-0000-7000-8000-000000000002\",\"creditsUsed\":2}"
+  },
+  "empty_array": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"success\":true,\"data\":{\"web\":[]},\"warning\":null,\"id\":\"019a0000-0000-7000-8000-000000000003\",\"creditsUsed\":2}"
+  },
+  "malformed": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"success\":true,\"data\":[{\"url\":\"https://www.firecrawl.dev/\",\"title\":\"Firecrawl - The Web Data API for AI\"}]}"
+  },
+  "bad_request": {
+    "status": 400,
+    "headers": "",
+    "body": "{\"success\":false,\"error\":\"Bad Request\",\"details\":[{\"code\":\"too_big\",\"maximum\":100,\"path\":[\"limit\"],\"message\":\"Number must be less than or equal to 100\"}]}"
+  },
+  "unauthorized": {
+    "status": 401,
+    "headers": "",
+    "body": "{\"success\":false,\"error\":\"Unauthorized: Invalid token\"}"
+  },
+  "payment_required": {
+    "status": 402,
+    "headers": "",
+    "body": "{\"success\":false,\"error\":\"Payment Required: Insufficient credits\"}"
+  },
+  "request_timeout": {
+    "status": 408,
+    "headers": "",
+    "body": "{\"success\":false,\"error\":\"Request timed out\"}"
+  },
+  "rate_limited_retry": {
+    "status": 429,
+    "headers": "Retry-After: 7\r\n",
+    "body": "{\"success\":false,\"error\":\"Rate limit exceeded\"}"
+  },
+  "rate_limited_no_retry": {
+    "status": 429,
+    "headers": "",
+    "body": "{\"success\":false,\"error\":\"Rate limit exceeded\"}"
+  },
+  "server_error": {
+    "status": 500,
+    "headers": "",
+    "body": "{\"success\":false,\"code\":\"UNKNOWN_ERROR\",\"error\":\"An unexpected error occurred on the server.\"}"
+  }
+}

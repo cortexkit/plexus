@@ -8,6 +8,7 @@ mod brave;
 mod cache;
 mod deadline;
 mod deepseek;
+mod firecrawl;
 mod outcomes;
 mod tavily;
 

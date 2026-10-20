@@ -1,0 +1,140 @@
+// Firecrawl Search REST: the `firecrawl` provider of the web_search chain.
+//
+// This is a separate app from `catalog/firecrawl.jsonc`, Firecrawl's hosted
+// MCP server, which stays as it is. Connections and grants made for that MCP
+// app keep serving its own tools and are never chain candidates: web_search
+// resolves only connections of this app key, `firecrawl_rest`.
+//
+// Wire contract pinned from Firecrawl's own documentation (read 2026-10-20):
+// - Search endpoint reference with its OpenAPI operation,
+//   https://docs.firecrawl.dev/api-reference/endpoint/search;
+// - Search guide, https://docs.firecrawl.dev/features/search;
+// - API introduction (auth, status codes),
+//   https://docs.firecrawl.dev/api-reference/introduction;
+// - error catalog, https://docs.firecrawl.dev/api-reference/errors.
+//
+// - method and path: POST /v2/search on https://api.firecrawl.dev (the
+//   OpenAPI server is https://api.firecrawl.dev/v2, operation POST /search),
+//   with a JSON body;
+// - auth: "Authorization: Bearer fc-...", so the key goes in `Authorization`
+//   with the `Bearer ` prefix. The connection is bound to the vault
+//   credential `apikey:firecrawl`; plexus reads it by name at dispatch and
+//   never stores it. Firecrawl also serves keyless requests at a lower rate
+//   limit; this manifest always sends the key;
+// - request fields used: `query` (required, maxLength 500), `limit` (integer,
+//   1 to 100, default 10), `sources` (default ["web"]; the typed object form
+//   [{"type": "web"}] is sent), `includeDomains` (hostnames without protocol
+//   or path; Firecrawl adds them to the search as site: operators itself)
+//   and `tbs` (qdr:h, qdr:d, qdr:w, qdr:m, qdr:y; also sbd:1 and custom
+//   cdr: ranges, unused here; it filters web results). The reference also
+//   documents categories, excludeDomains, location, country, safe, timeout,
+//   ignoreInvalidURLs, highlights, enterprise, scrapeOptions and others;
+//   web_search sends none of them, and they are not in the reviewed schema;
+// - reply: {success, data, warning, id, creditsUsed}, where `data` holds one
+//   array per requested source. `data.web[]` items carry `title`,
+//   `description` and `url` (plus `position`, and page content only when
+//   scrapeOptions ask for it). `data.news[]` items carry `snippet` and
+//   `date` instead; news is never requested;
+// - errors: every non-2xx reply is {"success": false, "error": "..."}. The
+//   documented statuses are 400 bad request, 401 unauthorized, 402 payment
+//   required ("Payment Required: Insufficient credits"), 408 request timed
+//   out, 429 rate limit exceeded (with Retry-After in seconds "when
+//   available") and 500 server error;
+// - billing: 2 credits per 10 results, rounded up, when no scraping is asked.
+//
+// Differences from the provider facts the web_search chain design started from
+// (POST https://api.firecrawl.dev/v2/search; Bearer auth; query, limit,
+// sources [{type: "web"}] and tbs recency; title, url, description or
+// snippet):
+// - none in method, path, auth or the four fields named there;
+// - domains: the design lists no domain field, but Firecrawl documents
+//   `includeDomains`, so requested domains are sent there rather than
+//   composed into `query` as operators;
+// - query length: the documented limit is 500 without a unit. Firecrawl's
+//   API is a JavaScript service, whose string lengths are UTF-16 code units,
+//   so FirecrawlRestBackend counts the limit in those, the stricter reading;
+// - the docs do not say whether a source that found nothing comes back as an
+//   empty array or is left out. Firecrawl's open-source server leaves it out,
+//   so a successful reply whose `data` has no `web` is an empty result;
+// - web results carry no publication date, so none is reported;
+// - the excerpt is `description`; `snippet` fills in only if a web result
+//   ever arrives with that name instead;
+// - classification needs no Firecrawl-specific rule: 402 is a quota skip
+//   with the one-hour cooldown; 429 is throttled for its Retry-After, or 60
+//   seconds without one; 408 is another client error and 500 a server error,
+//   both unavailable for 60 seconds.
+//
+// The search action is read-risk and has no side effects, so a retry is safe.
+// No other Firecrawl endpoint is declared: web_search needs only search, and
+// page fetching is out of scope.
+{
+  "schema_version": 1,
+  "key": "firecrawl_rest",
+  "name": "Firecrawl Search (REST)",
+  "description": "Web search over Firecrawl's Search API, as a provider for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Documented REST API with a published OpenAPI spec and static API-key bearer auth; search without scrape options mutates no vendor-side state, so it maps to a read grant.",
+  "tier": "S1",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://api.firecrawl.dev"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "Authorization",
+      "prefix": "Bearer ",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/v2/search",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "sources": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": { "type": { "type": "string", "enum": ["web"] } },
+                "required": ["type"],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 1
+            },
+            "includeDomains": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20
+            },
+            "tbs": { "type": "string", "enum": ["qdr:d", "qdr:w", "qdr:m", "qdr:y"] }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

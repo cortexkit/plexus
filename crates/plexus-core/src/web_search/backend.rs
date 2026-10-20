@@ -14,9 +14,11 @@ use crate::poller::iso8601;
 
 mod brave;
 mod deepseek;
+mod firecrawl;
 mod tavily;
 pub use brave::{BraveRestBackend, BRAVE_MAX_COUNT, BRAVE_MAX_QUERY_CHARS, BRAVE_MAX_QUERY_WORDS};
 pub use deepseek::{DeepSeekRestBackend, DEEPSEEK_MAX_COUNT, DEEPSEEK_MAX_QUERY_CHARS};
+pub use firecrawl::{FirecrawlRestBackend, FIRECRAWL_MAX_LIMIT, FIRECRAWL_MAX_QUERY_UTF16};
 pub use tavily::{TavilyRestBackend, TAVILY_MAX_INCLUDE_DOMAINS, TAVILY_MAX_RESULTS};
 
 /// Longest excerpt returned per result, in characters.
