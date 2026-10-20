@@ -1525,7 +1525,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 21);
+        assert_eq!(count, 22);
     }
 
     /// Each of these pins a rule the dispatch path DEPENDS on but cannot

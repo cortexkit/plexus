@@ -12,7 +12,9 @@ use serde_json::{json, Value};
 use super::query::WebSearchQuery;
 use crate::poller::iso8601;
 
+mod brave;
 mod tavily;
+pub use brave::{BraveRestBackend, BRAVE_MAX_COUNT, BRAVE_MAX_QUERY_CHARS, BRAVE_MAX_QUERY_WORDS};
 pub use tavily::{TavilyRestBackend, TAVILY_MAX_INCLUDE_DOMAINS, TAVILY_MAX_RESULTS};
 
 /// Longest excerpt returned per result, in characters.

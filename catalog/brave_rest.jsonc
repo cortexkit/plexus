@@ -1,0 +1,126 @@
+// Brave Search REST: the `brave` provider of the web_search chain.
+//
+// Wire contract pinned from Brave's own Web Search API documentation (read
+// 2026-10-20):
+// - API reference, https://api-dashboard.search.brave.com/api-reference/web/search/get
+//   (base URL https://api.search.brave.com/res, operation GET /v1/web/search);
+// - authentication guide, https://api-dashboard.search.brave.com/documentation/guides/authentication;
+// - rate-limiting guide, https://api-dashboard.search.brave.com/documentation/guides/rate-limiting;
+// - search operators guide, https://api-dashboard.search.brave.com/documentation/resources/search-operators.
+//
+// - method and path: GET /res/v1/web/search on https://api.search.brave.com,
+//   with every argument in the query string;
+// - auth: "All requests to the Brave Search API must include an API key in the
+//   X-Subscription-Token HTTP header", the raw key with no prefix. The
+//   connection is bound to the vault credential `apikey:brave`; plexus reads it
+//   by name at dispatch and never stores it. The key never travels in the URL;
+// - request fields: `q` (required; "Maximum of 600 characters and 75 words"),
+//   `count` (1 to 20, default 20), `freshness` (`pd`, `pw`, `pm`, `py`: 24
+//   hours, 7 days, 31 days, 365 days), `extra_snippets` ("up to 5 additional,
+//   alternative excerpts") and `text_decorations` (default true: "decoration
+//   markers (e.g. highlighting characters)" in display strings; sent as false);
+// - domains: Brave has no domain parameter. Domains go into `q` as `site:`
+//   operators joined by uppercase `OR`, the form the operator guide shows
+//   ("electric vehicles site:reuters.com OR site:bloomberg.com 2025"). The
+//   guide documents no grouping with parentheses, so none is sent;
+// - reply: `web` is optional ("Web results relevant to the query"); its
+//   `results[]` items carry `title`, `url`, `description`, `extra_snippets`,
+//   `age` ("A human-readable representation of the web search result's age.
+//   For example, `2 days ago`") and `page_age` ("The page's date, based on its
+//   published or last modified date");
+// - documented errors: 404, 422 and 429, each with an `error` object carrying
+//   `id`, `status`, `code`, `detail` and `meta`. Exceeding a rate limit is a
+//   429. The plan's monthly quota is one of those rate-limit windows
+//   (X-RateLimit-Limit "1, 15000": per second and per month), so a used-up
+//   monthly quota is also a 429. No Retry-After header is documented, only
+//   X-RateLimit-Reset.
+//
+// Differences from the provider facts the web_search chain design started from
+// (X-Subscription-Token; q, count up to 20 and freshness; domains via query
+// operators; query at most 500 characters; web.results[].title, url,
+// description plus extra_snippets, and age):
+// - Brave documents 600 characters, not 500. BraveRestBackend keeps the
+//   500-character limit, which is the tool's own query limit, and checks it
+//   on the final `q` after the site: operators are added. It also enforces
+//   Brave's 75-word limit on that final string; a longer query skips Brave as
+//   a capability mismatch rather than being sent;
+// - `age` is relative text in most replies. The publication date comes from
+//   `page_age` when present, and from `age` only when that is an absolute
+//   date; a relative age such as "2 days ago" is dropped, not guessed;
+// - every request also sends `text_decorations=false`, so titles and
+//   descriptions arrive without highlighting markup;
+// - a missing or invalid key: Brave's reference documents no 401. Clients
+//   that call the live API report an invalid key as HTTP 422 with
+//   error.code SUBSCRIPTION_TOKEN_INVALID (for example
+//   kennbroorg/iKy backend/factories/search_providers.py and
+//   perminder-klair/subwave controller/src/routes/settings/llm.ts, the
+//   latter "verified live"). web_search classifies every 400 and 422 as a
+//   rejected request without reading the body, so with a wrong key every
+//   ordered search stops at Brave with web_search_request_rejected: no
+//   cooldown and no fallthrough to the next provider. The rollout's live
+//   check sends a real Brave search with the stored key to catch this
+//   before an order containing brave is set;
+// - a used-up monthly quota is a 429 like any rate limit, so web_search
+//   treats it as throttled: a 60-second cooldown (no Retry-After is
+//   documented), not the one-hour quota cooldown.
+//
+// The search action is read-risk and has no side effects, so a retry is safe.
+// No other Brave endpoint is declared: web_search needs only web search.
+{
+  "schema_version": 1,
+  "key": "brave_rest",
+  "name": "Brave Search (REST)",
+  "description": "Web search over Brave's Search API, as a provider for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Documented REST API with a published reference and a static API-key header; search mutates no vendor-side state, so it maps to a read grant.",
+  "tier": "S1",
+  "transport": {
+    "kind": "rest_api",
+    "url": "https://api.search.brave.com"
+  },
+  "auth": {
+    "mode": "api_key"
+  },
+  "credential_bindings": [
+    {
+      "ref_role": "api_key",
+      "placement": "header",
+      "key": "X-Subscription-Token",
+      "prefix": "",
+      "required": true
+    }
+  ],
+  "resource_filters": {
+    "required": [],
+    "optional": [],
+    "write_enabling": []
+  },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "GET",
+        "path": "/res/v1/web/search",
+        "parameters": "query",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "q": { "type": "string", "maxLength": 600 },
+            "count": { "type": "integer", "minimum": 1, "maximum": 20 },
+            "freshness": { "type": "string", "enum": ["pd", "pw", "pm", "py"] },
+            "extra_snippets": { "type": "boolean" },
+            "text_decorations": { "type": "boolean" }
+          },
+          "required": ["q"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": {
+    "ask_first_risk": ["write", "destructive"],
+    "rate_limit": { "calls_per_min": 30 }
+  },
+  "availability": "ga"
+}

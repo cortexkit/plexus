@@ -1,0 +1,53 @@
+{
+  "_source": "Built from Brave's Web Search API reference (https://api-dashboard.search.brave.com/api-reference/web/search/get), its Web Search overview (https://api-dashboard.search.brave.com/app/documentation/web-search/responses) and its rate-limiting guide (https://api-dashboard.search.brave.com/documentation/guides/rate-limiting). Brave publishes the response schema and one illustrative web.results fragment rather than a whole reply: the success body embeds that fragment (title, url, description, extra_snippets) in the documented envelope and fills the other documented fields with example values, and the empty and malformed bodies drop sections from it. Error bodies follow the documented error object (id, status, code, detail, meta). The SUBSCRIPTION_TOKEN_INVALID code and detail come from clients of the live API (zylon-ai/private-gpt tests/components/web_search/test_brave_provider.py); the other codes and details are illustrative. Rate-limit headers follow the guide's examples; no Retry-After is documented.",
+  "success": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"type\":\"search\",\"query\":{\"original\":\"python web frameworks\",\"show_strict_warning\":false,\"is_navigational\":false,\"is_news_breaking\":false,\"spellcheck_off\":true,\"country\":\"us\",\"bad_results\":false,\"should_fallback\":false,\"postal_code\":\"\",\"city\":\"\",\"header_country\":\"\",\"more_results_available\":true,\"state\":\"\"},\"mixed\":{\"type\":\"mixed\",\"main\":[{\"type\":\"web\",\"index\":0,\"all\":false},{\"type\":\"web\",\"index\":1,\"all\":false}],\"top\":[],\"side\":[]},\"web\":{\"type\":\"search\",\"family_friendly\":true,\"results\":[{\"title\":\"Python Web Frameworks\",\"url\":\"https://example.com/python-frameworks\",\"is_source_local\":false,\"is_source_both\":false,\"description\":\"Main snippet text...\",\"page_age\":\"2025-03-11T17:00:00\",\"profile\":{\"name\":\"Example\",\"url\":\"https://example.com/python-frameworks\",\"long_name\":\"example.com\",\"img\":\"https://imgs.search.brave.com/example-favicon\"},\"language\":\"en\",\"family_friendly\":true,\"type\":\"search_result\",\"subtype\":\"generic\",\"is_live\":false,\"meta_url\":{\"scheme\":\"https\",\"netloc\":\"example.com\",\"hostname\":\"example.com\",\"favicon\":\"https://imgs.search.brave.com/example-favicon\",\"path\":\"› python-frameworks\"},\"age\":\"March 11, 2025\",\"extra_snippets\":[\"First additional excerpt from the page...\",\"Second additional excerpt from the page...\",\"Third additional excerpt from the page...\"]},{\"title\":\"Comparing Python web frameworks\",\"url\":\"https://example.org/compare\",\"is_source_local\":false,\"is_source_both\":false,\"description\":\"A comparison of Django, Flask and FastAPI.\",\"language\":\"en\",\"family_friendly\":true,\"type\":\"search_result\",\"subtype\":\"generic\",\"is_live\":false,\"meta_url\":{\"scheme\":\"https\",\"netloc\":\"example.org\",\"hostname\":\"example.org\",\"favicon\":\"https://imgs.search.brave.com/example-org-favicon\",\"path\":\"› compare\"},\"age\":\"2 days ago\"}]}}"
+  },
+  "empty": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"type\":\"search\",\"query\":{\"original\":\"python web frameworks\",\"show_strict_warning\":false,\"is_navigational\":false,\"is_news_breaking\":false,\"spellcheck_off\":true,\"country\":\"us\",\"bad_results\":false,\"should_fallback\":false,\"postal_code\":\"\",\"city\":\"\",\"header_country\":\"\",\"more_results_available\":false,\"state\":\"\"},\"mixed\":{\"type\":\"mixed\",\"main\":[],\"top\":[],\"side\":[]}}"
+  },
+  "empty_web": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"type\":\"search\",\"query\":{\"original\":\"python web frameworks\",\"show_strict_warning\":false,\"is_navigational\":false,\"is_news_breaking\":false,\"spellcheck_off\":true,\"country\":\"us\",\"bad_results\":false,\"should_fallback\":false,\"postal_code\":\"\",\"city\":\"\",\"header_country\":\"\",\"more_results_available\":false,\"state\":\"\"},\"mixed\":{\"type\":\"mixed\",\"main\":[],\"top\":[],\"side\":[]},\"web\":{\"type\":\"search\",\"family_friendly\":true,\"results\":[]}}"
+  },
+  "malformed": {
+    "status": 200,
+    "headers": "",
+    "body": "{\"type\":\"search\",\"query\":{\"original\":\"python web frameworks\",\"show_strict_warning\":false,\"is_navigational\":false,\"is_news_breaking\":false,\"spellcheck_off\":true,\"country\":\"us\",\"bad_results\":false,\"should_fallback\":false,\"postal_code\":\"\",\"city\":\"\",\"header_country\":\"\",\"more_results_available\":true,\"state\":\"\"},\"web\":{\"type\":\"search\",\"family_friendly\":true}}"
+  },
+  "token_invalid": {
+    "status": 422,
+    "headers": "",
+    "body": "{\"type\":\"ErrorResponse\",\"error\":{\"id\":\"5a8c7a3c-2f0b-4c1e-9d55-0d1b7c3e9f21\",\"status\":422,\"code\":\"SUBSCRIPTION_TOKEN_INVALID\",\"detail\":\"The provided subscription token is invalid.\",\"meta\":{\"component\":\"authentication\"}},\"time\":1760918400}"
+  },
+  "validation_failed": {
+    "status": 422,
+    "headers": "",
+    "body": "{\"type\":\"ErrorResponse\",\"error\":{\"id\":\"5a8c7a3c-2f0b-4c1e-9d55-0d1b7c3e9f21\",\"status\":422,\"code\":\"VALIDATION\",\"detail\":\"Unable to validate request parameter(s)\",\"meta\":{\"errors\":[{\"type\":\"less_than_equal\",\"loc\":[\"query\",\"count\"],\"msg\":\"Input should be less than or equal to 20\",\"input\":\"21\",\"ctx\":{\"le\":20}}]}},\"time\":1760918400}"
+  },
+  "not_found": {
+    "status": 404,
+    "headers": "",
+    "body": "{\"type\":\"ErrorResponse\",\"error\":{\"id\":\"5a8c7a3c-2f0b-4c1e-9d55-0d1b7c3e9f21\",\"status\":404,\"code\":\"RESOURCE_NOT_FOUND\",\"detail\":\"Resource not found.\"},\"time\":1760918400}"
+  },
+  "rate_limited": {
+    "status": 429,
+    "headers": "X-RateLimit-Limit: 1, 2000\r\nX-RateLimit-Policy: 1;w=1, 2000;w=2592000\r\nX-RateLimit-Remaining: 0, 1981\r\nX-RateLimit-Reset: 1, 1419704\r\n",
+    "body": "{\"type\":\"ErrorResponse\",\"error\":{\"id\":\"5a8c7a3c-2f0b-4c1e-9d55-0d1b7c3e9f21\",\"status\":429,\"code\":\"RATE_LIMITED\",\"detail\":\"Request rate limit exceeded for plan.\",\"meta\":{\"plan\":\"Free\",\"rate_limit\":1,\"rate_current\":2,\"quota_limit\":2000,\"quota_current\":19,\"component\":\"rate_limiter\"}},\"time\":1760918400}"
+  },
+  "monthly_quota_used": {
+    "status": 429,
+    "headers": "X-RateLimit-Limit: 1, 2000\r\nX-RateLimit-Policy: 1;w=1, 2000;w=2592000\r\nX-RateLimit-Remaining: 1, 0\r\nX-RateLimit-Reset: 1, 1419704\r\n",
+    "body": "{\"type\":\"ErrorResponse\",\"error\":{\"id\":\"5a8c7a3c-2f0b-4c1e-9d55-0d1b7c3e9f21\",\"status\":429,\"code\":\"RATE_LIMITED\",\"detail\":\"Request rate limit exceeded for plan.\",\"meta\":{\"plan\":\"Free\",\"rate_limit\":1,\"rate_current\":1,\"quota_limit\":2000,\"quota_current\":2001,\"component\":\"rate_limiter\"}},\"time\":1760918400}"
+  },
+  "server_error": {
+    "status": 500,
+    "headers": "",
+    "body": "{\"type\":\"ErrorResponse\",\"error\":{\"id\":\"5a8c7a3c-2f0b-4c1e-9d55-0d1b7c3e9f21\",\"status\":500,\"code\":\"INTERNAL_ERROR\",\"detail\":\"Internal server error.\"},\"time\":1760918400}"
+  }
+}
