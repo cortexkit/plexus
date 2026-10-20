@@ -2008,7 +2008,9 @@ async fn every_shipped_manifest_is_reachable_through_the_operator_ceremony() {
         let value: Value = serde_json::from_str(&normalized).expect("parse shipped JSON");
         let ingested = ingest_value(value).expect("ingest shipped manifest");
         let app_key = ingested.manifest.key;
-        // SearXNG permits anonymous enrollment, not the synthetic totality credential.
+        // Vendors whose key is optional (SearXNG) are enrolled without a key here,
+        // like keyless vendors. They accept only their own named key, so the
+        // placeholder credential this test gives every keyed vendor would be refused.
         let credential_free = matches!(
             ingested.manifest.auth.mode,
             plexus_core::manifest::AuthMode::None | plexus_core::manifest::AuthMode::OptionalApiKey

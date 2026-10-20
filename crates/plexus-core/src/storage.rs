@@ -7626,8 +7626,9 @@ impl PlexusStore {
         Ok(manifest.transport.url_from_connection)
     }
 
-    /// Only a reviewed optional bearer manifest may accept a ticket with or
-    /// without an API-key reference.
+    /// Whether the catalog's manifest for `app_key` declares an optional API key
+    /// (`auth.mode = optional_api_key`). Only such a vendor may be enrolled
+    /// either with an API-key reference or without one.
     pub fn manifest_has_optional_credential(&self, app_key: &str) -> Result<bool, StoreError> {
         Ok(matches!(
             self.parsed_manifest(CATALOG_PRINCIPAL, app_key)?,

@@ -57,7 +57,10 @@ pub struct Transport {
     pub kind: TransportKind,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
-    /// Use the validated address stored on the connection, never a catalog URL.
+    /// When true, the manifest names no `url`: each connection's own base address,
+    /// set by the operator when issuing the connection's binding ticket and
+    /// validated then, is used instead. For self-hosted vendors such as SearXNG,
+    /// where every user's server lives at a different address.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub url_from_connection: bool,
 }
