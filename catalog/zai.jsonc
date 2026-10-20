@@ -9,9 +9,12 @@
 // No REST schema or argument-shape retry is used. At rollout, tools/list discovery
 // and operator review must confirm this action and its inputSchema before a grant.
 // Results map title, link/url, content and publish_date; answer text is discarded.
-// Known gap: MCP RPC/tool quota wording currently gets the ordinary unavailable
-// skip (60 seconds). Provider-declared transport signals must carry quota evidence;
-// this adapter does not infer quota from vendor error prose.
+// Undeclared quota gap: the official MCP page above (read 2026-10-20) gives
+// only troubleshooting prose, no stable MCP error field or response header.
+// The separate REST error table (https://docs.z.ai/api-reference/api-code.md,
+// read 2026-10-20) does not map its codes to MCP errors. No signal is declared;
+// RPC/tool quota wording retains the ordinary unavailable skip (60 seconds).
+// Vendor prose is never used as quota evidence.
 {
   "schema_version": 1,
   "key": "zai",

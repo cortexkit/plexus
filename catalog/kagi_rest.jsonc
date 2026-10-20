@@ -72,10 +72,11 @@
 // - query length: none is documented, so the tool's own 500-character limit
 //   applies and no valid tool query skips Kagi for capability;
 // - a publication date is reported from `time` when it is a parseable date;
-// - Kagi's 429 covers both a rate limit and an exhausted usage limit. The
-//   transport returns no 429 body, so both are classified as throttled (the
-//   Retry-After, if one is ever sent, or 60 seconds), never as quota. 401 is a
-//   credential failure, 400 a rejected request, and 403 and 500 are
+// - undeclared quota gap: Kagi's official OpenAPI bundle above (read
+//   2026-10-20) defines 429 as both rate limited and usage limit exhausted,
+//   but no stable quota-specific error[].code or response header. No signal
+//   is declared: both retain throttling (Retry-After if sent, or 60 seconds).
+//   401 remains a credential failure, 400 a rejected request, and 403 and 500
 //   unavailable for 60 seconds;
 // - the Search page notes that the API inherits the account's settings
 //   (blocked or promoted sites, snippet length). Those can reorder or remove

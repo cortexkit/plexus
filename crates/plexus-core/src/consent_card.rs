@@ -428,6 +428,7 @@ mod tests {
             transmission,
             retryability: crate::transport::Retryability::Terminal,
             retry_after_ms: None,
+            error_signal: None,
             outcome,
         })
     }
