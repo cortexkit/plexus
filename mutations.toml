@@ -17808,7 +17808,7 @@ timeout_s = 120
 
 [[control]]
 id = "web-search-jina-capability-domain-count"
-guards = "Jina's capability admits one domain, the single site filter X-Site carries, so a search with two domains skips Jina instead of being sent with one dropped"
+guards = "Jina's capability declaration admits one domain, because the X-Site header carries a single site filter, so a search with two domains skips Jina instead of being sent with one domain dropped"
 file = "crates/plexus-core/src/web_search/backend/jina.rs"
 old = "max_domains: JINA_MAX_DOMAINS,"
 new = "max_domains: usize::MAX, /* NON-VACUITY BREAK */"
@@ -17824,7 +17824,7 @@ timeout_s = 120
 
 [[control]]
 id = "web-search-jina-capability-result-count"
-guards = "Jina's capability clamps count to its documented maximum of 20"
+guards = "Jina's capability declaration clamps the result count to Jina's documented count maximum of 20"
 file = "crates/plexus-core/src/web_search/backend/jina.rs"
 old = "max_results: JINA_MAX_COUNT,"
 new = "max_results: u8::MAX, /* NON-VACUITY BREAK */"
@@ -17936,7 +17936,7 @@ timeout_s = 120
 
 [[control]]
 id = "rest-header-parameter-never-replaces-reviewed-header"
-guards = "At dispatch, a header argument that would replace a header the transport already set (such as the credential) refuses the request instead"
+guards = "At dispatch, the transport refuses the request when a header argument would replace a header it already set, such as the credential header"
 file = "crates/plexus-core/src/rest_api.rs"
 old = "if headers.contains_key(name) {"
 new = "if false { /* NON-VACUITY BREAK */"
