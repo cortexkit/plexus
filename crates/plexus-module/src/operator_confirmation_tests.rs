@@ -537,3 +537,34 @@ async fn confirmation_fails_closed_on_disconnect_malformed_reply_and_deadline() 
         "operator_confirmation_unavailable"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bot_read_upgrade_confirmation_and_preview_are_fenced() {
+    for all in [false, true] {
+        let mut case = Case::new(manifest::GITHUB_GRANT_OP);
+        case.params = json!({"kind":"read","module":"reserved:basal","actions":["github.repo.get"],"dry_run":true});
+        if all { case.params["all_handles"] = json!(true); }
+        else { case.params["app_handle_id"] = json!(HANDLE); }
+        let db = rusqlite::Connection::open(&case.path).unwrap();
+        db.execute("DELETE FROM catalog_actions WHERE name='github.repo.get'", []).unwrap();
+        let before = case.snapshot(true);
+        let preview = ceremony_with_peer(&case, Err("operator_declined"), false).await;
+        assert!(preview.get("result").is_some(), "{preview}");
+        assert_eq!(case.snapshot(true), before, "read preview must write no audit or catalog rows");
+        case.params["dry_run"] = json!(false);
+        for (reason, code) in [("operator_declined", "operator_confirmation_declined"), ("unsupported_control_frame", "operator_confirmation_unavailable")] {
+            let before = case.snapshot(false);
+            let reply = ceremony_with_peer(&case, Err(reason), true).await;
+            assert_eq!(reply["error"]["code"], code, "{reply}");
+            assert_eq!(case.snapshot(false), before);
+            let count: i64 = db.query_row("SELECT count(*) FROM audit_journal WHERE gate='operator_confirmation' AND reason_code=?1", [code], |row| row.get(0)).unwrap();
+            assert_eq!(count, 1);
+        }
+        let applied = ceremony_with_peer(&case, Ok(()), true).await;
+        assert!(applied.get("result").is_some(), "{applied}");
+        let before = case.snapshot(true);
+        let no_op = ceremony_with_peer(&case, Ok(()), true).await;
+        assert!(no_op.get("result").is_some(), "{no_op}");
+        assert_eq!(case.snapshot(true), before, "read no-op must change nothing");
+    }
+}

@@ -112,8 +112,8 @@ commands:
   remove-policy  remove a policy (idempotent)
   review-action  show the pinned and current schema, with property-level diff
   repin-action   re-pin one action after reviewing its current schema
-  handle-grant   add write abilities (or, with --kind poll, poll reads) to one
-                 imported GitHub handle
+  handle-grant   add write abilities, poll reads, or agent-bot reads to imported
+                 GitHub handles
   handle-unbind  remove one repository from a GitHub handle
   handle-bind    bind more repositories to one imported GitHub handle
   delete-connection
@@ -218,6 +218,18 @@ handle-grant --handle <app_handle_id> --actions a,b --kind poll [--apply]
     that owns the subscriptions. Widens the connection ceiling by exactly those
     reads. Writes are refused. Takes no --carrier or --effect. Without --apply
     this is a dry run that prints the plan and writes nothing.
+
+handle-grant (--handle <app_handle_id> | --all-handles) --kind read
+             --carrier <principal> --actions a,b [--apply]
+    Adds exactly the listed agent-bot reads to the handle ceiling and carrier's
+    module grant (e.g. reserved:aft), creating the grant if needed. Accepted:
+    github.repo.get, github.search.code, github.search.issues,
+    github.actions.job.get, github.actions.job_log. Both job actions are needed
+    for a bot job log read. Missing catalog rows are seeded from the reviewed
+    manifest with AddMissing semantics; disabled/quarantined rows stay refused.
+    No agent grants or policies change. --all-handles selects enabled handles
+    only. Preview writes nothing; --apply uses one Touch ID confirmation and
+    one audited transaction for all selected handles. Rerunning is a no-op.
 
 handle-unbind --handle <app_handle_id> --repo <owner/name> [--apply]
   Preview by default; removing the last repository is allowed. Grants and policies stay.
@@ -472,6 +484,7 @@ fn accepted_flags(command: &str) -> Option<&'static [&'static str]> {
         "repin-action" => &["--connection", "--action", "--expected-hash"],
         "handle-grant" => &[
             "--handle",
+            "--all-handles",
             "--actions",
             "--kind",
             "--carrier",
@@ -495,7 +508,7 @@ fn accepted_flags(command: &str) -> Option<&'static [&'static str]> {
 /// Parsed command line: flags with values, plus bare `--help`.
 /// Flags that take no value. An allowlist, so a mistyped value-taking flag
 /// still refuses rather than being read as a boolean.
-const BARE_FLAGS: &[&str] = &["--all", "--apply", "--clear"];
+const BARE_FLAGS: &[&str] = &["--all", "--all-handles", "--apply", "--clear"];
 
 struct Flags {
     values: Vec<(String, String)>,
@@ -891,8 +904,30 @@ fn repin_action_request(flags: &Flags) -> Result<(&'static str, Value), Failure>
 }
 
 fn handle_grant_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
-    let handle = flags.required("--handle")?;
     let actions = flags.action_selectors()?;
+    if flags.value("--kind") == Some("read") {
+        let handle = flags.value("--handle");
+        let all = flags.has("--all-handles");
+        if all == handle.is_some() || handle == Some("") {
+            return Err(Failure::usage(
+                "--kind read requires exactly one of --handle or --all-handles",
+            ));
+        }
+        if flags.value("--effect").is_some() {
+            return Err(Failure::usage("--effect does not apply to --kind read"));
+        }
+        let carrier = flags.required("--carrier")?;
+        let mut params = json!({"kind":"read","module":carrier,"actions":actions,
+            "all_handles":all,"dry_run":!flags.has("--apply")});
+        if let Some(handle) = handle {
+            params["app_handle_id"] = json!(handle);
+        }
+        return Ok((plexus_module::manifest::GITHUB_GRANT_OP, params));
+    }
+    if flags.has("--all-handles") {
+        return Err(Failure::usage("--all-handles requires --kind read"));
+    }
+    let handle = flags.required("--handle")?;
     match flags.value("--kind") {
         None | Some("invoke") => {}
         Some("poll") => {
@@ -916,7 +951,7 @@ fn handle_grant_request(flags: &Flags) -> Result<(&'static str, Value), Failure>
                 }),
             ));
         }
-        Some(_) => return Err(Failure::usage("--kind must be invoke or poll")),
+        Some(_) => return Err(Failure::usage("--kind must be invoke, poll or read")),
     }
     // `--carrier`, not `--module`: `--module` is the common flag naming the
     // plexus module to call, so reusing it sent this op to a module named
@@ -1445,6 +1480,9 @@ fn grant_lines(grant: &Value) -> Vec<String> {
 
 /// The lines `handle-grant` prints for a plan, applied or not.
 fn handle_grant_lines(plan: &Value) -> Vec<String> {
+    if let Some(handles) = plan["handles"].as_array() {
+        return handles.iter().flat_map(handle_grant_lines).collect();
+    }
     let mut lines = vec![
         format!(
             "{}  {}",
@@ -1459,6 +1497,12 @@ fn handle_grant_lines(plan: &Value) -> Vec<String> {
         format!("expanded actions:  {}", list(&plan["expanded"])),
         format!("ceiling additions: {}", list(&plan["ceiling_additions"])),
     ];
+    if plan.get("catalog_additions").is_some() {
+        lines.push(format!(
+            "catalog additions (reviewed, AddMissing): {}",
+            list(&plan["catalog_additions"])
+        ));
+    }
     for grant in plan["grants"].as_array().into_iter().flatten() {
         lines.push(format!(
             "grant  {} {} {} {}",
@@ -2997,5 +3041,94 @@ mod web_search_chain_cli_tests {
             .contains("unknown flag --clear"));
         assert!(USAGE.contains("set-web-search-order <name>..."));
         assert!(USAGE.contains("set-web-search-allowance <name> --clear"));
+    }
+}
+
+#[cfg(test)]
+mod bot_read_grant_cli_tests {
+    use super::*;
+
+    fn flags(args: &[&str]) -> Flags {
+        Flags::parse(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn read_kind_single_and_bulk_preview_apply_and_refuse_ambiguous_flags() {
+        for selector in ["--handle", "--all-handles"] {
+            let mut args = vec![
+                "--kind",
+                "read",
+                "--carrier",
+                "reserved:aft",
+                "--actions",
+                "github.repo.get",
+                selector,
+            ];
+            if selector == "--handle" {
+                args.push("app-x");
+            }
+            let preview = flags(&args);
+            preview
+                .refuse_unknown(accepted_flags("handle-grant").unwrap())
+                .unwrap();
+            let (method, plan) = handle_grant_request(&preview).unwrap();
+            assert_eq!(method, plexus_module::manifest::GITHUB_GRANT_OP);
+            assert_eq!(plan["kind"], "read");
+            assert_eq!(plan["module"], "reserved:aft");
+            assert_eq!(plan["dry_run"], true);
+            assert_eq!(plan["all_handles"], selector == "--all-handles");
+            if selector == "--handle" {
+                assert_eq!(plan["app_handle_id"], "app-x");
+            }
+            args.push("--apply");
+            assert_eq!(
+                handle_grant_request(&flags(&args)).unwrap().1["dry_run"],
+                false
+            );
+            args.extend(["--effect", "allow"]);
+            assert!(handle_grant_request(&flags(&args)).is_err());
+        }
+        for args in [
+            vec![
+                "--kind",
+                "read",
+                "--actions",
+                "github.repo.get",
+                "--carrier",
+                "reserved:aft",
+            ],
+            vec![
+                "--kind",
+                "read",
+                "--actions",
+                "github.repo.get",
+                "--carrier",
+                "reserved:aft",
+                "--handle",
+                "app-x",
+                "--all-handles",
+            ],
+            vec![
+                "--kind",
+                "poll",
+                "--actions",
+                "github.issue.get",
+                "--all-handles",
+            ],
+            vec![
+                "--kind",
+                "read",
+                "--actions",
+                "github.repo.get",
+                "--handle",
+                "app-x",
+            ],
+        ] {
+            assert!(handle_grant_request(&flags(&args)).is_err());
+        }
+        let lines = handle_grant_lines(&json!({"handles":[{"app_handle_id":"app-x","dry_run":true,"catalog_additions":["github.repo.get"],"ceiling_additions":["github.repo.get"],"grants":[]}]})).join("\n");
+        assert!(lines.contains("app-x"));
+        assert!(lines.contains("catalog additions (reviewed, AddMissing): github.repo.get"));
+        assert!(USAGE.contains("--all-handles) --kind read"));
     }
 }

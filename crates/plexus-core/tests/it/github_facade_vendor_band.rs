@@ -4404,3 +4404,107 @@ fn generation_failure_preserves_partial_write_and_later_resume() {
         "a healthy same-nonce retry must send only the unfinished write leg"
     );
 }
+
+#[test]
+fn read_upgrade_keeps_claimed_bot_write_live() {
+    use plexus_core::github::facade::{gates, vendor_band};
+    let (scratch, store, engine, transport, scope) = setup(
+        "read-upgrade-inflight-write",
+        &[("github.issue.get", "read"), ("close_issue", "write")],
+    );
+    let db = Connection::open(scratch.path()).unwrap();
+    // Model an imported direct-owned handle while retaining the write fixture's
+    // transport, scope reader, and separate module and agent grant layers.
+    db.execute_batch("UPDATE connections SET principal='direct',ceiling_risk='write',ceiling_selectors='[\"github.issue.get\",\"close_issue\"]';
+        UPDATE catalog_actions SET principal='direct';
+        UPDATE grants SET principal='direct';
+        UPDATE github_app_handle SET connection_principal='direct';").unwrap();
+    let now = plexus_core::now_ms();
+    let mut reply = gates::run_scoped(
+        store.as_ref(),
+        plexus_core::github::AFT_PRINCIPAL,
+        Some(&scope),
+        &json!({"verb":"issue close","repository":"org/repo","number":"42"}),
+        "read-upgrade-nonce",
+        "read-upgrade-id",
+        "worker",
+        now,
+        120,
+    );
+    assert!(matches!(
+        reply.claim,
+        Some(plexus_core::github::receipt::Claim::Owned(_))
+    ));
+    let claimed = store
+        .github_receipt("agent-fixture", "read-upgrade-nonce")
+        .unwrap()
+        .unwrap();
+    let generation: i64 = db
+        .query_row(
+            "SELECT generation FROM grants WHERE grant_id='module'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let connection_generation: i64 = db
+        .query_row(
+            "SELECT generation FROM connections WHERE connection_id='conn-fixture'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let plan = store
+        .grant_github_handle_read(&plexus_core::storage::github_store::GithubHandleReadGrant {
+            app_handle_id: Some("app-fixture".into()),
+            all_handles: false,
+            module: plexus_core::github::AFT_PRINCIPAL.into(),
+            actions: vec!["github.repo.get".into()],
+            dry_run: false,
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan["handles"][0]["grants"][0]["op"], "extend");
+    assert_eq!(plan["handles"][0]["grants"][0]["grant_id"], "module");
+    let unchanged_generation: i64 = db
+        .query_row(
+            "SELECT generation FROM grants WHERE grant_id='module'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unchanged_generation, generation);
+    let upgraded_generation: i64 = db
+        .query_row(
+            "SELECT generation FROM connections WHERE connection_id='conn-fixture'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(upgraded_generation, connection_generation + 1);
+    let after = store
+        .github_receipt("agent-fixture", "read-upgrade-nonce")
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.claim_owner, claimed.claim_owner);
+    assert_eq!(after.authority_baseline, claimed.authority_baseline);
+    let result = vendor_band::run(
+        &engine,
+        &store,
+        &mut reply,
+        "read-upgrade-nonce",
+        "worker",
+        now,
+    );
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(transport.requests().len(), 1);
+    assert_eq!(transport.requests()[0].action, "close_issue");
+    let receipt = store
+        .github_receipt("agent-fixture", "read-upgrade-nonce")
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.state, "completed");
+    assert!(receipt
+        .effects
+        .iter()
+        .all(|effect| effect.outcome.is_some()));
+}

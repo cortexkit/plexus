@@ -34,13 +34,6 @@ const READS: &[&str] = &[
     "github.issue.search",
     "github.pull_request.get",
     "github.pr.review_threads",
-    // The agent bot reads AFT's `gh` routes through each agent's own bot.
-    // The bot job log read checks the job first, so it needs both actions.
-    "github.repo.get",
-    "github.search.code",
-    "github.search.issues",
-    "github.actions.job.get",
-    "github.actions.job_log",
 ];
 /// The reviewed reads a scheduled poll may be granted on a handle connection:
 /// the import's module reads plus the issue timeline, which actor enrichment
@@ -460,6 +453,11 @@ pub fn import(
         );
         let mut aft: BTreeSet<String> = grants.iter().map(|row| row.action.clone()).collect();
         aft.extend(READS.iter().map(|action| (*action).to_owned()));
+        aft.extend(
+            crate::github::reads::bot::GRANT_ACTIONS
+                .iter()
+                .map(|action| (*action).to_owned()),
+        );
         let connection_id = format!("github-handle-{}", item.app_handle_id);
         module_grants.push(json!({"connection_id":connection_id,"grantee_principal":crate::github::AFT_PRINCIPAL,"action_selectors":aft}));
         module_grants.push(json!({"connection_id":connection_id,"grantee_principal":crate::github::PREFRONTAL_PRINCIPAL,"action_selectors":prefrontal_selectors()}));
@@ -535,6 +533,20 @@ pub fn grant_poll(
     };
     store
         .grant_github_handle_poll(&request)
+        .map_err(|error| format!("grant_failed: {error}"))?
+}
+
+/// Upgrade module authority for bot reads without changing write grants or policies.
+pub fn grant_read(
+    store: &PlexusStore,
+    principal: &str,
+    request: &crate::storage::github_store::GithubHandleReadGrant,
+) -> Result<Value, String> {
+    if principal != "direct" {
+        return Err("operator_authority_required".into());
+    }
+    store
+        .grant_github_handle_read(request)
         .map_err(|error| format!("grant_failed: {error}"))?
 }
 
