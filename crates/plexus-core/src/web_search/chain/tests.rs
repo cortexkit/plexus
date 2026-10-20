@@ -14,6 +14,7 @@ mod kagi;
 mod kimi;
 mod ollama;
 mod outcomes;
+mod parallel;
 mod tavily;
 
 const NOW: i64 = 1_790_000_000_000;

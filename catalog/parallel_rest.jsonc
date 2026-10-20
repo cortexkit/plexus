@@ -1,0 +1,98 @@
+// Parallel Search REST, provider `parallel` for web_search. Search sources only;
+// no chat, completions or synthesized-answer endpoint is declared.
+//
+// Wire contract pinned from Parallel's official documentation (read 2026-10-20):
+// - https://docs.parallel.ai/api-reference/search/search
+// - https://docs.parallel.ai/search/search-migration-guide
+// - https://docs.parallel.ai/search/advanced-search-settings
+// - https://docs.parallel.ai/resources/source-policy
+// - https://docs.parallel.ai/docs-legacy-openapi.json (the deprecated Beta header)
+//
+// POST https://api.parallel.ai/v1/search, JSON body, x-api-key: <key>.
+// The connection binds vault credential apikey:parallel, resolved at dispatch;
+// the manifest contains no key or inline token URL. A search is read-risk/Pure.
+//
+// The reviewed provider constraints described objective or query, count,
+// source_policy domains and after_date, with x-api-key and a beta header. The
+// current GA contract differs: /v1/search requires search_queries (1 to 5
+// strings, each at most 200 characters); objective is optional (at most 5,000
+// characters). We send the caller's literal query as ONE search_queries entry,
+// never generate queries or use an answer endpoint. The migration guide moves
+// max_results and source_policy from Beta's top level into advanced_settings.
+// max_results is positive, capped at 20 in public Search modes. Domains use
+// advanced_settings.source_policy.include_domains; the include/exclude lists
+// together allow up to 200 domains. The declared domain envelope is the tool's
+// smaller bound. after_date is a YYYY-MM-DD inclusive publication lower bound
+// in that same source_policy, computed from the requested recency window.
+//
+// Acceptance deviation approved during implementation: no static beta header
+// is sent. The migration guide recommends GA for new integrations, and the
+// legacy OpenAPI marks parallel-beta optional and deprecated; neither documents
+// a required Search beta version value. Guessing a version would not pin a
+// documented contract. The existing request_constants + header_parameters
+// mechanism can already send reviewed non-credential headers, so no transport
+// or manifest-model extension is needed. deny_unknown_fields stays intact.
+//
+// Reply mapping: results[].url and title; excerpts[] joined with newlines and
+// bounded to the neutral excerpt limit; publish_date only when parseable as
+// RFC 3339 or a calendar date. search_id, warnings, usage and any answer are
+// ignored. An empty results array is a served empty search, not a failover.
+// A missing/non-array results field is a shape error. The capability skips
+// queries over 200 Unicode characters rather than truncating or rewriting them.
+{
+  "schema_version": 1,
+  "key": "parallel_rest",
+  "name": "Parallel Search (REST)",
+  "description": "Keyed Parallel Search API sources for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Small keyed JSON search API with source links and native domain/date filters; no model or answer endpoint is used.",
+  "tier": "S1",
+  "transport": { "kind": "rest_api", "url": "https://api.parallel.ai" },
+  "auth": { "mode": "api_key" },
+  "credential_bindings": [
+    { "ref_role": "api_key", "placement": "header", "key": "x-api-key", "prefix": "", "required": true }
+  ],
+  "resource_filters": { "required": [], "optional": [], "write_enabling": [] },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/v1/search",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "search_queries": {
+              "type": "array", "minItems": 1, "maxItems": 1,
+              "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+            },
+            "advanced_settings": {
+              "type": "object",
+              "properties": {
+                "max_results": { "type": "integer", "minimum": 1, "maximum": 20 },
+                "source_policy": {
+                  "type": "object",
+                  "properties": {
+                    "include_domains": {
+                      "type": "array", "minItems": 1, "maxItems": 20,
+                      "items": { "type": "string", "minLength": 1 }
+                    },
+                    "after_date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "required": ["max_results"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["search_queries", "advanced_settings"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": { "ask_first_risk": ["write", "destructive"], "rate_limit": { "calls_per_min": 30 } },
+  "availability": "ga"
+}

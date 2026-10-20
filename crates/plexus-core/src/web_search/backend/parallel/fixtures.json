@@ -1,0 +1,17 @@
+{
+  "_source": "Recorded-shape fixtures built from Parallel's Search API reference and migration guide (https://docs.parallel.ai/api-reference/search/search, https://docs.parallel.ai/search/search-migration-guide, read 2026-10-20). Success uses the documented results[].url, title, excerpts[] and publish_date fields with illustrative source text; empty uses the same array schema. Error bodies are illustrative rather than captured live credentials or queries. Status variants cover all HTTP outcome rows, including defensive handling of 402 and quota-bearing 403, both forms of 429, and invalid/missing JSON bodies. Local transmission outcomes are fabricated separately in chain tests.",
+  "success": {"status": 200, "headers": "", "body": "{\"search_id\":\"search_example\",\"results\":[{\"url\":\"https://example.com/news\",\"title\":\"Example news\",\"excerpts\":[\"First excerpt.\",\"Second excerpt.\"],\"publish_date\":\"2026-09-27\"},{\"url\":\"https://example.org/\",\"title\":\"Another source\",\"excerpts\":[\"Another excerpt.\"],\"publish_date\":null}],\"answer\":\"Not a search result and never returned\"}"},
+  "empty": {"status": 200, "headers": "", "body": "{\"search_id\":\"search_empty\",\"results\":[]}"},
+  "malformed": {"status": 200, "headers": "", "body": "{\"search_id\":\"search_malformed\"}"},
+  "no_body": {"status": 200, "headers": "", "body": ""},
+  "bad_request": {"status": 400, "headers": "", "body": "{\"error\":\"quota in an invalid request must not be scanned\"}"},
+  "unprocessable": {"status": 422, "headers": "", "body": "{\"error\":\"invalid search_queries; insufficient balance must not be scanned\"}"},
+  "payment_required": {"status": 402, "headers": "", "body": "{\"error\":\"payment required\"}"},
+  "quota_forbidden": {"status": 403, "headers": "", "body": "{\"error\":\"insufficient credits\"}"},
+  "unauthorized": {"status": 401, "headers": "", "body": "{\"error\":\"quota must not override invalid key\"}"},
+  "forbidden": {"status": 403, "headers": "", "body": "{\"error\":\"access forbidden\"}"},
+  "rate_limited": {"status": 429, "headers": "", "body": "{\"error\":\"quota text is hidden by REST throttling\"}"},
+  "rate_limited_retry": {"status": 429, "headers": "Retry-After: 7\r\n", "body": "{\"error\":\"rate limited\"}"},
+  "server_error": {"status": 500, "headers": "", "body": "{\"error\":\"internal server error\"}"},
+  "capability_skip": {"query_chars": 201, "expected": "length"}
+}

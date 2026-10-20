@@ -18493,3 +18493,131 @@ expect_red = ["web_search::chain::tests::ollama::a_domain_or_recency_window_skip
 expect_message = "one domain: nothing is dispatched"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-parallel-api-key-header"
+guards = "Parallel's shipped manifest places the vault key in x-api-key, never a bearer or URL"
+file = "catalog/parallel_rest.jsonc"
+old = '"key": "x-api-key"'
+new = '"key": "wrong-api-key" /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/parallel.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::parallel::keyed_ga_post_sends_native_filters_without_a_beta_header"]
+expect_message = "the key must travel in x-api-key"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-parallel-ga-path"
+guards = "Parallel uses the documented GA search endpoint, not legacy beta or an answer endpoint"
+file = "catalog/parallel_rest.jsonc"
+old = '"path": "/v1/search"'
+new = '"path": "/v1beta/search" /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/parallel/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::parallel::tests::shipped_manifest_pins_keyed_ga_search_and_closed_schema"]
+expect_message = "/v1/search"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-parallel-literal-query"
+guards = "The caller's literal query travels as the sole GA search_queries entry"
+file = "crates/plexus-core/src/web_search/backend/parallel.rs"
+old = '"search_queries": [query.query],'
+new = '"objective": query.query, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/parallel/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::parallel::tests::native_fields_preserve_query_domains_and_each_recency_window"]
+expect_message = "native filters must not be dropped"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-parallel-native-domains"
+guards = "Parallel preserves the domain allowlist inside advanced_settings.source_policy"
+file = "crates/plexus-core/src/web_search/backend/parallel.rs"
+old = 'policy["include_domains"] = json!(query.include_domains);'
+new = 'let _ = &query.include_domains; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/parallel/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::parallel::tests::native_fields_preserve_query_domains_and_each_recency_window"]
+expect_message = "native filters must not be dropped"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-parallel-native-after-date"
+guards = "Each recency window produces the documented publication lower bound rather than unfiltered results"
+file = "crates/plexus-core/src/web_search/backend/parallel.rs"
+old = "policy[\"after_date\"] = json!(timestamp.split('T').next().unwrap());"
+new = 'let _ = timestamp; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/parallel/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::parallel::tests::native_fields_preserve_query_domains_and_each_recency_window"]
+expect_message = "native filters must not be dropped"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-parallel-query-capability"
+guards = "A query over GA's 200-character bound skips without dispatch, allowance or cooldown"
+file = "crates/plexus-core/src/web_search/backend/parallel.rs"
+old = 'max: PARALLEL_MAX_QUERY_CHARS,'
+new = 'max: usize::MAX, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/chain/tests/parallel.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::parallel::capability_skip_has_no_dispatch_count_or_cooldown_and_boundary_is_served"]
+expect_message = "Capability"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-parallel-result-capability"
+guards = "Parallel clamps max_results to the documented public Search maximum of 20"
+file = "crates/plexus-core/src/web_search/backend/parallel.rs"
+old = 'max_results: PARALLEL_MAX_RESULTS,'
+new = 'max_results: u8::MAX, /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/parallel/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::parallel::tests::capability_serves_the_declared_envelope_and_clamps_result_count"]
+expect_message = "20"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-parallel-excerpts"
+guards = "Neutral excerpts come from result sources, never a synthesized answer"
+file = "crates/plexus-core/src/web_search/backend/parallel.rs"
+old = 'excerpt: truncate_chars(&excerpts, EXCERPT_MAX_CHARS),'
+new = 'excerpt: truncate_chars(text("answer"), EXCERPT_MAX_CHARS), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/web_search/backend/parallel/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::parallel::tests::documented_sources_map_only_links_excerpts_and_publication_dates"]
+expect_message = "First excerpt"
+build_timeout_s = 3600
+timeout_s = 120
