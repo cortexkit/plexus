@@ -3077,8 +3077,9 @@ pub mod tests {
         const CHILD: &str = "PLEXUS_DUPLICATE_RETRY_CHILD";
         if std::env::var_os(CHILD).is_none() {
             // Prepare the durable fixture before timing the diagnostic child.
-            // The child reopens it to exercise the real restart/retry path, but
-            // does not spend its log-observation budget creating a fresh schema.
+            // The child reopens it to exercise the real restart/retry path.
+            // Its 30-second execution deadline then covers retry and diagnostics,
+            // rather than cold schema creation.
             let (scratch, store) = test_store("duplicate-crash-retry");
             let sub = seed_connection_and_subscription(&store, "conn-1");
             insert_test_event(

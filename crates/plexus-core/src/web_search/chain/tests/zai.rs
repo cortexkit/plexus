@@ -106,6 +106,15 @@ struct Recorded {
     used: u32,
 }
 fn recorded(record: &str, field: &str, count: bool) -> Recorded {
+    recorded_with_setup_delay(record, field, count, std::time::Duration::ZERO)
+}
+
+fn recorded_with_setup_delay(
+    record: &str,
+    field: &str,
+    count: bool,
+    setup_delay: std::time::Duration,
+) -> Recorded {
     let reply = fixtures()[record].clone();
     let calls = if record == "unauthorized" { 2 } else { 1 };
     // Auth rejection initializes a second session before the one permitted resend.
@@ -137,6 +146,9 @@ fn recorded(record: &str, field: &str, count: bool) -> Recorded {
             format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
         },
     );
+    // The listener already exists while the durable store is being prepared.
+    // Model a disk stall without consuming a CPU or changing MCP response timing.
+    std::thread::sleep(setup_delay);
     let (fixture, _) = super::super::super::tests::granted_exa_engine(&format!("zai-{record}"));
     connect(&fixture, schema(field, count));
     let manifest = crate::manifest::ingest_value(
@@ -177,6 +189,18 @@ fn recorded(record: &str, field: &str, count: bool) -> Recorded {
         vault,
         used,
     }
+}
+
+#[test]
+fn mcp_fixture_waits_for_durable_preparation_before_session_initialization() {
+    let record = recorded_with_setup_delay(
+        "success",
+        "query",
+        true,
+        crate::bounded::WAIT + std::time::Duration::from_millis(500),
+    );
+    assert!(record.result.is_ok(), "{:?}", record.result);
+    assert_eq!(record.requests.len(), 3);
 }
 
 #[test]

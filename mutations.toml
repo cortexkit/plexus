@@ -1569,6 +1569,7 @@ runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 expect_red = ["bus::tests::real_nats_adapter_polls_publish_and_waits_for_ack_before_stamp"]
+select = "expected"
 build_timeout_s = 3600
 
 [[control]]
@@ -19807,4 +19808,130 @@ list_command = ["python3", "-B", "-c", '''from pathlib import Path; text = Path(
 test_count_pattern = "Ran {count} test"
 expect_red = ["RolloutContract.test_live_steps_remain_pending_and_governed"]
 expect_message = "live steps must remain pending until deployment"
+timeout_s = 120
+
+[[control]]
+id = "module-diagnostic-fixture-must-run"
+guards = "A quiet diagnostic child cannot pass after an exact fixture name drifts"
+file = "crates/plexus-module/src/lib.rs"
+old = '.args(["--exact", test, "--nocapture"])'
+new = '.args(["--exact", "tests::missing_diagnostic_fixture", "--nocapture"]) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::health_probe_over_an_imported_handle_connection_logs_no_warning"]
+expect_message = "did not run exactly one test"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-imported-probe-observed"
+guards = "The quiet imported-handle fixture positively observes a probed connection"
+file = "crates/plexus-module/src/lib.rs"
+old = "total += 1;"
+new = "total += 0; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::health_probe_over_an_imported_handle_connection_logs_no_warning"]
+expect_message = "the imported handle must actually be probed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-probe-listing-diagnostic"
+guards = "A health-probe listing failure names the affected principal and underlying error"
+file = "crates/plexus-module/src/lib.rs"
+old = 'health probe connection listing failed for principal {principal}: {error}'
+new = 'probe listing error: {error} /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::health_probe_listing_failure_logs_principal_and_error_to_stderr"]
+expect_message = "probe listing error"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-probe-principals-diagnostic"
+guards = "A principal-enumeration failure visibly names its direct-only fallback"
+file = "crates/plexus-module/src/lib.rs"
+old = 'health probe principal enumeration failed for stored subscription and connection owners; falling back to principal direct only: {error}'
+new = 'probe enumeration error: {error} /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::health_probe_principals_failure_logs_narrowing_and_error_to_stderr"]
+expect_message = "probe enumeration error"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-probe-imported-handle-recovery"
+guards = "Imported GitHub handles recover without a stored credential binding"
+file = "crates/plexus-core/src/catalog.rs"
+old = 'return self.health_probe_handle_connection(principal, connection_id);'
+new = '/* NON-VACUITY BREAK: fall through to the stored-binding path. */'
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::health_probe_recovers_a_degraded_handle_connection"]
+expect_message = "started degraded"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-test-admission-owned-by-caller"
+guards = "ZAI fixture admission survives durable setup before MCP initialization"
+edits = [{ file = "crates/plexus-core/tests/support/http_server.rs", old = "for index in 0..expected {", new = "for index in 0..expected { let deadline = std::time::Instant::now() + bounded::WAIT; /* NON-VACUITY BREAK */" }, { file = "crates/plexus-core/tests/support/http_server.rs", old = "if stop.load(Ordering::SeqCst) {", new = "if stop.load(Ordering::SeqCst) || std::time::Instant::now() >= deadline {" }]
+test_file = "crates/plexus-core/src/web_search/chain/tests/zai.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::zai::mcp_fixture_waits_for_durable_preparation_before_session_initialization"]
+expect_message = "expected 3 requests, got 0"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-invalid-requests-terminal"
+guards = "ZAI MCP 400/422 responses are terminal request rejections, not cooldown skips"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = "if matches!(status, Some(400 | 422)) {"
+new = "if false && matches!(status, Some(400 | 422)) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/zai.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::zai::mcp_empty_serves_and_invalid_requests_are_terminal"]
+expect_message = "RequestRejected"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "zai-throttling-closed-outcome"
+guards = "ZAI MCP throttling retains its closed reason and bounded cooldown"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = "if throttled {"
+new = "if false && throttled { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/zai.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::zai::mcp_other_errors_have_closed_outcomes_and_cooldowns"]
+expect_message = "rate_limited"
+build_timeout_s = 3600
 timeout_s = 120

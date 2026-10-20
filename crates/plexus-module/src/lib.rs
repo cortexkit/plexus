@@ -6123,10 +6123,10 @@ mod tests {
         );
     }
 
-    fn health_probe_scenario(scenario: &str) {
-        logging::init_child();
-        let path = Scratch::database("health-probe");
-        let store = Arc::new(
+    const PREPARED_HEALTH_STORE: &str = "PLEXUS_PREPARED_HEALTH_STORE";
+
+    fn open_health_probe_store(path: &Path) -> Arc<PlexusStore> {
+        Arc::new(
             PlexusStore::open(&StorageDescriptor {
                 module_id: "plexus".into(),
                 storage_namespace: path.to_string_lossy().into_owned(),
@@ -6136,7 +6136,22 @@ mod tests {
                 },
             })
             .unwrap(),
-        );
+        )
+    }
+
+    fn health_probe_path(prepare: fn() -> Scratch) -> (Option<Scratch>, PathBuf) {
+        if let Some(path) = std::env::var_os(PREPARED_HEALTH_STORE) {
+            (None, PathBuf::from(path))
+        } else {
+            let scratch = prepare();
+            let path = scratch.path().to_path_buf();
+            (Some(scratch), path)
+        }
+    }
+
+    fn prepare_health_probe_fixture() -> Scratch {
+        let path = Scratch::database("health-probe");
+        let store = open_health_probe_store(&path);
         // REST catalog refresh uses the manifest's actions, not a vendor request.
         let source = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa_rest.jsonc"),
@@ -6172,6 +6187,14 @@ mod tests {
                     .unwrap();
             }
         }
+        path
+    }
+
+    fn health_probe_scenario(scenario: &str) {
+        logging::init_child();
+        let (_scratch, path) = health_probe_path(prepare_health_probe_fixture);
+        let store = open_health_probe_store(&path);
+        let owners = ["direct", "probe-owner", "z-other-owner"];
         let state = ModuleState {
             health: Arc::new(health::HealthState::new()),
             runtime: runtime_for_test(Arc::clone(&store)),
@@ -6370,22 +6393,11 @@ mod tests {
     /// One imported GitHub handle connection in the production shape: the
     /// reviewed github_rest manifest, a connection row created by the import
     /// with NO stored credential binding, and the handle credential provider
-    /// installed on the runtime. Runs one health-probe pass with the
-    /// connection starting in `status`, then checks it ends `active`.
-    fn imported_handle_probe_scenario(status: &str) {
-        logging::init_child();
+    /// installed later on the runtime. This prepares durable rows only; the
+    /// observer process runs the probe and checks the resulting status.
+    fn prepare_imported_handle_probe_fixture() -> Scratch {
         let path = Scratch::database("handle-probe");
-        let store = Arc::new(
-            PlexusStore::open(&StorageDescriptor {
-                module_id: "plexus".into(),
-                storage_namespace: path.to_string_lossy().into_owned(),
-                isolation: cortexkit_store_types::Isolation::Module,
-                backend: cortexkit_store_types::StorageBackend::Sqlite {
-                    path: path.to_string_lossy().into_owned(),
-                },
-            })
-            .unwrap(),
-        );
+        let store = open_health_probe_store(&path);
         let source = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/github_rest.jsonc"),
         )
@@ -6416,6 +6428,14 @@ mod tests {
                 policies: vec![],
             }])
             .unwrap();
+        path
+    }
+
+    fn imported_handle_probe_scenario(status: &str) {
+        logging::init_child();
+        let (_scratch, path) = health_probe_path(prepare_imported_handle_probe_fixture);
+        let store = open_health_probe_store(&path);
+        let connection_id = "github-handle-app-probe";
         let imported = store.connection("direct", connection_id).unwrap().unwrap();
         assert!(
             !imported.has_credential_binding,
@@ -6433,6 +6453,16 @@ mod tests {
             runtime,
         };
         run_health_probes(&state);
+        let subc_protocol::session::ModuleControlResponse::HealthCheck { metrics, .. } =
+            state.health.report()
+        else {
+            panic!("expected probe health report");
+        };
+        assert_eq!(
+            metrics.unwrap()["connections"],
+            json!(1),
+            "the imported handle must actually be probed"
+        );
         let after = store.connection("direct", connection_id).unwrap().unwrap();
         assert_eq!(after.status, "active", "started {status}");
         drop(state);
@@ -7517,10 +7547,31 @@ mod tests {
     }
 
     fn module_diagnostic_output(test: &str) -> String {
+        // Cold migrations and fixture imports can stall on shared storage. They
+        // are not log-observation work; prepare them before timing the child.
+        // Keep the scratch owner alive until the child has closed the database.
+        let prepared = match test {
+            "tests::health_probe_listing_error_fixture"
+            | "tests::health_probe_connection_error_fixture"
+            | "tests::health_probe_principals_error_fixture" => {
+                Some(prepare_health_probe_fixture())
+            }
+            "tests::health_probe_imported_handle_fixture"
+            | "tests::health_probe_imported_handle_degraded_fixture" => {
+                Some(prepare_imported_handle_probe_fixture())
+            }
+            _ => None,
+        };
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args(["--exact", test, "--nocapture"])
+            .env("PLEXUS_LOG_STDERR_CHILD", "1");
+        if let Some(scratch) = &prepared {
+            command.env(PREPARED_HEALTH_STORE, scratch.path());
+        }
         let output = bounded::child_output(
-            std::process::Command::new(std::env::current_exe().expect("test executable"))
-                .args(["--exact", test, "--nocapture"])
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+            &mut command,
             std::time::Duration::from_secs(30),
             "module diagnostic test child",
         )
@@ -7530,6 +7581,13 @@ mod tests {
             "fixture {test} failed: {} {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
+            "fixture {test} did not run exactly one test: {}",
+            String::from_utf8_lossy(&output.stdout)
         );
         String::from_utf8(output.stderr).expect("UTF-8 stderr")
     }

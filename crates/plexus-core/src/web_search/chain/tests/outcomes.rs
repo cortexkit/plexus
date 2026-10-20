@@ -212,10 +212,8 @@ fn recorded_rest_attempt(record: &str, reason: SkipReason, cooldown_ms: i64) {
     let (fixture, _) = super::super::super::tests::granted_exa_engine("chain-recorded-rest");
     add_connection(&fixture, "tavily", "tavily", Some("direct"));
     order(&fixture, &["exa", "tavily"]);
-    // The server starts only after the store is set up, and waits longer than
-    // the default for both requests: on a loaded test host the store writes
-    // before dispatch can outlast the default two-second accept deadline, and
-    // the search would then fail to connect rather than see the recorded reply.
+    // Complete durable setup first. Admission then follows the server's lifetime,
+    // so preparation before dispatch cannot expire its listener.
     let (endpoint, server) = crate::test_http::FixedRequestServer::start_with_deadline(
         2,
         "web-search-outcomes",

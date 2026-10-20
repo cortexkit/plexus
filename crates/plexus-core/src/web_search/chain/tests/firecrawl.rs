@@ -161,10 +161,8 @@ fn recorded_walk(record: &str, providers: &[&str]) -> Recorded {
             .clone(),
     );
     order(&fixture, providers);
-    // The server starts only after the store is set up, and waits longer than
-    // the default for the request: on a loaded test host the store writes
-    // before dispatch can outlast the default two-second accept deadline, and
-    // the search would then fail to connect rather than see the recorded reply.
+    // Complete durable setup first. Admission then follows the server's lifetime,
+    // so preparation before dispatch cannot expire its listener.
     let requests = Arc::new(Mutex::new(Vec::new()));
     let (endpoint, server) = crate::test_http::FixedRequestServer::start_with_deadline(
         providers.len(),
