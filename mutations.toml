@@ -19679,3 +19679,69 @@ expect_red = ["web_search::backend::zai::tests::missing_reviewed_query_fields_sk
 expect_message = "unsupported schema must log once per connection"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-rollout-binary-before-manifests"
+guards = "The deployment runbook places the new parser binary before adding manifests that require it"
+file = "docs/design/web-search-provider-chain-rollout.md"
+old = '''install -m 755 "$NEW_ADMIN" "$LIVE_BIN/ck-plexus-admin.next"
+mv "$LIVE_BIN/ck-plexus.next" "$LIVE_BIN/ck-plexus"'''
+new = '''install -m 755 "$NEW_ADMIN" "$LIVE_BIN/ck-plexus-admin.next"
+: # NON-VACUITY BREAK: add manifests without placing their new parser first'''
+test_file = "docs/design/web-search-provider-chain-rollout.md"
+runner = "command"
+command = ["python3", "-B", "-c", '''from pathlib import Path; text = Path("docs/design/web-search-provider-chain-rollout.md").read_text(); exec(text.split("<!-- rollout-contract-tests -->\n```python\n", 1)[1].split("\n```", 1)[0])''', "{test}"]
+list_command = ["python3", "-B", "-c", '''from pathlib import Path; text = Path("docs/design/web-search-provider-chain-rollout.md").read_text(); exec(text.split("<!-- rollout-contract-tests -->\n```python\n", 1)[1].split("\n```", 1)[0])''', "--list", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["RolloutContract.test_binary_precedes_manifest_installation"]
+expect_message = "new binary must be placed before new manifests"
+timeout_s = 120
+
+[[control]]
+id = "web-search-rollout-old-binary-actually-boots"
+guards = "Catalog compatibility includes a supervised old-binary boot, not just parser or version output"
+file = "docs/design/web-search-provider-chain-rollout.md"
+old = '''ck module start plexus
+scripts/verify-deployed-binary.sh "$LIVE_BIN/ck-plexus"
+ck --json module status plexus > "$EVIDENCE/old-boot-status.json"'''
+new = ''': # NON-VACUITY BREAK: skip the old-binary boot
+scripts/verify-deployed-binary.sh "$LIVE_BIN/ck-plexus"
+ck --json module status plexus > "$EVIDENCE/old-boot-status.json"'''
+test_file = "docs/design/web-search-provider-chain-rollout.md"
+runner = "command"
+command = ["python3", "-B", "-c", '''from pathlib import Path; text = Path("docs/design/web-search-provider-chain-rollout.md").read_text(); exec(text.split("<!-- rollout-contract-tests -->\n```python\n", 1)[1].split("\n```", 1)[0])''', "{test}"]
+list_command = ["python3", "-B", "-c", '''from pathlib import Path; text = Path("docs/design/web-search-provider-chain-rollout.md").read_text(); exec(text.split("<!-- rollout-contract-tests -->\n```python\n", 1)[1].split("\n```", 1)[0])''', "--list", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["RolloutContract.test_old_binary_boot_is_not_only_a_parser_check"]
+expect_message = "old binary must actually boot on the deployed catalog"
+timeout_s = 120
+
+[[control]]
+id = "web-search-rollout-provider-inventory-complete"
+guards = "Every declared provider has a matching runbook inventory row with backend, manifest, fixtures and capability tests"
+file = "docs/design/web-search-provider-chain-rollout.md"
+old = '| zai | `ZaiMcpBackend`'
+new = '| retired | `ZaiMcpBackend` <!-- NON-VACUITY BREAK: omit Z.AI from the inventory -->'
+test_file = "docs/design/web-search-provider-chain-rollout.md"
+runner = "command"
+command = ["python3", "-B", "-c", '''from pathlib import Path; text = Path("docs/design/web-search-provider-chain-rollout.md").read_text(); exec(text.split("<!-- rollout-contract-tests -->\n```python\n", 1)[1].split("\n```", 1)[0])''', "{test}"]
+list_command = ["python3", "-B", "-c", '''from pathlib import Path; text = Path("docs/design/web-search-provider-chain-rollout.md").read_text(); exec(text.split("<!-- rollout-contract-tests -->\n```python\n", 1)[1].split("\n```", 1)[0])''', "--list", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["RolloutContract.test_inventory_covers_every_declared_provider"]
+expect_message = "provider inventory must cover every declared name"
+timeout_s = 120
+
+[[control]]
+id = "web-search-rollout-live-steps-pending"
+guards = "Live rollout steps remain explicitly pending rather than recording worker deployment"
+file = "docs/design/web-search-provider-chain-rollout.md"
+old = '## 3. Credentials and connections (pending: run at deploy)'
+new = '## 3. Credentials and connections (NON-VACUITY BREAK: completed by worker)'
+test_file = "docs/design/web-search-provider-chain-rollout.md"
+runner = "command"
+command = ["python3", "-B", "-c", '''from pathlib import Path; text = Path("docs/design/web-search-provider-chain-rollout.md").read_text(); exec(text.split("<!-- rollout-contract-tests -->\n```python\n", 1)[1].split("\n```", 1)[0])''', "{test}"]
+list_command = ["python3", "-B", "-c", '''from pathlib import Path; text = Path("docs/design/web-search-provider-chain-rollout.md").read_text(); exec(text.split("<!-- rollout-contract-tests -->\n```python\n", 1)[1].split("\n```", 1)[0])''', "--list", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ["RolloutContract.test_live_steps_remain_pending_and_governed"]
+expect_message = "live steps must remain pending until deployment"
+timeout_s = 120
