@@ -262,8 +262,18 @@ pub(crate) fn issue_ticket(state: &Arc<ModuleState>, principal_key: &str, params
     let Some(app_key) = params.get("app_key").and_then(Value::as_str) else {
         return json!({"error": {"code": "invalid_request", "message": "issue_ticket requires app_key"}});
     };
-    let instance = match (app_key, params.get("instance_url")) {
-        ("searxng_rest", Some(Value::String(value))) => {
+    let takes_instance_url = match state.store().manifest_takes_instance_url(app_key) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::wire::store_failure(
+                "manifest read",
+                "manifest could not be read",
+                &error,
+            )
+        }
+    };
+    let instance = match (takes_instance_url, params.get("instance_url")) {
+        (true, Some(Value::String(value))) => {
             match plexus_core::instance_url::InstanceUrl::parse(value) {
                 Ok(url) => Some(url),
                 Err(message) => {
@@ -271,12 +281,12 @@ pub(crate) fn issue_ticket(state: &Arc<ModuleState>, principal_key: &str, params
                 }
             }
         }
-        ("searxng_rest", _) => {
-            return json!({"error":{"code":"invalid_request","message":"SearXNG requires instance_url"}})
+        (true, _) => {
+            return json!({"error":{"code":"invalid_request","message":"this provider requires instance_url"}})
         }
-        (_, None) => None,
-        (_, Some(_)) => {
-            return json!({"error":{"code":"invalid_request","message":"instance_url is only supported for SearXNG"}})
+        (false, None) => None,
+        (false, Some(_)) => {
+            return json!({"error":{"code":"invalid_request","message":"this provider takes no instance_url"}})
         }
     };
     // Only the reviewed manifest may waive a credential, never operator input.

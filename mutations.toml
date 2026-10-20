@@ -19498,3 +19498,18 @@ select = "expected"
 expect_red = ["tests::searxng_connect_stores_private_instance_and_allows_anonymous_or_named_bearer"]
 expect_message = "argument_undeclared"
 build_timeout_s = 3600
+
+[[control]]
+id = "searxng-instance-rule-from-manifest"
+guards = "Ticket destination requirements come from the reviewed manifest, not a literal provider name, and store-layer enforcement admits an instance only when declared"
+file = "crates/plexus-core/src/storage.rs"
+old = "Ok(manifest.transport.url_from_connection)"
+new = "Ok(false && manifest.transport.url_from_connection) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/storage.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::tests::searxng_instance_ticket_requirements_come_from_the_reviewed_manifest"]
+expect_message = "instance manifest must admit its approved destination"
+build_timeout_s = 3600

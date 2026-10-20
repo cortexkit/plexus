@@ -367,6 +367,7 @@ fn production_backend_cache_is_separated_by_stored_instance_digest() {
 fn tickets_require_an_instance_and_store_it_without_exposing_it_in_summaries() {
     let (engine, _) = super::super::super::tests::granted_exa_engine("searxng-ticket");
     let store = engine.store();
+    store.upsert_manifest("system", &manifest()).unwrap();
     store
         .insert_connection("direct", CONNECTION, "searxng_rest", "pending", &json!({}))
         .unwrap();

@@ -147,10 +147,11 @@ issue-ticket --app <key> --actions a,b,c|'*' [--credential-id <id>]
              [--risk read|write|destructive] [--connection <id>] [--instance-url <url>]
    Supply a vault credential id. Omit it when the
   reviewed manifest declares auth.mode=none or optional_api_key. A reference must be readable by reserved:plexus.
-  SearXNG requires --instance-url and accepts only apikey:searxng or no key.
+  Supply --instance-url exactly when the reviewed manifest requires it.
+  SearXNG accepts only apikey:searxng or no key.
   The instance must be HTTPS (HTTP only to loopback), without credentials, query
   or fragment. Only the operator's ticket may choose the destination; connect
-  takes no instance argument. --instance-url is refused for every other app.
+  takes no instance argument. Providers with a fixed endpoint refuse --instance-url.
   --risk and --actions set the connection's initial authority ceiling;
   every later grant must fit inside it. --actions is required; pass '*' to
   request every action the vendor declares, stored as a concrete list.
@@ -390,8 +391,9 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         let connection_file = flags.required("--subc")?;
         let module_id = flags.value("--module").unwrap_or(DEFAULT_MODULE_ID);
         let app = flags.required("--app")?;
-        let auth_mode = catalog_app_auth_mode(Path::new(connection_file), module_id, app)?;
-        let (method, params) = issue_ticket_request(&flags, &auth_mode)?;
+        let (auth_mode, takes_instance_url) =
+            catalog_app_requirements(Path::new(connection_file), module_id, app)?;
+        let (method, params) = issue_ticket_request(&flags, &auth_mode, takes_instance_url)?;
         let response = call_management(Path::new(connection_file), module_id, method, params)?;
         return report(command, &response, &flags);
     }
@@ -697,12 +699,16 @@ fn rebind_credential_lines(result: &Value) -> Vec<String> {
     ]
 }
 
-fn issue_ticket_request(flags: &Flags, auth_mode: &str) -> Result<(&'static str, Value), Failure> {
+fn issue_ticket_request(
+    flags: &Flags,
+    auth_mode: &str,
+    takes_instance_url: bool,
+) -> Result<(&'static str, Value), Failure> {
     let app = flags.required("--app")?;
     let credential_free = auth_mode.eq_ignore_ascii_case("none");
     let optional_credential = auth_mode.eq_ignore_ascii_case("OptionalApiKey")
         || auth_mode.eq_ignore_ascii_case("optional_api_key");
-    let instance = ticket_instance(flags)?;
+    let instance = ticket_instance(flags, takes_instance_url)?;
     if flags.value("--handle-file").is_some() {
         return Err(Failure::usage(
             "handle_bindings_removed: use --credential-id",
@@ -738,22 +744,23 @@ fn issue_ticket_request(flags: &Flags, auth_mode: &str) -> Result<(&'static str,
 
 fn ticket_instance(
     flags: &Flags,
+    takes_instance_url: bool,
 ) -> Result<Option<plexus_core::instance_url::InstanceUrl>, Failure> {
-    match (flags.required("--app")?, flags.value("--instance-url")) {
-        ("searxng_rest", Some(value)) => plexus_core::instance_url::InstanceUrl::parse(value)
+    match (takes_instance_url, flags.value("--instance-url")) {
+        (true, Some(value)) => plexus_core::instance_url::InstanceUrl::parse(value)
             .map(Some)
             .map_err(Failure::usage),
-        ("searxng_rest", None) => Err(Failure::usage("SearXNG requires --instance-url")),
-        (_, Some(_)) => Err(Failure::usage(
-            "--instance-url is only supported for SearXNG",
-        )),
-        (_, None) => Ok(None),
+        (true, None) => Err(Failure::usage("this provider requires instance_url")),
+        (false, Some(_)) => Err(Failure::usage("this provider takes no instance_url")),
+        (false, None) => Ok(None),
     }
 }
 
 fn validate_ticket_flags(flags: &Flags) -> Result<(), Failure> {
     flags.required("--app")?;
-    ticket_instance(flags)?;
+    if let Some(value) = flags.value("--instance-url") {
+        plexus_core::instance_url::InstanceUrl::parse(value).map_err(Failure::usage)?;
+    }
     flags.action_selectors()?;
     if flags.value("--handle-file").is_some() {
         return Err(Failure::usage(
@@ -1117,11 +1124,11 @@ fn set_web_search_allowance_request(flags: &Flags) -> Result<(&'static str, Valu
     ))
 }
 
-fn catalog_app_auth_mode(
+fn catalog_app_requirements(
     connection_file: &Path,
     module_id: &str,
     app_key: &str,
-) -> Result<String, Failure> {
+) -> Result<(String, bool), Failure> {
     let response = call_module(
         connection_file,
         subc_protocol::RouteTarget::ToolProvider {
@@ -1146,10 +1153,18 @@ fn catalog_app_auth_mode(
                 "unknown_app: app '{app_key}' is not in the connectable catalog"
             ))
         })?;
-    app["auth_mode"]
+    app_ticket_requirements(app)
+}
+
+fn app_ticket_requirements(app: &Value) -> Result<(String, bool), Failure> {
+    let auth_mode = app["auth_mode"]
         .as_str()
         .map(str::to_owned)
-        .ok_or_else(|| Failure::transport(format!("catalog app '{app_key}' has no auth_mode")))
+        .ok_or_else(|| Failure::transport("catalog app has no auth_mode"))?;
+    let takes_instance_url = app["takes_instance_url"]
+        .as_bool()
+        .ok_or_else(|| Failure::transport("catalog app has no takes_instance_url boolean"))?;
+    Ok((auth_mode, takes_instance_url))
 }
 
 fn call_management(
@@ -1987,7 +2002,7 @@ mod tests {
         assert_eq!(grant.code, EXIT_USAGE);
         assert!(grant.message.contains("--actions"), "{}", grant.message);
 
-        let ticket = issue_ticket_request(&flags(&["--app", "deepwiki"]), "None")
+        let ticket = issue_ticket_request(&flags(&["--app", "deepwiki"]), "None", false)
             .expect_err("a ticket with no --actions must be refused");
         assert_eq!(ticket.code, EXIT_USAGE);
         assert!(ticket.message.contains("--actions"), "{}", ticket.message);
@@ -1995,9 +2010,12 @@ mod tests {
         let (_, params) =
             grant_request(&flags(&["--connection", "conn-1", "--actions", "*"])).expect("grant");
         assert_eq!(params["action_selectors"], json!(["*"]));
-        let (_, params) =
-            issue_ticket_request(&flags(&["--app", "deepwiki", "--actions", "*"]), "None")
-                .expect("ticket");
+        let (_, params) = issue_ticket_request(
+            &flags(&["--app", "deepwiki", "--actions", "*"]),
+            "None",
+            false,
+        )
+        .expect("ticket");
         assert_eq!(params["action_selectors"], json!(["*"]));
 
         let empty = grant_request(&flags(&["--connection", "conn-1", "--actions", " , "]))
@@ -2319,6 +2337,7 @@ mod tests {
                 "*",
             ]),
             "ApiKey",
+            false,
         )
         .unwrap();
         assert_eq!(method, "plexus.admin.issue_ticket");
@@ -2331,6 +2350,7 @@ mod tests {
         let failure = issue_ticket_request(
             &flags(&["--app", "linear", "--handle-file", "/not/read"]),
             "ApiKey",
+            false,
         )
         .expect_err("the removed flag must be refused");
         assert_eq!(failure.code, EXIT_USAGE);
@@ -2339,7 +2359,7 @@ mod tests {
 
     #[test]
     fn a_credential_requiring_app_requires_a_reference() {
-        let failure = issue_ticket_request(&flags(&["--app", "linear"]), "ApiKey")
+        let failure = issue_ticket_request(&flags(&["--app", "linear"]), "ApiKey", false)
             .expect_err("credentialed apps must require --credential-id");
         assert_eq!(failure.code, EXIT_USAGE);
         assert!(failure.message.contains("--credential-id"), "{failure:?}");
@@ -2347,9 +2367,12 @@ mod tests {
 
     #[test]
     fn a_credential_free_app_omits_the_handle() {
-        let (method, params) =
-            issue_ticket_request(&flags(&["--app", "deepwiki", "--actions", "*"]), "None")
-                .expect("credential-free apps need no handle file");
+        let (method, params) = issue_ticket_request(
+            &flags(&["--app", "deepwiki", "--actions", "*"]),
+            "None",
+            false,
+        )
+        .expect("credential-free apps need no handle file");
         assert_eq!(method, "plexus.admin.issue_ticket");
         assert_eq!(params["app_key"], "deepwiki");
         assert!(params.get("handle").is_none(), "{params}");
@@ -2372,7 +2395,7 @@ mod tests {
             let flags = flags(&args);
             validate_ticket_flags(&flags).unwrap();
             for mode in ["OptionalApiKey", "optional_api_key"] {
-                let (_, params) = issue_ticket_request(&flags, mode).unwrap();
+                let (_, params) = issue_ticket_request(&flags, mode, true).unwrap();
                 assert_eq!(params["instance_url"], "https://private.invalid/base");
                 assert_eq!(
                     params.get("credential_id").and_then(Value::as_str),
@@ -2389,7 +2412,8 @@ mod tests {
                 "--credential-id",
                 "apikey:other"
             ]),
-            "none"
+            "none",
+            false,
         )
         .is_err());
     }
@@ -2417,17 +2441,59 @@ mod tests {
             assert!(!error.message.contains("remote.invalid"));
         }
         assert!(
-            validate_ticket_flags(&flags(&["--app", "searxng_rest", "--actions", "*"])).is_err()
+            ticket_instance(&flags(&["--app", "searxng_rest", "--actions", "*"]), true).is_err()
         );
-        assert!(validate_ticket_flags(&flags(&[
+        assert!(ticket_instance(
+            &flags(&[
+                "--app",
+                "linear",
+                "--actions",
+                "*",
+                "--instance-url",
+                "https://private.invalid"
+            ]),
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn searxng_instance_cli_uses_required_catalog_metadata_not_the_app_name() {
+        let (auth_mode, takes_instance_url) = app_ticket_requirements(&json!({
+            "key":"private_rest", "auth_mode":"None", "takes_instance_url":true
+        }))
+        .unwrap();
+        let provided = flags(&[
             "--app",
-            "linear",
+            "private_rest",
             "--actions",
             "*",
             "--instance-url",
-            "https://private.invalid"
-        ]))
-        .is_err());
+            "https://private.invalid",
+        ]);
+        let (_, request) = issue_ticket_request(&provided, &auth_mode, takes_instance_url).unwrap();
+        assert_eq!(request["instance_url"], "https://private.invalid/");
+        let missing = ticket_instance(
+            &flags(&["--app", "private_rest", "--actions", "*"]),
+            takes_instance_url,
+        )
+        .unwrap_err();
+        assert_eq!(missing.message, "this provider requires instance_url");
+        let (_, takes_instance_url) = app_ticket_requirements(&json!({
+            "key":"searxng_rest", "auth_mode":"None", "takes_instance_url":false
+        }))
+        .unwrap();
+        let refused = ticket_instance(&provided, takes_instance_url).unwrap_err();
+        assert_eq!(refused.message, "this provider takes no instance_url");
+        for metadata in [
+            json!({"auth_mode":"None"}),
+            json!({"auth_mode":"None","takes_instance_url":"false"}),
+        ] {
+            assert!(
+                app_ticket_requirements(&metadata).is_err(),
+                "unreadable instance rule must refuse, not default to false"
+            );
+        }
     }
 
     #[test]
@@ -2440,6 +2506,7 @@ mod tests {
                 "/not/read/because-the-manifest-forbids-it",
             ]),
             "None",
+            false,
         )
         .expect_err("credential-free apps must refuse a supplied handle");
         assert_eq!(failure.code, EXIT_USAGE);
@@ -2806,10 +2873,12 @@ mod tests {
             "*",
         ]);
         assert_eq!(
-            issue_ticket_request(&reference, "api_key").unwrap().1["credential_id"],
+            issue_ticket_request(&reference, "api_key", false)
+                .unwrap()
+                .1["credential_id"],
             "apikey:exa"
         );
-        assert!(issue_ticket_request(&reference, "none").is_err());
+        assert!(issue_ticket_request(&reference, "none", false).is_err());
         assert!(issue_ticket_request(
             &flags(&[
                 "--app",
@@ -2819,7 +2888,8 @@ mod tests {
                 "--handle-file",
                 "unused"
             ]),
-            "api_key"
+            "api_key",
+            false,
         )
         .is_err());
     }

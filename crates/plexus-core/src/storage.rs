@@ -7374,11 +7374,6 @@ impl PlexusStore {
         audit: &dyn Fn(&BindingTicket) -> AuditRecord,
         instance: Option<&crate::instance_url::InstanceUrl>,
     ) -> Result<Result<BindingTicket, CeremonyRefusal>, StoreError> {
-        if instance.is_some() && app_key != "searxng_rest" {
-            return Err(StoreError::Backend(
-                "instance_url is only supported for SearXNG".into(),
-            ));
-        }
         self.write_binding_ticket(
             principal,
             connection_id,
@@ -7403,6 +7398,24 @@ impl PlexusStore {
         audit: AuditFor<'_, BindingTicket>,
         instance: Option<&crate::instance_url::InstanceUrl>,
     ) -> Result<Result<BindingTicket, CeremonyRefusal>, StoreError> {
+        if let Some(app_key) = create_for_app {
+            match (
+                self.manifest_takes_instance_url(app_key)?,
+                instance.is_some(),
+            ) {
+                (true, false) => {
+                    return Err(StoreError::Backend(
+                        "this provider requires instance_url".into(),
+                    ))
+                }
+                (false, true) => {
+                    return Err(StoreError::Backend(
+                        "this provider takes no instance_url".into(),
+                    ))
+                }
+                _ => {}
+            }
+        }
         let credential_free = ref_role == NO_CREDENTIAL_REF_ROLE;
         if credential_free != credential_id_bytes.is_empty() {
             return Err(StoreError::Backend(
@@ -7599,6 +7612,18 @@ impl PlexusStore {
             manifest.auth.mode,
             crate::manifest::AuthMode::None
         ))
+    }
+
+    /// Whether the reviewed manifest requires an operator-selected destination.
+    /// A missing manifest declares no destination. Malformed documents and
+    /// storage failures refuse rather than silently allowing a fixed endpoint.
+    pub fn manifest_takes_instance_url(&self, app_key: &str) -> Result<bool, StoreError> {
+        let Some(document) = self.parsed_manifest(CATALOG_PRINCIPAL, app_key)? else {
+            return Ok(false);
+        };
+        let manifest = document
+            .map_err(|_| StoreError::Backend("reviewed manifest could not be read".into()))?;
+        Ok(manifest.transport.url_from_connection)
     }
 
     /// Only a reviewed optional bearer manifest may accept a ticket with or
@@ -8046,6 +8071,20 @@ impl PlexusStore {
         ticket_id: &str,
     ) -> Result<Option<ConnectionSummary>, StoreError> {
         type TicketRow = (String, i64, String, String, String, String, Option<String>);
+        let app_key: Option<String> = self.inner.with_read(|conn| {
+            conn.query_row(
+                "SELECT c.app_key FROM binding_tickets t JOIN connections c
+                   ON c.principal=t.principal AND c.connection_id=t.connection_id
+                 WHERE t.principal=?1 AND t.ticket_id=?2",
+                (principal, ticket_id),
+                |row| row.get(0),
+            )
+            .optional()
+        })?;
+        let Some(app_key) = app_key else {
+            return Ok(None);
+        };
+        let takes_instance_url = self.manifest_takes_instance_url(&app_key)?;
         let now = now_ms();
         self.inner.with_conn_fenced(|conn| {
             let ticket: Option<TicketRow> = conn
@@ -8088,15 +8127,11 @@ impl PlexusStore {
                 )?;
                 return Ok(None);
             }
-            let app_key: String = conn.query_row(
-                "SELECT app_key FROM connections WHERE principal=?1 AND connection_id=?2",
-                (principal, &connection_id), |row| row.get(0),
-            )?;
             let instance = match instance_address.as_deref().map(crate::instance_url::InstanceUrl::parse).transpose() {
                 Ok(instance) => instance,
                 Err(_) => return Ok(None),
             };
-            if (app_key == "searxng_rest") != instance.is_some() {
+            if takes_instance_url != instance.is_some() {
                 return Ok(None);
             }
             // A credentialed enrollment must have written its binding before it
@@ -11113,6 +11148,128 @@ mod tests {
         PlexusStore::open(&descriptor).expect("open audit retention store")
     }
 
+    fn instance_rule_manifest(store: &PlexusStore, key: &str, takes_instance_url: bool) {
+        let mut manifest: Value = serde_json::from_str(
+            &subc_jsonc::jsonc_to_json(include_str!("../../../catalog/searxng_rest.jsonc"))
+                .unwrap(),
+        )
+        .unwrap();
+        manifest["key"] = serde_json::json!(key);
+        if !takes_instance_url {
+            manifest["transport"] =
+                serde_json::json!({"kind":"rest_api","url":"https://fixed.invalid"});
+        }
+        store
+            .upsert_manifest(
+                CATALOG_PRINCIPAL,
+                &crate::manifest::ingest_value(manifest).unwrap(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn searxng_instance_ticket_requirements_come_from_the_reviewed_manifest() {
+        let store = audit_store();
+        // Give searxng_rest a fixed URL and private_rest a connection-supplied
+        // URL to catch admission checks based on the app key.
+        instance_rule_manifest(&store, "searxng_rest", false);
+        instance_rule_manifest(&store, "private_rest", true);
+        let instance =
+            crate::instance_url::InstanceUrl::parse("https://private-ticket.invalid/base").unwrap();
+        let ceiling = Ceiling {
+            risk: Risk::Read,
+            action_selectors: vec!["search".into()],
+        };
+        let issue = |app: &str, connection: &str, instance| {
+            store.issue_binding_ticket_audited_at_instance(
+                "direct",
+                connection,
+                app,
+                NO_CREDENTIAL_REF_ROLE,
+                &[],
+                &ceiling,
+                &|_| {
+                    AuditRecord::ceremony(
+                        "direct",
+                        Some(app),
+                        Some(connection),
+                        "issue_ticket",
+                        "read",
+                        None,
+                    )
+                },
+                instance,
+            )
+        };
+        let error = issue("searxng_rest", "fixed", Some(&instance)).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("this provider takes no instance_url"));
+        assert!(
+            store.connection("direct", "fixed").unwrap().is_none(),
+            "rejected instance must write no connection"
+        );
+        assert!(
+            store.list_audit("direct").unwrap().is_empty(),
+            "rejected instance must write no audit"
+        );
+        let ticket = issue("private_rest", "private", Some(&instance))
+            .expect("instance manifest must admit its approved destination")
+            .unwrap();
+        let summary = store
+            .connect_with_ticket("direct", &ticket.ticket_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.app_key, "private_rest");
+        assert_eq!(
+            store
+                .connection("direct", "private")
+                .unwrap()
+                .unwrap()
+                .instance_url,
+            Some(instance.clone())
+        );
+        let error = issue("private_rest", "missing", None).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("this provider requires instance_url"));
+        assert!(store.connection("direct", "missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn searxng_instance_manifest_storage_errors_never_become_no_instance() {
+        let store = audit_store();
+        store
+            .inner
+            .with_conn_fenced(|conn| conn.execute_batch("DROP TABLE app_manifests"))
+            .unwrap();
+        assert!(store.manifest_takes_instance_url("private_rest").is_err());
+        let ceiling = Ceiling {
+            risk: Risk::Read,
+            action_selectors: vec!["search".into()],
+        };
+        assert!(store
+            .issue_binding_ticket_audited_at_instance(
+                "direct",
+                "unreadable",
+                "private_rest",
+                NO_CREDENTIAL_REF_ROLE,
+                &[],
+                &ceiling,
+                &|_| AuditRecord::ceremony(
+                    "direct",
+                    Some("private_rest"),
+                    Some("unreadable"),
+                    "issue_ticket",
+                    "read",
+                    None
+                ),
+                None
+            )
+            .is_err());
+        assert!(store.connection("direct", "unreadable").unwrap().is_none());
+    }
+
     #[test]
     fn searxng_migration_57_is_additive_across_forward_rollback_and_forward_again() {
         let descriptor = StorageDescriptor {
@@ -11142,6 +11299,7 @@ mod tests {
             ci_runs: Default::default(),
             manifest_cache: Default::default(),
         };
+        instance_rule_manifest(&store, "searxng_rest", true);
         assert!(store
             .connection("direct", "before")
             .unwrap()

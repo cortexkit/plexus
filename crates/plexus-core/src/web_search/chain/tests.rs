@@ -96,6 +96,19 @@ fn add_connection(engine: &Engine, id: &str, provider: &str, caller: Option<&str
         .unwrap();
     let instance = (provider == "searxng")
         .then(|| crate::instance_url::InstanceUrl::parse("https://fixture.invalid/").unwrap());
+    if instance.is_some() {
+        let manifest = crate::manifest::ingest_value(
+            serde_json::from_str(
+                &subc_jsonc::jsonc_to_json(include_str!(
+                    "../../../../../catalog/searxng_rest.jsonc"
+                ))
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        store.upsert_manifest("system", &manifest).unwrap();
+    }
     let ticket = store
         .create_binding_ticket_with_instance(
             "direct",

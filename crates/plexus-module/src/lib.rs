@@ -3446,7 +3446,26 @@ fn facade_catalog_apps(call: &FacadeArguments<'_>) -> Result<Value, ModuleError>
     let principal_key = call.principal_key;
     Ok({
         match state.store().list_manifest_summaries(principal_key) {
-            Ok(apps) => json!({"result": {"apps": apps}}),
+            Ok(apps) => {
+                let mut values = Vec::with_capacity(apps.len());
+                for app in apps {
+                    let takes_instance_url =
+                        match state.store().manifest_takes_instance_url(&app.key) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                return Ok(crate::wire::store_failure(
+                                    "app catalog read",
+                                    "app catalog could not be read",
+                                    &error,
+                                ))
+                            }
+                        };
+                    let mut value = json!(app);
+                    value["takes_instance_url"] = json!(takes_instance_url);
+                    values.push(value);
+                }
+                json!({"result": {"apps": values}})
+            }
             Err(error) => crate::wire::store_failure(
                 "app catalog read",
                 "app catalog could not be read",
@@ -5793,6 +5812,81 @@ mod tests {
         );
         assert_eq!(schema["additionalProperties"], false);
         assert!(schema["properties"].get("instance_url").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn searxng_instance_catalog_and_ceremony_follow_the_reviewed_manifest() {
+        let (_scratch, store, state) = two_connection_fixture("instance-manifest-rule");
+        let mut manifest: Value = serde_json::from_str(
+            &subc_jsonc::jsonc_to_json(include_str!("../../../catalog/searxng_rest.jsonc"))
+                .unwrap(),
+        )
+        .unwrap();
+        manifest["key"] = json!("private_rest");
+        store
+            .upsert_manifest("system", &plexus_core::ingest_value(manifest).unwrap())
+            .unwrap();
+        let arguments = json!({});
+        let catalog = facade_catalog_apps(&FacadeArguments {
+            state: &state,
+            arguments: arguments.as_object().unwrap(),
+            principal_key: "direct",
+            op: Some("apps"),
+        })
+        .unwrap();
+        let apps = catalog["result"]["apps"].as_array().unwrap();
+        assert_eq!(
+            apps.iter()
+                .find(|app| app["key"] == "private_rest")
+                .unwrap()["takes_instance_url"],
+            true
+        );
+        assert_eq!(
+            apps.iter().find(|app| app["key"] == "exa_rest").unwrap()["takes_instance_url"],
+            false
+        );
+        let missing = ceremony::issue_ticket(&state, "direct", &json!({"app_key":"private_rest"}));
+        assert_eq!(
+            missing["error"]["message"],
+            "this provider requires instance_url"
+        );
+        let refused = ceremony::issue_ticket(
+            &state,
+            "direct",
+            &json!({"app_key":"exa_rest","instance_url":"https://private.invalid"}),
+        );
+        assert_eq!(
+            refused["error"]["message"],
+            "this provider takes no instance_url"
+        );
+        let approved = ceremony::issue_ticket(
+            &state,
+            "direct",
+            &json!({"app_key":"private_rest","instance_url":"https://private.invalid/base","action_selectors":["search"]}),
+        );
+        let ticket = approved["result"]["ticket_id"]
+            .as_str()
+            .expect("instance manifest ticket");
+        let arguments = json!({"ticket_id":ticket});
+        let connected = facade_connections_connect(&FacadeArguments {
+            state: &state,
+            arguments: arguments.as_object().unwrap(),
+            principal_key: "direct",
+            op: Some("connect"),
+        })
+        .unwrap();
+        assert_eq!(connected["result"]["discovery"], "complete");
+        assert_eq!(
+            store
+                .connection("direct", "conn-private_rest")
+                .unwrap()
+                .unwrap()
+                .instance_url
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "https://private.invalid/base"
+        );
     }
 
     #[tokio::test]

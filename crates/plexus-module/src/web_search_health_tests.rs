@@ -71,6 +71,17 @@ fn add_owned_connection(
         .unwrap();
     let instance = (app_key == "searxng_rest")
         .then(|| plexus_core::instance_url::InstanceUrl::parse(INSTANCE).unwrap());
+    if instance.is_some() {
+        let manifest = plexus_core::ingest_value(
+            serde_json::from_str(
+                &subc_jsonc::jsonc_to_json(include_str!("../../../catalog/searxng_rest.jsonc"))
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        store.upsert_manifest("system", &manifest).unwrap();
+    }
     let ticket = store
         .create_binding_ticket_with_instance(
             owner,
