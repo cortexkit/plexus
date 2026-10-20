@@ -9,6 +9,9 @@
 // No REST schema or argument-shape retry is used. At rollout, tools/list discovery
 // and operator review must confirm this action and its inputSchema before a grant.
 // Results map title, link/url, content and publish_date; answer text is discarded.
+// Known gap: MCP RPC/tool quota wording currently gets the ordinary unavailable
+// skip (60 seconds). Provider-declared transport signals must carry quota evidence;
+// this adapter does not infer quota from vendor error prose.
 {
   "schema_version": 1,
   "key": "zai",

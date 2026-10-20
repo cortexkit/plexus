@@ -19649,54 +19649,6 @@ build_timeout_s = 3600
 timeout_s = 120
 
 [[control]]
-id = "zai-mcp-rpc-quota-signal"
-guards = "MCP JSON-RPC credit or quota bodies preserve a fixed quota signal before vendor prose is discarded"
-file = "crates/plexus-core/src/mcp_remote.rs"
-old = 'return Err(if names_exhausted_quota(error) {'
-new = 'return Err(if false { /* NON-VACUITY BREAK */'
-test_file = "crates/plexus-core/src/web_search/chain/tests/zai.rs"
-runner = "cargo"
-package = "plexus-core"
-target = "--lib"
-select = "expected"
-expect_red = ["web_search::chain::tests::zai::mcp_rpc_quota_and_tool_quota_are_preserved_without_vendor_text"]
-expect_message = "rpc_quota"
-build_timeout_s = 3600
-timeout_s = 120
-
-[[control]]
-id = "zai-mcp-tool-quota-signal"
-guards = "MCP isError content preserves quota before normalization into a safe error code"
-file = "crates/plexus-core/src/mcp_remote.rs"
-old = 'if names_exhausted_quota(&result) {'
-new = 'if false { /* NON-VACUITY BREAK */'
-test_file = "crates/plexus-core/src/web_search/chain/tests/zai.rs"
-runner = "cargo"
-package = "plexus-core"
-target = "--lib"
-select = "expected"
-expect_red = ["web_search::chain::tests::zai::mcp_rpc_quota_and_tool_quota_are_preserved_without_vendor_text"]
-expect_message = "tool_quota"
-build_timeout_s = 3600
-timeout_s = 120
-
-[[control]]
-id = "zai-mcp-quota-classification"
-guards = "The chain honors the transport's MCP quota observation with a one-hour quota cooldown"
-file = "crates/plexus-core/src/web_search/chain/outcome.rs"
-old = '|| mcp_quota'
-new = '|| (mcp_quota && false) /* NON-VACUITY BREAK */'
-test_file = "crates/plexus-core/src/web_search/chain/tests/zai.rs"
-runner = "cargo"
-package = "plexus-core"
-target = "--lib"
-select = "expected"
-expect_red = ["web_search::chain::tests::zai::mcp_rpc_quota_and_tool_quota_are_preserved_without_vendor_text"]
-expect_message = "rpc_quota"
-build_timeout_s = 3600
-timeout_s = 120
-
-[[control]]
 id = "zai-drop-synthesized-answer"
 guards = "ZAI contributes cited source content, never its synthesized answer text"
 file = "crates/plexus-core/src/web_search/backend/zai.rs"

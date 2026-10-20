@@ -246,31 +246,12 @@ fn mcp_empty_serves_and_invalid_requests_are_terminal() {
 }
 
 #[test]
-fn mcp_rpc_quota_and_tool_quota_are_preserved_without_vendor_text() {
-    for name in ["rpc_quota", "rpc_credits", "rpc_balance", "tool_quota"] {
-        let record = recorded(name, "query", true);
-        assert_eq!(
-            record.result,
-            Err(unavailable(&[("zai", SkipReason::Quota)])),
-            "{name}"
-        );
-        assert_eq!(
-            record
-                .service
-                .chain_cooldowns
-                .lock()
-                .unwrap()
-                .get(CONNECTION),
-            Some(&(NOW + 3_600_000)),
-            "{name}"
-        );
-        assert!(record.vault.failures.lock().unwrap().is_empty());
-    }
-}
-
-#[test]
 fn mcp_other_errors_have_closed_outcomes_and_cooldowns() {
     for (name, reason, cooldown) in [
+        ("rpc_quota", SkipReason::Unavailable, 60_000),
+        ("rpc_credits", SkipReason::Unavailable, 60_000),
+        ("rpc_balance", SkipReason::Unavailable, 60_000),
+        ("tool_quota", SkipReason::Unavailable, 60_000),
         ("rpc_unavailable", SkipReason::Unavailable, 60_000),
         ("tool_unavailable", SkipReason::Unavailable, 60_000),
         ("payment_required", SkipReason::Quota, 3_600_000),

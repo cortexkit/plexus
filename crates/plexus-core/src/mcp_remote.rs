@@ -81,7 +81,6 @@ pub enum McpRemoteError {
     /// The vendor's answer was larger than the transport reads into memory.
     ResponseTooLarge,
     VendorStatus(u16),
-    QuotaExhausted,
     Vendor,
 }
 
@@ -125,7 +124,6 @@ impl fmt::Display for McpRemoteError {
                 write!(formatter, "MCP vendor request failed (HTTP {status})")
             }
             Self::Vendor => formatter.write_str("MCP vendor request failed"),
-            Self::QuotaExhausted => formatter.write_str("MCP vendor quota exhausted"),
         }
     }
 }
@@ -1019,18 +1017,14 @@ impl Transport for McpRemoteTransport {
                     }
                     // MCP tool failures carry vendor-specific details in content blocks. Keep
                     // those details in the operator log, but return a fixed caller-facing
-                    // error code that preserves quota exhaustion without vendor prose.
+                    // error so callers can match `mcp_tool_error` without vendor prose.
                     eprintln!(warn transport:
                         "vendor tool error on {}: {}",
                         request.action,
                         crate::http_support::bounded_text_for_log(&error_text, 4096)
                     );
                     return TransportResponse::vendor_error(
-                        if names_exhausted_quota(&result) {
-                            "mcp_quota_exhausted"
-                        } else {
-                            "mcp_tool_error"
-                        },
+                        "mcp_tool_error",
                         "MCP vendor request failed",
                     );
                 }
@@ -1107,9 +1101,6 @@ fn call_error_response(error: McpCallError) -> TransportResponse {
                 "MCP vendor request failed",
             ),
             McpRemoteError::Configuration => local_error_response(McpRemoteError::Configuration),
-            McpRemoteError::QuotaExhausted => {
-                TransportResponse::vendor_error("mcp_quota_exhausted", "MCP vendor request failed")
-            }
             McpRemoteError::UnsupportedProtocol => TransportResponse::vendor_error(
                 "mcp_unsupported_protocol_version",
                 "MCP negotiated an unsupported protocol version",
@@ -1551,29 +1542,9 @@ fn classify_reply(reply: HttpReply, state: &mut ConnectionEntry) -> Result<Value
                 .and_then(Value::as_str)
                 .unwrap_or("<none>"), 4096)
         );
-        return Err(if names_exhausted_quota(error) {
-            McpRemoteError::QuotaExhausted
-        } else {
-            McpRemoteError::Vendor
-        });
+        return Err(McpRemoteError::Vendor);
     }
     Ok(reply.body)
-}
-
-/// Inspect only failed MCP bodies, before vendor wording is replaced with a
-/// fixed diagnostic. The resulting error code carries no vendor text or URLs.
-pub(crate) fn names_exhausted_quota(body: &Value) -> bool {
-    match body {
-        Value::String(text) => {
-            let text = text.to_ascii_lowercase();
-            text.contains("credit")
-                || text.contains("quota")
-                || text.contains("insufficient balance")
-        }
-        Value::Array(items) => items.iter().any(names_exhausted_quota),
-        Value::Object(fields) => fields.values().any(names_exhausted_quota),
-        _ => false,
-    }
 }
 
 /// The vendor's own explanation for a failed tool call.

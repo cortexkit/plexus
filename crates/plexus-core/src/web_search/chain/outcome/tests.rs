@@ -328,39 +328,3 @@ fn default_errors_are_unavailable() {
         assert_move(outcome, None, SkipReason::Unavailable, 60_000);
     }
 }
-
-#[test]
-fn zai_direct_is_error_bodies_classify_quota_without_scanning_successes() {
-    let backend = crate::web_search::ZaiMcpBackend::default();
-    for (body, reason, duration) in [
-        (
-            json!({"isError":true,"content":[{"type":"text","text":"No credits remain"}]}),
-            SkipReason::Quota,
-            3_600_000,
-        ),
-        (
-            json!({"isError":true,"content":[{"type":"text","text":"Search unavailable"}]}),
-            SkipReason::Unavailable,
-            60_000,
-        ),
-    ] {
-        let classified = classify(
-            &backend,
-            &dispatch(
-                TransportOutcome::Completed {
-                    response: Some(body),
-                },
-                None,
-            ),
-            QuotaSignal::Absent,
-            5,
-            0,
-        );
-        assert!(
-            matches!(classified, Classified::MoveOn {reason: actual, cooldown_ms} if actual == reason && cooldown_ms == duration)
-        );
-    }
-    assert!(
-        matches!(classify(&backend, &dispatch(TransportOutcome::Completed { response:Some(json!({"results":[],"answer":"quota"})) }, None), QuotaSignal::Absent, 5, 0), Classified::Serve(results) if results.is_empty())
-    );
-}
