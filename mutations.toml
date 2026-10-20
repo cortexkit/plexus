@@ -17437,3 +17437,147 @@ expect_red = ["web_search::chain::outcome::tests::provider_declared_exhausted_st
 expect_message = "a status the provider declares as exhausted is quota, like 402"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-brave-capability-query-length"
+guards = "Brave's capability declares the 500-character limit, checked on the final q after site: operators, so a longer query skips Brave without dispatch"
+file = "crates/plexus-core/src/web_search/backend/brave.rs"
+old = "max: BRAVE_MAX_QUERY_CHARS,"
+new = "max: usize::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/brave/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::brave::tests::capability_checks_the_final_query_after_site_operators"]
+expect_message = "a query that only exceeds 500 characters once its operators are added must skip"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-brave-capability-word-limit"
+guards = "A final Brave q over Brave's documented 75-word limit skips Brave rather than being sent"
+file = "crates/plexus-core/src/web_search/backend/brave.rs"
+old = "if prepared.query.split_whitespace().count() > BRAVE_MAX_QUERY_WORDS {"
+new = "if false { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/brave/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::brave::tests::capability_skips_a_final_query_over_brave_word_limit"]
+expect_message = "more than 75 words must skip"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-brave-domains-as-site-operators"
+guards = "Every requested domain reaches Brave as a site: operator in q; dropping them would silently widen the search"
+file = "crates/plexus-core/src/web_search/backend/brave.rs"
+old = "composed.query = brave_query(query);"
+new = "composed.query = query.query.clone(); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/brave/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::brave::tests::vendor_args_use_braves_documented_parameter_names"]
+expect_message = "a filtered search maps domains to site: operators and recency to freshness"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-brave-freshness-mapping"
+guards = "A one-week recency maps to Brave's pw freshness window, not a wider one"
+file = "crates/plexus-core/src/web_search/backend/brave.rs"
+old = "Recency::Week => \"pw\","
+new = "Recency::Week => \"pm\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/brave/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::brave::tests::vendor_args_use_braves_documented_parameter_names"]
+expect_message = "a filtered search maps domains to site: operators and recency to freshness"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-brave-capability-result-count"
+guards = "Brave's capability clamps count to its documented maximum of 20"
+file = "crates/plexus-core/src/web_search/backend/brave.rs"
+old = "max_results: BRAVE_MAX_COUNT,"
+new = "max_results: 100, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/brave/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::brave::tests::capability_serves_the_tool_envelope_with_domains_as_site_operators"]
+expect_message = "count is clamped to Brave's maximum of 20"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-brave-extra-snippets-in-excerpt"
+guards = "Brave excerpts include each result's extra_snippets after its description"
+file = "crates/plexus-core/src/web_search/backend/brave.rs"
+old = ".chain(snippets)"
+new = ".chain(snippets.take(0)) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/brave/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::brave::tests::a_documented_reply_maps_title_url_description_snippets_and_dates"]
+expect_message = "Brave results map title, url, description with extra_snippets, and page_age"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-brave-zoneless-page-age"
+guards = "Brave's page_age without a zone is read as UTC rather than dropped"
+file = "crates/plexus-core/src/web_search/backend/brave.rs"
+old = "rfc3339_date(value).or_else(|| rfc3339_date(&format!(\"{value}Z\")))"
+new = "rfc3339_date(value) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/brave/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::brave::tests::a_documented_reply_maps_title_url_description_snippets_and_dates"]
+expect_message = "Brave results map title, url, description with extra_snippets, and page_age"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-brave-missing-web-is-empty"
+guards = "A Brave search reply without a web section is an empty success, so a search with no hits is served empty instead of failing over"
+file = "crates/plexus-core/src/web_search/backend/brave.rs"
+old = "None if reply.get(\"type\").and_then(Value::as_str) == Some(\"search\") => Ok(&[]),"
+new = "None if false => Ok(&[]), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/brave/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::brave::tests::a_search_reply_without_web_results_is_an_empty_success"]
+expect_message = "a search that found no web pages is empty, not malformed"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-brave-subscription-token-header"
+guards = "The shipped Brave manifest sends the key bare in X-Subscription-Token, the header Brave authenticates"
+file = "catalog/brave_rest.jsonc"
+old = "\"key\": \"X-Subscription-Token\","
+new = "\"key\": \"Authorization\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/brave.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::brave::a_documented_success_is_served_from_a_keyed_get_to_web_search"]
+expect_message = "the key travels bare in X-Subscription-Token"
+build_timeout_s = 3600
+timeout_s = 120
