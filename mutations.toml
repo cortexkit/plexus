@@ -18765,3 +18765,128 @@ expect_red = ["web_search::backend::perplexity::tests::documented_results_map_li
 expect_message = "only linked sources, never generated answer text or last_updated, may become results"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-synthetic-domains"
+guards = "Synthetic skips domain-filtered searches rather than silently widening them"
+file = "crates/plexus-core/src/web_search/backend/synthetic.rs"
+old = "max_domains: 0,"
+new = "max_domains: usize::MAX, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/synthetic/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::synthetic::tests::capability_skips_domains_and_every_recency_instead_of_dropping_filters"]
+expect_message = "unsupported requests must skip Synthetic before dispatch"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-synthetic-recency"
+guards = "Synthetic skips every unsupported recency window rather than dropping it"
+file = "crates/plexus-core/src/web_search/backend/synthetic.rs"
+old = "supported: &[],"
+new = "supported: ALL_RECENCIES, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/synthetic/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::synthetic::tests::capability_skips_domains_and_every_recency_instead_of_dropping_filters"]
+expect_message = "unsupported requests must skip Synthetic before dispatch"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-synthetic-query-only"
+guards = "Synthetic sends only the literal query, never a result-count field"
+file = "crates/plexus-core/src/web_search/backend/synthetic.rs"
+old = "json!({\"query\": query.query})"
+new = "json!({\"query\": query.query, \"max_results\": query.max_results}) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/synthetic/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::synthetic::tests::capability_serves_unfiltered_queries_with_query_only_and_local_count"]
+expect_message = "Synthetic must receive only the literal query"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-synthetic-bearer"
+guards = "Synthetic sends the vault key as an Authorization bearer token"
+file = "catalog/synthetic_rest.jsonc"
+old = "\"prefix\": \"Bearer \""
+new = "\"prefix\": \"\" /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/synthetic/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::synthetic::tests::shipped_manifest_pins_bearer_query_only_search_and_closed_schema"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-synthetic-search-path"
+guards = "Synthetic uses its reviewed v2 search endpoint"
+file = "catalog/synthetic_rest.jsonc"
+old = "\"path\": \"/v2/search\""
+new = "\"path\": \"/v1/search\" /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/synthetic/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::synthetic::tests::shipped_manifest_pins_bearer_query_only_search_and_closed_schema"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-synthetic-result-text"
+guards = "Synthetic excerpts come from results text, not an unrelated response field"
+file = "crates/plexus-core/src/web_search/backend/synthetic.rs"
+old = "excerpt: truncate_chars(text(\"text\"), EXCERPT_MAX_CHARS),"
+new = "excerpt: truncate_chars(text(\"content\"), EXCERPT_MAX_CHARS), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/synthetic/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::synthetic::tests::documented_results_map_title_url_text_and_published"]
+expect_message = "Synthetic results must map title, url, text and published"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-synthetic-published"
+guards = "Synthetic preserves parseable publication dates from the published field"
+file = "crates/plexus-core/src/web_search/backend/synthetic.rs"
+old = "published_at: rfc3339_date(text(\"published\")),"
+new = "published_at: rfc3339_date(text(\"date\")), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/synthetic/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::synthetic::tests::documented_results_map_title_url_text_and_published"]
+expect_message = "Synthetic results must map title, url, text and published"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-synthetic-local-count"
+guards = "Synthetic enforces caller max_results locally because the vendor request has no count"
+file = "crates/plexus-core/src/web_search/backend/synthetic.rs"
+old = ".take(max_results)"
+new = ".take(max_results.saturating_add(1)) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend/synthetic/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::synthetic::tests::mapping_bounds_count_and_unicode_excerpts_and_drops_unlinked_items"]
+build_timeout_s = 3600
+timeout_s = 120

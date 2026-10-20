@@ -1,0 +1,58 @@
+// Synthetic's keyed Search API, provider `synthetic` for web_search.
+//
+// Wire contract pinned from Synthetic's official Search documentation (read 2026-10-20):
+// https://dev.synthetic.new/docs/synthetic/search
+// POST https://api.synthetic.new/v2/search with JSON {"query": "..."} and
+// Authorization: Bearer <API key>. The connection binds apikey:synthetic; the
+// vault resolves the key at dispatch, never from an inline token or URL.
+// Search is read/Pure: no idempotency key or mutation endpoint is involved.
+//
+// The reviewed web-search provider constraints table proposes POST /v2/search,
+// bearer auth, query-only JSON and results[].title/url/text/published. The vendor
+// examples agree on all these wire fields; no differences found. The docs provide
+// request/response examples rather than an exhaustive schema and describes the
+// API as under development. It documents no domain or recency filters, query
+// operators, query-length maximum, result-count parameter or result-count maximum.
+// Thus filters skip this provider rather than being silently dropped. The local
+// envelope uses the tool's 500 Unicode-character limit and 20-result ceiling;
+// max_results is applied to the reply, never sent to the vendor.
+//
+// Result text is truncated to EXCERPT_MAX_CHARS (600 characters). Parseable published dates
+// are normalized to RFC 3339 UTC; absent/invalid dates are omitted. Entries with
+// no URL are dropped. Empty results serve empty; missing/non-array results fail
+// mapping. No generated answer text is substituted for linked search results.
+{
+  "schema_version": 1,
+  "key": "synthetic_rest",
+  "name": "Synthetic Search (REST)",
+  "description": "Keyed Synthetic Search API result links for web_search.",
+  "reuse_path": "openapi_shim",
+  "reuse_rationale": "Small keyed JSON search API with a query-only request and linked results.",
+  "tier": "S1",
+  "transport": { "kind": "rest_api", "url": "https://api.synthetic.new" },
+  "auth": { "mode": "api_key" },
+  "credential_bindings": [
+    { "ref_role": "api_key", "placement": "header", "key": "Authorization", "prefix": "Bearer ", "required": true }
+  ],
+  "resource_filters": { "required": [], "optional": [], "write_enabling": [] },
+  "actions_baseline": [
+    {
+      "name": "search",
+      "risk": "read",
+      "http": {
+        "method": "POST",
+        "path": "/v2/search",
+        "args_schema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "minLength": 1, "maxLength": 500 }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "defaults": { "ask_first_risk": ["write", "destructive"], "rate_limit": { "calls_per_min": 30 } },
+  "availability": "ga"
+}
