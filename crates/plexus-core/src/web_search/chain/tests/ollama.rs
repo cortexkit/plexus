@@ -1,9 +1,8 @@
 //! Ollama's documented replies, sent through the real REST transport built
 //! from the shipped `catalog/ollama_rest.jsonc`, and how the chain treats
-//! each; plus the capability declaration: Ollama takes domains only as `site:`
-//! operators and no date filter, so a recency window, or a query too long once
-//! its operators are added, skips it without dispatch, allowance or cooldown,
-//! while the same search that fits is dispatched and counted.
+//! each; plus the capability declaration: Ollama takes no domain or date
+//! filter, so a search with either skips it without dispatch, allowance or
+//! cooldown, and the same search without them is dispatched and counted.
 
 use super::*;
 use crate::credentials::{CredentialError, ResolvedCredential};
@@ -161,17 +160,6 @@ fn recorded_search(record: &str) -> Recorded {
 /// the recorded reply `record`; each later provider's attempt, by an
 /// Exa-shaped success. The fake server expects one request per provider.
 fn recorded_walk(record: &str, providers: &[&str]) -> Recorded {
-    recorded_walk_with(
-        "plain",
-        record,
-        providers,
-        json!({"query": "what is ollama?", "max_results": 3}),
-    )
-}
-
-/// As [`recorded_walk`], with the tool arguments `arguments`. `tag` keeps the
-/// store of each distinct call apart.
-fn recorded_walk_with(tag: &str, record: &str, providers: &[&str], arguments: Value) -> Recorded {
     assert_eq!(providers.first(), Some(&"ollama"));
     let recordings: Value =
         serde_json::from_str(include_str!("../../backend/ollama/fixtures.json")).unwrap();
@@ -179,7 +167,7 @@ fn recorded_walk_with(tag: &str, record: &str, providers: &[&str], arguments: Va
     assert!(response.is_object(), "missing recorded response {record}");
     let ollama_manifest = shipped_manifest();
     let (fixture, _) = super::super::super::tests::granted_exa_engine(&format!(
-        "chain-ollama-{tag}-{record}-{}",
+        "chain-ollama-{record}-{}",
         providers.len()
     ));
     connect(
@@ -241,7 +229,13 @@ fn recorded_walk_with(tag: &str, record: &str, providers: &[&str], arguments: Va
         }),
     );
     let service = ollama_service();
-    let result = service.search(&engine, "direct", arguments.as_object().unwrap());
+    let result = service.search(
+        &engine,
+        "direct",
+        json!({"query": "what is ollama?", "max_results": 3})
+            .as_object()
+            .unwrap(),
+    );
     if let Err(error) = server.join() {
         panic!(
             "{record}: the search did not reach the recorded endpoint once per provider ({error}): {result:?}"
@@ -348,36 +342,6 @@ fn a_documented_success_is_served_from_a_bearer_post_to_api_web_search() {
     );
 }
 
-/// Requested domains reach Ollama as `site:` operators inside `query`, sent
-/// through the real transport, and the reply is served.
-#[test]
-fn requested_domains_travel_as_site_operators_in_the_sent_query() {
-    let recorded = recorded_walk_with(
-        "domains",
-        "success",
-        &["ollama"],
-        json!({
-            "query": "what is ollama?",
-            "max_results": 3,
-            "include_domains": ["github.com", "ollama.com"]
-        }),
-    );
-    let response = recorded.result.as_ref().unwrap();
-    assert_eq!(
-        (response.backend.as_str(), response.results.len()),
-        ("ollama", 3)
-    );
-    let (_, body) = recorded.request.split_once("\r\n\r\n").unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(body).unwrap(),
-        json!({
-            "query": "what is ollama? site:github.com OR site:ollama.com",
-            "max_results": 3
-        }),
-        "the domains are site: operators in query, with no domain field"
-    );
-}
-
 #[test]
 fn an_empty_results_array_is_served_empty() {
     let recorded = recorded_search("empty");
@@ -474,33 +438,29 @@ fn used(engine: &Engine) -> u32 {
         .unwrap()
 }
 
-/// Ollama takes no recency filter, and its 500-character envelope is counted
-/// after the `site:` operators are added. A search with a recency window, or
-/// a 495-character query with one domain (507 characters once composed),
-/// skips Ollama for capability before any connection, allowance, cooldown or
-/// dispatch work.
+/// Ollama takes no domain filter and no recency filter, so a search with one
+/// domain, or with a recency window, skips it for capability before any
+/// connection, allowance, cooldown or dispatch work.
 #[test]
-fn recency_or_a_query_too_long_with_its_operators_skips_ollama_without_counting_or_cooling_it() {
+fn a_domain_or_recency_window_skips_ollama_without_counting_or_cooling_it() {
     for (case, arguments) in [
-        ("recency", json!({"query": "news", "recency": "day"})),
         (
-            "too long with operators",
-            json!({"query": "x".repeat(495), "include_domains": ["a.com"]}),
+            "one domain",
+            json!({"query": "news", "include_domains": ["ollama.com"]}),
         ),
+        ("recency", json!({"query": "news", "recency": "day"})),
     ] {
         let (engine, transport, service) =
             allowance_engine(&format!("chain-ollama-skip-{}", case.replace(' ', "-")));
-        let refusal = service
-            .search(&engine, "direct", arguments.as_object().unwrap())
-            .unwrap_err();
-        assert_eq!(
-            refusal,
-            unavailable(&[("ollama", SkipReason::Capability)]),
-            "{case}"
-        );
+        let result = service.search(&engine, "direct", arguments.as_object().unwrap());
         assert!(
             transport.requests().is_empty(),
             "{case}: nothing is dispatched"
+        );
+        assert_eq!(
+            result,
+            Err(unavailable(&[("ollama", SkipReason::Capability)])),
+            "{case}: the search must skip Ollama for capability"
         );
         assert_eq!(
             used(&engine),
@@ -514,37 +474,26 @@ fn recency_or_a_query_too_long_with_its_operators_skips_ollama_without_counting_
     }
 }
 
-/// The same 495-character query with no domain, and a short query with one
-/// domain, are each dispatched to Ollama and counted: the skips above come
-/// from the filters and the composed length, not from the setup.
+/// The longest query the tool accepts, without filters, is dispatched to
+/// Ollama unchanged and counted: the skips above come from the filters, not
+/// from the setup.
 #[test]
-fn a_query_that_fits_with_its_operators_is_served_by_ollama() {
-    let text = "x".repeat(495);
-    for (case, arguments, sent) in [
-        (
-            "long",
-            json!({"query": text, "max_results": 20}),
-            json!({"query": text, "max_results": 10}),
-        ),
-        (
-            "domain",
-            json!({"query": "news", "include_domains": ["a.com"], "max_results": 5}),
-            json!({"query": "news site:a.com", "max_results": 5}),
-        ),
-    ] {
-        let (engine, transport, service) = allowance_engine(&format!("chain-ollama-serve-{case}"));
-        let _ = service.search(&engine, "direct", arguments.as_object().unwrap());
-        let requests = transport.requests();
-        assert_eq!(
-            requests.len(),
-            1,
-            "{case}: the search is dispatched to Ollama"
-        );
-        assert_eq!(
-            requests[0].args, sent,
-            "{case}: the query keeps its terms, one domain becomes one site: operator, \
-             and max_results is clamped to Ollama's 10"
-        );
-        assert_eq!(used(&engine), 1, "{case}");
-    }
+fn the_longest_unfiltered_tool_query_is_served_by_ollama() {
+    let (engine, transport, service) = allowance_engine("chain-ollama-serve");
+    let text = "x".repeat(crate::web_search::query::MAX_QUERY_CHARS);
+    let _ = service.search(
+        &engine,
+        "direct",
+        json!({"query": text, "max_results": 20})
+            .as_object()
+            .unwrap(),
+    );
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 1, "the search is dispatched to Ollama");
+    assert_eq!(
+        requests[0].args,
+        json!({"query": text, "max_results": 10}),
+        "the query is unchanged and max_results is clamped to Ollama's 10"
+    );
+    assert_eq!(used(&engine), 1);
 }

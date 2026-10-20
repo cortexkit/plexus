@@ -52,15 +52,16 @@
 //   `apikey:ollama`. This is the vault name agreed with the vault's owners and
 //   already recorded in the web_search provider table; the key is an
 //   ollama.com account key, which a local Ollama server does not use;
-// - domains: Ollama documents no `site:` operator (or any operator). Requested
-//   domains are still sent as `site:` operators appended to `query` in the
-//   plain `terms site:a OR site:b` form, without parentheses, and the
-//   500-character limit applies to that final string. That Ollama's search
-//   honours them is the design's assumption, not a documented fact;
+// - domains: the design's row says `site:` in the query, but Ollama documents
+//   no `site:` operator (or any other operator) and no domain field. An
+//   operator Ollama might silently ignore would return unfiltered results as
+//   if they were filtered, so plexus treats domains as unsupported: a search
+//   that asks for any domain skips Ollama for capability and the chain moves
+//   on. The query is sent exactly as the caller wrote it;
 // - recency: none is documented, so a search with a recency window skips
 //   Ollama for capability instead of being answered with results of any age;
 // - query length: none is documented, so the tool's own 500-character limit
-//   applies, counted after the `site:` operators are added;
+//   applies to the query as sent;
 // - dates: the reply carries no date, so no result reports a publication date;
 // - outcome classification: 400 is a rejected request; 401 is a credential
 //   failure; 429 is throttled for 60 seconds, or for its Retry-After if one is

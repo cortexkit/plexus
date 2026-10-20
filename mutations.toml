@@ -18383,54 +18383,6 @@ build_timeout_s = 3600
 timeout_s = 120
 
 [[control]]
-id = "web-search-ollama-site-operator"
-guards = "Each requested domain reaches Ollama as a site: operator in query, so a domain-restricted search is never sent as bare terms"
-file = "crates/plexus-core/src/web_search/backend/ollama.rs"
-old = ".map(|domain| format!(\"site:{domain}\"))"
-new = ".map(|domain| format!(\"{domain}\")) /* NON-VACUITY BREAK */"
-test_file = "crates/plexus-core/src/web_search/backend/ollama/tests.rs"
-runner = "cargo"
-package = "plexus-core"
-target = "--lib"
-select = "expected"
-expect_red = ["web_search::backend::ollama::tests::requested_domains_are_composed_as_site_operators_in_the_query"]
-expect_message = "one domain is one site: operator after the terms"
-build_timeout_s = 3600
-timeout_s = 120
-
-[[control]]
-id = "web-search-ollama-site-alternatives-or"
-guards = "Several requested domains are joined by OR, so a result from any one of them matches instead of requiring all"
-file = "crates/plexus-core/src/web_search/backend/ollama.rs"
-old = "sites.join(\" OR \")"
-new = "sites.join(\" \") /* NON-VACUITY BREAK */"
-test_file = "crates/plexus-core/src/web_search/backend/ollama/tests.rs"
-runner = "cargo"
-package = "plexus-core"
-target = "--lib"
-select = "expected"
-expect_red = ["web_search::backend::ollama::tests::requested_domains_are_composed_as_site_operators_in_the_query"]
-expect_message = "several domains are site: alternatives joined by OR"
-build_timeout_s = 3600
-timeout_s = 120
-
-[[control]]
-id = "web-search-ollama-length-after-operators"
-guards = "Ollama's length check runs on the final query with its site: operators, so a query that only overflows once its domains are added skips Ollama"
-file = "crates/plexus-core/src/web_search/backend/ollama.rs"
-old = "admission.prepare_query(self.name(), &composed, now_ms)?"
-new = "admission.prepare_query(self.name(), query, now_ms)? /* NON-VACUITY BREAK */"
-test_file = "crates/plexus-core/src/web_search/backend/ollama/tests.rs"
-runner = "cargo"
-package = "plexus-core"
-target = "--lib"
-select = "expected"
-expect_red = ["web_search::backend::ollama::tests::capability_skips_a_query_too_long_once_site_operators_are_added"]
-expect_message = "a query over 500 characters once its site: operator is added must skip"
-build_timeout_s = 3600
-timeout_s = 120
-
-[[control]]
 id = "web-search-ollama-capability-no-recency"
 guards = "Ollama's capability declares no recency filter, so a search with a recency window skips Ollama instead of being answered with results of any age"
 file = "crates/plexus-core/src/web_search/backend/ollama.rs"
@@ -18441,7 +18393,7 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::backend::ollama::tests::capability_skips_any_recency_window"]
+expect_red = ["web_search::backend::ollama::tests::capability_skips_any_domain_or_recency_window"]
 expect_message = "recency window must skip Ollama"
 build_timeout_s = 3600
 timeout_s = 120
@@ -18464,7 +18416,7 @@ timeout_s = 120
 
 [[control]]
 id = "web-search-ollama-capability-query-length"
-guards = "Ollama's capability declares the tool's 500-character envelope on the final query, since Ollama documents none; a longer query skips Ollama without dispatch"
+guards = "Ollama's capability declares the tool's 500-character envelope on the query as sent, since Ollama documents none; a longer query skips Ollama without dispatch"
 file = "crates/plexus-core/src/web_search/backend/ollama.rs"
 old = "max: OLLAMA_MAX_QUERY_CHARS,"
 new = "max: usize::MAX, /* NON-VACUITY BREAK */"
@@ -18473,7 +18425,7 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::backend::ollama::tests::capability_skips_a_query_too_long_once_site_operators_are_added"]
+expect_red = ["web_search::backend::ollama::tests::capability_skips_a_query_beyond_the_declared_envelope"]
 expect_message = "must skip"
 build_timeout_s = 3600
 timeout_s = 120
@@ -18523,5 +18475,21 @@ target = "--lib"
 select = "expected"
 expect_red = ["web_search::backend::ollama::tests::mapping_drops_results_without_a_url_and_bounds_excerpts"]
 expect_message = "a result whose url is missing, null or empty is dropped"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-ollama-capability-no-domains"
+guards = "Ollama's capability declares no domain filter, since Ollama documents no domain field or site: operator; a domain-filtered search skips Ollama with nothing sent, no allowance counted and no cooldown, instead of being answered with unfiltered results"
+file = "crates/plexus-core/src/web_search/backend/ollama.rs"
+old = "max_domains: 0,"
+new = "max_domains: 20, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/chain/tests/ollama.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::chain::tests::ollama::a_domain_or_recency_window_skips_ollama_without_counting_or_cooling_it"]
+expect_message = "one domain: nothing is dispatched"
 build_timeout_s = 3600
 timeout_s = 120

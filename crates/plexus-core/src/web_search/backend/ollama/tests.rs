@@ -55,35 +55,6 @@ fn vendor_args_send_only_query_and_max_results() {
     assert_eq!(prepared.query.query, "what is ollama?");
 }
 
-/// Ollama has no domain field, so each requested domain becomes a `site:`
-/// operator appended to the terms, alternatives joined by `OR`.
-#[test]
-fn requested_domains_are_composed_as_site_operators_in_the_query() {
-    let one = OllamaRestBackend
-        .prepare(&query("release notes", &["ollama.com"], None), NOW)
-        .unwrap();
-    assert_eq!(
-        one.vendor_args,
-        json!({"query": "release notes site:ollama.com", "max_results": 5}),
-        "one domain is one site: operator after the terms"
-    );
-    let several = OllamaRestBackend
-        .prepare(
-            &query("release notes", &["ollama.com", "github.com"], None),
-            NOW,
-        )
-        .unwrap();
-    assert_eq!(
-        several.vendor_args["query"],
-        json!("release notes site:ollama.com OR site:github.com"),
-        "several domains are site: alternatives joined by OR"
-    );
-    assert_eq!(
-        several.query.query,
-        "release notes site:ollama.com OR site:github.com"
-    );
-}
-
 #[test]
 fn the_shipped_manifest_pins_ollamas_bearer_post_to_api_web_search() {
     let manifest = shipped_manifest();
@@ -125,9 +96,8 @@ fn the_shipped_manifest_pins_ollamas_bearer_post_to_api_web_search() {
     );
 }
 
-/// Every argument the backend can send, including a query lengthened by
-/// `site:` operators, is declared by the reviewed closed schema and within
-/// its bounds.
+/// Every argument the backend can send is declared by the reviewed closed
+/// schema and within its bounds.
 #[test]
 fn every_vendor_argument_fits_the_reviewed_closed_schema() {
     let manifest = shipped_manifest();
@@ -139,13 +109,11 @@ fn every_vendor_argument_fits_the_reviewed_closed_schema() {
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(schema["required"], json!(["query"]));
     let properties = schema["properties"].as_object().unwrap();
-    let longest_with_domain = "é".repeat(OLLAMA_MAX_QUERY_CHARS - " site:a.com".len());
-    for (text, domains, count) in [
-        ("q".to_string(), &[][..], 1),
-        ("é".repeat(MAX_QUERY_CHARS), &[][..], MAX_RESULTS_LIMIT),
-        (longest_with_domain, &["a.com"][..], MAX_RESULTS_LIMIT),
+    for (text, count) in [
+        ("q".to_string(), 1),
+        ("é".repeat(OLLAMA_MAX_QUERY_CHARS), MAX_RESULTS_LIMIT),
     ] {
-        let mut search = query(&text, domains, None);
+        let mut search = query(&text, &[], None);
         search.max_results = count;
         let prepared = OllamaRestBackend.prepare(&search, NOW).unwrap();
         let args = prepared.vendor_args.as_object().unwrap();
@@ -267,61 +235,47 @@ fn mapping_drops_results_without_a_url_and_bounds_excerpts() {
     assert_eq!(results[0].fetched_at, "1970-01-01T00:00:00.000Z");
 }
 
-/// Ollama documents no date filter and no date operator, so any recency
-/// window skips it rather than widening the search to results of any age.
+/// Ollama documents no domain filter, no date filter and no query operator
+/// for either, so any requested domain or recency window skips it rather than
+/// being answered with unfiltered results.
 #[test]
-fn capability_skips_any_recency_window() {
+fn capability_skips_any_domain_or_recency_window() {
+    assert_eq!(
+        OllamaRestBackend.prepare(&query("q", &["ollama.com"], None), NOW),
+        Err(skip(CapabilityFailure::DomainFilter)),
+        "a single requested domain must skip Ollama"
+    );
     for recency in [Recency::Day, Recency::Week, Recency::Month, Recency::Year] {
         assert_eq!(
             OllamaRestBackend.prepare(&query("q", &[], Some(recency)), NOW),
             Err(skip(CapabilityFailure::Recency)),
             "a {recency:?} recency window must skip Ollama"
         );
-        assert_eq!(
-            OllamaRestBackend.prepare(&query("q", &["ollama.com"], Some(recency)), NOW),
-            Err(skip(CapabilityFailure::Recency)),
-            "a domain does not make a {recency:?} window acceptable"
-        );
     }
 }
 
-/// The 500-character envelope applies to the final query, after the `site:`
-/// operators are added: the longest query that fits with one domain is
-/// served, and one more character skips instead of being cut short.
+/// The query is sent exactly as the caller wrote it, and the tool's
+/// 500-character limit is the declared envelope since Ollama documents none:
+/// the limit is served and one more character skips. The tool never sends a
+/// longer query, so it is built directly here.
 #[test]
-fn capability_skips_a_query_too_long_once_site_operators_are_added() {
-    assert!(OllamaRestBackend
-        .prepare(&query(&"é".repeat(MAX_QUERY_CHARS), &[], None), NOW)
-        .is_ok());
-    let fits = MAX_QUERY_CHARS - " site:a.com".len();
-    assert!(OllamaRestBackend
-        .prepare(&query(&"é".repeat(fits), &["a.com"], None), NOW)
-        .is_ok());
+fn capability_skips_a_query_beyond_the_declared_envelope() {
+    let longest = "é".repeat(OLLAMA_MAX_QUERY_CHARS);
+    let prepared = OllamaRestBackend
+        .prepare(&query(&longest, &[], None), NOW)
+        .unwrap();
     assert_eq!(
-        OllamaRestBackend.prepare(&query(&"é".repeat(fits + 1), &["a.com"], None), NOW),
-        Err(skip(CapabilityFailure::Length)),
-        "a query over 500 characters once its site: operator is added must skip"
+        prepared.vendor_args["query"],
+        json!(longest),
+        "the query is sent unchanged"
     );
     assert_eq!(
-        OllamaRestBackend.prepare(&query(&"é".repeat(MAX_QUERY_CHARS + 1), &[], None), NOW),
+        OllamaRestBackend.prepare(
+            &query(&"é".repeat(OLLAMA_MAX_QUERY_CHARS + 1), &[], None),
+            NOW
+        ),
         Err(skip(CapabilityFailure::Length)),
         "a query over the declared 500-character envelope must skip"
-    );
-}
-
-#[test]
-fn capability_skips_more_domains_than_the_tool_accepts() {
-    let domains = (0..=MAX_INCLUDE_DOMAINS)
-        .map(|index| format!("d{index}.com"))
-        .collect::<Vec<_>>();
-    let search = WebSearchQuery {
-        include_domains: domains,
-        ..query("q", &[], None)
-    };
-    assert_eq!(
-        OllamaRestBackend.prepare(&search, NOW),
-        Err(skip(CapabilityFailure::DomainFilter)),
-        "more domains than declared must skip"
     );
 }
 
