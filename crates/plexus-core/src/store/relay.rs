@@ -50,9 +50,9 @@ pub const MAX_SEQ: u64 = 9_007_199_254_740_991;
 /// Most run attempts remembered from `workflow_run` webhooks. A job webhook
 /// normally follows its run's `requested` webhook within minutes, so this
 /// holds far more than the attempts in flight at once.
-pub const CI_RUN_CACHE_CAPACITY: usize = 10_000;
+const CI_RUN_CACHE_CAPACITY: usize = 10_000;
 /// Oldest remembered run attempt, by relay receipt time: 24 hours.
-pub const CI_RUN_CACHE_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1000;
+const CI_RUN_CACHE_MAX_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// (lowercase repository full name, run id, run attempt)
 type CiRunKey = (String, i64, i64);

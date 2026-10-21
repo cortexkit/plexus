@@ -52,7 +52,7 @@ pub enum ReconcileResult {
 }
 
 impl ReconcileResult {
-    pub fn as_status(&self) -> &'static str {
+    fn as_status(&self) -> &'static str {
         match self {
             Self::Confirmed { .. } => "confirmed",
             Self::NotFound => "not_found",

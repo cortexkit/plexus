@@ -10,7 +10,7 @@ Plexus is the CortexKit module that lets agents act on external services (GitHub
 
 **Governance pipeline** (`GovernanceEngine`). A tool call goes RESERVE → REVALIDATE → DISPATCH:
 1. The invoke boundary refuses undeclared identity-token fields (`assertion`, `agent_assertion`). Governance refuses credential-named argument keys recursively for every caller, including internal calls. Agent identity comes only from the daemon's route scope stamp; `agent_id` attributes the call, while `delegates: true` requests agent authority and `owner_authorized: true` confirms that the daemon allows the scope owner to delegate it. With consent cards configured, an unscoped call cannot raise a cardless approval.
-2. Authorize: connection health, catalog status, a matching grant, policy (`allow` / `ask_first` / `block`), severity and the decision plane for S3/S4, and resource filters. Write a 60-second reservation that pins the generations of every row it read.
+2. Authorize: connection health, catalog status, a matching grant, policy (`allow` / `ask_first` / `block`), severity (S3/S4 need a decision plane; none is configured in production, so they are refused), and resource filters. Write a 60-second reservation that pins the generations of every row it read.
 3. Revalidate at claim time. Any generation that moved aborts the call.
 4. Resolve the credential from the vault (credential-free manifests dispatch anonymously), dispatch, report the outcome, and write the audit row.
 

@@ -44,10 +44,8 @@ pub mod smoke;
 mod test_http;
 /// The shared stderr-capture helpers, compiled once so every test module uses
 /// the same one-time logger initialization. plexus-core's support/audit.rs,
-/// which this crate also compiles, declares its own private copy that this
-/// crate cannot reach, hence the allowance.
+/// which this crate also compiles, reaches them under this name too.
 #[cfg(test)]
-#[allow(clippy::duplicate_mod)]
 #[path = "../../plexus-core/tests/support/logging.rs"]
 mod test_logging;
 #[cfg(test)]
@@ -586,7 +584,7 @@ where
     // observes the closed channel and stops. Shutdown waits a bounded time for
     // that (`stop_task`), then aborts the task, so one wedged pass cannot hold
     // the module open after its route has closed. A poll in flight at shutdown
-    // is left to finish or abandoned; `commit_poll_success` is a single fenced
+    // is left to finish or abandoned; `commit_keyed_poll_success` is a single fenced
     // transaction, so an abandoned poll leaves the cursor unadvanced and the
     // events unwritten, which is the correct outcome.
     let (claim_shutdown, mut claim_stop) = mpsc::channel::<()>(1);

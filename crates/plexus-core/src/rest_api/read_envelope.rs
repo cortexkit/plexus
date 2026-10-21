@@ -183,13 +183,13 @@ fn classify(
         // status like any other refusal rather than as an unknown outcome.
         // A 401 keeps the `http_401` code the vault's credential check reads;
         // a 403 is a permission refusal and never reported as a bad credential.
-        let mut failed = TransportResponse::vendor_error(&format!("http_{status}"), "");
+        let mut failed = TransportResponse::vendor_error(&format!("http_{status}"));
         failed.error_message = Some(projection(status, &limit));
         return failed;
     }
     if body.truncated {
         eprintln!(warn transport: "REST bot read on {method} {path} exceeded {} bytes", bot::MAX_BOT_READ_BODY_BYTES);
-        let mut refused = TransportResponse::vendor_error("response_too_large", "");
+        let mut refused = TransportResponse::vendor_error("response_too_large");
         refused.error_message = Some(projection(status, &limit));
         return refused;
     }

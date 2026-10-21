@@ -85,8 +85,7 @@ fn declared_mcp_tool_errors_carry_only_fixed_signals() {
         );
         assert_eq!(
             result,
-            TransportResponse::vendor_error("mcp_tool_error", "MCP vendor request failed")
-                .with_error_signal(Some(signal)),
+            TransportResponse::vendor_error("mcp_tool_error").with_error_signal(Some(signal)),
             "MCP tool error must retain only the fixed declared signal"
         );
         assert_eq!(
@@ -107,8 +106,7 @@ fn declared_mcp_rpc_errors_carry_only_fixed_signals() {
             json!({"jsonrpc":"2.0","error":{"code":"REVIEWED","message":"private vendor wording"}});
         assert_eq!(
             dispatch(Some(rule(200, signal, "/error/code")), 200, "", error),
-            TransportResponse::vendor_error("mcp_request_failed", "MCP vendor request failed")
-                .with_error_signal(Some(signal)),
+            TransportResponse::vendor_error("mcp_request_failed").with_error_signal(Some(signal)),
             "MCP RPC error must retain only the fixed declared signal"
         );
     }
@@ -150,18 +148,18 @@ fn github_without_declarations_is_byte_for_byte_unchanged() {
         "content":[{"type":"text","text":"quota exhausted private wording"}]}});
     assert_eq!(
         dispatch(None, 200, "", tool_error),
-        TransportResponse::vendor_error("mcp_tool_error", "MCP vendor request failed"),
+        TransportResponse::vendor_error("mcp_tool_error"),
         "undeclared GitHub tool errors must remain byte-for-byte unchanged"
     );
     let rpc_error =
         json!({"error":{"code":"REVIEWED","message":"quota exhausted private wording"}});
     assert_eq!(
         dispatch(None, 200, "", rpc_error.clone()),
-        TransportResponse::vendor_error("mcp_request_failed", "MCP vendor request failed")
+        TransportResponse::vendor_error("mcp_request_failed")
     );
     assert_eq!(
         dispatch(None, 422, "", rpc_error.clone()),
-        TransportResponse::vendor_error("http_422", "MCP vendor request failed")
+        TransportResponse::vendor_error("http_422")
     );
     assert_eq!(
         dispatch(None, 429, "Retry-After: 7\r\n", rpc_error),

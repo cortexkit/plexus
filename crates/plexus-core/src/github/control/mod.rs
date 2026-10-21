@@ -46,13 +46,13 @@ const POLL_READS: &[&str] = &[
     "github.issue.search",
 ];
 /// The read actions each imported handle grants the prefrontal module.
-pub(crate) const PREFRONTAL_READS: &[&str] = crate::github::reads::BOT_ACTIONS;
+const PREFRONTAL_READS: &[&str] = crate::github::reads::BOT_ACTIONS;
 /// The only writes each imported handle grants the prefrontal module. This
 /// carries over the invoke grant on `add_reaction` that prefrontal-core holds
 /// today on every per-project GitHub connection, which it uses for the eyes
 /// reaction that marks an issue or pull request as seen. The agent's own
 /// grant on the handle must still cover each request.
-pub(crate) const PREFRONTAL_WRITES: &[&str] = &["add_reaction"];
+const PREFRONTAL_WRITES: &[&str] = &["add_reaction"];
 
 /// Every action selector on prefrontal-core's module grant for one handle.
 pub(crate) fn prefrontal_selectors() -> Vec<String> {

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 /// The largest request a stub will buffer. Conformance requests are a few
 /// kilobytes; the cap keeps a misbehaving client from growing a stub's buffer
 /// without bound.
-pub(crate) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 /// A bounded local HTTP stub. Fixed workers serve connections synchronously,
 /// so slow clients cannot create an unbounded number of detached threads.
@@ -153,7 +153,7 @@ fn serve_connection(
 /// over [`MAX_REQUEST_BYTES`] is refused.
 ///
 /// Incomplete requests are errors, never raw framing or partial JSON.
-pub(crate) fn read_http_request(stream: &mut impl Read) -> Result<String, String> {
+fn read_http_request(stream: &mut impl Read) -> Result<String, String> {
     read_http_request_until(stream, Instant::now() + Duration::from_secs(5))
 }
 

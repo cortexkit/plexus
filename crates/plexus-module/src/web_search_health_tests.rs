@@ -8,10 +8,7 @@ use plexus_core::web_search::capability::WebSearchCapability;
 use plexus_core::web_search::{WebSearchBackend, WebSearchQuery, WebSearchResult};
 
 /// Captures the real fleet log renderer's stderr in an isolated child process.
-#[allow(dead_code)]
-mod logging {
-    include!("../../plexus-core/tests/support/logging.rs");
-}
+use crate::test_logging as logging;
 
 /// A SearXNG instance address, planted where a connection could carry one.
 const INSTANCE_HOST: &str = "searx.internal.example";

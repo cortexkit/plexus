@@ -2699,7 +2699,7 @@ where
                 // hole is visible rather than silent.
                 //
                 // A prune failure does not turn a successful poll into a failed
-                // one. At this point `commit_poll_success` has already
+                // one. At this point `commit_keyed_poll_success` has already
                 // succeeded: the events are durable, the cursor advanced, the
                 // vendor read genuinely completed. `PollCycle::Completed` is
                 // the truthful description of what happened. Retention is

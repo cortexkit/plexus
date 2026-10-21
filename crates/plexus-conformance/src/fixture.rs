@@ -390,7 +390,7 @@ impl ConnectorFixture {
     }
 
     /// Tavily catalog: read-only web search and extraction.
-    pub fn tavily() -> Self {
+    pub(crate) fn tavily() -> Self {
         let manifest_path = PathBuf::from("catalog/tavily.jsonc");
         Self {
             name: "tavily".to_string(),
@@ -411,7 +411,7 @@ impl ConnectorFixture {
     }
 
     /// Context7 catalog: read-only library documentation lookup.
-    pub fn context7() -> Self {
+    pub(crate) fn context7() -> Self {
         let manifest_path = PathBuf::from("catalog/context7.jsonc");
         Self {
             name: "context7".to_string(),
@@ -447,7 +447,7 @@ impl ConnectorFixture {
     /// write-enabling coverage lives in the fixtures whose vendors actually
     /// serve writes (browserbase, notion), so nothing is lost by this fixture
     /// declining to invent one.
-    pub fn firecrawl() -> Self {
+    pub(crate) fn firecrawl() -> Self {
         let manifest_path = PathBuf::from("catalog/firecrawl.jsonc");
         Self {
             name: "firecrawl".to_string(),
@@ -472,7 +472,7 @@ impl ConnectorFixture {
     }
 
     /// Hugging Face catalog: read-only model/dataset/space search and repo reads.
-    pub fn huggingface() -> Self {
+    pub(crate) fn huggingface() -> Self {
         let manifest_path = PathBuf::from("catalog/huggingface.jsonc");
         Self {
             name: "huggingface".to_string(),
@@ -511,7 +511,7 @@ impl ConnectorFixture {
     /// Synthetic REST fixture: a hand-written `rest_api` manifest exercised
     /// against an in-process REST stub. Covers a GET with a path parameter, a
     /// POST with a JSON body, and an ask-first gated write.
-    pub fn restdemo() -> Self {
+    pub(crate) fn restdemo() -> Self {
         let manifest_path = PathBuf::from("fixtures/restdemo.jsonc");
         Self {
             name: "restdemo".to_string(),
@@ -544,7 +544,7 @@ impl ConnectorFixture {
     /// `auth.mode = none`, so the fixture exercises the enrollment path that
     /// has no handle to place — the one that was unreachable while the connect
     /// path demanded a credential unconditionally.
-    pub fn deepwiki() -> Self {
+    pub(crate) fn deepwiki() -> Self {
         let manifest_path = PathBuf::from("catalog/deepwiki.jsonc");
         Self {
             name: "deepwiki".to_string(),
@@ -585,7 +585,7 @@ impl ConnectorFixture {
     /// Defaults to the in-process REST stub so it runs on every gate; a live
     /// run supplies --live with an operator handle, which switches the target
     /// to the manifest endpoint.
-    pub fn exa_rest() -> Self {
+    pub(crate) fn exa_rest() -> Self {
         let manifest_path = PathBuf::from("catalog/exa_rest.jsonc");
         Self {
             name: "exa_rest".to_string(),
@@ -610,7 +610,7 @@ impl ConnectorFixture {
     }
 
     /// Supabase catalog fixture covering write operations that can execute arbitrary SQL or Edge Functions.
-    pub fn supabase() -> Self {
+    pub(crate) fn supabase() -> Self {
         let manifest_path = PathBuf::from("catalog/supabase.jsonc");
         Self {
             name: "supabase".to_string(),
@@ -662,7 +662,7 @@ impl ConnectorFixture {
     }
 
     /// Neon catalog preview fixture for write operations that can execute arbitrary SQL.
-    pub fn neon() -> Self {
+    pub(crate) fn neon() -> Self {
         let manifest_path = PathBuf::from("catalog/neon.jsonc");
         Self {
             name: "neon".to_string(),
@@ -720,7 +720,7 @@ impl ConnectorFixture {
     /// Read-only PostHog REST catalog fixture. The project ID is supplied as a
     /// connection value allowlist so its per-project scope is asserted on read
     /// calls, where required filters alone do not gate execution.
-    pub fn posthog_rest() -> Self {
+    pub(crate) fn posthog_rest() -> Self {
         let manifest_path = PathBuf::from("catalog/posthog_rest.jsonc");
         Self {
             name: "posthog_rest".to_string(),
@@ -758,7 +758,7 @@ impl ConnectorFixture {
     }
 
     /// Resend catalog fixture for an irreversible broadcast send that cannot be undone after execution.
-    pub fn resend() -> Self {
+    pub(crate) fn resend() -> Self {
         let manifest_path = PathBuf::from("catalog/resend.jsonc");
         Self {
             name: "resend".to_string(),
@@ -810,7 +810,7 @@ impl ConnectorFixture {
     }
 
     /// Browserbase catalog fixture where browser actions that cause side effects require user confirmation before execution.
-    pub fn browserbase() -> Self {
+    pub(crate) fn browserbase() -> Self {
         let manifest_path = PathBuf::from("catalog/browserbase.jsonc");
         Self {
             name: "browserbase".to_string(),

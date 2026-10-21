@@ -3279,6 +3279,10 @@ fn revoked_grant_refuses_poll() {
 
 #[path = "support/audit.rs"]
 mod audit_test;
+// The audit fixture reports through the same stderr-capture helpers the other
+// suites use, under the name every including crate gives them.
+#[path = "support/logging.rs"]
+mod test_logging;
 
 #[test]
 fn authorization_audit_failure_is_loud_and_preserves_reservation() {

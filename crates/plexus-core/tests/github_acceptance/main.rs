@@ -1149,7 +1149,7 @@ fn unresolvable_credential_and_definitive_vendor_refusals_are_sticky() {
             .store(credential_missing, std::sync::atomic::Ordering::SeqCst);
         if let Some(code) = vendor_code {
             *f.github.response_override.lock().unwrap() =
-                Some(TransportResponse::vendor_error(code, "rejected"));
+                Some(TransportResponse::vendor_error(code));
         }
         let first = f.request(&comment(), label);
         assert_eq!(

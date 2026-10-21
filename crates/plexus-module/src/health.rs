@@ -282,6 +282,7 @@ impl HealthState {
 
     /// Degrade health while `source` names any connection whose credential
     /// needs a person to repair it.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_credential_repair_source(
         mut self,
         source: impl Fn() -> BTreeMap<String, String> + Send + Sync + 'static,

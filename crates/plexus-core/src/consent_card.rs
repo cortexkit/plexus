@@ -24,19 +24,19 @@ pub const CONSENT_REPORT_EXECUTION: &str = "consent.report_execution";
 /// Broca cuts calls at 120 seconds. Detach must commit before the caller gives
 /// up, or a later answer reaches neither the held call nor the agent.
 pub const HELD_CALL_BUDGET: Duration = Duration::from_secs(110);
-pub const AWAIT_MAX_MS: u64 = 120_000;
+const AWAIT_MAX_MS: u64 = 120_000;
 const AWAIT_ROUTE_DEADLINE: Duration = Duration::from_secs(30);
 const AWAIT_REPLY_RESERVE: Duration = Duration::from_secs(1);
 
 /// The option ids on every card Plexus files. Get and await identify the
 /// chosen option by `answered_choice_id`, never by label.
 pub const OPTION_APPROVE: &str = "approve";
-pub const OPTION_DENY: &str = "deny";
+pub(crate) const OPTION_DENY: &str = "deny";
 
 /// The execution outcomes `consent.report_execution` accepts.
-pub const EXECUTED: &str = "executed";
+const EXECUTED: &str = "executed";
 pub const APPROVED_NOT_EXECUTED: &str = "approved_not_executed";
-pub const OUTCOME_UNKNOWN: &str = "outcome_unknown";
+const OUTCOME_UNKNOWN: &str = "outcome_unknown";
 
 /// Written as the `decider` of a request decided on its card, followed by the
 /// card's id. It tells a request the user approved on their phone apart from
@@ -45,7 +45,7 @@ pub const CONSENT_CARD_DECIDER_PREFIX: &str = "consent_card:";
 
 /// The longest preview text a card carries, in characters. The preview is a
 /// reminder of what will be sent, not a copy of it.
-pub const PREVIEW_TEXT_MAX_CHARS: usize = 600;
+const PREVIEW_TEXT_MAX_CHARS: usize = 600;
 /// The longest rendering of any one argument value in the preview.
 const PREVIEW_VALUE_MAX_CHARS: usize = 160;
 /// Shown in place of an argument whose name marks it as secret.
@@ -109,7 +109,8 @@ pub struct ParkedApproval<'a> {
     /// Recipient-declaring sends require the entire text and every recipient,
     /// not a bounded reminder. Their wire size is checked before parking.
     pub complete_preview: bool,
-    /// Plexus's exact-JSON hash of those arguments, as stored on the request.
+    /// Plexus's JCS (RFC 8785) SHA-256 of those arguments, as stored on the
+    /// request.
     pub args_digest: &'a str,
     /// How long the request has left before it expires.
     pub expires_in_ms: i64,
@@ -170,7 +171,7 @@ pub fn consent_request_body(parked: &ParkedApproval<'_>) -> Value {
 /// shaped like a credential (a `ghp_` token, a JWT, ...), is shown as
 /// withheld; its value is never rendered. Long values are cut, and the whole text is capped at
 /// [`PREVIEW_TEXT_MAX_CHARS`].
-pub fn preview_text(args: &Value) -> String {
+fn preview_text(args: &Value) -> String {
     let text = match args {
         Value::Object(object) if object.is_empty() => "(no arguments)".to_string(),
         Value::Object(object) => object
@@ -192,7 +193,7 @@ pub fn preview_text(args: &Value) -> String {
 }
 
 /// The same secret filter as the ordinary preview, without truncating values.
-pub fn complete_preview_text(args: &Value) -> String {
+fn complete_preview_text(args: &Value) -> String {
     match args {
         Value::Object(object) if object.is_empty() => "(no arguments)".into(),
         Value::Object(object) => object
@@ -710,25 +711,26 @@ mod tests {
         assert_eq!(body["requester_ref"], "req-1");
         assert_eq!(body["dedup_key"], "reserved:broca:call-1");
     }
-}
-#[test]
-fn credential_handle_values_are_redacted_under_ordinary_argument_names() {
-    let value = "ckh_0123456789abcdef";
-    for key in ["handle", "body", "actor", "note"] {
-        let args = json!({key: value});
-        assert!(
-            !crate::secret_input::contains_secret_input(&args),
-            "ordinary key refused"
-        );
-        for preview in [preview_text(&args), complete_preview_text(&args)] {
+
+    #[test]
+    fn credential_handle_values_are_redacted_under_ordinary_argument_names() {
+        let value = "ckh_0123456789abcdef";
+        for key in ["handle", "body", "actor", "note"] {
+            let args = json!({key: value});
             assert!(
-                !preview.contains(value),
-                "preview exposed a vault handle: {preview}"
+                !crate::secret_input::contains_secret_input(&args),
+                "ordinary key refused"
             );
-            assert!(preview.contains(PREVIEW_WITHHELD));
+            for preview in [preview_text(&args), complete_preview_text(&args)] {
+                assert!(
+                    !preview.contains(value),
+                    "preview exposed a vault handle: {preview}"
+                );
+                assert!(preview.contains(PREVIEW_WITHHELD));
+            }
         }
+        assert!(crate::secret_input::contains_secret_input(
+            &json!({"credential_handle": "x"})
+        ));
     }
-    assert!(crate::secret_input::contains_secret_input(
-        &json!({"credential_handle": "x"})
-    ));
 }

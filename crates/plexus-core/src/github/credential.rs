@@ -19,7 +19,7 @@ const EXPIRY_MARGIN_MS: i64 = 60_000;
 /// refuse. The codes are fixed strings so the provider trait can keep its
 /// `&'static str` error type.
 pub const UNRESOLVABLE_TRANSIENT: &str = "handle_credential_unresolvable{class: transient}";
-pub const UNRESOLVABLE_AUTH_REQUIRED: &str = "handle_credential_unresolvable{class: auth_required}";
+const UNRESOLVABLE_AUTH_REQUIRED: &str = "handle_credential_unresolvable{class: auth_required}";
 pub const UNRESOLVABLE_PERMANENT: &str = "handle_credential_unresolvable{class: permanent}";
 pub(crate) const APP_PREFIX: &str = "github_app:";
 

@@ -78,20 +78,13 @@ fn exa_without_declarations_is_byte_for_byte_unchanged() {
         );
         let expected = match status {
             401 => {
-                let mut response =
-                    TransportResponse::vendor_error("http_401", "REST authentication was rejected");
+                let mut response = TransportResponse::vendor_error("http_401");
                 response.error_message = Some("REST authentication was rejected".into());
                 response
             }
             429 => crate::http_support::throttled_response("REST", Duration::from_secs(60)),
-            500 => TransportResponse::unknown_with_error(
-                "http_500",
-                "REST gateway response was not definitive",
-            ),
-            _ => TransportResponse::vendor_error(
-                &format!("http_{status}"),
-                "REST vendor request failed",
-            ),
+            500 => TransportResponse::unknown_with_error("http_500"),
+            _ => TransportResponse::vendor_error(&format!("http_{status}")),
         };
         assert_eq!(
             result, expected,
