@@ -321,6 +321,19 @@ fn diagnostic_names_are_bounded_and_escape_controls() {
 }
 
 #[test]
+fn diagnostic_labels_keep_128_characters_then_mark_the_cut() {
+    let exact = "é".repeat(128);
+    let counted = "label cut after a character count";
+    assert_eq!(diagnostic_label(&exact), "\\u{e9}".repeat(128), "{counted}");
+    let long = format!("a\n{}", "b".repeat(200));
+    assert_eq!(
+        diagnostic_label(&long),
+        format!("a\\n{}...", "b".repeat(126)),
+        "{counted}"
+    );
+}
+
+#[test]
 fn boot_catalog_refusal_names_the_input_file() {
     let scratch = Scratch::directory("refused-catalog-path");
     let path = scratch.path().join("broken_vendor.jsonc");

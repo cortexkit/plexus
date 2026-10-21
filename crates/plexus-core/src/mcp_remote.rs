@@ -30,8 +30,8 @@ use crate::manifest::CredentialBinding;
 #[cfg(test)]
 use crate::mcp_payload::tools_from_response;
 use crate::mcp_payload::{
-    decode_tool_result, json_rpc_request, tool_result_from_response, tools_call_params,
-    tools_list_params,
+    collect_tool_pages, decode_tool_result, json_rpc_request, tool_result_from_response,
+    tools_call_params, ToolPagesError,
 };
 use crate::transport::{
     Retryability, TransmissionState, Transport, TransportRequest, TransportResponse,
@@ -561,48 +561,21 @@ impl McpRemoteTransport {
         let mut state = entry.lock().map_err(|_| poisoned_lock_error())?;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             state.ensure_current(&config)?;
-            let mut actions = Vec::new();
-            let mut params = tools_list_params();
-            let mut cursors = HashSet::new();
-            let mut names = HashSet::new();
-            let mut bytes = 0usize;
-            for _ in 0..MAX_TOOL_PAGES {
+            collect_tool_pages(|params| {
                 let body = json_rpc_request(
                     self.next_request_id.fetch_add(1, Ordering::Relaxed),
                     "tools/list",
                     params,
                 );
-                let (response, _) = self
-                    .rpc_with_reconnect(&mut state, &config, body, credential)
-                    .map_err(McpCallError::into_remote)?;
-                bytes = bytes.saturating_add(
-                    serde_json::to_vec(&response)
-                        .map_err(|_| McpRemoteError::Protocol)?
-                        .len(),
-                );
-                if bytes > MAX_RESPONSE_BODY_BYTES {
-                    return Err(McpRemoteError::ResponseTooLarge);
-                }
-                let tools = response
-                    .pointer("/result/tools")
-                    .and_then(Value::as_array)
-                    .ok_or(McpRemoteError::Protocol)?;
-                for tool in tools {
-                    let action = DiscoveredAction::from_value(tool)?;
-                    if !names.insert(action.name.clone()) {
-                        return Err(McpRemoteError::Protocol);
-                    }
-                    if actions.len() >= MAX_DISCOVERED_TOOLS {
-                        return Err(McpRemoteError::ResponseTooLarge);
-                    }
-                    actions.push(action);
-                }
-                match next_tool_cursor(&response, &mut cursors)? {
-                    None => return Ok(actions),
-                    Some(cursor) => params = json!({"cursor": cursor}),
-                }
-            }
-            Err(McpRemoteError::Protocol)
+                self.rpc_with_reconnect(&mut state, &config, body, credential)
+                    .map(|(response, _)| response)
+                    .map_err(McpCallError::into_remote)
+            })
+            .map_err(|error| match error {
+                ToolPagesError::Fetch(error) | ToolPagesError::Action(error) => error,
+                ToolPagesError::TooLarge => McpRemoteError::ResponseTooLarge,
+                ToolPagesError::Protocol => McpRemoteError::Protocol,
+            })
         }));
         match outcome {
             Ok(result) => result,

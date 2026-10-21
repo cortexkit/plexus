@@ -22,6 +22,8 @@ fn request(action: &str, args: Value) -> TransportRequest {
 fn operation(value: Value) -> HttpOperation {
     serde_json::from_value(value).unwrap()
 }
+/// Not `FixedRequestServer`: these bounds tests hold a three-second accept
+/// deadline and two-second socket timeouts, tighter than the shared fixture's.
 fn server(
     handler: impl FnOnce(String) -> String + Send + 'static,
 ) -> (String, std::thread::JoinHandle<()>) {
@@ -191,6 +193,8 @@ fn throttle_statuses_without_auth_poisoning() {
     }
 }
 
+/// Not `FixedRequestServer`: the reply is written in timed slices, under the
+/// same tighter accept and socket deadlines as `server`.
 fn trickle(mcp: bool) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();

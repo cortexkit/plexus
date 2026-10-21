@@ -2,7 +2,6 @@
 //! deliberately excluded so polls and a future webhook reader share identities.
 
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 
 pub const GITHUB_ISSUE_CHANGED: &str = "github_issue_changed";
 pub const GITHUB_PR_CHANGED: &str = "github_pr_changed";
@@ -191,7 +190,7 @@ pub fn derive_event_key(kind: &str, fields: &Value) -> Result<String, EventKeyEr
     // below 2^53 the bytes are RFC 8785's, so no existing key moves.
     let bytes = crate::jcs::canonicalize_exact_integers(&Value::Object(identity))
         .map_err(EventKeyError::Canonicalization)?;
-    Ok(hex::encode(Sha256::digest(bytes)))
+    Ok(crate::jcs::sha256_hex(&bytes))
 }
 
 #[cfg(test)]

@@ -327,30 +327,15 @@ fn with_freshness_check(
         if refusal.is_none() && !refreshed {
             return Ok(());
         }
-        let audit = plexus_core::AuditRecord { principal: reservation.principal.clone(),
-        actor: reservation.actor.clone(),
-        acting_principal: reservation.acting_principal.clone(),
-        agent_id: reservation.attributed_agent_id.clone(), app_handle_id: if reservation.origin == plexus_core::governance::RequestOrigin::Facade { reservation.bound_agent_handle.clone() } else { None }, agent_handle: reservation.bound_agent_handle.clone(), connection_id: Some(reservation.connection_id.clone()),
-        app_key: Some(reservation.app_key.clone()),
-        action: Some(reservation.action.clone()),
-        risk: None,
-        severity: None,
-        decision: if refusal.is_some() { "deny" } else { "allow" }.to_string(),
-        reason_code: refusal
+        let reason_code = refusal
             .as_ref()
-            .map_or("catalog_refreshed".to_string(), |(code, _)| code.clone()),
-        gate: Some("freshness".to_string()),
-        args_redaction_summary: None,
-        outcome: None,
-        latency_ms: None,
-        request_id: Some(reservation.request_id.clone()),
-        credential_fingerprint: None,
-        provider_account_fingerprint: None,
-        attempt_no: None,
-        vendor_request_id: None,
-        idempotency_key_fingerprint: None,
-        response_class: None,
-        reconciliation_of: None, };
+            .map_or("catalog_refreshed", |(code, _)| code.as_str());
+        let audit = plexus_core::AuditRecord::for_reservation(
+            reservation,
+            if refusal.is_some() { "deny" } else { "allow" },
+            reason_code,
+            "freshness",
+        );
         if let Err(error) = store.append_audit(&audit) {
             plexus_core::diag!(error governance:
                 "audit append failed: freshness check for {}/{}: {error}",

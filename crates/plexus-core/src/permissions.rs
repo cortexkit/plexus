@@ -104,6 +104,8 @@ impl Capability {
 /// every list for as long as any of its grants is live, however many of its
 /// grants come and go.
 pub fn row_id(agent_id: &str, connection_id: &str, capability: Capability) -> String {
+    // Not `jcs::sha256_hex`: the parts are hashed length-prefixed as a stream,
+    // and the id keeps only the first 24 hex characters.
     let mut hasher = Sha256::new();
     for part in [CAPABILITY, agent_id, connection_id, capability.scope()] {
         hasher.update((part.len() as u64).to_be_bytes());

@@ -2292,3 +2292,211 @@ fn request_ids_large_batch_are_all_distinct() {
     }
     assert_eq!(seen.len(), BATCH_SIZE);
 }
+
+/// Facade receipts persist `policy_effect_hash`, so a change to its inputs,
+/// their order or their encoding would make every in-flight receipt refuse
+/// `policy_changed`. The literals are SHA-256 of the JCS text, computed
+/// independently of plexus.
+#[test]
+fn policy_effect_hash_matches_the_persisted_receipt_values() {
+    for (module, agent, ask_first, expected) in [
+        (
+            None,
+            None,
+            false,
+            "sha256:d0c06f5cabaeb2e06ebef933184a33727cb40e6e0b7d71c6b1e3ccba0cd5beb4",
+        ),
+        (
+            None,
+            None,
+            true,
+            "sha256:1cc61e13539ce66b9f6920e5f6567f18d1259b5cc4848ff5f198fba2a7c5a01a",
+        ),
+        (
+            Some("allow"),
+            None,
+            false,
+            "sha256:872858286cc8f048deb4244f23f7a1a0416478deb2f119f0fec6969b8fe87374",
+        ),
+        (
+            Some("ask_first"),
+            Some("block"),
+            true,
+            "sha256:967e9c4007e549c2d3ba6c6fd078440b31d13ce1e3e798a0c1f9c6ed8ec21875",
+        ),
+        (
+            Some("block"),
+            Some("ask_first"),
+            false,
+            "sha256:1e4f0c067f751469ccfb5c66fdab99164eda341bb592a702e4b656b80bed0711",
+        ),
+        (
+            None,
+            Some("allow"),
+            true,
+            "sha256:b84170c757f2bbbd1036a49de37e5d4216be547318141de37ce52c1c7cb1cc69",
+        ),
+    ] {
+        assert_eq!(
+            policy_effect_hash(module, agent, ask_first).unwrap(),
+            expected,
+            "module={module:?} agent={agent:?} ask_first={ask_first}"
+        );
+    }
+}
+
+/// The typed comparator and the facade's receipt comparator share
+/// `AUTHORITY_DIMENSIONS`; this pins that the typed one checks the same
+/// dimensions in the same order and names the same refusals.
+#[test]
+fn typed_authority_comparison_follows_the_shared_dimension_order() {
+    let original = AuthorityBaseline {
+        app_handle_generation: 1,
+        repo_binding_generation: 1,
+        credential_generation: 1,
+        handle_enabled: true,
+        agent_grant_generation: 1,
+        module_grant_generation: 1,
+        policy_effect_hash: "sha256:before".into(),
+    };
+    let moved = |field: &str| {
+        let mut current = original.clone();
+        match field {
+            "handle_enabled" => current.handle_enabled = false,
+            "repo_binding_generation" => current.repo_binding_generation += 1,
+            "agent_grant_generation" => current.agent_grant_generation += 1,
+            "module_grant_generation" => current.module_grant_generation += 1,
+            "policy_effect_hash" => current.policy_effect_hash = "sha256:after".into(),
+            "credential_generation" => current.credential_generation += 1,
+            "app_handle_generation" => current.app_handle_generation += 1,
+            other => panic!("dimension {other} has no typed field"),
+        }
+        current
+    };
+    let apply = |current: &mut AuthorityBaseline, from: &AuthorityBaseline| {
+        if !from.handle_enabled {
+            current.handle_enabled = false;
+        }
+        current.repo_binding_generation = current
+            .repo_binding_generation
+            .max(from.repo_binding_generation);
+        current.agent_grant_generation = current
+            .agent_grant_generation
+            .max(from.agent_grant_generation);
+        current.module_grant_generation = current
+            .module_grant_generation
+            .max(from.module_grant_generation);
+        if from.policy_effect_hash != original.policy_effect_hash {
+            current.policy_effect_hash = from.policy_effect_hash.clone();
+        }
+        current.credential_generation = current
+            .credential_generation
+            .max(from.credential_generation);
+        current.app_handle_generation = current
+            .app_handle_generation
+            .max(from.app_handle_generation);
+    };
+    for (index, (field, refusal)) in AUTHORITY_DIMENSIONS.iter().enumerate() {
+        assert_eq!(
+            compare_authority_baseline(&original, &moved(field)),
+            Err(*refusal),
+            "{field} alone"
+        );
+        // Moving every later dimension too must still name this one.
+        let mut current = moved(field);
+        for (later, _) in &AUTHORITY_DIMENSIONS[index + 1..] {
+            apply(&mut current, &moved(later));
+        }
+        assert_eq!(
+            compare_authority_baseline(&original, &current),
+            Err(*refusal),
+            "{field} with every later dimension"
+        );
+    }
+    assert_eq!(compare_authority_baseline(&original, &original), Ok(()));
+}
+
+/// Every audit row about a reservation starts from `for_reservation`; this pins
+/// the fields it fills and that the bound handle is recorded as the app handle
+/// for facade calls only.
+#[test]
+fn reservation_audit_rows_record_the_app_handle_only_for_facade_calls() {
+    let mut reservation = Reservation {
+        reservation_id: "reservation".to_string(),
+        principal: "owner".to_string(),
+        acting_principal: "caller".to_string(),
+        actor: "actor".to_string(),
+        attributed_agent_id: Some("agent-1".to_string()),
+        bound_agent_handle: Some("handle-1".to_string()),
+        connection_id: "connection".to_string(),
+        app_key: "github".to_string(),
+        action: "write_item".to_string(),
+        args: serde_json::json!({}),
+        approved_args: serde_json::json!({}),
+        grant_id: "grant".to_string(),
+        approved_args_hash: "sha256:approved".to_string(),
+        args_snapshot_hash: "sha256:approved".to_string(),
+        schema_hash: "sha256:schema".to_string(),
+        risk: Risk::Write,
+        severity: Severity::S2,
+        snapshot: SnapshotGenerations {
+            connection: 1,
+            catalog_action: 1,
+            grant: 1,
+            policy: 0,
+            policy_id: None,
+        },
+        expires_at_ms: 0,
+        request_id: "request".to_string(),
+        credential_fingerprint: "credential:test".to_string(),
+        decision_id: None,
+        grant_hash: None,
+        intent_id: None,
+        authority_baseline: None,
+        receipt: None,
+        origin: RequestOrigin::Facade,
+        scope: None,
+        relay_origin: None,
+        on_behalf_of_agent: None,
+        agent_grant: None,
+        approval_scope: None,
+    };
+    let expected = |app_handle_id: Option<&str>| AuditRecord {
+        principal: "owner".to_string(),
+        actor: "actor".to_string(),
+        acting_principal: "caller".to_string(),
+        agent_id: Some("agent-1".to_string()),
+        app_handle_id: app_handle_id.map(str::to_owned),
+        agent_handle: Some("handle-1".to_string()),
+        connection_id: Some("connection".to_string()),
+        app_key: Some("github".to_string()),
+        action: Some("write_item".to_string()),
+        risk: None,
+        severity: None,
+        decision: "deny".to_string(),
+        reason_code: "stale".to_string(),
+        gate: Some("dispatch".to_string()),
+        args_redaction_summary: None,
+        outcome: None,
+        latency_ms: None,
+        request_id: Some("request".to_string()),
+        credential_fingerprint: None,
+        provider_account_fingerprint: None,
+        attempt_no: None,
+        vendor_request_id: None,
+        idempotency_key_fingerprint: None,
+        response_class: None,
+        reconciliation_of: None,
+    };
+    assert_eq!(
+        AuditRecord::for_reservation(&reservation, "deny", "stale", "dispatch"),
+        expected(Some("handle-1")),
+        "a facade call records its bound handle as the app handle"
+    );
+    reservation.origin = RequestOrigin::Ordinary;
+    assert_eq!(
+        AuditRecord::for_reservation(&reservation, "deny", "stale", "dispatch"),
+        expected(None),
+        "an ordinary call records no app handle"
+    );
+}

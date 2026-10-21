@@ -77,8 +77,19 @@ pub fn jcs_sha256(value: &Value) -> Result<String, JcsError> {
     }
 
     let bytes = canonicalize(value)?;
-    let digest = Sha256::digest(&bytes);
-    Ok(format!("sha256:{digest:x}"))
+    Ok(sha256_tagged(&bytes))
+}
+
+/// Lowercase hex SHA-256 of `bytes` with no prefix: the form event keys and
+/// event-outbox digests are stored in.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// `sha256:` followed by [`sha256_hex`]: the form schema, manifest and argument
+/// hashes are stored in. Keep the two forms apart when comparing stored values.
+pub fn sha256_tagged(bytes: &[u8]) -> String {
+    format!("sha256:{}", sha256_hex(bytes))
 }
 
 #[cfg(test)]
@@ -218,6 +229,25 @@ fn write_string(out: &mut Vec<u8>, text: &str) -> Result<(), JcsError> {
 
 #[cfg(test)]
 mod tests {
+    /// Event keys, outbox digests, manifest and schema hashes are stored in one
+    /// of these two shapes. The vectors are the published SHA-256 test vectors.
+    #[test]
+    fn sha256_helpers_write_lowercase_hex_bare_and_tagged() {
+        assert_eq!(
+            super::sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            super::sha256_tagged(b""),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stored digest shape"
+        );
+        assert_eq!(
+            super::jcs_sha256(&serde_json::json!({"b": 1, "a": [true, null]})).unwrap(),
+            super::sha256_tagged(br#"{"a":[true,null],"b":1}"#)
+        );
+    }
+
     #[test]
     #[ignore = "manual canonical key-sort measurement"]
     fn measure_key_sort() {

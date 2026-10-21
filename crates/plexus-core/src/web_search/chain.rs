@@ -103,13 +103,12 @@ fn instance_digest(
     backend: &dyn WebSearchBackend,
     connection: &ConnectionRecord,
 ) -> Result<Option<String>, ()> {
-    use sha2::{Digest, Sha256};
     match backend.instance_url(connection) {
         Some(address) => {
             let mut url = reqwest::Url::parse(&address).map_err(|_| ())?;
             url.set_fragment(None);
             let normalized = url.as_str().trim_end_matches('/');
-            Ok(Some(hex::encode(Sha256::digest(normalized.as_bytes()))))
+            Ok(Some(crate::jcs::sha256_hex(normalized.as_bytes())))
         }
         None if provider == "searxng" => Err(()),
         None => Ok(None),

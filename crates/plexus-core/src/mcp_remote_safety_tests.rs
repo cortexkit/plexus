@@ -262,6 +262,8 @@ fn cr_only_sse_requests_receive_an_error_before_the_tool_result() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    // Not `FixedRequestServer`: this test keeps a three-second accept deadline
+    // and two-second socket timeouts, tighter than the shared fixture's.
     let worker = thread::spawn(move || {
         let accept = || {
             let deadline = Instant::now() + Duration::from_secs(3);

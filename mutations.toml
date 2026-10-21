@@ -1252,8 +1252,8 @@ hub = "Every stored and polled event carries its event key, so the poller and st
 hub_targets = ["plexus_core", "poller"]
 guards = "Per-kind event keys are bare canonical SHA-256 hex"
 file = "crates/plexus-core/src/event_key.rs"
-old = "Ok(hex::encode(Sha256::digest(bytes)))"
-new = "Ok(format!(\"sha256:{}\", hex::encode(Sha256::digest(bytes)))) // NON-VACUITY BREAK"
+old = "Ok(crate::jcs::sha256_hex(&bytes))"
+new = "Ok(format!(\"sha256:{}\", crate::jcs::sha256_hex(&bytes))) // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/event_key.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -6761,8 +6761,8 @@ timeout_s = 120
 id = "reconciliation-backoff"
 guards = "Retries honor per-record persisted spacing"
 file = "crates/plexus-core/src/storage.rs"
-old = "next_attempt_at_ms=?3 + MIN(60000,5000 * (1 << MIN(retry_attempts,4)))"
-new = "next_attempt_at_ms=?3 /* NON-VACUITY BREAK */"
+old = "next_attempt_at_ms=?3 + ?4,"
+new = "next_attempt_at_ms=?3 + 0 * ?4, /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -12146,8 +12146,8 @@ timeout_s = 120
 id = "governance-report-failure-not-denial"
 guards = "A reporting failure does not rewrite execution as an authority denial"
 file = "crates/plexus-core/src/governance.rs"
-old = "decision: if matches!(report.terminal,"
-new = "decision: if false && matches!(report.terminal, /* NON-VACUITY BREAK */"
+old = "                if matches!(\n                    report.terminal,"
+new = "                if false && matches!( /* NON-VACUITY BREAK */\n                    report.terminal,"
 test_file = "crates/plexus-core/tests/decision_plane.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -14694,9 +14694,9 @@ expect_red = ["mcp_remote::safety_tests::rejected_initialized_notification_disca
 [[control]]
 id = "transport-discovery-budget"
 guards = "Discovery has a cumulative body budget across all tool pages"
-file = "crates/plexus-core/src/mcp_remote.rs"
-old = "if bytes > MAX_RESPONSE_BODY_BYTES {"
-new = "if false && bytes > MAX_RESPONSE_BODY_BYTES { /* NON-VACUITY BREAK */"
+file = "crates/plexus-core/src/mcp_payload.rs"
+old = "if bytes > crate::http_support::MAX_RESPONSE_BODY_BYTES {"
+new = "if false && bytes > crate::http_support::MAX_RESPONSE_BODY_BYTES { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -14707,7 +14707,7 @@ expect_red = ["mcp_remote::safety_tests::discovery_has_an_aggregate_response_bud
 [[control]]
 id = "transport-discovery-duplicates"
 guards = "Repeated tool names cannot mask a schema change during discovery"
-file = "crates/plexus-core/src/mcp_remote.rs"
+file = "crates/plexus-core/src/mcp_payload.rs"
 old = "if !names.insert(action.name.clone()) {"
 new = "if false && !names.insert(action.name.clone()) { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
@@ -15047,7 +15047,7 @@ timeout_s = 120
 id = "probe-deterministic-failure-suspension"
 guards = "Invalid probe return values suspend visibly without retiring a once probe or advancing its cursor"
 file = "crates/plexus-core/src/poller.rs"
-old = "_ => PollCycle::Suspended {\n            reason: format!(\n                \"{code}: {}\",\n                error.to_string().chars().take(512).collect::<String>()\n            ),\n        },"
+old = "_ => PollCycle::Suspended {\n            reason: format!(\n                \"{code}: {}\",\n                crate::text::prefix_within_chars(&error.to_string(), 512).0\n            ),\n        },"
 new = "_ => PollCycle::Inconclusive { code }, // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/poller/tests/mod.rs"
 runner = "cargo"
@@ -20897,5 +20897,244 @@ target = "--lib"
 select = "expected"
 expect_red = ["manifest::tests::catalog_labels_keep_the_listing_spelling_of_every_variant"]
 expect_message = "OptionalApiKey"
+build_timeout_s = 3600
+timeout_s = 120
+[[control]]
+id = "policy-effect-hash-input-order"
+guards = "The persisted receipt policy_effect_hash keeps its inputs in their stored order: module effect, agent effect, ask_first"
+file = "crates/plexus-core/src/governance.rs"
+old = "    jcs::jcs_sha256(&serde_json::json!([module_effect, agent_effect, ask_first]))"
+new = "    jcs::jcs_sha256(&serde_json::json!([agent_effect, module_effect, ask_first])) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/governance_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::policy_effect_hash_matches_the_persisted_receipt_values"]
+expect_message = "module="
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "authority-dimension-order-shared"
+guards = "The facade receipt check and the typed authority comparison name the same first changed dimension"
+file = "crates/plexus-core/src/governance.rs"
+old = "    (\"repo_binding_generation\", \"repository_rebound\"),\n    (\"agent_grant_generation\", \"agent_grant_revoked\"),"
+new = "    (\"agent_grant_generation\", \"agent_grant_revoked\"),\n    (\"repo_binding_generation\", \"repository_rebound\"), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/governance_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::typed_authority_comparison_follows_the_shared_dimension_order"]
+expect_message = "with every later dimension"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "reservation-audit-app-handle-facade-only"
+guards = "Reservation audit rows record the bound handle as the app handle for facade calls only"
+file = "crates/plexus-core/src/governance.rs"
+old = "            app_handle_id: if reservation.origin == RequestOrigin::Facade {"
+new = "            app_handle_id: if true || reservation.origin == RequestOrigin::Facade { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/governance_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["governance::tests::reservation_audit_rows_record_the_app_handle_only_for_facade_calls"]
+expect_message = "an ordinary call records no app handle"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "text-byte-prefix-rounds-down"
+guards = "Byte-limited truncation backs off to the previous character boundary for every caller"
+file = "crates/plexus-core/src/text.rs"
+old = "        end -= 1;"
+new = "        end += 1; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/text.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["text::tests::byte_prefix_never_splits_a_character", "http_support::tests::log_truncation_keeps_whole_characters_and_its_marker_within_the_limit", "code_search::reply::tests::line_cap_keeps_whole_characters_and_fits_the_marker_in_the_limit"]
+expect_message = "character boundary"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "text-char-prefix-count"
+guards = "Character-limited truncation keeps exactly the limit's count for every caller"
+file = "crates/plexus-core/src/text.rs"
+old = "    match text.char_indices().nth(max_chars) {"
+new = "    match text.char_indices().nth(max_chars + 1) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/text.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["text::tests::char_prefix_counts_characters_and_reports_a_cut", "http_support::tests::log_truncation_keeps_whole_characters_and_its_marker_within_the_limit", "consent_card::tests::preview_truncation_counts_the_ellipsis_inside_the_budget", "web_search::backend::tests::result_fields_are_cut_at_a_character_count_without_a_marker"]
+expect_message = "after a character count"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "text-char-prefix-count-module-label"
+guards = "The module's diagnostic labels keep exactly 128 characters before marking a cut"
+file = "crates/plexus-core/src/text.rs"
+old = "    match text.char_indices().nth(max_chars) {"
+new = "    match text.char_indices().nth(max_chars + 1) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/wire_safety_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["wire_safety_tests::diagnostic_labels_keep_128_characters_then_mark_the_cut"]
+expect_message = "label cut after a character count"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "mock-request-projection-is-diagnostic-redaction"
+guards = "The mock transport records requests through the same diagnostic redaction production projections use"
+file = "crates/plexus-core/src/transport.rs"
+old = "        request.args = crate::http_support::redact_value(&request.args);"
+new = "        request.args = request.args.clone(); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/transport.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["transport::tests::mock_request_projection_is_the_diagnostic_redaction"]
+expect_message = "the mock records the diagnostic redaction"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "request-fingerprint-not-jcs"
+guards = "The stored exact-json-v1 receipt fingerprint stays serde_json's sorted text, not the JCS form"
+file = "crates/plexus-core/src/github/facade/request_map.rs"
+old = "        crate::jcs::sha256_hex(exact.to_string().as_bytes())"
+new = "        crate::jcs::sha256_hex(&crate::jcs::canonicalize_exact_integers(&exact).unwrap()) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/github/facade/request_map.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["github::facade::request_map::tests::request_fingerprint_is_pinned_and_differs_from_jcs"]
+expect_message = "the stored receipt fingerprint must not move"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "backoff-doubling-cap"
+guards = "The shared doubling backoff applies each caller's cap, so scheduler and reconciliation sequences stay as pinned"
+file = "crates/plexus-core/src/backoff.rs"
+old = "    base_ms.saturating_mul(factor).min(cap_ms)"
+new = "    base_ms.saturating_mul(factor) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/backoff.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["backoff::tests::doubles_per_failure_up_to_the_doubling_limit_and_the_cap", "scheduler::tests::backoff_interval_sequence_is_pinned_for_short_typical_and_long_cadences", "storage::store_contract_tests::reconciliation_retry_delay_is_pinned_for_its_first_ten_attempt_counts"]
+expect_message = "backoff step"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "backoff-doubling-cap-module"
+guards = "The relay and outbox reconnect backoff keep their five-minute cap through the shared doubling"
+file = "crates/plexus-core/src/backoff.rs"
+old = "    base_ms.saturating_mul(factor).min(cap_ms)"
+new = "    base_ms.saturating_mul(factor) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_backoff_sequences_are_pinned_for_their_first_ten_steps", "bus::tests::outbox_reconnect_backoff_is_pinned_for_its_first_ten_steps"]
+expect_message = "backoff step"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "grant-reference-strict-decoding"
+guards = "Grant references still refuse every encoding the hand-written codec refused, such as non-zero trailing bits"
+file = "crates/plexus-core/src/grant_refusal.rs"
+old = "    URL_SAFE_NO_PAD.decode(text).ok()"
+new = "    base64::engine::GeneralPurpose::new(&base64::alphabet::URL_SAFE, base64::engine::general_purpose::NO_PAD.with_decode_allow_trailing_bits(true)).decode(text).ok() /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/grant_refusal.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["grant_refusal::tests::grant_reference_codec_matches_the_replaced_codec"]
+expect_message = "must decode as the replaced codec did"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "sha256-tagged-lowercase"
+guards = "Stored sha256-tagged digests stay lowercase hex"
+file = "crates/plexus-core/src/jcs.rs"
+old = "    format!(\"sha256:{}\", sha256_hex(bytes))"
+new = "    format!(\"sha256:{}\", sha256_hex(bytes).to_uppercase()) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/jcs.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["jcs::tests::sha256_helpers_write_lowercase_hex_bare_and_tagged"]
+expect_message = "stored digest shape"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "tool-pages-duplicate-name"
+guards = "A tools/list walk refuses a tool name seen on an earlier page, for both MCP transports"
+file = "crates/plexus-core/src/mcp_payload.rs"
+old = "            if !names.insert(action.name.clone()) {"
+new = "            if false && !names.insert(action.name.clone()) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_payload.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_payload::tests::tool_pages_refuse_what_both_transports_refused"]
+expect_message = "a tool name seen on an earlier page"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "tool-pages-tool-count-limit"
+guards = "A tools/list walk stops at the discovered-tool limit, for both MCP transports"
+file = "crates/plexus-core/src/mcp_payload.rs"
+old = "            if actions.len() >= MAX_DISCOVERED_TOOLS {"
+new = "            if actions.len() > MAX_DISCOVERED_TOOLS { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_payload.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["mcp_payload::tests::tool_pages_stop_at_the_size_and_tool_count_limits"]
+expect_message = "tool-count limit"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-ttl-single-default"
+guards = "The reconciler's default refresh policy and a manifest's omitted catalog_ttl_s are the same one-day value"
+file = "crates/plexus-core/src/catalog.rs"
+old = "const DEFAULT_CATALOG_TTL: Duration = Duration::from_secs(crate::manifest::DEFAULT_CATALOG_TTL_S);"
+new = "const DEFAULT_CATALOG_TTL: Duration = Duration::from_secs(23 * 60 * 60); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/catalog.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["catalog::tests::omitted_manifest_ttl_and_default_policy_ttl_are_both_one_day"]
+expect_message = "one day"
 build_timeout_s = 3600
 timeout_s = 120

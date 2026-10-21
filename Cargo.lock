@@ -1635,6 +1635,7 @@ dependencies = [
 name = "plexus-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "cortexkit-log",
  "cortexkit-store",

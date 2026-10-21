@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 // `PartialEq` only: `actions_baseline[].http.args_schema` is a JSON Schema held
 // as `serde_json::Value`, which does not implement `Eq`.
@@ -682,8 +681,13 @@ impl Availability {
     }
 }
 
+/// Maximum age, in seconds, of an observed MCP catalog when a manifest does
+/// not declare `defaults.catalog_ttl_s`. The catalog reconciler's own default
+/// refresh policy is built from this same value, so the two cannot drift.
+pub const DEFAULT_CATALOG_TTL_S: u64 = 24 * 60 * 60;
+
 fn default_catalog_ttl_s() -> u64 {
-    24 * 60 * 60
+    DEFAULT_CATALOG_TTL_S
 }
 
 /// A manifest together with the normalized JSON and its ingest hash.
@@ -753,8 +757,7 @@ pub fn ingest_value(value: Value) -> Result<IngestedManifest, ManifestError> {
         .map_err(|error| ManifestError::InvalidJson(error.to_string()))?;
     let bytes = crate::jcs::canonicalize_exact_integers(&normalized)
         .map_err(|error| ManifestError::InvalidJson(error.to_string()))?;
-    let digest = Sha256::digest(bytes);
-    let content_hash = format!("sha256:{digest:x}");
+    let content_hash = crate::jcs::sha256_tagged(&bytes);
     Ok(IngestedManifest {
         manifest,
         json: value,

@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 /// credential up by it or treat two equal fingerprints as proof of one
 /// credential. Use the stored reference or connection id for that.
 pub fn fingerprint(handle: &[u8]) -> String {
+    // Only the first six digest bytes, so not `jcs::sha256_hex`.
     let digest = Sha256::digest(handle);
     format!("ckfp_{}", hex::encode(&digest[..6]))
 }

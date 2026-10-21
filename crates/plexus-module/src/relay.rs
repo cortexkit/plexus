@@ -740,8 +740,13 @@ async fn run_connections(
     }
 }
 fn backoff(failures: u32) -> Duration {
-    Duration::from_secs((1u64 << failures.min(9)).min(300))
+    Duration::from_millis(plexus_core::backoff::doubling_ms(
+        1_000, failures, 9, 300_000,
+    ))
 }
+/// Kept apart from `backoff`: the connection loop carries this delay itself as
+/// its state (reset to `INITIAL_CREDENTIAL_RECHECK` once a usable credential is
+/// read), not a failure count, and its base is five seconds rather than one.
 fn credential_recheck_delay(next: &mut Duration) -> Duration {
     let delay = *next;
     *next = (*next * 2).min(CREDENTIAL_RECHECK);

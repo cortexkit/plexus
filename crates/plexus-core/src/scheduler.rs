@@ -57,16 +57,15 @@ use crate::poller::{PollCycle, Poller};
 use crate::storage::{PlexusStore, TriggerSubscription, CIRCUIT_BREAKER_SUSPENSION_REASON};
 use crate::transport::Transport;
 
-/// Exponential base for failure backoff: each consecutive vendor failure
-/// multiplies the wait before the next attempt by this factor.
+/// Failure backoff doubles the wait before the next attempt per consecutive
+/// vendor failure (the base-2 multiplier is `backoff::doubling_ms`).
 ///
 /// Base 2 is the conventional exponential backoff. It pulls a failing
 /// subscription off a struggling vendor quickly — 2x, 4x, 8x, 16x cadence —
 /// while a one- or two-failure blip, which is the common case, recovers within
 /// a couple of cadences. A larger base would recover transient blips too
 /// slowly; a smaller one would not relieve vendor quota pressure fast enough.
-const BACKOFF_BASE: i64 = 2;
-
+///
 /// Absolute ceiling on the backoff interval, in seconds.
 ///
 /// The exponential interval is capped here so a still-active failing
@@ -729,7 +728,7 @@ fn backoff_elapsed(subscription: &TriggerSubscription, now_ms: i64) -> bool {
 /// and consecutive vendor-failure count, in milliseconds.
 ///
 /// Zero failures yields exactly the cadence. Each consecutive failure multiplies
-/// the cadence by [`BACKOFF_BASE`], capped at [`BACKOFF_CEILING_S`]. The result
+/// the cadence per failure, capped at [`BACKOFF_CEILING_S`]. The result
 /// never drops below the cadence itself: backoff only ever lengthens the wait,
 /// so even a long-cadence subscription held against the ceiling is not polled
 /// more often than it asked for.
@@ -750,16 +749,16 @@ fn jittered_interval_ms(subscription: &TriggerSubscription, cadence_s: i64) -> i
 
 fn effective_interval_ms(cadence_s: i64, consecutive_vendor_failures: i64) -> i64 {
     let cadence_ms = cadence_s.saturating_mul(1000);
-    if consecutive_vendor_failures <= 0 {
+    if consecutive_vendor_failures <= 0 || cadence_ms <= 0 {
         return cadence_ms;
     }
     // Bound the exponent so a corrupt or absurd failure count cannot overflow
     // the power; the ceiling clamps the result regardless.
     let exponent = consecutive_vendor_failures.min(63) as u32;
-    let multiplier = BACKOFF_BASE.saturating_pow(exponent);
-    let backoff_ms = cadence_ms.saturating_mul(multiplier);
     let ceiling_ms = BACKOFF_CEILING_S.saturating_mul(1000);
-    backoff_ms.min(ceiling_ms).max(cadence_ms)
+    let backoff_ms =
+        crate::backoff::doubling_ms(cadence_ms as u64, exponent, 63, ceiling_ms as u64) as i64;
+    backoff_ms.max(cadence_ms)
 }
 
 #[cfg(test)]
@@ -781,6 +780,39 @@ mod tests {
     use serde_json::json;
 
     static SCHEDULER_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// The first ten failure counts for a one-second, one-minute and two-hour
+    /// cadence, plus corrupt counts and cadences, as the scheduler computed them
+    /// before its doubling moved into `backoff::doubling_ms`.
+    #[test]
+    fn backoff_interval_sequence_is_pinned_for_short_typical_and_long_cadences() {
+        let steps = |cadence_s: i64| -> Vec<i64> {
+            (0..10)
+                .map(|failures| effective_interval_ms(cadence_s, failures))
+                .collect()
+        };
+        assert_eq!(
+            steps(1),
+            [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 512_000],
+            "backoff step"
+        );
+        assert_eq!(
+            steps(60),
+            [
+                60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000, 3_600_000, 3_600_000,
+                3_600_000, 3_600_000
+            ],
+            "backoff step"
+        );
+        assert_eq!(steps(7_200), [7_200_000; 10]);
+        for failures in [63, 64, i64::MAX] {
+            assert_eq!(effective_interval_ms(1, failures), 3_600_000);
+        }
+        assert_eq!(effective_interval_ms(60, -3), 60_000);
+        assert_eq!(effective_interval_ms(0, 5), 0);
+        assert_eq!(effective_interval_ms(-5, 5), -5_000);
+        assert_eq!(effective_interval_ms(i64::MAX, 5), i64::MAX);
+    }
 
     struct SlowPoll;
     impl Transport for SlowPoll {

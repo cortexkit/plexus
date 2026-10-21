@@ -17,7 +17,6 @@ use std::time::Instant;
 
 use plexus_core::{fingerprint, CkcredRouteError, CkcredRoutePeer};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::evidence::now_ms;
 
@@ -180,7 +179,7 @@ fn payload_marker(payload: &Value) -> Value {
         "__redacted": true,
         "json_type": json_type,
         "len": bytes.len(),
-        "fingerprint": format!("sha256:{}", hex::encode(Sha256::digest(&bytes))),
+        "fingerprint": plexus_core::jcs::sha256_tagged(&bytes),
     })
 }
 

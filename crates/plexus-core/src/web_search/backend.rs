@@ -331,17 +331,30 @@ fn rfc3339_date(value: &str) -> Option<String> {
     Some(iso8601::format_millis(millis))
 }
 
+/// The first `limit` characters with no marker: a search result's title or
+/// excerpt is a fixed-size field, and the reply already says it holds excerpts.
 fn truncate_chars(value: &str, limit: usize) -> String {
-    match value.char_indices().nth(limit) {
-        Some((cut, _)) => value[..cut].to_string(),
-        None => value.to_string(),
-    }
+    crate::text::prefix_within_chars(value, limit).0.to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::web_search::query::{Recency, WebSearchQuery};
+
+    #[test]
+    fn result_fields_are_cut_at_a_character_count_without_a_marker() {
+        let counted = "result field cut after a character count";
+        assert_eq!(truncate_chars("aé😀b", 3), "aé😀", "{counted}");
+        assert_eq!(truncate_chars("aé😀b", 4), "aé😀b", "{counted}");
+        assert_eq!(truncate_chars("aé😀b", 0), "", "{counted}");
+        let title = "é".repeat(TITLE_MAX_CHARS + 5);
+        assert_eq!(
+            truncate_chars(&title, TITLE_MAX_CHARS),
+            "é".repeat(TITLE_MAX_CHARS),
+            "{counted}"
+        );
+    }
 
     fn query(recency: Option<Recency>, domains: &[&str]) -> WebSearchQuery {
         WebSearchQuery {

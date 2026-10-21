@@ -1096,7 +1096,7 @@ fn vendor_error_log_line(
     }
 
     let path = path.split('?').next().unwrap_or(path);
-    let clipped = crate::http_support::truncate_utf8(body, REST_ERROR_BODY_CAP);
+    let clipped = crate::text::prefix_within_bytes(body, REST_ERROR_BODY_CAP);
     let body_was_truncated = clipped.len() < body.len();
     let body = clipped;
     let truncation =

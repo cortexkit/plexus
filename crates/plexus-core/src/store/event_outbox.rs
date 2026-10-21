@@ -231,7 +231,7 @@ pub(super) fn insert_marker(
          VALUES (?1, ?2, ?3, ?4, ?5, lower(?6), ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
         ON CONFLICT(event_key) DO NOTHING", rusqlite::params![identity.event_key, event_id,
         identity.event_name, identity.repo_id, identity.change, h.repo, h.project, h.pr, h.branch, h.conclusion, now,
-        envelope, envelope.map(|body| hex::encode(sha2::Sha256::digest(body.as_bytes()))),body_v1,hex::encode(sha2::Sha256::digest(body_v1.as_bytes()))])?;
+        envelope, envelope.map(|body| crate::jcs::sha256_hex(body.as_bytes())),body_v1,crate::jcs::sha256_hex(body_v1.as_bytes())])?;
     if identity.event_name.starts_with("github_ci_") {
         conn.execute(
             "INSERT INTO github_repo_id_cache (repo, repo_id, last_attempt_at_ms, resolved_at_ms)
@@ -308,7 +308,7 @@ pub(super) fn preserve_overlapping_markers(
         let (body, digest) = if body.is_none() && digest.is_none() {
             match original.filter(|body| !body.is_empty()) {
                 Some(body) => {
-                    let digest = hex::encode(sha2::Sha256::digest(body.as_bytes()));
+                    let digest = crate::jcs::sha256_hex(body.as_bytes());
                     (Some(body), Some(digest))
                 }
                 None => (None, Some(String::new())),
@@ -369,7 +369,7 @@ fn canonical_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalEvent> {
         String::new()
     } else {
         row.get::<_, Option<String>>(18)?
-            .unwrap_or_else(|| hex::encode(sha2::Sha256::digest(body.as_bytes())))
+            .unwrap_or_else(|| crate::jcs::sha256_hex(body.as_bytes()))
     };
     Ok(CanonicalEvent {
         event_key: row.get(0)?,
