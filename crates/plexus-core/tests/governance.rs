@@ -1665,7 +1665,7 @@ fn poll_constructor_refuses_non_read_catalog_states_before_authorize() {
 
 #[test]
 fn poll_constructor_is_load_bearing_with_write_grant_and_allow_policy() {
-    let (path, engine) = seed("poll-load-bearing");
+    let (_path, engine) = seed("poll-load-bearing");
     engine
         .store()
         .insert_grant(&GrantInput {

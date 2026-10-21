@@ -1,5 +1,4 @@
 use crate::scope_support::{delegating_scope, LiveScopeReader};
-use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::credentials::ResolvedCredential;
 use plexus_core::github::credential::HandleCredentialProvider;
 use plexus_core::github::facade::bot_request_scoped;
@@ -53,16 +52,8 @@ fn setup(label: &str, actions: &[(&str, &str)]) -> Setup {
 /// `module` is the calling module that holds the module grant. The agent grant
 /// keeps the grantee the import gives it, reserved:aft.
 fn setup_as(label: &str, actions: &[(&str, &str)], module: &str) -> Setup {
-    let scratch = plexus_core::test_scratch::Scratch::database(label);
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".into(),
-        storage_namespace: label.into(),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: scratch.path().to_string_lossy().into_owned(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).unwrap());
+    let (scratch, store) = crate::scratch_store::open(label);
+    let store = Arc::new(store);
     store
         .insert_connection(
             "operator",

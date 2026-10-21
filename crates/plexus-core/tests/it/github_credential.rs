@@ -215,21 +215,10 @@ fn vendor_401_invalidates_and_reports_once_but_403_does_not() {
 
 #[test]
 fn store_backed_seam_reads_scoped_token_from_handle_row_not_caller() {
-    use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
     use plexus_core::governance::GovernanceSeams;
     use plexus_core::storage::github_store::{GithubGovernanceSeams, GithubHandle};
-    use plexus_core::PlexusStore;
 
-    let scratch = plexus_core::test_scratch::Scratch::database("github-credential-seam");
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".into(),
-        storage_namespace: scratch.path().to_string_lossy().into_owned(),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: scratch.path().to_string_lossy().into_owned(),
-        },
-    };
-    let store = PlexusStore::open(&descriptor).unwrap();
+    let (_scratch, store) = crate::scratch_store::open("github-credential-seam");
     store
         .insert_connection(
             "direct",

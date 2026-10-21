@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::credentials::StubCredentialSource;
 use plexus_core::governance::{
     compare_authority_baseline, facade_not_sent, pipeline_denial, AuthorityBaseline,
     AuthorizationRequest, CatalogDenial, Denial, FacadeNotSentCode, GovernanceEngine,
     GovernanceSeams, GrantDenial, PolicyDenial, RequestOrigin, ResolverDenial,
 };
-use plexus_core::storage::{CatalogAction, CatalogActionInput, GrantInput, PlexusStore};
+use plexus_core::storage::{CatalogAction, CatalogActionInput, GrantInput};
 use plexus_core::transport::MockTransport;
 
 fn baseline() -> AuthorityBaseline {
@@ -185,16 +184,8 @@ fn engine(
     plexus_core::test_scratch::Scratch,
     GovernanceEngine<StubCredentialSource, MockTransport>,
 ) {
-    let scratch = plexus_core::test_scratch::Scratch::database("governance-seams");
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".into(),
-        storage_namespace: scratch.path().to_string_lossy().into_owned(),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: scratch.path().to_string_lossy().into_owned(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).unwrap());
+    let (scratch, store) = crate::scratch_store::open("governance-seams");
+    let store = Arc::new(store);
     store
         .insert_connection(
             "direct",

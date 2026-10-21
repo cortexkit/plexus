@@ -486,20 +486,10 @@ fn g7_claim_receives_canonical_fingerprint_and_baseline_without_contact() {
 
 #[test]
 fn g7_store_claims_one_approval_atomically_and_preserves_other_agents_approval() {
-    use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
     use plexus_core::storage::github_store::GithubHandle;
-    use plexus_core::PlexusStore;
     use rusqlite::{params, Connection};
-    let scratch = plexus_core::test_scratch::Scratch::database("facade-approval");
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".into(),
-        storage_namespace: "facade-approval".into(),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: scratch.path().to_string_lossy().into_owned(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).unwrap());
+    let (scratch, store) = crate::scratch_store::open("facade-approval");
+    let store = Arc::new(store);
     store
         .insert_connection(
             "operator",
@@ -1140,18 +1130,9 @@ fn real_gate_store(
     plexus_core::test_scratch::Scratch,
     Arc<plexus_core::PlexusStore>,
 ) {
-    use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
     use plexus_core::storage::github_store::GithubHandle;
-    let scratch = plexus_core::test_scratch::Scratch::database(label);
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".into(),
-        storage_namespace: label.into(),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: scratch.path().to_string_lossy().into_owned(),
-        },
-    };
-    let store = Arc::new(plexus_core::PlexusStore::open(&descriptor).unwrap());
+    let (scratch, store) = crate::scratch_store::open(label);
+    let store = Arc::new(store);
     store
         .insert_connection(
             "operator",
