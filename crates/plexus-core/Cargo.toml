@@ -27,6 +27,9 @@ serde_path_to_error = { workspace = true }
 ryu-js = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+# Grant references are base64url without padding; plexus-module already
+# links the same version.
+base64 = "0.22"
 getrandom = "0.3"
 zeroize = { workspace = true }
 rusqlite = { workspace = true }

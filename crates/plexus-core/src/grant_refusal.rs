@@ -1,4 +1,6 @@
 //! Stable capability names for grant refusals and restoration checks.
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -117,36 +119,14 @@ impl GrantRefusal {
     }
 }
 
-const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+/// Grant references use base64url without padding, decoded strictly: padding,
+/// characters outside the URL-safe alphabet, impossible lengths and non-zero
+/// trailing bits are all refused, so each reference has exactly one spelling.
 fn encode(bytes: &[u8]) -> String {
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        for shift in [18, 12, 6, 0].into_iter().take(chunk.len() + 1) {
-            out.push(ALPHABET[((n >> shift) & 63) as usize] as char);
-        }
-    }
-    out
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 fn decode(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 4 == 1 {
-        return None;
-    }
-    let mut out = Vec::new();
-    let mut accumulator = 0u32;
-    let mut bits = 0;
-    for byte in text.bytes() {
-        let digit = ALPHABET.iter().position(|b| *b == byte)? as u32;
-        accumulator = (accumulator << 6) | digit;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((accumulator >> bits) as u8);
-        }
-    }
-    (encode(&out) == text).then_some(out)
+    URL_SAFE_NO_PAD.decode(text).ok()
 }
 
 #[cfg(test)]
@@ -179,5 +159,144 @@ mod tests {
         assert!(GrantTarget::decode("g1.e30").is_none());
         let decoded = decode(target.reference().strip_prefix("g1.").unwrap()).unwrap();
         assert_eq!(String::from_utf8(decoded).unwrap(), "{\"action\":\"create_issue\",\"connection\":\"conn/with spaces\",\"grantee\":\"agent_unicode_ü\",\"layer\":\"agent\",\"tool\":\"github\"}");
+    }
+
+    /// The hand-written codec grant references used before the `base64` crate,
+    /// kept as the reference the crate's strict URL-safe engine must match.
+    mod replaced {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        pub(super) fn encode(bytes: &[u8]) -> String {
+            let mut out = String::new();
+            for chunk in bytes.chunks(3) {
+                let n = (u32::from(chunk[0]) << 16)
+                    | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+                    | u32::from(*chunk.get(2).unwrap_or(&0));
+                for shift in [18, 12, 6, 0].into_iter().take(chunk.len() + 1) {
+                    out.push(ALPHABET[((n >> shift) & 63) as usize] as char);
+                }
+            }
+            out
+        }
+        pub(super) fn decode(text: &str) -> Option<Vec<u8>> {
+            if text.len() % 4 == 1 {
+                return None;
+            }
+            let mut out = Vec::new();
+            let mut accumulator = 0u32;
+            let mut bits = 0;
+            for byte in text.bytes() {
+                let digit = ALPHABET.iter().position(|b| *b == byte)? as u32;
+                accumulator = (accumulator << 6) | digit;
+                bits += 6;
+                if bits >= 8 {
+                    bits -= 8;
+                    out.push((accumulator >> bits) as u8);
+                }
+            }
+            (encode(&out) == text).then_some(out)
+        }
+    }
+
+    #[test]
+    fn grant_reference_codec_matches_the_replaced_codec() {
+        // Encoding: every byte string up to two bytes, and longer pseudo-random
+        // ones, including the grant targets refusals actually carry.
+        let mut inputs: Vec<Vec<u8>> = vec![vec![]];
+        for a in 0..=255u8 {
+            inputs.push(vec![a]);
+            for b in 0..=255u8 {
+                inputs.push(vec![a, b]);
+            }
+        }
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            seed >> 33
+        };
+        for length in 3..=96 {
+            for _ in 0..64 {
+                inputs.push((0..length).map(|_| next() as u8).collect());
+            }
+        }
+        for (layer, tool, connection) in [
+            (Layer::Module, "github", Some("github-app")),
+            (Layer::Agent, "github", Some("conn/with spaces")),
+            (Layer::Module, "web_search", None),
+            (Layer::Module, "code_search", Some("grep_app")),
+        ] {
+            let target = GrantTarget::new(layer, "broca", tool, connection, "searchGitHub");
+            let bytes = crate::jcs::canonicalize(&serde_json::to_value(&target).unwrap()).unwrap();
+            assert_eq!(
+                target.reference(),
+                format!("g1.{}", replaced::encode(&bytes))
+            );
+            inputs.push(bytes);
+        }
+        for bytes in &inputs {
+            assert_eq!(encode(bytes), replaced::encode(bytes), "{bytes:?}");
+        }
+
+        // Decoding: every text up to three characters over the URL-safe
+        // alphabet plus padding, the standard alphabet's `+` and `/`, and
+        // other bytes; every four-character text over a smaller set; and
+        // pseudo-random longer texts. Whatever the replaced codec refused
+        // must still be refused, and everything else must decode the same.
+        let mut symbols: Vec<char> =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+                .chars()
+                .collect();
+        symbols.extend(['=', '+', '/', ' ', '.', '\n', 'é']);
+        let mut texts = vec![String::new()];
+        for a in &symbols {
+            texts.push(a.to_string());
+            for b in &symbols {
+                texts.push(format!("{a}{b}"));
+                for c in &symbols {
+                    texts.push(format!("{a}{b}{c}"));
+                }
+            }
+        }
+        let small = ['A', 'B', 'Q', 'g', 'w', '_', '-', '=', '+'];
+        for a in small {
+            for b in small {
+                for c in small {
+                    for d in small {
+                        texts.push(format!("{a}{b}{c}{d}"));
+                    }
+                }
+            }
+        }
+        for length in 4..=16 {
+            for _ in 0..2_000 {
+                texts.push(
+                    (0..length)
+                        .map(|_| symbols[next() as usize % symbols.len()])
+                        .collect(),
+                );
+            }
+        }
+        for bytes in &inputs {
+            let text = replaced::encode(bytes);
+            texts.push(format!("{text}="));
+            texts.push(format!("{text}=="));
+            texts.push(text);
+        }
+        let mut refused = 0;
+        for text in &texts {
+            let expected = replaced::decode(text);
+            refused += usize::from(expected.is_none());
+            assert_eq!(
+                decode(text),
+                expected,
+                "{text:?} must decode as the replaced codec did"
+            );
+        }
+        assert!(
+            refused > texts.len() / 2,
+            "the corpus must exercise refusals"
+        );
     }
 }
