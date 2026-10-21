@@ -5,10 +5,6 @@ use crate::bounded;
 #[path = "logging.rs"]
 mod logging;
 
-#[path = "github_facade.rs"]
-#[allow(dead_code)]
-pub mod github_facade;
-
 pub fn reject_inserts(path: &Path) {
     rusqlite::Connection::open(path)
         .unwrap()
