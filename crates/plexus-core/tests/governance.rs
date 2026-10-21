@@ -342,7 +342,7 @@ fn a_reservation_dispatched_at_its_expiry_instant_is_refused_as_expired() {
             outcome.outcome,
             TransportOutcome::NotSent { ref code, .. } if code == "reservation_expired"
         ),
-        "{:?}",
+        "a reservation at its expiry instant must be refused as expired: {:?}",
         outcome.outcome
     );
     assert!(engine.transport().requests().is_empty());

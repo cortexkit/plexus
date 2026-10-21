@@ -762,7 +762,10 @@ fn retry_after_is_returned_as_throttle_and_honored_before_next_call() {
     // on: the time it shows passing is the wait the transport made.
     let started = clock.now();
     let second = transport.dispatch(request("throttle", "read_tool"), &credential);
-    assert!(clock.now().duration_since(started) >= Duration::from_millis(900));
+    assert!(
+        clock.now().duration_since(started) >= Duration::from_millis(900),
+        "retry-after must be honored before the next call"
+    );
     assert!(second.response.is_some());
     task.join().expect("throttle server exits");
 }

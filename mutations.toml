@@ -346,7 +346,7 @@ build_timeout_s = 3600
 id = "rest-connection-vendor-throttle"
 guards = "A Retry-After recorded on a REST connection delays its next request before the vendor receives it"
 file = "crates/plexus-core/src/rest_api.rs"
-old = "ThrottleGate::Wait(delay) => thread::sleep(delay),"
+old = "ThrottleGate::Wait(delay) => state.clock.sleep(delay),"
 new = "ThrottleGate::Wait(_delay) => {} /* NON-VACUITY BREAK */,"
 test_file = "crates/plexus-core/src/rest_api.rs"
 runner = "cargo"
@@ -21138,3 +21138,78 @@ expect_red = ["catalog::tests::omitted_manifest_ttl_and_default_policy_ttl_are_b
 expect_message = "one day"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "governance-engine-real-wall-clock"
+guards = "A governance engine built for production judges expiry on the real wall clock, not a clock frozen when it was built"
+file = "crates/plexus-core/src/governance.rs"
+old = "            now_ms: Arc::new(crate::storage::now_ms),"
+new = "            now_ms: { let frozen = crate::storage::now_ms(); Arc::new(move || frozen) }, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/governance_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+expect_red = ["governance::tests::a_new_engine_reads_the_real_wall_clock"]
+expect_message = "the engine's clock must be the real wall clock"
+build_timeout_s = 3600
+timeout_s = 600
+
+[[control]]
+id = "governance-reservation-expired-at-its-instant"
+guards = "A reservation dispatched exactly at its expiry instant is refused as expired, not as stale authority"
+file = "crates/plexus-core/src/governance.rs"
+old = "            let expired = self.now_ms() >= reservation.expires_at_ms;"
+new = "            let expired = self.now_ms() > reservation.expires_at_ms; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test governance"
+expect_red = ["a_reservation_dispatched_at_its_expiry_instant_is_refused_as_expired"]
+expect_message = "a reservation at its expiry instant must be refused as expired"
+build_timeout_s = 3600
+timeout_s = 300
+
+[[control]]
+id = "mcp-throttle-wait-on-transport-clock"
+guards = "The MCP transport waits out a short vendor throttle on its own clock, not by sleeping on the real one behind it"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "            ThrottleGate::Wait(remaining) => state.clock.sleep(remaining),"
+new = "            ThrottleGate::Wait(remaining) => std::thread::sleep(remaining), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_transport_integration_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+expect_red = ["mcp_remote::transport_integration_tests::retry_after_is_returned_as_throttle_and_honored_before_next_call"]
+expect_message = "retry-after must be honored before the next call"
+build_timeout_s = 3600
+timeout_s = 600
+
+[[control]]
+id = "transport-clock-real-sleep-blocks"
+guards = "The production transport clock's sleep really blocks, so a throttle wait cannot pass instantly"
+file = "crates/plexus-core/src/http_support.rs"
+old = "            sleep: Arc::new(std::thread::sleep),"
+new = "            sleep: Arc::new(|_: Duration| {}), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/http_support.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+expect_red = ["http_support::tests::the_real_transport_clock_reads_and_sleeps_on_real_time"]
+expect_message = "the real clock's sleep must block"
+build_timeout_s = 3600
+timeout_s = 600
+
+[[control]]
+id = "mcp-transport-real-clock"
+guards = "An MCP transport built for production reads the real clock, not a manual one"
+file = "crates/plexus-core/src/mcp_remote.rs"
+old = "            clock: TransportClock::real(),"
+new = "            clock: TransportClock::manual(), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/mcp_remote_transport_integration_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+expect_red = ["mcp_remote::transport_integration_tests::a_new_mcp_transport_reads_the_real_clock"]
+expect_message = "the transport clock must be the real one"
+build_timeout_s = 3600
+timeout_s = 600
