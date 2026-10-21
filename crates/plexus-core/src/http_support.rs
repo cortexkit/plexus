@@ -261,13 +261,9 @@ fn error_chain_text(error: &dyn std::error::Error) -> String {
         text.push_str(&next.to_string());
         source = next.source();
     }
-    match text.char_indices().nth(ERROR_CAUSE_LIMIT) {
-        Some((cut, _)) => {
-            text.truncate(cut);
-            text.push('…');
-            text
-        }
-        None => text,
+    match crate::text::prefix_within_chars(&text, ERROR_CAUSE_LIMIT) {
+        (kept, true) => format!("{kept}…"),
+        (_, false) => text,
     }
 }
 
@@ -658,21 +654,17 @@ pub(crate) fn is_secret_key(key: &str) -> bool {
         || key.contains("authorization")
 }
 
-pub(crate) fn truncate_utf8(text: &str, limit: usize) -> &str {
-    let mut end = limit.min(text.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
-}
-
 pub(crate) fn bounded_text_for_log(text: &str, limit: usize) -> std::borrow::Cow<'_, str> {
     if text.len() <= limit {
         return std::borrow::Cow::Borrowed(text);
     }
     let suffix = " [truncated]";
-    let mut output = truncate_utf8(text, limit.saturating_sub(suffix.len())).to_owned();
-    output.push_str(truncate_utf8(suffix, limit.saturating_sub(output.len())));
+    let mut output =
+        crate::text::prefix_within_bytes(text, limit.saturating_sub(suffix.len())).to_owned();
+    output.push_str(crate::text::prefix_within_bytes(
+        suffix,
+        limit.saturating_sub(output.len()),
+    ));
     std::borrow::Cow::Owned(output)
 }
 
@@ -704,8 +696,12 @@ pub(crate) fn bounded_json_for_log(value: &serde_json::Value, limit: usize) -> S
     let text = String::from_utf8_lossy(&writer.bytes[..end]);
     if truncated {
         let suffix = " [truncated]";
-        let mut output = truncate_utf8(&text, limit.saturating_sub(suffix.len())).to_owned();
-        output.push_str(truncate_utf8(suffix, limit.saturating_sub(output.len())));
+        let mut output =
+            crate::text::prefix_within_bytes(&text, limit.saturating_sub(suffix.len())).to_owned();
+        output.push_str(crate::text::prefix_within_bytes(
+            suffix,
+            limit.saturating_sub(output.len()),
+        ));
         output
     } else {
         text.into_owned()
@@ -743,6 +739,47 @@ mod tests {
             r#"{"ok":true}"#
         );
     }
+    #[test]
+    fn log_truncation_keeps_whole_characters_and_its_marker_within_the_limit() {
+        let text = "aé😀b".repeat(4);
+        let boundary = "log text cut on a character boundary";
+        assert_eq!(bounded_text_for_log(&text, 32), text.as_str(), "{boundary}");
+        assert_eq!(
+            bounded_text_for_log(&text, 16),
+            "aé [truncated]",
+            "{boundary}"
+        );
+        assert_eq!(
+            bounded_text_for_log(&text, 20),
+            "aé😀b [truncated]",
+            "{boundary}"
+        );
+        // Shorter than the marker: only as much of the marker as fits.
+        assert_eq!(bounded_text_for_log(&text, 5), " [tru", "{boundary}");
+
+        #[derive(Debug)]
+        struct Chain(&'static str, Option<Box<Chain>>);
+        impl std::fmt::Display for Chain {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(self.0)
+            }
+        }
+        impl std::error::Error for Chain {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|inner| inner as _)
+            }
+        }
+        let counted = "error chain cut after a character count";
+        let short = Chain("outer", Some(Box::new(Chain("inner é", None))));
+        assert_eq!(error_chain_text(&short), "outer: inner é", "{counted}");
+        let long: &'static str = "é".repeat(ERROR_CAUSE_LIMIT + 3).leak();
+        let cut = error_chain_text(&Chain(long, None));
+        assert_eq!(cut.chars().count(), ERROR_CAUSE_LIMIT + 1, "{counted}");
+        assert!(cut.ends_with("é…"), "{counted}");
+        let exact: &'static str = "é".repeat(ERROR_CAUSE_LIMIT).leak();
+        assert_eq!(error_chain_text(&Chain(exact, None)), exact, "{counted}");
+    }
+
     use crate::transport::TransmissionState;
 
     fn start_failure_server(

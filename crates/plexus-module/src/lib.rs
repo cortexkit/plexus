@@ -5110,12 +5110,9 @@ fn tool_error(code: &str, message: &str) -> Value {
 }
 
 fn diagnostic_label(value: &str) -> String {
-    let mut label: String = value
-        .chars()
-        .take(128)
-        .flat_map(char::escape_default)
-        .collect();
-    if value.chars().count() > 128 {
+    let (kept, cut) = plexus_core::text::prefix_within_chars(value, 128);
+    let mut label: String = kept.chars().flat_map(char::escape_default).collect();
+    if cut {
         label.push_str("...");
     }
     label

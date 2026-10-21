@@ -164,11 +164,9 @@ fn cap_line(line: &str) -> (String, bool) {
     if line.len() <= MAX_LINE_BYTES {
         return (line.to_string(), false);
     }
-    let mut end = MAX_LINE_BYTES - LINE_CUT_MARKER.len();
-    while !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    (format!("{}{LINE_CUT_MARKER}", &line[..end]), true)
+    let end = MAX_LINE_BYTES - LINE_CUT_MARKER.len();
+    let kept = crate::text::prefix_within_bytes(line, end);
+    (format!("{kept}{LINE_CUT_MARKER}"), true)
 }
 
 /// The text and structured paths share the parsed matches; vendor prose is never forwarded.
@@ -193,10 +191,7 @@ pub fn render_with_repo_filter(response: &CodeSearchResponse, repo_filter: Optio
     }
     if text.len() > MAX_TEXT_BYTES {
         let suffix = "\nText truncated. Narrow query, repo or path.\n";
-        let mut end = MAX_TEXT_BYTES - suffix.len();
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = crate::text::prefix_within_bytes(&text, MAX_TEXT_BYTES - suffix.len()).len();
         text.truncate(end);
         text.push_str(suffix);
     }
@@ -207,6 +202,22 @@ pub fn render_with_repo_filter(response: &CodeSearchResponse, repo_filter: Optio
 pub(super) mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn line_cap_keeps_whole_characters_and_fits_the_marker_in_the_limit() {
+        let exact = "x".repeat(MAX_LINE_BYTES);
+        assert_eq!(cap_line(&exact), (exact.clone(), false));
+        // The cut point, 497 bytes, falls inside the four-byte emoji.
+        let line = format!("{}😀tail", "x".repeat(MAX_LINE_BYTES - 4));
+        let (capped, cut) = cap_line(&line);
+        assert!(cut);
+        assert_eq!(
+            capped,
+            format!("{}…", "x".repeat(MAX_LINE_BYTES - 4)),
+            "line cut on a character boundary"
+        );
+        assert!(capped.len() <= MAX_LINE_BYTES);
+    }
 
     #[test]
     #[ignore = "performance measurement"]

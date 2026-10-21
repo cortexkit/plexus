@@ -188,7 +188,7 @@ pub fn preview_text(args: &Value) -> String {
         other if withhold_from_preview("", other) => PREVIEW_WITHHELD.to_string(),
         other => render_value(other),
     };
-    truncate_chars(&text, PREVIEW_TEXT_MAX_CHARS)
+    truncate_chars_with_ellipsis(&text, PREVIEW_TEXT_MAX_CHARS)
 }
 
 /// The same secret filter as the ordinary preview, without truncating values.
@@ -229,17 +229,19 @@ fn render_value(value: &Value) -> String {
         Value::String(text) => text.clone(),
         other => other.to_string(),
     };
-    truncate_chars(&rendered, PREVIEW_VALUE_MAX_CHARS)
+    truncate_chars_with_ellipsis(&rendered, PREVIEW_VALUE_MAX_CHARS)
 }
 
-/// Cut `text` to at most `max` characters, marking a cut with an ellipsis.
-fn truncate_chars(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
+/// Cut `text` to at most `max` characters, the ellipsis that marks a cut
+/// included, so a preview never exceeds the card's character budget.
+fn truncate_chars_with_ellipsis(text: &str, max: usize) -> String {
+    match crate::text::prefix_within_chars(text, max) {
+        (_, false) => text.to_string(),
+        (_, true) => {
+            let (kept, _) = crate::text::prefix_within_chars(text, max.saturating_sub(1));
+            format!("{kept}…")
+        }
     }
-    let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
 }
 
 /// The requester for approval cards. All id operations use the original
@@ -417,6 +419,24 @@ pub(crate) fn execution_from_dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_truncation_counts_the_ellipsis_inside_the_budget() {
+        let counted = "preview cut after a character count";
+        assert_eq!(
+            truncate_chars_with_ellipsis("aé😀b", 4),
+            "aé😀b",
+            "{counted}"
+        );
+        assert_eq!(truncate_chars_with_ellipsis("aé😀b", 3), "aé…", "{counted}");
+        assert_eq!(truncate_chars_with_ellipsis("aé😀b", 1), "…", "{counted}");
+        assert_eq!(truncate_chars_with_ellipsis("aé😀b", 0), "…", "{counted}");
+        assert_eq!(truncate_chars_with_ellipsis("", 0), "", "{counted}");
+        let long = "é".repeat(PREVIEW_VALUE_MAX_CHARS + 1);
+        let cut = truncate_chars_with_ellipsis(&long, PREVIEW_VALUE_MAX_CHARS);
+        assert_eq!(cut.chars().count(), PREVIEW_VALUE_MAX_CHARS, "{counted}");
+        assert!(cut.ends_with("é…"), "{counted}");
+    }
 
     fn report(
         transmission: crate::transport::TransmissionState,

@@ -271,6 +271,8 @@ fn type_mismatch(path: &str, expected: &'static str, actual: &Value) -> ReturnVa
     }
 }
 
+/// Kept here rather than shared with plexus-core's `text` helpers: plexus-core
+/// depends on this crate, so this crate cannot depend on it.
 fn field_preview(field: &str) -> String {
     let mut characters = field.chars();
     let mut preview: String = characters.by_ref().take(64).collect();

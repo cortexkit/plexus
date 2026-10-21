@@ -3742,7 +3742,7 @@ fn probe_run_outcome(error: &ProbeError) -> PollCycle {
         _ => PollCycle::Suspended {
             reason: format!(
                 "{code}: {}",
-                error.to_string().chars().take(512).collect::<String>()
+                crate::text::prefix_within_chars(&error.to_string(), 512).0
             ),
         },
     }

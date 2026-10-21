@@ -384,7 +384,7 @@ const REFUSAL_MESSAGE_LOG_LIMIT: usize = 4096;
 fn refusal_log_line(code: &str, message: &str) -> String {
     format!(
         "local MCP adapter refused '{code}': {}",
-        crate::http_support::truncate_utf8(message, REFUSAL_MESSAGE_LOG_LIMIT)
+        crate::text::prefix_within_bytes(message, REFUSAL_MESSAGE_LOG_LIMIT)
     )
 }
 
