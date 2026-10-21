@@ -14,7 +14,7 @@ pub(super) fn actions_runtime() -> (Arc<ModuleState>, Arc<PlexusStore>, Arc<Mock
         let schema = action.http.as_ref().unwrap().args_schema.clone();
         store.upsert_catalog_action(&plexus_core::CatalogActionInput {
             principal: "direct".into(), connection_id: CONNECTION.into(), name: action.name.clone(), title: None,
-            schema_hash: plexus_core::jcs_sha256(&schema).unwrap(), schema, risk: "read".into(), severity: "read".into(),
+            schema_hash: plexus_core::jcs_sha256(&schema).unwrap(), schema, risk: "read".into(), severity: "S1".into(),
             status: "active".into(), quarantine_reason: None, reconciliation: None, ask_first: false,
         }).unwrap();
     }

@@ -6640,7 +6640,7 @@ mod tests {
                 schema: schema.clone(),
                 schema_hash: plexus_core::jcs_sha256(&schema).expect("test JSON is JCS-compatible"),
                 risk: "write".to_string(),
-                severity: "write".to_string(),
+                severity: "S2".to_string(),
                 status: "active".to_string(),
                 quarantine_reason: None,
                 reconciliation: None,
