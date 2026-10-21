@@ -188,6 +188,13 @@ pub(crate) fn resolve_connection(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Policy lookups made on this thread, so a test can show a search reads
+    /// policy no more often than it needs to.
+    pub(crate) static POLICY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The policy effect governance would apply to `action` on `connection`:
 /// the governing policy's effect, or the action's ask-first default when no
 /// policy matches.
@@ -198,6 +205,8 @@ pub(crate) fn policy_effect(
     action: &CatalogAction,
     now_ms: i64,
 ) -> Result<&'static str, SearchDenial> {
+    #[cfg(test)]
+    POLICY_READS.with(|reads| reads.set(reads.get() + 1));
     let policy = store
         .matching_policy(
             &connection.principal,

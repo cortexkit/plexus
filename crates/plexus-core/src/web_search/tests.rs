@@ -422,3 +422,87 @@ fn the_search_row_joins_the_engine_rows_by_request_id() {
         "the search row must carry the engine's request id"
     );
 }
+
+/// A cache hit reads policy once: the standing checks already required the
+/// policy to allow the search outright at the same instant, so a second read
+/// before serving the hit adds a store round trip and nothing else. Holds for
+/// the compatibility path and for an ordered walk's hit.
+#[test]
+fn a_cache_hit_reads_policy_once() {
+    let (engine, transport) = granted_exa_engine("cache-hit-policy-reads");
+    let service =
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000));
+    transport.set_response(crate::MockResponse::Success(json!({"results": []})));
+    for path in ["compatibility", "ordered"] {
+        if path == "ordered" {
+            engine
+                .store()
+                .set_web_search_order(&["exa".to_string()])
+                .unwrap();
+        }
+        let args = json!({"query": format!("read once {path}")});
+        assert!(
+            !service
+                .search(&engine, "direct", args.as_object().unwrap())
+                .unwrap()
+                .cached
+        );
+        facade::POLICY_READS.with(|reads| reads.set(0));
+        assert!(
+            service
+                .search(&engine, "direct", args.as_object().unwrap())
+                .unwrap()
+                .cached
+        );
+        assert_eq!(
+            facade::POLICY_READS.with(|reads| reads.get()),
+            1,
+            "a {path} cache hit must read policy once"
+        );
+    }
+}
+
+/// A cache hit's search row is the only record of the governed read, so a
+/// hit whose row cannot be written is withheld. A dispatched search, which
+/// the engine's own rows record, is still returned when its search row fails.
+#[test]
+fn an_unrecorded_cache_hit_is_withheld() {
+    let (engine, transport, path) = granted_exa_engine_with_path("unrecorded-cache-hit");
+    let service =
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000));
+    transport.set_response(crate::MockResponse::Success(json!({"results": [
+        {"url": "https://a.example/", "title": "A"}
+    ]})));
+    let db = rusqlite::Connection::open(&*path).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER refuse_search_rows BEFORE INSERT ON audit_journal
+         WHEN NEW.gate = 'web_search'
+         BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+    )
+    .unwrap();
+    let args = json!({"query": "unrecorded"});
+    let dispatched = service
+        .search(&engine, "direct", args.as_object().unwrap())
+        .expect("a dispatched search is returned even when its search row fails");
+    assert!(!dispatched.cached);
+    assert_eq!(
+        service.search(&engine, "direct", args.as_object().unwrap()),
+        Err(WebSearchRefusal::BackendUnavailable {
+            backend: "exa".into()
+        }),
+        "a cache hit whose audit row cannot be written must be withheld"
+    );
+    db.execute_batch("DROP TRIGGER refuse_search_rows").unwrap();
+    assert!(
+        service
+            .search(&engine, "direct", args.as_object().unwrap())
+            .unwrap()
+            .cached,
+        "once the row can be written the same entry is served"
+    );
+    assert_eq!(
+        transport.requests().len(),
+        1,
+        "the withheld hit sent nothing"
+    );
+}

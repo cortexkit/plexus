@@ -20520,7 +20520,7 @@ runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search_tests::web_search_admin_tests::code_search_limits_are_settable_and_report_the_replaced_row"]
+expect_red = ["web_search_tests::admin::code_search_limits_are_settable_and_report_the_replaced_row"]
 expect_message = "the code_search backend's limits must be settable"
 build_timeout_s = 3600
 timeout_s = 120
@@ -20536,7 +20536,7 @@ runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search_tests::web_search_admin_tests::code_search_limits_are_settable_and_report_the_replaced_row"]
+expect_red = ["web_search_tests::admin::code_search_limits_are_settable_and_report_the_replaced_row"]
 expect_message = "the reply must report the row the write replaced"
 build_timeout_s = 3600
 timeout_s = 120
@@ -20650,5 +20650,37 @@ target = "--lib"
 select = "expected"
 expect_red = ["code_search::tests::a_dispatched_search_row_states_what_reached_the_vendor"]
 expect_message = "the search row must state what reached the vendor"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-cache-hit-single-policy-read"
+guards = "A compatibility web_search cache hit reads policy once, in the standing checks, not again before serving"
+file = "crates/plexus-core/src/web_search/mod.rs"
+old = "        if let Some(results) = self.cache.get(&key, now_ms) {\n            return Ok(WebSearchResponse {"
+new = "        if let Some(results) = self.cache.get(&key, now_ms) {\n            let _ = self.policy_effect(store, &connection, &action, now_ms); /* NON-VACUITY BREAK */\n            return Ok(WebSearchResponse {"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::a_cache_hit_reads_policy_once"]
+expect_message = "a compatibility cache hit must read policy once"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-unrecorded-cache-hit-withheld"
+guards = "A web_search cache hit whose only audit row cannot be written is withheld rather than served unrecorded"
+file = "crates/plexus-core/src/web_search/mod.rs"
+old = "            Ok(response) if response.cached && recorded.is_err() => {"
+new = "            Ok(response) if false && response.cached && recorded.is_err() => { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::an_unrecorded_cache_hit_is_withheld"]
+expect_message = "a cache hit whose audit row cannot be written must be withheld"
 build_timeout_s = 3600
 timeout_s = 120

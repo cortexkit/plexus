@@ -339,8 +339,26 @@ impl WebSearchService {
             chain: None,
         };
         let outcome = self.run(engine, arguments, now_ms, &mut audit);
-        self.write_audit(engine.store(), &audit, &outcome);
-        outcome
+        let recorded = self.write_audit(engine.store(), &audit, &outcome);
+        match outcome {
+            // A cache hit writes no engine rows, so its search row is the only
+            // record that the governed read happened. Served without it, the
+            // read would leave no audit trail, so it is withheld. Nothing was
+            // sent and nothing charged back; a retry once the store recovers
+            // serves the same entry. A dispatched search keeps the engine's
+            // own rows as its record and is still returned.
+            Ok(response) if response.cached && recorded.is_err() => {
+                eprintln!(error web_search:
+                    "web_search cache hit for {} on {:?} withheld: its audit row could not be written",
+                    audit.search.caller,
+                    audit.search.connection_id
+                );
+                Err(WebSearchRefusal::BackendUnavailable {
+                    backend: response.backend,
+                })
+            }
+            outcome => outcome,
+        }
     }
 
     fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
@@ -402,12 +420,11 @@ impl WebSearchService {
 
         // Search is authorized by the carrier's module grant. The stamped agent
         // supplies attribution and a rate-limit key, not a second grant layer.
-        // Only after that grant and the rate limit are checked may the shared
-        // cache answer, and only if policy would let the engine dispatch this
-        // search. The cache saves the vendor call; it does not bypass policy.
+        // Only after that grant, the standing checks (policy allows the search
+        // outright) and the rate limit pass may the shared cache answer. The
+        // cache saves the vendor call; it does not bypass policy.
         let key = CacheKey::new(backend.name(), &query);
         if let Some(results) = self.cache.get(&key, now_ms) {
-            self.cached_read_policy(store, &connection, &action, now_ms, is_flow)?;
             return Ok(WebSearchResponse {
                 results,
                 backend: backend.name().to_string(),
@@ -519,33 +536,6 @@ impl WebSearchService {
         .map_err(|denial| self.refusal_from(denial))
     }
 
-    /// Apply the policy the engine would apply before dispatching `action`.
-    /// It uses the same governing-policy selection and the same default (the
-    /// action's ask-first flag when no policy matches). Only `allow` admits a
-    /// cached read. `block` refuses, and so does `ask_first`, because a cache hit
-    /// never parks an approval request. Unknown effects count as `block`.
-    fn cached_read_policy(
-        &self,
-        store: &PlexusStore,
-        connection: &ConnectionRecord,
-        action: &CatalogAction,
-        now_ms: i64,
-        _is_flow: bool,
-    ) -> Result<(), WebSearchRefusal> {
-        let effect = self.policy_effect(store, connection, action, now_ms)?;
-        if effect == "allow" {
-            return Ok(());
-        }
-        if crate::governance::per_call_approval_unsupported(effect, false) {
-            return Err(WebSearchRefusal::PerCallApprovalUnsupported);
-        }
-        eprintln!(warn web_search:
-            "web_search cache hit refused by policy ({effect}) on {}",
-            connection.connection_id
-        );
-        Err(WebSearchRefusal::PolicyBlocked)
-    }
-
     pub fn grant_target(caller: &str) -> crate::grant_refusal::GrantTarget {
         crate::grant_refusal::GrantTarget::new(
             crate::grant_refusal::Layer::Module,
@@ -620,7 +610,7 @@ impl WebSearchService {
         store: &PlexusStore,
         audit: &CallAudit,
         outcome: &Result<WebSearchResponse, WebSearchRefusal>,
-    ) {
+    ) -> Result<(), cortexkit_store::StoreError> {
         let row = match outcome {
             Ok(response) if response.cached => facade::RowOutcome {
                 decision: "allow",
@@ -663,7 +653,7 @@ impl WebSearchService {
         // not credentials. The query is kept as text for the journal's normal
         // retention window (30 days by default) and ages out with the row.
         // Nothing credential-derived is written here.
-        let _ = audit.search.append(store, app_key, action, summary, row);
+        audit.search.append(store, app_key, action, summary, row)
     }
 }
 

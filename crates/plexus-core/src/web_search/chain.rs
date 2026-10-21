@@ -244,8 +244,8 @@ impl WebSearchService {
                 target,
             )
             .ok()?;
-        self.cached_read_policy(store, &connection, &action, now_ms, is_flow)
-            .ok()?;
+        // Policy must allow the search outright: a cache hit never parks an
+        // approval request, so ask_first refuses here like block does.
         self.standing_checks(store, &connection, &action, now_ms)
             .ok()?;
         let instance = instance_digest(provider.name, backend.as_ref(), &connection).ok()?;
