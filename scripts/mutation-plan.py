@@ -3,11 +3,39 @@
 
 Selection mirrors the pinned ckdev-mutate runner: changed edit/test paths,
 changed controls or prebuilds, followed by sorted-ID modulo sharding.
+
+Which rows run depends on the event:
+
+- A train push replays the rows its diff against origin/main touches. A commit
+  reaches main only after its train's run went green on that exact commit (the
+  pre-push hook and scripts/train.sh both enforce this), so every touched row
+  has already been replayed by the time main moves.
+- A push to main therefore replays nothing. Replaying the whole catalogue there
+  would repeat the train's work on the same commit and costs many runner-hours
+  per landing.
+- The nightly schedule and manual dispatch replay every row with --broad. That
+  run catches interactions between changes that no single train's diff selects.
+- Pull requests replay nothing; the mutation job also excludes them.
+
+The shard count grows with the selection so each shard stays well inside the
+mutation job's 180-minute limit.
 """
 import argparse
 import json
+import math
 import subprocess
 import tomllib
+
+# Rows one shard replays at most. A diff or --all replay runs only each row's
+# named tests. A --broad replay runs every test target of the row's package, so
+# a row takes longer and a shard gets fewer of them. Measured on GitHub's hosted
+# runners, one shard of 292 broad rows took 166 minutes, and shards of about 246
+# plain rows did not all finish inside the 180-minute limit. These sizes leave a
+# shard roughly half its time to spare.
+ROWS_PER_SHARD = 120
+BROAD_ROWS_PER_SHARD = 80
+# Upper bound on runners one CI run allocates for mutation proofs.
+MAX_SHARDS = 16
 
 
 def selected_rows(current, baseline, changed):
@@ -19,12 +47,37 @@ def selected_rows(current, baseline, changed):
                 (row.get("edits") or [{"file": row.get("file")}]))]
 
 
+def shard_total(count, broad):
+    """Shards for `count` selected rows; 0 when nothing is selected."""
+    if not count:
+        return 0
+    per_shard = BROAD_ROWS_PER_SHARD if broad else ROWS_PER_SHARD
+    return min(MAX_SHARDS, max(1, math.ceil(count / per_shard)))
+
+
+def selection_for(event, ref):
+    """The ckdev-mutate selection flags for a CI event; empty selects nothing."""
+    if event == "push" and ref.startswith("refs/heads/train/"):
+        return "--diff origin/main"
+    if event in ("schedule", "workflow_dispatch"):
+        return "--all --broad"
+    # A main push lands a commit whose train already replayed every touched
+    # row; pull requests never allocate mutation runners.
+    return ""
+
+
 def plan(rows, event, ref):
-    selection = ("--diff origin/main" if event == "push" and ref.startswith("refs/heads/train/")
-                 else "--all" if event == "push" and ref == "refs/heads/main"
-                 else "--all --broad" if event in ("schedule", "workflow_dispatch") else "")
+    return plan_selection(rows, selection_for(event, ref))
+
+
+def plan_selection(rows, selection):
     count = len(rows) if selection else 0
-    return {"matrix": {"shard": list(range(1, min(4, count) + 1))},
+    total = shard_total(count, "--broad" in selection.split())
+    # The mutation job reads `total` from the matrix for its name and its
+    # --shard i/n argument. With no rows the job is skipped, so the empty
+    # matrix carries no total.
+    matrix = {"shard": list(range(1, total + 1)), "total": [total]} if total else {"shard": []}
+    return {"matrix": matrix,
             "selection": selection, "has_mutations": bool(count), "count": count}
 
 
@@ -49,7 +102,7 @@ def main():
     if base_ref is None and args.event == "push" and args.ref.startswith("refs/heads/train/"):
         # With no main branch yet, as in a fresh repository or a fork, there is
         # nothing to compare against, so every control counts as touched.
-        result = plan(rows, "push", "refs/heads/main")
+        result = plan_selection(rows, "--all")
     elif base_ref:
         changed = set(subprocess.check_output(
             ["git", "diff", "--name-only", "-z", base_ref, "HEAD", "--"]

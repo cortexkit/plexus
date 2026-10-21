@@ -83,16 +83,22 @@ named assertion with the other tests accounted for.
 ### CI
 
 [CI](../.github/workflows/ci.yml) validates the catalogue in the Linux Test job
-and replays selected controls in one to four nonempty mutation shards. Train
-pushes select changed rows with `--diff origin/main`; main pushes deliberately
-verify the full catalogue independently of a train run. Later main pushes do
-not cancel a running main audit. The nightly schedule at 03:23 UTC and manual
-runs select all rows with `--broad`. Only CAUGHT and HUB are accepted, and JSON
-reports are uploaded even when a shard fails.
+and replays selected controls in nonempty mutation shards. The planner
+(`scripts/mutation-plan.py`) sizes the shard count to the selection: one shard
+per 120 rows for a train replay, one per 80 rows for a broad replay, at most 16,
+so each shard finishes inside the job's 180-minute limit. Train pushes select
+changed rows with `--diff origin/main`. Main pushes replay nothing: a commit
+reaches main only after its train's run replayed every touched row on that
+exact commit, which the pre-push hook and `scripts/train.sh` enforce. The
+nightly schedule at 03:23 UTC and manual runs replay all rows with `--broad`,
+which catches interactions between changes that no single train's diff
+selects. Only CAUGHT and HUB are accepted, and JSON reports are uploaded even
+when a shard fails.
 
 The planner computes selection before shard allocation, and the replay step
 passes it to the mutation runner. `scripts/check-train-preconditions.sh` refuses
 ref- or event-dependent job and step conditions except the explicit PR exclusion
-on the mutation job. Train and main execute the same CI steps; fork PRs allocate
-no mutation runners. Concurrency groups include the event name so main pushes
+on the mutation job. Train and main execute the same CI steps; main skips only
+the mutation shards its train already ran, and fork PRs allocate no mutation
+runners. Concurrency groups include the event name so main pushes
 cannot cancel the nightly broad replay on the same ref.

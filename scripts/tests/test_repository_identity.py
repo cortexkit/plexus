@@ -109,7 +109,8 @@ exec "{real_git}" "$@"
         self.assertEqual(len(identity_calls), 1)
 
     def test_hook_accepts_skipped_mutation_shards_only_beside_a_green_test_job(self):
-        shard = "Mutation proofs (${{ matrix.shard }}/4)\\tskipped"
+        # A skipped matrix job keeps its unexpanded name.
+        shard = "Mutation proofs (${{ matrix.shard }}/${{ matrix.total }})\\tskipped"
         accepted = self.hook(MOCK_VERDICTS=f"Test (ubuntu)\\tsuccess\\n{shard}")
         self.assertEqual(accepted.returncode, 0, accepted.stderr)
         for label, verdicts, message in [
@@ -119,12 +120,29 @@ exec "{real_git}" "$@"
             # must not excuse a skipped shard.
             ("another green check but no test job", f"Lint\\tsuccess\\n{shard}", "not every check is green"),
             ("another skipped check", "Test (ubuntu)\\tsuccess\\nLint\\tskipped", "not every check is green"),
-            ("a failed shard", "Test (ubuntu)\\tsuccess\\nMutation proofs (1/4)\\tfailure", "not every check is green"),
+            ("a failed shard", "Test (ubuntu)\\tsuccess\\nMutation proofs (1/9)\\tfailure", "not every check is green"),
         ]:
             with self.subTest(label=label):
                 refused = self.hook(MOCK_VERDICTS=verdicts)
                 self.assertEqual(refused.returncode, 1, refused.stderr)
                 self.assertIn(message, refused.stderr)
+
+    # The planner sizes the shard count to the selection, so the hook must not
+    # depend on any particular count of shards.
+    def test_hook_reads_every_shard_of_a_sized_mutation_matrix(self):
+        shards = [f"Mutation proofs ({i}/9)" for i in range(1, 10)]
+        green = "\\n".join(["Test (ubuntu)\\tsuccess"] + [f"{name}\\tsuccess" for name in shards])
+        accepted = self.hook(MOCK_VERDICTS=green)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        for red_shard in (1, 6, 9):
+            with self.subTest(red_shard=red_shard):
+                verdicts = "\\n".join(["Test (ubuntu)\\tsuccess"] + [
+                    f"{name}\\t{'failure' if i == red_shard else 'success'}"
+                    for i, name in enumerate(shards, start=1)])
+                refused = self.hook(MOCK_VERDICTS=verdicts)
+                self.assertEqual(refused.returncode, 1, refused.stderr)
+                self.assertIn("not every check is green", refused.stderr)
+                self.assertIn("failure", refused.stderr)
 
     def test_hook_accepts_renamed_repository_with_the_same_id(self):
         for url in ["https://github.com/cortexkit/plexus-private.git",

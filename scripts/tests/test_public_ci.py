@@ -51,6 +51,16 @@ class PublicCiTests(unittest.TestCase):
         self.assertEqual(toolchain["with"]["toolchain"], "1.99.0")
         self.assertIn("bash scripts/build-probe-guest.sh --check", [step.get("run") for step in job["steps"]])
 
+    def test_mutation_shards_take_their_count_from_the_planned_matrix(self):
+        # The planner sizes the matrix to the selection; a fixed count here
+        # would replay only some of the selected rows or name shards wrongly.
+        job = self.jobs["mutations"]
+        self.assertEqual(job["name"], "Mutation proofs (${{ matrix.shard }}/${{ matrix.total }})")
+        self.assertEqual(job["strategy"]["matrix"], "${{ fromJSON(needs.test.outputs.mutation-matrix) }}")
+        replay = next(step for step in job["steps"] if step.get("name") == "Replay selected mutation proofs")
+        self.assertEqual(replay["env"]["MUTATION_SHARD"], "${{ matrix.shard }}/${{ matrix.total }}")
+        self.assertIn('--shard "$MUTATION_SHARD"', replay["run"])
+
     def test_mutation_jobs_only_restore_the_public_build_cache(self):
         caches = [step for step in self.jobs["mutations"]["steps"] if step.get("name") == "Restore Rust build"]
         self.assertEqual(len(caches), 1)

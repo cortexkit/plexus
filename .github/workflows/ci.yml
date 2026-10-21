@@ -20,7 +20,7 @@ concurrency:
   # The nightly schedule runs the full catalogue with --broad on main. A group
   # shared with main pushes would let a push cancel that audit before it finishes.
   group: ci-${{ github.event_name }}-${{ github.ref }}
-  # Main's full verification is independent of the train run and must finish.
+  # Main's own run is independent of the train run and must finish.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -204,7 +204,9 @@ jobs:
         run: bash scripts/build-probe-guest.sh --check
 
   mutations:
-    name: Mutation proofs (${{ matrix.shard }}/4)
+    # The Test job's planner sizes the matrix to the selection, so `total` is
+    # the shard count of this run, not a fixed number.
+    name: Mutation proofs (${{ matrix.shard }}/${{ matrix.total }})
     needs: test
     # scripts/mutation-plan.py selects no mutation proofs for PR events. Exclude them
     # here too, so fork PRs cannot allocate runners for empty replay jobs.
@@ -269,12 +271,15 @@ jobs:
         run: cargo install --locked --git https://github.com/cortexkit/commons --rev "$MUTATE_RUNNER_REV" cortexkit-mutate
 
       # Each control deliberately breaks source and checks that a named test fails.
-      # Train replays controls whose source/test files or definitions
-      # changed; main/nightly replay the full catalogue.
+      # A train replays controls whose source/test files or definitions changed.
+      # A main push replays nothing: the commit already passed its train's
+      # replay of every touched row. The nightly schedule and manual dispatch
+      # replay the full catalogue with --broad, which catches interactions
+      # between changes that no single train's diff selects.
       # The Test job plans this selection before any shard runner is allocated.
       - name: Replay selected mutation proofs
         env:
-          MUTATION_SHARD: ${{ matrix.shard }}/4
+          MUTATION_SHARD: ${{ matrix.shard }}/${{ matrix.total }}
           MUTATION_SELECTION: ${{ needs.test.outputs.mutation-selection }}
         run: |
           set -euo pipefail

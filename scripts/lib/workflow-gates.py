@@ -42,7 +42,10 @@ Usage:
 each one that no longer holds: the push trigger runs on train branches
 (including nested names such as train/a/b) and on main, no job or step `if:`
 changes the gates between train and main pushes, and the concurrency group is
-per-ref. The planner-driven mutation job explicitly excludes PR events.
+per-ref. The planner-driven mutation job explicitly excludes PR events. Its
+other condition reads only the planner's output, which selects rows for train
+pushes and selects none for main pushes, so a main push can skip mutation
+shards that its train already ran but never runs a gate its train skipped.
 """
 
 from __future__ import annotations
@@ -363,7 +366,10 @@ PER_REF_GROUP = re.compile(r"\bgithub\.(?:ref|ref_name)\b")
 
 def classify(condition: str) -> str | None:
     """ref = provably dead under trains, warn = depends on the landing path."""
-    # This exact planner-driven exclusion treats train and main pushes alike.
+    # This exact planner-driven exclusion names no ref. Whether shards run on a
+    # push depends only on the planner's selection, which replays touched rows
+    # on train pushes and nothing on main pushes; main never runs a mutation
+    # shard that its train skipped, so the landing flow loses no gate.
     # Do not allow arbitrary event expressions: an OR or a ref clause could
     # silently skip a gate that the landing flow relies on.
     if condition == "github.event_name != 'pull_request' && needs.test.outputs.has-mutations == 'true'":

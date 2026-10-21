@@ -184,10 +184,36 @@ esac
         planner = load_script('mutation-plan')
         rows = [{"id":str(i), "file":"source", "test_file":"tests"} for i in range(5)]
         self.assertEqual(planner.plan(rows, 'pull_request', 'refs/pull/1/merge')['matrix'], {"shard":[]}, "PRs must not allocate mutation runners")
-        self.assertEqual(planner.plan(rows[:1], 'push', 'refs/heads/train/x')['matrix'], {"shard":[1]}, "empty shards must not allocate runners")
+        self.assertEqual(planner.plan(rows[:1], 'push', 'refs/heads/train/x')['matrix'], {"shard":[1], "total":[1]}, "empty shards must not allocate runners")
         current = {"control":rows}
         self.assertEqual(planner.selected_rows(current, current, {'docs'}), [])
         self.assertEqual(planner.selected_rows(current, current, {'source'}), rows)
         self.assertEqual(planner.selected_rows(current, current, {'tests'}), rows)
         self.assertEqual(planner.selected_rows({**current, 'prebuild':['build']}, current, set()), rows)
         self.assertEqual(planner.selected_rows({'control':rows + [{'id':'new'}]}, current, set()), [{'id':'new'}])
+
+    # A shard holds at most 120 plain rows or 80 broad ones, so each finishes
+    # inside the mutation job's 180-minute limit; the matrix names every shard
+    # and the total each one passes to `ckdev-mutate run --shard i/n`.
+    def test_mutation_shards_are_sized_to_the_selection(self):
+        planner = load_script('mutation-plan')
+        rows = lambda count: [{"id": str(i)} for i in range(count)]
+        for count, selection, total in [(0, "--diff origin/main", 0), (1, "--diff origin/main", 1),
+                                        (120, "--diff origin/main", 1), (121, "--diff origin/main", 2),
+                                        (983, "--diff origin/main", 9), (240, "--all", 2),
+                                        (80, "--all --broad", 1), (81, "--all --broad", 2)]:
+            with self.subTest(count=count, selection=selection):
+                result = planner.plan_selection(rows(count), selection)
+                expected = {"shard": list(range(1, total + 1)), "total": [total]} if total else {"shard": []}
+                self.assertEqual(result['matrix'], expected, "shards must be sized to the selection")
+                self.assertEqual(result['count'], count)
+                self.assertEqual(result['has_mutations'], bool(count))
+
+    # 1,369 broad rows would need 18 shards of 80; the cap holds them at 16.
+    def test_mutation_shard_count_is_capped_at_sixteen(self):
+        planner = load_script('mutation-plan')
+        for count, selection in ((1369, "--all --broad"), (100_000, "--diff origin/main"), (100_000, "--all --broad")):
+            with self.subTest(count=count, selection=selection):
+                result = planner.plan_selection([{"id": str(i)} for i in range(count)], selection)
+                self.assertEqual(result['matrix'], {"shard": list(range(1, 17)), "total": [16]},
+                                 "a huge selection must not allocate more than 16 shard runners")

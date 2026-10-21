@@ -1,4 +1,4 @@
-"""Mutation shard planning for train pushes, with and without a main branch."""
+"""Mutation selection per CI event, and train pushes with and without a main branch."""
 
 import subprocess
 import sys
@@ -27,8 +27,8 @@ def git(cwd, *args):
                         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"})
 
 
-def plan(cwd):
-    output = subprocess.run([sys.executable, str(PLAN), "--event", "push", "--ref", "refs/heads/train/x"],
+def plan(cwd, event="push", ref="refs/heads/train/x"):
+    output = subprocess.run([sys.executable, str(PLAN), "--event", event, "--ref", ref],
                             cwd=cwd, check=True, capture_output=True, text=True).stdout
     return dict(line.split("=", 1) for line in output.splitlines())
 
@@ -57,6 +57,30 @@ class MutationPlanTests(unittest.TestCase):
         result = plan(self.repo)
         self.assertEqual(result["selection"], "--diff " + head)
         self.assertEqual(result["count"], "0")
+        self.assertEqual(result["has-mutations"], "false")
+        self.assertEqual(result["matrix"], '{"shard":[]}')
+
+    # A commit lands on main only after its train replayed every touched row on
+    # that exact commit, so a main push replaying the catalogue again would only
+    # repeat that work. The broad nightly replay covers the whole catalogue.
+    def test_main_push_selects_no_mutation_proofs(self):
+        result = plan(self.repo, "push", "refs/heads/main")
+        self.assertEqual(result["selection"], "", "a main push must not replay mutation proofs")
+        self.assertEqual(result["count"], "0")
+        self.assertEqual(result["has-mutations"], "false")
+        self.assertEqual(result["matrix"], '{"shard":[]}')
+
+    def test_schedule_and_dispatch_replay_every_row_broadly(self):
+        for event in ("schedule", "workflow_dispatch"):
+            with self.subTest(event=event):
+                result = plan(self.repo, event, "refs/heads/main")
+                self.assertEqual(result["selection"], "--all --broad")
+                self.assertEqual(result["count"], "2")
+                self.assertEqual(result["has-mutations"], "true")
+
+    def test_pull_requests_select_no_mutation_proofs(self):
+        result = plan(self.repo, "pull_request", "refs/pull/1/merge")
+        self.assertEqual(result["selection"], "")
         self.assertEqual(result["has-mutations"], "false")
 
 
