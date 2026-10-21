@@ -2282,3 +2282,16 @@ fn credential_debug_never_exposes_secret_material() {
         "credential_public must never appear in Debug: {debug_str}"
     );
 }
+
+/// The first ten outbox reconnect delays, as the bus computed them before its
+/// doubling moved into `plexus_core::backoff`.
+#[test]
+fn outbox_reconnect_backoff_is_pinned_for_its_first_ten_steps() {
+    let steps: Vec<u64> = (0..10).map(|n| reconnect_backoff(n).as_secs()).collect();
+    assert_eq!(
+        steps,
+        [1, 2, 4, 8, 16, 32, 64, 128, 256, 300],
+        "backoff step"
+    );
+    assert_eq!(reconnect_backoff(u32::MAX), Duration::from_secs(300));
+}

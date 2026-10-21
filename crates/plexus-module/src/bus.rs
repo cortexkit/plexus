@@ -961,7 +961,9 @@ async fn wait_for_claim_loss(state: &ModuleState) {
 // A full batch can have more rows behind it; otherwise a notification or the
 // fallback timer starts the next pass.
 fn reconnect_backoff(failures: u32) -> Duration {
-    Duration::from_secs(1u64 << failures.min(9)).min(Duration::from_secs(300))
+    Duration::from_millis(plexus_core::backoff::doubling_ms(
+        1_000, failures, 9, 300_000,
+    ))
 }
 
 async fn wait_for_outbox(store: &PlexusStore, delay: Duration, failures: u32) {

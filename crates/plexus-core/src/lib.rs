@@ -175,6 +175,7 @@ macro_rules! eprintln {
 pub mod actor_attribution;
 pub mod agent_registry;
 pub mod agent_retirement;
+pub mod backoff;
 #[cfg(test)]
 #[path = "../tests/support/bounded.rs"]
 pub(crate) mod bounded;

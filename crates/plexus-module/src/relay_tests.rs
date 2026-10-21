@@ -3020,3 +3020,25 @@ fn credential_id_is_the_public_field_only() {
     }
     assert_eq!(credential_id(b"\xff\xfe"), None);
 }
+
+/// The first ten reconnect delays and credential recheck delays, as the relay
+/// computed them before its doubling moved into `plexus_core::backoff`.
+#[test]
+fn relay_backoff_sequences_are_pinned_for_their_first_ten_steps() {
+    let reconnect: Vec<u64> = (0..10).map(|n| backoff(n).as_secs()).collect();
+    assert_eq!(
+        reconnect,
+        [1, 2, 4, 8, 16, 32, 64, 128, 256, 300],
+        "backoff step"
+    );
+    assert_eq!(backoff(u32::MAX), Duration::from_secs(300));
+    let mut next = INITIAL_CREDENTIAL_RECHECK;
+    let recheck: Vec<u64> = (0..10)
+        .map(|_| credential_recheck_delay(&mut next).as_secs())
+        .collect();
+    assert_eq!(
+        recheck,
+        [5, 10, 20, 40, 80, 160, 300, 300, 300, 300],
+        "backoff step"
+    );
+}

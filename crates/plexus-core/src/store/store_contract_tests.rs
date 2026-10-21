@@ -1101,7 +1101,9 @@ fn reconciliation_backoff_grows_from_five_seconds_to_sixty() {
         occurred_at_ms: now,
     };
     store.enqueue_write_reconciliation(&record, None).unwrap();
-    for delay in [5000, 10000, 20000, 40000, 60000, 60000] {
+    for delay in [
+        5000, 10000, 20000, 40000, 60000, 60000, 60000, 60000, 60000, 60000,
+    ] {
         store.backoff_write_reconciliation(&record, now).unwrap();
         assert!(
             store
@@ -1116,6 +1118,35 @@ fn reconciliation_backoff_grows_from_five_seconds_to_sixty() {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+}
+#[test]
+fn reconciliation_retry_delay_is_pinned_for_its_first_ten_attempt_counts() {
+    let steps: Vec<i64> = (0..10)
+        .map(crate::storage::reconciliation_retry_delay_ms)
+        .collect();
+    assert_eq!(
+        steps,
+        [5000, 10000, 20000, 40000, 60000, 60000, 60000, 60000, 60000, 60000],
+        "backoff step"
+    );
+    // SQLite's `1 << -1` is 0, so the replaced formula waited nothing here.
+    assert_eq!(crate::storage::reconciliation_retry_delay_ms(-1), 0);
+    // The SQL expression this replaced, evaluated by SQLite itself.
+    let sqlite = rusqlite::Connection::open_in_memory().unwrap();
+    for attempts in -3..10_i64 {
+        let replaced: i64 = sqlite
+            .query_row(
+                "SELECT MIN(60000,5000 * (1 << MIN(?1,4)))",
+                [attempts],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            crate::storage::reconciliation_retry_delay_ms(attempts),
+            replaced,
+            "attempts {attempts}"
         );
     }
 }

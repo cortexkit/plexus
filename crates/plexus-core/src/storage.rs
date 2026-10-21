@@ -52,6 +52,17 @@ pub(crate) const RESERVATION_RETENTION_MS: i64 = AUDIT_MILLIS_PER_DAY;
 const RESERVATION_RETENTION_BATCH_ROWS: usize = AUDIT_RETENTION_BATCH_ROWS;
 const CEREMONY_RETENTION_BATCH_ROWS: i64 = AUDIT_RETENTION_BATCH_ROWS as i64;
 const RECONCILIATION_BATCH_ROWS: i64 = 1_000;
+
+/// How long a write reconciliation waits before its next retry after
+/// `attempts` earlier retries: five seconds, doubling, at most one minute. The
+/// stored count never exceeds four. A negative count, which only a hand-edited
+/// row could hold, waits nothing, as the SQL formula this replaced did.
+pub(crate) fn reconciliation_retry_delay_ms(attempts: i64) -> i64 {
+    if attempts < 0 {
+        return 0;
+    }
+    crate::backoff::doubling_ms(5_000, attempts.min(4) as u32, 4, 60_000) as i64
+}
 const SUBSCRIPTION_EVENTS_PREDICATE: &str = "principal = ?1 AND subscription_id = ?2";
 const BINDING_TICKET_TTL_MS: i64 = 60_000;
 const MAX_DIAGNOSTIC_ACTION_CHARS: usize = 80;
@@ -11093,7 +11104,20 @@ impl PlexusStore {
         now: i64,
     ) -> Result<(), StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            conn.execute("UPDATE pending_write_reconciliations SET next_attempt_at_ms=?3 + MIN(60000,5000 * (1 << MIN(retry_attempts,4))), retry_attempts=MIN(retry_attempts+1,4) WHERE principal=?1 AND request_id=?2",rusqlite::params![record.principal,record.request_id,now])?;
+            // Read the attempt count and write the next attempt under the same
+            // writer, so the delay is computed in Rust by the shared backoff.
+            let attempts: Option<i64> = conn
+                .query_row(
+                    "SELECT retry_attempts FROM pending_write_reconciliations WHERE principal=?1 AND request_id=?2",
+                    rusqlite::params![record.principal, record.request_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(attempts) = attempts else {
+                return Ok(());
+            };
+            let delay_ms = reconciliation_retry_delay_ms(attempts);
+            conn.execute("UPDATE pending_write_reconciliations SET next_attempt_at_ms=?3 + ?4, retry_attempts=MIN(retry_attempts+1,4) WHERE principal=?1 AND request_id=?2",rusqlite::params![record.principal,record.request_id,now,delay_ms])?;
             Ok(())
         })
     }
