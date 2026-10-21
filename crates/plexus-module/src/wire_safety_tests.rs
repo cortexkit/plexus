@@ -266,28 +266,6 @@ fn health_report_reads_the_last_store_snapshot() {
 }
 
 #[test]
-#[ignore = "manual performance measurement"]
-fn measure_static_catalog_and_reply_rendering() {
-    let started = std::time::Instant::now();
-    for _ in 0..100 {
-        std::hint::black_box(
-            tool_provider::reply(
-                cortexkit_role_tool_provider::ops::TOOL_CATALOG,
-                &serde_json::Map::new(),
-            )
-            .unwrap(),
-        );
-    }
-    println!("catalog_100_us={}", started.elapsed().as_micros());
-    let payload = json!({"result":{"body":"x".repeat(200_000)}});
-    let started = std::time::Instant::now();
-    for _ in 0..100 {
-        std::hint::black_box(with_call_tool_result(Some("events_get"), payload.clone()));
-    }
-    println!("render_200KB_100_us={}", started.elapsed().as_micros());
-}
-
-#[test]
 fn optional_ceremony_strings_and_policy_filter_are_not_silently_defaulted() {
     let state = state();
     for field in ["risk_ceiling", "connection_id"] {
