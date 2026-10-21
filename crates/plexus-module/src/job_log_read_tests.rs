@@ -75,6 +75,7 @@ async fn agentless_job_log_flow_uses_only_basals_grant() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn running_job_has_a_named_refusal_and_no_log_request() {
     let (mut runtime, store, _, _scratch) = actions_runtime();
+    crate::test_support::assert_loopback_is_not_proxied();
     let (url, server) = crate::test_http::FixedRequestServer::start(1, "job status", |_, request| {
         assert!(request.starts_with("GET /repos/o/x/actions/jobs/42 "));
         let body = r#"{"status":"in_progress"}"#;

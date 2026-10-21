@@ -244,6 +244,7 @@ fn with_rest(runtime: &mut Arc<ModuleState>, store: Arc<PlexusStore>, url: Strin
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn superseded_catalog_dispatches_the_two_reviewed_endpoints() {
     let (mut runtime, store, _, _scratch) = setup();
+    crate::test_support::assert_loopback_is_not_proxied();
     let (url, server) =
         crate::test_http::FixedRequestServer::start(2, "run comparison", |index, request| {
             let body = if index == 0 {
@@ -300,6 +301,7 @@ async fn superseded_catalog_dispatches_the_two_reviewed_endpoints() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn superseded_missing_run_has_a_named_refusal() {
     let (mut runtime, store, _, _scratch) = setup();
+    crate::test_support::assert_loopback_is_not_proxied();
     let (url, server) =
         crate::test_http::FixedRequestServer::start(1, "missing run", |_, request| {
             assert!(request.starts_with("GET /repos/o/x/actions/runs/42 "));

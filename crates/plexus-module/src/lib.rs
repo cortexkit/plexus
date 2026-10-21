@@ -42,6 +42,8 @@ pub mod smoke;
 #[cfg(test)]
 #[path = "../../plexus-core/tests/support/http_server.rs"]
 mod test_http;
+#[cfg(test)]
+mod test_support;
 mod tool_provider;
 mod web_search_health;
 pub mod wire;
@@ -6603,6 +6605,7 @@ mod tests {
         ask_first: bool,
         granted: bool,
     ) -> McpWriteFixture {
+        crate::test_support::assert_loopback_is_not_proxied();
         let scratch = Scratch::database(label);
         let store = Arc::new(
             PlexusStore::open(&StorageDescriptor {
@@ -12790,10 +12793,12 @@ mod pool_sweep_tests {
             ),
         });
 
-        // Pool an entry. The endpoint never resolves, which is fine: the pool
-        // entry is created before the request is attempted, and a failed
+        // Pool an entry. Nothing listens on the endpoint, which is fine: the
+        // pool entry is created before the request is attempted, and a failed
         // dispatch leaves exactly the idle entry this test is about.
-        let mut config = plexus_core::McpRemoteConfig::new("https://vendor.invalid/mcp");
+        crate::test_support::assert_loopback_is_not_proxied();
+        let mut config =
+            plexus_core::McpRemoteConfig::new(crate::test_support::closed_loopback_url("/mcp"));
         config.idle_timeout = std::time::Duration::from_millis(1);
         mcp_transport.register_connection(plexus_core::McpConnection {
             connection_id: "pooled".to_string(),
