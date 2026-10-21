@@ -1559,6 +1559,13 @@ pub mod tests {
             change: Some("updated"),
             headers: &headers,
         };
+        // Commit against the connection the subscription really belongs to,
+        // so a test that seeds a different connection id gets a consistent row.
+        let connection_id = store
+            .subscription("direct", sub_id)
+            .expect("read the subscription")
+            .expect("insert_test_event needs a seeded subscription")
+            .connection_id;
         let actor = ActorAttribution::NotEnriched;
         let input = KeyedPollEventInput {
             event: PollEventInput {
@@ -1576,7 +1583,7 @@ pub mod tests {
         store
             .commit_keyed_poll_success(
                 "direct",
-                "conn-1",
+                &connection_id,
                 sub_id,
                 &json!({}),
                 &[input],
@@ -1584,6 +1591,27 @@ pub mod tests {
                 &[],
             )
             .expect("commit keyed poll success");
+    }
+
+    /// A poll success committed under the wrong connection advances nothing
+    /// and inserts no event, without an error. So the shared helper must
+    /// commit under the connection the subscription was seeded with.
+    #[tokio::test]
+    async fn insert_test_event_commits_under_the_seeded_connection() {
+        let (_scratch, store) = test_store("event-own-connection");
+        let sub = seed_connection_and_subscription(&store, "conn-2");
+        insert_test_event(
+            &store,
+            &sub,
+            &"e".repeat(64),
+            "github_issue_changed",
+            "owner/repo",
+            &json!({"number": 1}),
+        );
+        assert!(
+            super::outbox_has_pending(&store).await.unwrap(),
+            "an event seeded for conn-2 must reach the outbox"
+        );
     }
 
     struct Claim(std::sync::atomic::AtomicBool);
