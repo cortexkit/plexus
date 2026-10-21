@@ -20883,3 +20883,19 @@ expect_red = ["code_search::tests::credential_shaped_query_words_are_not_stored"
 expect_message = "no search row may hold the token"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "catalog-label-listing-spelling"
+guards = "The catalog apps listing keeps the spelling its readers match on for every manifest enum value"
+file = "crates/plexus-core/src/manifest.rs"
+old = "Self::OptionalApiKey => \"OptionalApiKey\","
+new = "Self::OptionalApiKey => \"optional_api_key\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::catalog_labels_keep_the_listing_spelling_of_every_variant"]
+expect_message = "OptionalApiKey"
+build_timeout_s = 3600
+timeout_s = 120
