@@ -535,8 +535,7 @@ fn the_search_row_records_the_filters() {
         let rows = engine.store().list_audit("direct").unwrap();
         let summary: Value = serde_json::from_str(
             rows.iter()
-                .filter(|row| row.gate.as_deref() == Some("web_search"))
-                .last()
+                .rfind(|row| row.gate.as_deref() == Some("web_search"))
                 .and_then(|row| row.args_redaction_summary.as_deref())
                 .unwrap(),
         )
@@ -579,8 +578,7 @@ fn credential_shaped_query_words_are_not_stored() {
         let rows = engine.store().list_audit("direct").unwrap();
         let row = rows
             .iter()
-            .filter(|row| row.gate.as_deref() == Some("web_search"))
-            .last()
+            .rfind(|row| row.gate.as_deref() == Some("web_search"))
             .unwrap();
         let summary: Value =
             serde_json::from_str(row.args_redaction_summary.as_deref().unwrap()).unwrap();
