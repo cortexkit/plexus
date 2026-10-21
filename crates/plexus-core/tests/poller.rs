@@ -3135,8 +3135,11 @@ fn a_credential_needing_human_repair_defers_the_watch_and_recovers_by_itself() {
 
 /// Runs only inside the child process of
 /// [`a_credential_needing_repair_is_logged_once_per_state_change`], where it
-/// has the process-wide repair metrics and log to itself.
+/// has the process-wide repair metrics and log to itself. Ignored so an
+/// ordinary run does not count a pass for it; the guard keeps an
+/// `--include-ignored` run from sharing those metrics with other tests.
 #[test]
+#[ignore = "child-process fixture run by a_credential_needing_repair_is_logged_once_per_state_change"]
 fn credential_repair_log_fixture() {
     if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
         return;
@@ -4573,14 +4576,12 @@ fn a_seed_under_a_key_the_cursor_kind_ignores_is_refused() {
 
 /// Capture the actual stderr of an isolated test process, not a formatting proxy.
 fn actor_diagnostic_output(test: &str) -> String {
-    let output = bounded::child_output(
-        std::process::Command::new(std::env::current_exe().expect("test executable"))
-            .args(["--exact", test, "--nocapture", "--include-ignored"])
-            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+    let output = bounded::child_test_output(
+        test,
+        &[("PLEXUS_LOG_STDERR_CHILD", "1")],
         std::time::Duration::from_secs(30),
         "test binary child",
-    )
-    .expect("run diagnostic fixture");
+    );
     assert!(
         output.status.success(),
         "fixture {test} failed: {} {}",
@@ -6438,14 +6439,12 @@ const LEDGER_CHILD_ENV: &str = "PLEXUS_POLL_LEDGER_CHILD";
 fn skipped_watermark_item_balances_the_drop_ledger() {
     const TEST: &str = "skipped_watermark_item_balances_the_drop_ledger";
     if std::env::var_os(LEDGER_CHILD_ENV).is_none() {
-        let output = bounded::child_output(
-            std::process::Command::new(std::env::current_exe().expect("test executable"))
-                .args(["--exact", TEST, "--nocapture"])
-                .env(LEDGER_CHILD_ENV, "1"),
+        let output = bounded::child_test_output(
+            TEST,
+            &[(LEDGER_CHILD_ENV, "1")],
             std::time::Duration::from_secs(30),
             "test binary child",
-        )
-        .expect("run ledger child");
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             output.status.success() && stdout.contains("1 passed"),

@@ -375,14 +375,12 @@ fn sse_body_failures_have_an_operator_cause_and_path() {
         assert_eq!(answer.transmission, TransmissionState::OutcomeUnknown);
         return;
     }
-    let output = crate::test_http::bounded::child_output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
-            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+    let output = crate::test_http::bounded::child_test_output(
+        TEST,
+        &[("PLEXUS_LOG_STDERR_CHILD", "1")],
         Duration::from_secs(10),
         "SSE diagnostic child",
-    )
-    .unwrap();
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(

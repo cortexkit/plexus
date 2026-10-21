@@ -524,14 +524,12 @@ mod tests {
         let live = root().join(format!("{SCRATCH_PREFIX}live-{}-0-0", std::process::id()));
         fs::create_dir_all(&live).expect("plant live scratch");
 
-        let output = crate::test_http::bounded::child_output(
-            std::process::Command::new(std::env::current_exe().expect("test binary"))
-                .args(["--exact", TEST, "--nocapture"])
-                .env(CHILD, "1"),
+        let output = crate::test_http::bounded::child_test_output(
+            TEST,
+            &[(CHILD, "1")],
             Duration::from_secs(30),
             "scratch sweep test child",
-        )
-        .expect("run child");
+        );
         assert!(
             output.status.success(),
             "child run failed: {}{}",

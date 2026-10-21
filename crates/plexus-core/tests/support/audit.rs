@@ -25,15 +25,15 @@ pub fn captured_by_parent(test: &str, context: &str) -> bool {
         logging::init_child();
         return false;
     }
-    let output = bounded::child_output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test, "--nocapture"])
-            .env("PLEXUS_AUDIT_STDERR_CHILD", test)
-            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+    let output = bounded::child_test_output(
+        test,
+        &[
+            ("PLEXUS_AUDIT_STDERR_CHILD", test),
+            ("PLEXUS_LOG_STDERR_CHILD", "1"),
+        ],
         std::time::Duration::from_secs(30),
         "test binary child",
-    )
-    .unwrap();
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");

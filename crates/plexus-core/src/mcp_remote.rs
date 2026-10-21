@@ -2229,14 +2229,12 @@ mod transport_integration_tests {
             }
             return;
         }
-        let output = crate::test_http::bounded::child_output(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST, "--nocapture"])
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+        let output = crate::test_http::bounded::child_test_output(
+            TEST,
+            &[("PLEXUS_LOG_STDERR_CHILD", "1")],
             Duration::from_secs(30),
             "MCP bounded vendor diagnostic child",
-        )
-        .unwrap();
+        );
         assert!(
             output.status.success(),
             "{}",
@@ -3210,14 +3208,12 @@ mod transport_integration_tests {
             task.join().expect("server exits");
             return;
         }
-        let output = crate::test_http::bounded::child_output(
-            std::process::Command::new(std::env::current_exe().expect("test executable"))
-                .args(["--exact", TEST, "--nocapture"])
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+        let output = crate::test_http::bounded::child_test_output(
+            TEST,
+            &[("PLEXUS_LOG_STDERR_CHILD", "1")],
             std::time::Duration::from_secs(30),
             "MCP diagnostic test child",
-        )
-        .expect("run MCP diagnostic test child");
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stderr}");
         let line = stderr
@@ -3261,14 +3257,12 @@ mod transport_integration_tests {
     /// the child's stdout, its stderr, and the one `MCP HTTP transport failed`
     /// line on that stderr.
     fn hang_up_diagnostic(test: &str) -> (String, String, String) {
-        let output = crate::test_http::bounded::child_output(
-            std::process::Command::new(std::env::current_exe().expect("test executable"))
-                .args(["--exact", test, "--nocapture"])
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+        let output = crate::test_http::bounded::child_test_output(
+            test,
+            &[("PLEXUS_LOG_STDERR_CHILD", "1")],
             std::time::Duration::from_secs(30),
             "MCP diagnostic test child",
-        )
-        .expect("run MCP diagnostic test child");
+        );
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         assert!(output.status.success(), "{stderr}");

@@ -3167,14 +3167,12 @@ mod tests {
         const TEST: &str = "poller::ci_runs::tests::a_ci_cycle_balances_the_poll_ledger";
         const CHILD: &str = "PLEXUS_CI_LEDGER_CHILD";
         if std::env::var_os(CHILD).is_none() {
-            let output = crate::test_http::bounded::child_output(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", TEST, "--nocapture"])
-                    .env(CHILD, "1"),
+            let output = crate::test_http::bounded::child_test_output(
+                TEST,
+                &[(CHILD, "1")],
                 std::time::Duration::from_secs(60),
                 "CI ledger test child",
-            )
-            .expect("run child");
+            );
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
                 output.status.success() && stdout.contains("1 passed"),

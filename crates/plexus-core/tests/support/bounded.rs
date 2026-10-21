@@ -194,6 +194,42 @@ pub fn child_output(
     })
 }
 
+/// Run one test of the current test binary as a child process, with `envs`
+/// set, and return its output once it finished within `timeout`.
+///
+/// The child must exit successfully and report exactly one passed test.
+/// `--exact` with a name that matches nothing runs zero tests and still exits
+/// successfully, so without that check a parent asserting what the child did
+/// NOT print would pass without the scenario having run. Ignored tests run too
+/// (`--include-ignored`), so a fixture meant only for a child can be ignored
+/// and never reports a pass for a run that did nothing.
+pub fn child_test_output(
+    test: &str,
+    envs: &[(&str, &str)],
+    timeout: Duration,
+    label: &str,
+) -> std::process::Output {
+    let mut command =
+        std::process::Command::new(std::env::current_exe().expect("current test executable"));
+    command.args(["--exact", test, "--nocapture", "--include-ignored"]);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = child_output(&mut command, timeout, label)
+        .unwrap_or_else(|error| panic!("{label}: could not start {test}: {error}"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{label}: {test} failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("test result: ok. 1 passed;"),
+        "{label}: {test} did not run exactly one test: {stdout}"
+    );
+    output
+}
+
 fn terminate_child_tree(child: &mut std::process::Child) {
     use std::process::Stdio;
     #[cfg(unix)]

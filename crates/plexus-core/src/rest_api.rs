@@ -2317,14 +2317,12 @@ mod tests {
             task.join().expect("server exits");
             return;
         }
-        let output = crate::test_http::bounded::child_output(
-            std::process::Command::new(std::env::current_exe().expect("test executable"))
-                .args(["--exact", TEST, "--nocapture"])
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+        let output = crate::test_http::bounded::child_test_output(
+            TEST,
+            &[("PLEXUS_LOG_STDERR_CHILD", "1")],
             std::time::Duration::from_secs(30),
             "REST diagnostic test child",
-        )
-        .expect("child process");
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stderr}");
         let line = stderr
@@ -2653,14 +2651,12 @@ mod tests {
             );
             return;
         }
-        let output = crate::test_http::bounded::child_output(
-            std::process::Command::new(std::env::current_exe().expect("test executable"))
-                .args(["--exact", TEST, "--nocapture"])
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+        let output = crate::test_http::bounded::child_test_output(
+            TEST,
+            &[("PLEXUS_LOG_STDERR_CHILD", "1")],
             std::time::Duration::from_secs(30),
             "REST diagnostic test child",
-        )
-        .expect("child process");
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stderr}");
         let line = stderr
@@ -3212,14 +3208,12 @@ mod local_diagnostic_tests {
             assert_eq!(reply.transmission, TransmissionState::NotSent);
             return;
         }
-        let output = crate::test_http::bounded::child_output(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST, "--nocapture"])
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+        let output = crate::test_http::bounded::child_test_output(
+            TEST,
+            &[("PLEXUS_LOG_STDERR_CHILD", "1")],
             Duration::from_secs(10),
             "local REST diagnostic",
-        )
-        .unwrap();
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stderr}");
         assert!(

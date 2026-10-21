@@ -1255,20 +1255,12 @@ fn reconciliation_warning_never_renders_sensitive_record_fragments() {
         assert_eq!(count, 0);
         return;
     }
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command
-        .args([
-            "--exact",
-            "storage::store_contract_tests::reconciliation_warning_never_renders_sensitive_record_fragments",
-            "--nocapture",
-        ])
-        .env("PLEXUS_LOG_STDERR_CHILD", "1");
-    let output = bounded::child_output(
-        &mut command,
+    let output = bounded::child_test_output(
+        "storage::store_contract_tests::reconciliation_warning_never_renders_sensitive_record_fragments",
+        &[("PLEXUS_LOG_STDERR_CHILD", "1")],
         std::time::Duration::from_secs(10),
         "reconciliation diagnostic child",
-    )
-    .expect("diagnostic child must complete within its deadline");
+    );
     assert!(output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
@@ -1564,20 +1556,12 @@ fn corrupt_catalog_rows_report_one_content_free_warning_per_action() {
         assert_eq!(report.gaps[0].reason, "stored schema does not parse");
         return;
     }
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command
-        .args([
-            "--exact",
-            "storage::store_contract_tests::corrupt_catalog_rows_report_one_content_free_warning_per_action",
-            "--nocapture",
-        ])
-        .env("PLEXUS_LOG_STDERR_CHILD", "1");
-    let output = bounded::child_output(
-        &mut command,
+    let output = bounded::child_test_output(
+        "storage::store_contract_tests::corrupt_catalog_rows_report_one_content_free_warning_per_action",
+        &[("PLEXUS_LOG_STDERR_CHILD", "1")],
         std::time::Duration::from_secs(10),
         "corrupt catalog diagnostic child",
-    )
-    .unwrap();
+    );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         output.status.success(),
@@ -1800,20 +1784,12 @@ fn relay_identity_changes_warn_once_per_new_id() {
         }
         return;
     }
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command
-        .args([
-            "--exact",
-            "storage::store_contract_tests::relay_identity_changes_warn_once_per_new_id",
-            "--nocapture",
-        ])
-        .env("PLEXUS_LOG_STDERR_CHILD", "1");
-    let output = bounded::child_output(
-        &mut command,
+    let output = bounded::child_test_output(
+        "storage::store_contract_tests::relay_identity_changes_warn_once_per_new_id",
+        &[("PLEXUS_LOG_STDERR_CHILD", "1")],
         std::time::Duration::from_secs(10),
         "identity change diagnostic child",
-    )
-    .unwrap();
+    );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         output.status.success(),

@@ -1309,14 +1309,12 @@ mod report_diagnostic_tests {
                 .expect("second report proves the first reporting-loop iteration finished");
             return;
         }
-        let output = crate::test_http::bounded::child_output(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST, "--nocapture"])
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+        let output = crate::test_http::bounded::child_test_output(
+            TEST,
+            &[("PLEXUS_LOG_STDERR_CHILD", "1")],
             std::time::Duration::from_secs(10),
             "vault report diagnostic",
-        )
-        .unwrap();
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stderr}");
         assert!(
