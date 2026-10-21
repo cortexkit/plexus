@@ -4021,13 +4021,9 @@ mod composite_cli_tests {
 
     #[test]
     fn onboard_cli_reads_the_inventory_file_and_requires_an_explicit_shim_statement() {
-        let path =
-            std::env::temp_dir().join(format!("onboard-inventory-{}.json", std::process::id()));
-        std::fs::write(
-            &path,
-            r#"{"version":"github-grant-import.v1","handles":[]}"#,
-        )
-        .unwrap();
+        let scratch = plexus_core::test_scratch::Scratch::file("onboard-cli", "inventory.json");
+        let path = scratch.path();
+        std::fs::write(path, r#"{"version":"github-grant-import.v1","handles":[]}"#).unwrap();
         let file = path.to_str().unwrap();
         let base = [
             "--inventory",
@@ -4054,7 +4050,6 @@ mod composite_cli_tests {
             (&params["shim_manifest_maps_repo"], &params["dry_run"]),
             (&json!(true), &json!(false))
         );
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
