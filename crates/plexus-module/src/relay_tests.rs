@@ -203,14 +203,14 @@ async fn local_hello_store_failure_does_not_blame_relay_protocol() {
     );
     bounded(server).await.unwrap();
 }
-fn sql(scratch: &Scratch, statement: &str) {
-    Connection::open(scratch.path())
+fn sql(scratch: impl AsRef<std::path::Path>, statement: &str) {
+    Connection::open(scratch.as_ref())
         .unwrap()
         .execute_batch(statement)
         .unwrap();
 }
-fn count(scratch: &Scratch, table: &str) -> i64 {
-    Connection::open(scratch.path())
+fn count(scratch: impl AsRef<std::path::Path>, table: &str) -> i64 {
+    Connection::open(scratch.as_ref())
         .unwrap()
         .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
         .unwrap()
@@ -985,8 +985,8 @@ async fn plain_issue_comment_still_publishes_issue_changed_with_sender() {
     );
 }
 
-fn due(scratch: &Scratch) -> i64 {
-    Connection::open(scratch.path())
+fn due(scratch: impl AsRef<std::path::Path>) -> i64 {
+    Connection::open(scratch.as_ref())
         .unwrap()
         .query_row(
             "SELECT count(*) FROM trigger_subscriptions WHERE last_polled_at_ms IS NULL",
@@ -1130,7 +1130,7 @@ async fn webhook_and_polled_copy_share_one_outbox_row() {
     }
 }
 
-fn add_other_repository(scratch: &Scratch) {
+fn add_other_repository(scratch: impl AsRef<std::path::Path>) {
     sql(scratch, "INSERT INTO trigger_subscriptions(subscription_id,principal,connection_id,action,cadence_s,cursor_kind,schema_hash,status,created_at_ms,fixed_args,project_id,project_source,last_polled_at_ms)
         SELECT subscription_id || '-other',principal,connection_id,action,cadence_s,cursor_kind,schema_hash,status,created_at_ms,'{\"owner\":\"org\",\"repo\":\"other\"}',project_id,project_source,last_polled_at_ms FROM trigger_subscriptions;");
 }
@@ -1138,14 +1138,24 @@ fn add_other_repository(scratch: &Scratch) {
 async fn stub_case(name: &str) {
     let (scratch, store, _) = fixture("relay-stub");
     add_other_repository(&scratch);
+    stub_reconciles_without_publish(store, &scratch, name).await;
+}
+/// Replay one stub or binding vector over a store whose watch set already has
+/// the second repository, and check it queued a reconcile and published nothing.
+async fn stub_reconciles_without_publish(
+    store: Arc<PlexusStore>,
+    scratch: impl AsRef<std::path::Path>,
+    name: &str,
+) {
+    let scratch = scratch.as_ref();
     replay(store, vec![hello(), vector(EVENTS, name)], true).await;
     assert_eq!(
-        due(&scratch),
+        due(scratch),
         if name == "rate-limited" { 2 } else { 4 },
         "stub or binding must queue reconcile before ack"
     );
     assert_eq!(
-        count(&scratch, "event_outbox"),
+        count(scratch, "event_outbox"),
         0,
         "stubs and bindings publish nothing"
     );
@@ -1158,9 +1168,46 @@ async fn oversized_stub_queues_reread_without_publish() {
 async fn rate_limited_stub_queues_reread_without_publish() {
     stub_case("rate-limited").await;
 }
+/// An overflow marker means the relay dropped events: the gap is logged for
+/// the operator, the whole watch set is queued for reconcile, and nothing is
+/// published. Run as a child so the warning can be read back from stderr.
 #[tokio::test]
 async fn overflow_stub_logs_gap_and_reconciles() {
-    stub_case("overflow").await;
+    const TEST: &str = "relay::tests::overflow_stub_logs_gap_and_reconciles";
+    if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
+        let prepared = prepare_relay_log_fixture("relay-overflow-log");
+        add_other_repository(&prepared);
+        let output = crate::bounded::child_output(
+            std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", TEST, "--nocapture"])
+                .env("PLEXUS_LOG_STDERR_CHILD", "1")
+                .env(PREPARED_RELAY_LOG_STORE, prepared.path()),
+            Duration::from_secs(30),
+            "relay overflow diagnostic child",
+        )
+        .expect("run relay overflow child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        crate::test_support::assert_exactly_one_test_passed(TEST, &output);
+        let gaps: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.contains(" WARN  plexus.relay: relay overflow gap at seq="))
+            .collect();
+        assert_eq!(
+            gaps.len(),
+            1,
+            "an overflow must log one gap warning: {stderr}"
+        );
+        assert!(
+            gaps[0].ends_with("; full reconcile queued"),
+            "the gap warning must say a full reconcile was queued: {}",
+            gaps[0]
+        );
+        return;
+    }
+    diagnostic_logging::init_child();
+    let (_scratch, store, path) = relay_log_fixture("relay-overflow-log");
+    stub_reconciles_without_publish(store, &path, "overflow").await;
 }
 #[tokio::test]
 async fn installation_bound_list_queues_only_matching_repositories() {
