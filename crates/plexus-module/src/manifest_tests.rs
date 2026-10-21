@@ -902,6 +902,7 @@ fn manifest_exposes_the_privileged_ops_on_a_management_surface() {
             ADMIN_SET_WEB_SEARCH_LIMIT_OP,
             ADMIN_SET_WEB_SEARCH_ORDER_OP,
             ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP,
+            ADMIN_ADD_WEB_SEARCH_PROVIDER_OP,
             crate::connector_home::STATUS_OP,
             crate::relay::STATUS_OP,
         ]

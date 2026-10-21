@@ -57,6 +57,7 @@ use test_support::{
 };
 mod tool_provider;
 mod web_search_health;
+mod web_search_provider_admin;
 pub mod wire;
 #[cfg(test)]
 mod wire_safety_tests;
@@ -1769,6 +1770,7 @@ async fn handle_management_request(
             | manifest::ADMIN_SET_WEB_SEARCH_LIMIT_OP
             | manifest::ADMIN_SET_WEB_SEARCH_ORDER_OP
             | manifest::ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP
+            | manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP
             | manifest::ADMIN_RECIPIENTS_ADD_OP
             | manifest::ADMIN_RECIPIENTS_REMOVE_OP
             | manifest::ADMIN_RECIPIENTS_LIST_OP
@@ -1988,6 +1990,18 @@ async fn handle_management_request(
         }
         manifest::ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP => {
             ceremony::set_web_search_allowance(state, &principal_key, params)
+        }
+        // Confirms for itself, once, with a summary built from its own plan.
+        manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP => {
+            web_search_provider_admin::add(
+                route,
+                params,
+                writer,
+                state,
+                route_bindings,
+                &principal_key,
+            )
+            .await?
         }
         _ => unreachable!("management operation was checked above"),
     };
@@ -3210,26 +3224,6 @@ fn facade_connections_connect(call: &FacadeArguments<'_>) -> Result<Value, Modul
         };
         match state.store().connect_with_ticket(principal_key, ticket_id) {
             Ok(Some(connection)) => {
-                // The connection's catalog is first seeded from the
-                // reviewed manifest, and discovery then reconciles it with
-                // the vendor. A failed seed leaves the connection active
-                // (the ticket is spent) but its catalog incomplete, so it
-                // is reported as degraded discovery, never as complete.
-                if let Err(error) = state.store().seed_catalog_from_manifest(
-                    principal_key,
-                    &connection.connection_id,
-                    &connection.app_key,
-                ) {
-                    eprintln!(warn catalog:
-                        "catalog seed failed during connect of {}: {error}",
-                        connection.connection_id
-                    );
-                    return Ok(json!({"result": {
-                        "connection": connection,
-                        "discovery": "degraded",
-                        "reason": "the reviewed manifest's actions could not be seeded; the module log names the cause",
-                    }}));
-                }
                 // Consuming the ticket has already committed the binding and
                 // activated the connection, and the ticket is now spent. So a
                 // discovery failure here is NOT a failed connect: reporting
@@ -3238,35 +3232,17 @@ fn facade_connections_connect(call: &FacadeArguments<'_>) -> Result<Value, Modul
                 // the store. Every outcome therefore returns the connection,
                 // with discovery reported separately and honestly — the
                 // catalog is refreshed again at invoke time.
-                match blocking_section(|| {
-                    state.runtime.reconciler.discover_for_connection(
-                        principal_key,
-                        &connection.connection_id,
-                        state.runtime.credential_source().as_ref(),
-                        state.runtime.endpoint_override.as_deref(),
-                    )
-                }) {
-                    Ok(_) => {
-                        json!({"result": {"connection": connection, "discovery": "complete"}})
-                    }
-                    Err(CatalogError::TransportUnavailable { kind }) => {
-                        json!({"result": {"connection": connection, "discovery": "unavailable", "reason": format!("transport kind '{kind}' is not available")}})
-                    }
-                    Err(CatalogError::Credential) => {
-                        json!({"result": {"connection": connection, "discovery": "credential_unresolved", "reason": "credential could not be resolved during connect discovery"}})
-                    }
-                    // Not a store failure and deliberately not an error:
-                    // connect SUCCEEDS while reporting that discovery did
-                    // not complete, because refusing here would consume the
-                    // single-use ticket and leave the operator with neither
-                    // a connection nor a ticket. The cause is still logged,
-                    // since a degraded discovery with no recorded reason is
-                    // the same dead end this pass exists to close.
-                    Err(error) => {
-                        eprintln!(warn catalog: "discovery degraded during connect: {error}");
-                        json!({"result": {"connection": connection, "discovery": "degraded"}})
-                    }
+                let (discovery, reason) = connect_time_catalog(
+                    state,
+                    principal_key,
+                    &connection.connection_id,
+                    &connection.app_key,
+                );
+                let mut result = json!({"connection": connection, "discovery": discovery});
+                if let Some(reason) = reason {
+                    result["reason"] = json!(reason);
                 }
+                json!({ "result": result })
             }
             Ok(None) => {
                 json!({"error": {"code": "binding_ticket_invalid", "message": "binding ticket is expired, consumed, or unknown"}})
@@ -3278,6 +3254,64 @@ fn facade_connections_connect(call: &FacadeArguments<'_>) -> Result<Value, Modul
             ),
         }
     })
+}
+
+/// Seed a connection's catalog from its reviewed manifest, then run
+/// discovery, and say how far it got: `complete`, or `degraded`,
+/// `unavailable` or `credential_unresolved` with an optional reason. Shared by
+/// `connections op=connect` and the admin ceremony that adds a web search
+/// provider, so both report the same outcome for the same failure.
+fn connect_time_catalog(
+    state: &Arc<ModuleState>,
+    principal_key: &str,
+    connection_id: &str,
+    app_key: &str,
+) -> (&'static str, Option<String>) {
+    // The connection's catalog is first seeded from the reviewed manifest, and
+    // discovery then reconciles it with the vendor. A failed seed leaves the
+    // connection active (the ticket is spent) but its catalog incomplete, so it
+    // is reported as degraded discovery, never as complete.
+    if let Err(error) =
+        state
+            .store()
+            .seed_catalog_from_manifest(principal_key, connection_id, app_key)
+    {
+        eprintln!(warn catalog:
+            "catalog seed failed during connect of {connection_id}: {error}"
+        );
+        return (
+            "degraded",
+            Some("the reviewed manifest's actions could not be seeded; the module log names the cause".to_string()),
+        );
+    }
+    match blocking_section(|| {
+        state.runtime.reconciler.discover_for_connection(
+            principal_key,
+            connection_id,
+            state.runtime.credential_source().as_ref(),
+            state.runtime.endpoint_override.as_deref(),
+        )
+    }) {
+        Ok(_) => ("complete", None),
+        Err(CatalogError::TransportUnavailable { kind }) => (
+            "unavailable",
+            Some(format!("transport kind '{kind}' is not available")),
+        ),
+        Err(CatalogError::Credential) => (
+            "credential_unresolved",
+            Some("credential could not be resolved during connect discovery".to_string()),
+        ),
+        // Not a store failure and deliberately not an error: connect SUCCEEDS
+        // while reporting that discovery did not complete, because refusing
+        // here would consume the single-use ticket and leave the operator with
+        // neither a connection nor a ticket. The cause is still logged, so an
+        // operator can diagnose a degraded discovery whose reply gives no
+        // reason.
+        Err(error) => {
+            eprintln!(warn catalog: "discovery degraded during connect: {error}");
+            ("degraded", None)
+        }
+    }
 }
 
 fn facade_connections_configure(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {

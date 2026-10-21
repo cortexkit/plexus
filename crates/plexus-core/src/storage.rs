@@ -7711,132 +7711,73 @@ impl PlexusStore {
         self.mint_grant_bounded_with(request, Some(audit))
     }
 
+    /// Mint several grants in one fenced transaction, each bounded exactly as
+    /// [`Self::mint_grant_bounded_audited`] bounds one, with one audit row per
+    /// grant. Every request is checked before any row is written, so a refusal
+    /// of any one of them writes no grant and no row at all.
+    pub fn mint_grants_bounded_audited(
+        &self,
+        requests: &[GrantMintRequest],
+        audit: &dyn Fn(&GrantRecord) -> AuditRecord,
+    ) -> Result<Result<Vec<GrantRecord>, CeremonyRefusal>, StoreError> {
+        self.mint_grants_bounded_with(requests, Some(audit))
+    }
+
     fn mint_grant_bounded_with(
         &self,
         request: &GrantMintRequest,
         audit: AuditFor<'_, GrantRecord>,
     ) -> Result<Result<GrantRecord, CeremonyRefusal>, StoreError> {
-        let GrantMintRequest {
-            principal,
-            connection_id,
-            grantee_principal,
-            authority_kind,
-            requested_risk,
-            requested_selectors,
-            expires_at,
-        } = request;
-        // Expiry is OPTIONAL for every authority kind, poll included.
-        //
-        // This deliberately reverses a rule that made poll expiry mandatory. The
-        // old comment here claimed expiry was "the only mechanism that makes
-        // inattention STOP polling rather than continue it", and that was untrue:
-        // VISIBILITY PLUS EASY REVOCATION is another mechanism, and a better one.
-        // Mandatory expiry puts the cost on the common case -- the operator still
-        // wants the watch -- to defend against the rare one, and collects it
-        // forever, on a schedule, from someone who already consented.
-        //
-        // The hidden assumption was that inattention should default to REVOKING.
-        // For a personal fleet, where the grant was given deliberately, it should
-        // default to CONTINUING; the remedy for "I forgot this existed" is a
-        // surface listing every live grant with one-click revoke, not a deadline.
-        //
-        // SILENTLY is why the old rule was harmful rather than merely annoying:
-        // when a poll grant lapsed the watches just stopped collecting. No error,
-        // no alarm -- the feed went quiet and looked like a quiet week.
-        //
-        // An operator who WANTS a bounded grant still passes an expiry and it is
-        // still enforced on every poll. What is gone is the refusal to mint
-        // without one.
-        let expires_at = *expires_at;
-        if *grantee_principal == "*" {
+        Ok(self
+            .mint_grants_bounded_with(std::slice::from_ref(request), audit)?
+            .map(|mut minted| minted.remove(0)))
+    }
+
+    fn mint_grants_bounded_with(
+        &self,
+        requests: &[GrantMintRequest],
+        audit: AuditFor<'_, GrantRecord>,
+    ) -> Result<Result<Vec<GrantRecord>, CeremonyRefusal>, StoreError> {
+        if requests
+            .iter()
+            .any(|request| request.grantee_principal == "*")
+        {
             return Ok(Err(CeremonyRefusal::WildcardGrantee));
         }
         race_point("grant_insert");
         self.inner.with_conn_fenced(|conn| {
-            let ceiling = match grant_ceiling_on_conn(conn, principal, connection_id)? {
-                Ok(ceiling) => ceiling,
-                Err(refusal) => return Ok(Err(refusal)),
-            };
-            let Some(risk) = Risk::parse(requested_risk) else {
-                return Ok(Err(CeremonyRefusal::InvalidRisk(
-                    requested_risk.to_string(),
-                )));
-            };
-            // Expand a requested wildcard against the connection's ceiling,
-            // which may name fewer actions than the app manifest.
-            let selectors = if requested_selectors.iter().any(|value| value == "*") {
-                ceiling.action_selectors.clone()
-            } else {
-                requested_selectors.to_vec()
-            };
-            // Wildcards expand to the connection's actions; an empty expansion is
-            // just as unusable as an explicitly empty request, not unrestricted.
-            if selectors.is_empty() {
-                return Ok(Err(CeremonyRefusal::EmptyActionSelectors));
-            }
-            let requested = Ceiling {
-                risk,
-                action_selectors: selectors.clone(),
-            };
-            if !requested.risk.within(ceiling.risk) {
-                return Ok(Err(CeremonyRefusal::RiskAboveCeiling {
-                    requested: requested.risk.to_string(),
-                    ceiling: ceiling.risk.to_string(),
-                }));
-            }
-            // A stored '*' selector admits any action. Match Ceiling::within's
-            // subset rule so minting and later grant checks interpret it identically.
-            let ceiling_is_open = ceiling.action_selectors.iter().any(|value| value == "*");
-            if !ceiling_is_open {
-                if let Some(outside) = selectors
-                    .iter()
-                    .find(|selector| !ceiling.action_selectors.contains(selector))
-                {
-                    // Distinct from `UndeclaredAction`, which belongs to the
-                    // manifest link of the chain. Reusing it here sends an operator
-                    // to the manifest to look for an action that is sitting in the
-                    // manifest, fully declared -- so the message denies something
-                    // they can see is true, and the natural conclusion is that the
-                    // module is broken.
-                    //
-                    // The two also have completely different remedies. An undeclared
-                    // action is fixed by editing a manifest; a ceiling breach cannot
-                    // be fixed by minting a grant or issuing another ticket. It
-                    // requires an explicit operator ceiling-widening ceremony.
-                    return Ok(Err(CeremonyRefusal::OutsideConnectionCeiling {
-                        action: outside.clone(),
-                        ceiling: ceiling.action_selectors.clone(),
-                    }));
+            // The ceiling is read inside the insert transaction for every
+            // request, so a revocation or narrowing committed before this
+            // transaction cannot be outrun by a ceiling read earlier.
+            let mut checked = Vec::with_capacity(requests.len());
+            for request in requests {
+                match bounded_grant_on_conn(conn, request)? {
+                    Ok(input) => checked.push(input),
+                    Err(refusal) => return Ok(Err(refusal)),
                 }
             }
-            let grant_id = new_id("grant");
-            let input = GrantInput {
-                grant_id: grant_id.clone(),
-                principal: principal.to_string(),
-                connection_id: connection_id.to_string(),
-                grantee_principal: grantee_principal.to_string(),
-                risk_ceiling: requested.risk.to_string(),
-                action_selectors: selectors.clone(),
-                authority_kind: authority_kind.to_string(),
-                expires_at,
-            };
-            insert_grant_on_conn(conn, &input)?;
-            let minted = GrantRecord {
-                grant_id,
-                principal: principal.to_string(),
-                connection_id: connection_id.to_string(),
-                grantee_principal: grantee_principal.to_string(),
-                risk_ceiling: requested.risk.to_string(),
-                action_selectors: selectors,
-                authority_kind: authority_kind.to_string(),
-                expires_at,
-                // `insert_grant` stores a new grant at generation 1.
-                generation: 1,
-                revoked_at_ms: None,
-                revoked_by: None,
-                state: grant_state(expires_at, None, now_ms()).to_string(),
-            };
-            append_audit_for(conn, audit, &minted)?;
+            let now = now_ms();
+            let mut minted = Vec::with_capacity(checked.len());
+            for input in checked {
+                insert_grant_on_conn(conn, &input)?;
+                let record = GrantRecord {
+                    state: grant_state(input.expires_at, None, now).to_string(),
+                    grant_id: input.grant_id,
+                    principal: input.principal,
+                    connection_id: input.connection_id,
+                    grantee_principal: input.grantee_principal,
+                    risk_ceiling: input.risk_ceiling,
+                    action_selectors: input.action_selectors,
+                    authority_kind: input.authority_kind,
+                    expires_at: input.expires_at,
+                    // `insert_grant` stores a new grant at generation 1.
+                    generation: 1,
+                    revoked_at_ms: None,
+                    revoked_by: None,
+                };
+                append_audit_for(conn, audit, &record)?;
+                minted.push(record);
+            }
             Ok(Ok(minted))
         })
     }
@@ -8238,6 +8179,22 @@ impl PlexusStore {
     ) -> Result<Option<&'static str>, StoreError> {
         self.connection_credential_binding(principal, connection_id)
             .map(|binding| binding.map(|binding| binding.kind()))
+    }
+
+    /// The vault reference name a connection is bound to, or `None` when it
+    /// has no credential binding. The name is not a secret; the bytes behind
+    /// it are only ever read from the vault.
+    pub fn connection_credential_reference(
+        &self,
+        principal: &str,
+        connection_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.connection_credential_binding(principal, connection_id)
+            .map(|binding| {
+                binding.map(|binding| match binding {
+                    crate::credentials::ConnectionCredentialBinding::Reference(id) => id,
+                })
+            })
     }
 
     pub(crate) fn connection_credential_binding(
@@ -9717,6 +9674,108 @@ fn grant_ceiling_on_conn(
     Ok(Ok(Ceiling {
         risk,
         action_selectors: parse_string_list(&selectors)?,
+    }))
+}
+
+/// Check one grant request against its connection's ceiling, read on `conn`,
+/// and return the row to insert. Writes nothing.
+fn bounded_grant_on_conn(
+    conn: &rusqlite::Connection,
+    request: &GrantMintRequest,
+) -> rusqlite::Result<Result<GrantInput, CeremonyRefusal>> {
+    let GrantMintRequest {
+        principal,
+        connection_id,
+        grantee_principal,
+        authority_kind,
+        requested_risk,
+        requested_selectors,
+        expires_at,
+    } = request;
+    // Expiry is OPTIONAL for every authority kind, poll included.
+    //
+    // This deliberately reverses a rule that made poll expiry mandatory. The
+    // old comment here claimed expiry was "the only mechanism that makes
+    // inattention STOP polling rather than continue it", and that was untrue:
+    // VISIBILITY PLUS EASY REVOCATION is another mechanism, and a better one.
+    // Mandatory expiry puts the cost on the common case -- the operator still
+    // wants the watch -- to defend against the rare one, and collects it
+    // forever, on a schedule, from someone who already consented.
+    //
+    // The hidden assumption was that inattention should default to REVOKING.
+    // For a personal fleet, where the grant was given deliberately, it should
+    // default to CONTINUING; the remedy for "I forgot this existed" is a
+    // surface listing every live grant with one-click revoke, not a deadline.
+    //
+    // SILENTLY is why the old rule was harmful rather than merely annoying:
+    // when a poll grant lapsed the watches just stopped collecting. No error,
+    // no alarm -- the feed went quiet and looked like a quiet week.
+    //
+    // An operator who WANTS a bounded grant still passes an expiry and it is
+    // still enforced on every poll. What is gone is the refusal to mint
+    // without one.
+    let expires_at = *expires_at;
+    let ceiling = match grant_ceiling_on_conn(conn, principal, connection_id)? {
+        Ok(ceiling) => ceiling,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
+    let Some(risk) = Risk::parse(requested_risk) else {
+        return Ok(Err(CeremonyRefusal::InvalidRisk(
+            requested_risk.to_string(),
+        )));
+    };
+    // Expand a requested wildcard against the connection's ceiling,
+    // which may name fewer actions than the app manifest.
+    let selectors = if requested_selectors.iter().any(|value| value == "*") {
+        ceiling.action_selectors.clone()
+    } else {
+        requested_selectors.to_vec()
+    };
+    // Wildcards expand to the connection's actions; an empty expansion is
+    // just as unusable as an explicitly empty request, not unrestricted.
+    if selectors.is_empty() {
+        return Ok(Err(CeremonyRefusal::EmptyActionSelectors));
+    }
+    if !risk.within(ceiling.risk) {
+        return Ok(Err(CeremonyRefusal::RiskAboveCeiling {
+            requested: risk.to_string(),
+            ceiling: ceiling.risk.to_string(),
+        }));
+    }
+    // A stored '*' selector admits any action. Match Ceiling::within's
+    // subset rule so minting and later grant checks interpret it identically.
+    let ceiling_is_open = ceiling.action_selectors.iter().any(|value| value == "*");
+    if !ceiling_is_open {
+        if let Some(outside) = selectors
+            .iter()
+            .find(|selector| !ceiling.action_selectors.contains(selector))
+        {
+            // Distinct from `UndeclaredAction`, which belongs to the
+            // manifest link of the chain. Reusing it here sends an operator
+            // to the manifest to look for an action that is sitting in the
+            // manifest, fully declared -- so the message denies something
+            // they can see is true, and the natural conclusion is that the
+            // module is broken.
+            //
+            // The two also have completely different remedies. An undeclared
+            // action is fixed by editing a manifest; a ceiling breach cannot
+            // be fixed by minting a grant or issuing another ticket. It
+            // requires an explicit operator ceiling-widening ceremony.
+            return Ok(Err(CeremonyRefusal::OutsideConnectionCeiling {
+                action: outside.clone(),
+                ceiling: ceiling.action_selectors.clone(),
+            }));
+        }
+    }
+    Ok(Ok(GrantInput {
+        grant_id: new_id("grant"),
+        principal: principal.to_string(),
+        connection_id: connection_id.to_string(),
+        grantee_principal: grantee_principal.to_string(),
+        risk_ceiling: risk.to_string(),
+        action_selectors: selectors,
+        authority_kind: authority_kind.to_string(),
+        expires_at,
     }))
 }
 

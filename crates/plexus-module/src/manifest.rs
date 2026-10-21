@@ -107,6 +107,9 @@ pub const ADMIN_REBIND_CREDENTIAL_OP: &str = "plexus.admin.rebind_credential";
 pub const ADMIN_SET_WEB_SEARCH_LIMIT_OP: &str = "plexus.admin.set_web_search_limit";
 pub const ADMIN_SET_WEB_SEARCH_ORDER_OP: &str = "plexus.admin.set_web_search_order";
 pub const ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP: &str = "plexus.admin.set_web_search_allowance";
+/// Enroll one web search provider and grant its search action to its callers
+/// under a single operator confirmation: ticket, connect and grants together.
+pub const ADMIN_ADD_WEB_SEARCH_PROVIDER_OP: &str = "plexus.admin.add_web_search_provider";
 /// Adding a recipient entry lets the agent send to that recipient without
 /// asking for approval, widening its authority under an allow policy.
 pub const ADMIN_RECIPIENTS_ADD_OP: &str = "plexus.admin.recipients_add";
@@ -396,6 +399,11 @@ pub fn build_with_launch_nonce_source(
                     name: ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP.to_string(),
                     kind: ManagementOperationKind::Mutate,
                     description: Some("Preview or apply one provider's monthly web search allowance, or clear it".to_string()),
+                },
+                ManagementOperation {
+                    name: ADMIN_ADD_WEB_SEARCH_PROVIDER_OP.to_string(),
+                    kind: ManagementOperationKind::Mutate,
+                    description: Some("Preview or apply one web search provider's connection and caller search grants under one confirmation; Direct only".to_string()),
                 },
                 ManagementOperation {
                     name: crate::connector_home::STATUS_OP.to_string(),

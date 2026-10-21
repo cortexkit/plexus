@@ -79,6 +79,15 @@ impl Case {
             manifest::ADMIN_RECIPIENTS_ADD_OP => {
                 json!({"connection":CONNECTION,"recipient":"person@example.com","dry_run":false})
             }
+            manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP => {
+                let source = include_str!("../../../catalog/tavily_rest.jsonc");
+                let manifest = plexus_core::ingest_value(
+                    serde_json::from_str(&subc_jsonc::jsonc_to_json(source).unwrap()).unwrap(),
+                )
+                .unwrap();
+                store.upsert_manifest("system", &manifest).unwrap();
+                json!({"provider":"tavily","grantees":["reserved:basal"],"dry_run":false})
+            }
             manifest::GITHUB_IMPORT_OP | manifest::GITHUB_BIND_OP | manifest::GITHUB_GRANT_OP => {
                 let source = include_str!("../../../catalog/github_rest.jsonc");
                 let manifest = plexus_core::ingest_value(
@@ -163,6 +172,7 @@ const WIDENING: &[&str] = &[
     manifest::GITHUB_IMPORT_OP,
     manifest::GITHUB_BIND_OP,
     manifest::GITHUB_GRANT_OP,
+    manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP,
 ];
 
 fn route() -> RouteFrameContext {
@@ -340,6 +350,7 @@ async fn previews_never_request_confirmation() {
         manifest::GITHUB_IMPORT_OP,
         manifest::GITHUB_BIND_OP,
         manifest::GITHUB_GRANT_OP,
+        manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP,
     ] {
         for explicit_preview in [true, false] {
             let mut case = Case::new(method);
