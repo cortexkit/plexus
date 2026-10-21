@@ -13,11 +13,13 @@ use plexus_core::scope::CallScope;
 use plexus_core::storage::github_store::{GithubGovernanceSeams, GithubHandle};
 use plexus_core::transport::{Transport, TransportRequest, TransportResponse};
 use plexus_core::PlexusStore;
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use scope_support::{delegating_scope, LiveScopeReader};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
+#[path = "../support/facade_rows.rs"]
+mod facade_rows;
 #[path = "../support/logging.rs"]
 mod logging;
 
@@ -231,12 +233,7 @@ impl Fixture {
         // arguments from it, and each catalog row pins that action's reviewed
         // argument schema, as an imported handle connection does.
         let manifest = github_manifest();
-        db.execute(
-            "INSERT INTO app_manifests (principal,key,schema_version,content_hash,manifest_json,ingested_at_ms)
-             VALUES ('system','github_rest',1,'fixture',?1,1)",
-            params![serde_json::to_string(&manifest).unwrap()],
-        )
-        .unwrap();
+        facade_rows::insert_reviewed_manifest(&db, &serde_json::to_string(&manifest).unwrap());
         let selectors =
             serde_json::to_string(&actions.iter().map(|(a, _)| *a).collect::<Vec<_>>()).unwrap();
         for (action, risk) in actions {
@@ -246,10 +243,10 @@ impl Fixture {
                 .find(|declared| declared.name == *action)
                 .and_then(|declared| declared.http.as_ref())
                 .map_or_else(|| json!({}), |http| http.args_schema.clone());
-            db.execute("INSERT INTO catalog_actions (connection_id,principal,name,schema_json,schema_hash,risk,severity,status,first_seen_at_ms,last_seen_at_ms,ask_first) VALUES ('conn-fixture','operator',?1,?3,'schema',?2,'S1','active',1,1,0)", params![action,risk,schema.to_string()]).unwrap();
+            facade_rows::insert_catalog_action(&db, action, risk, &schema.to_string(), false);
         }
         for (grant, agent) in [("module", None), ("agent", Some("agent-fixture"))] {
-            db.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,authority_kind,created_at_ms,action_selectors,agent_id) VALUES (?1,'operator','conn-fixture','reserved:aft','write','invoke',1,?2,?3)",params![grant,selectors,agent]).unwrap();
+            facade_rows::insert_invoke_grant(&db, grant, "reserved:aft", &selectors, agent);
         }
         let scope = delegating_scope("agent-fixture");
         let github = Arc::new(RecordingGithub::default());
@@ -699,7 +696,13 @@ fn transient_missing_agent_grant_allows_same_nonce_after_minting() {
         .github_receipt("agent-fixture", "case")
         .unwrap()
         .is_none());
-    f.db().execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,authority_kind,created_at_ms,action_selectors,agent_id) VALUES ('agent','operator','conn-fixture','reserved:aft','write','invoke',1,'[\"add_issue_comment\"]','agent-fixture')", []).unwrap();
+    facade_rows::insert_invoke_grant(
+        &f.db(),
+        "agent",
+        "reserved:aft",
+        "[\"add_issue_comment\"]",
+        Some("agent-fixture"),
+    );
     let completed = f.request(&comment(), "case");
     assert_eq!(completed["result"]["status"], "completed", "{completed}");
     assert_eq!(f.github.comments.lock().unwrap().as_slice(), ["hello"]);

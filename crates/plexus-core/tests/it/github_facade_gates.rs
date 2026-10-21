@@ -1,3 +1,4 @@
+use crate::facade_rows;
 use crate::scope_support::{delegating_scope, LiveScopeReader};
 use plexus_core::github::facade::gates::{self, Authority, GateStore, Handle};
 use plexus_core::github::facade::request_map::{self, MappedRequest};
@@ -487,7 +488,7 @@ fn g7_claim_receives_canonical_fingerprint_and_baseline_without_contact() {
 #[test]
 fn g7_store_claims_one_approval_atomically_and_preserves_other_agents_approval() {
     use plexus_core::storage::github_store::GithubHandle;
-    use rusqlite::{params, Connection};
+    use rusqlite::Connection;
     let (scratch, store) = crate::scratch_store::open("facade-approval");
     let store = Arc::new(store);
     store
@@ -515,13 +516,15 @@ fn g7_store_claims_one_approval_atomically_and_preserves_other_agents_approval()
         .unwrap();
     store.bind_github_repo("org/repo", "app-fixture").unwrap();
     let db = Connection::open(scratch.path()).unwrap();
-    db.execute("INSERT INTO catalog_actions (connection_id,principal,name,schema_json,schema_hash,risk,severity,status,first_seen_at_ms,last_seen_at_ms,ask_first)
-        VALUES ('conn-fixture','operator','add_issue_comment','{}','schema','write','S1','active',1,1,1)",[]).unwrap();
+    facade_rows::insert_catalog_action(&db, "add_issue_comment", "write", "{}", true);
     for (grant, agent) in [("module", None), ("agent", Some("agent-fixture"))] {
-        db.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,
-            authority_kind,created_at_ms,action_selectors,agent_id)
-            VALUES (?1,'operator','conn-fixture','reserved:aft','write','invoke',1,'[\"add_issue_comment\"]',?2)",
-            params![grant,agent]).unwrap();
+        facade_rows::insert_invoke_grant(
+            &db,
+            grant,
+            "reserved:aft",
+            "[\"add_issue_comment\"]",
+            agent,
+        );
     }
     let scope = delegating_scope("agent-fixture");
     let first = gates::run_scoped(
@@ -853,7 +856,7 @@ fn g7_approval_names_its_carrier_and_a_reused_nonce_gets_a_fresh_one() {
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
     use plexus_core::storage::github_store::GithubHandle;
     use plexus_core::PlexusStore;
-    use rusqlite::{params, Connection};
+    use rusqlite::Connection;
     let carrier = plexus_core::github::PREFRONTAL_PRINCIPAL;
     let scratch = plexus_core::test_scratch::Scratch::database("facade-approval-reuse");
     let store = Arc::new(
@@ -892,8 +895,7 @@ fn g7_approval_names_its_carrier_and_a_reused_nonce_gets_a_fresh_one() {
         .unwrap();
     store.bind_github_repo("org/repo", "app-fixture").unwrap();
     let db = Connection::open(scratch.path()).unwrap();
-    db.execute("INSERT INTO catalog_actions (connection_id,principal,name,schema_json,schema_hash,risk,severity,status,first_seen_at_ms,last_seen_at_ms,ask_first)
-        VALUES ('conn-fixture','operator','add_issue_comment','{}','schema','write','S1','active',1,1,1)",[]).unwrap();
+    facade_rows::insert_catalog_action(&db, "add_issue_comment", "write", "{}", true);
     for (grant, grantee, agent) in [
         ("module", carrier, None),
         (
@@ -902,10 +904,7 @@ fn g7_approval_names_its_carrier_and_a_reused_nonce_gets_a_fresh_one() {
             Some("agent-fixture"),
         ),
     ] {
-        db.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,
-            authority_kind,created_at_ms,action_selectors,agent_id)
-            VALUES (?1,'operator','conn-fixture',?2,'write','invoke',1,'[\"add_issue_comment\"]',?3)",
-            params![grant, grantee, agent]).unwrap();
+        facade_rows::insert_invoke_grant(&db, grant, grantee, "[\"add_issue_comment\"]", agent);
     }
     let scope = delegating_scope("agent-fixture");
     let claim = |now: i64| {
@@ -1209,22 +1208,15 @@ fn g5_refusal_audit_records_resolved_handle_and_g1_records_null() {
 
 #[test]
 fn g6_real_agent_selector_exclusion_does_not_use_module_grant_as_substitute() {
-    use rusqlite::{params, Connection};
+    use rusqlite::Connection;
     let (scratch, store) = real_gate_store("facade-agent-selector", "enabled");
     let db = Connection::open(scratch.path()).unwrap();
-    db.execute("INSERT INTO catalog_actions (connection_id,principal,name,schema_json,schema_hash,risk,severity,status,first_seen_at_ms,last_seen_at_ms,ask_first)
-        VALUES ('conn-fixture','operator','add_issue_comment','{}','schema','write','S1','active',1,1,0)", []).unwrap();
+    facade_rows::insert_catalog_action(&db, "add_issue_comment", "write", "{}", false);
     for (id, agent, selectors) in [
         ("module", None, "[\"add_issue_comment\"]"),
         ("agent", Some("agent-fixture"), "[\"add_reaction\"]"),
     ] {
-        db.execute(
-            "INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,
-            risk_ceiling,authority_kind,created_at_ms,action_selectors,agent_id)
-            VALUES (?1,'operator','conn-fixture','reserved:aft','write','invoke',1,?2,?3)",
-            params![id, selectors, agent],
-        )
-        .unwrap();
+        facade_rows::insert_invoke_grant(&db, id, "reserved:aft", selectors, agent);
     }
     let scope = delegating_scope("agent-fixture");
     let result = plexus_core::github::facade::bot_request_scoped(

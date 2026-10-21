@@ -1,3 +1,4 @@
+use crate::facade_rows;
 use crate::scope_support::{delegating_scope, LiveScopeReader};
 use plexus_core::credentials::ResolvedCredential;
 use plexus_core::github::credential::HandleCredentialProvider;
@@ -7,7 +8,7 @@ use plexus_core::scope::CallScope;
 use plexus_core::storage::github_store::{GithubGovernanceSeams, GithubHandle};
 use plexus_core::transport::{MockResponse, MockTransport};
 use plexus_core::PlexusStore;
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -85,12 +86,7 @@ fn setup_as(label: &str, actions: &[(&str, &str)], module: &str) -> Setup {
     // governance refuses any argument a leg sends that the schema does not
     // declare. An action the manifest does not declare keeps an empty schema.
     let manifest = github_manifest();
-    db.execute(
-        "INSERT INTO app_manifests (principal,key,schema_version,content_hash,manifest_json,ingested_at_ms)
-         VALUES ('system','github_rest',1,'fixture',?1,1)",
-        params![serde_json::to_string(&manifest).unwrap()],
-    )
-    .unwrap();
+    facade_rows::insert_reviewed_manifest(&db, &serde_json::to_string(&manifest).unwrap());
     let selectors =
         serde_json::to_string(&actions.iter().map(|(action, _)| action).collect::<Vec<_>>())
             .unwrap();
@@ -101,8 +97,7 @@ fn setup_as(label: &str, actions: &[(&str, &str)], module: &str) -> Setup {
             .find(|declared| declared.name == *name)
             .and_then(|declared| declared.http.as_ref())
             .map_or_else(|| json!({}), |http| http.args_schema.clone());
-        db.execute("INSERT INTO catalog_actions (connection_id,principal,name,schema_json,schema_hash,risk,severity,status,first_seen_at_ms,last_seen_at_ms,ask_first)
-            VALUES ('conn-fixture','operator',?1,?3,'schema',?2,'S1','active',1,1,0)", params![name,risk,schema.to_string()]).unwrap();
+        facade_rows::insert_catalog_action(&db, name, risk, &schema.to_string(), false);
     }
     for (grant, grantee, agent) in [
         ("module", module, None),
@@ -112,8 +107,7 @@ fn setup_as(label: &str, actions: &[(&str, &str)], module: &str) -> Setup {
             Some("agent-fixture"),
         ),
     ] {
-        db.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,authority_kind,created_at_ms,action_selectors,agent_id)
-            VALUES (?1,'operator','conn-fixture',?4,'write','invoke',1,?2,?3)", params![grant,selectors,agent,grantee]).unwrap();
+        facade_rows::insert_invoke_grant(&db, grant, grantee, &selectors, agent);
     }
     let scope = delegating_scope("agent-fixture");
     let transport = Arc::new(MockTransport::default());
