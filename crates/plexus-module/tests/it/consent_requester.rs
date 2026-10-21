@@ -32,6 +32,11 @@ use tokio::time::{sleep, timeout};
 const CARRIER: &str = "reserved:broca";
 const ACTION: &str = "post_message";
 const FIXTURE_LIMIT: Duration = Duration::from_secs(60);
+/// Each daemon boot re-executes this test binary three times. Concurrent
+/// boots contend for the machine enough that a daemon can drop a client
+/// connection mid-request (tests/conformance.rs serializes its daemons for the
+/// same reason), so these fixtures start their daemons one at a time.
+static DAEMON_BOOT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 type Engine = GovernanceEngine<StubCredentialSource, MockTransport>;
 
@@ -71,6 +76,7 @@ impl Drop for Daemon {
 }
 impl Daemon {
     async fn new() -> Self {
+        let _boot = DAEMON_BOOT.lock().await;
         let scratch = Scratch::directory("cingulate-requester");
         let connection = scratch.join("connection.json");
         let home = scratch.join("home");

@@ -12,6 +12,15 @@ use tokio::{
 };
 
 const LIMIT: Duration = Duration::from_secs(60);
+/// Bound for `flow.audience` calls the fixture answers. Generous on purpose:
+/// it only has to catch a fixture that never answers, and the call travels
+/// through a daemon and a re-executed child that reads its answer from disk.
+const ANSWERED_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Each daemon boot re-executes this test binary twice. Concurrent boots
+/// contend for the machine enough that a daemon can drop a client connection
+/// mid-request (tests/conformance.rs serializes its daemons for the same
+/// reason), so the fixtures here start their daemons one at a time.
+static DAEMON_BOOT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn atomic_json(path: &Path, value: &Value) {
     let temporary = path.with_extension("partial");
@@ -31,6 +40,10 @@ impl Drop for Core {
 }
 impl Core {
     async fn new(reply: Value) -> Self {
+        Self::with_call_timeout(reply, ANSWERED_CALL_TIMEOUT).await
+    }
+    async fn with_call_timeout(reply: Value, call_timeout: Duration) -> Self {
+        let _boot = DAEMON_BOOT.lock().await;
         let scratch = Scratch::directory("flow-audience-core");
         let connection = scratch.join("connection.json");
         let home = scratch.join("home");
@@ -80,7 +93,7 @@ impl Core {
             consumer_identity: Some(serde_json::from_value(credentials).unwrap()),
             ..Default::default()
         })
-        .with_call_timeout(Duration::from_millis(250));
+        .with_call_timeout(call_timeout);
         Self {
             scratch,
             task,
@@ -445,7 +458,12 @@ async fn named_refusals_malformed_and_timeout_fail_closed_without_side_effects()
             "flow_audience_unavailable",
         );
     }
-    core.behavior(json!({"timeout":true}));
+    // The timeout case gets its own core with a short call timeout. The fixture
+    // never answers it, so the call waits out the whole bound, and the answered
+    // calls above keep their generous one.
+    let mut silent = Core::with_call_timeout(global(), Duration::from_millis(250)).await;
+    silent.behavior(json!({"timeout":true}));
+    let (state, _, transport, scratch) = setup(silent.audiences());
     let reply = quiet_refusal(
         &state,
         &transport,
