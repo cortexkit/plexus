@@ -629,6 +629,49 @@ run_phase "cargo fmt (workspace members) -- --check" \
 run_phase "cargo clippy --workspace --all-targets --locked --quiet -- -D warnings" \
   cargo clippy --workspace --all-targets --locked --quiet -- -D warnings
 
+# The shipped feature set, compiled on its own.
+#
+# plexus-conformance depends on plexus-core with `test-support` as a NORMAL
+# dependency, because the harness legitimately drives the stub credential
+# source, transport and decision plane. Cargo's resolver unifies that feature
+# into every build that selects the conformance crate, which every
+# `--workspace` command in this gate does. Without the phases below, no gate
+# command compiles plexus-core or ck-plexus the way a release does: a
+# production call to a test-support-gated item, or code that is dead only in
+# the shipped configuration, would surface first at release time.
+#
+# Selecting only the shipped packages, with no test, example or bench target,
+# leaves dev-dependency features out, so `test-support` stays off. The feature
+# tree is checked first: a selection change that lets the feature back in then
+# fails here, instead of quietly turning the compile below into one more
+# test-support build.
+refuse_test_support_in_shipped_features() {
+  local control shipped
+  control="$(cargo tree --locked -e normal,build,features -p plexus-conformance -i plexus-core)"
+  # Positive control, run every time: the conformance harness does enable the
+  # feature, so the search must find it there. Otherwise the pattern or the
+  # cargo tree output format has drifted, and an empty result below would be a
+  # clean bill from a check that recognises nothing.
+  if ! grep -q 'plexus-core feature "test-support"' <<<"$control"; then
+    echo "refusing: the feature-tree search did not find test-support in its control" >&2
+    echo "  expected plexus-conformance to enable plexus-core feature \"test-support\"" >&2
+    exit 1
+  fi
+  shipped="$(cargo tree --locked -e normal,build,features -p plexus-core -p plexus-module)"
+  if grep -q 'feature "test-support"' <<<"$shipped"; then
+    echo "refusing: the shipped package set enables a test-support feature" >&2
+    grep 'feature "test-support"' <<<"$shipped" >&2
+    exit 1
+  fi
+}
+
+run_phase "shipped packages build without test-support" \
+  refuse_test_support_in_shipped_features
+run_phase "cargo check --locked -p plexus-core --lib (shipped features)" \
+  cargo check --locked --quiet -p plexus-core --lib
+run_phase "cargo clippy --locked -p plexus-module --bins (shipped features) -- -D warnings" \
+  cargo clippy --locked --quiet -p plexus-module --bins -- -D warnings
+
 # Compile and run library, binary and integration tests.
 run_phase "cargo test --workspace --locked --quiet" \
   cargo test --workspace --locked --quiet

@@ -200,6 +200,7 @@ impl RouteBindings {
         self.insert_mode(channel, epoch, principal, scope, mode)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn insert_mode(
         &self,
         channel: u16,
