@@ -379,7 +379,9 @@ fn a_documented_rate_limit_falls_through_throttled() {
     assert_eq!(recorded.cooldown(), Some(60_000));
     assert_eq!(
         recorded.audit,
-        Some(json!({"served_by": "exa", "skipped": [{"provider": "kimi", "reason": "throttled"}]}))
+        Some(
+            json!({"filters": {"max_results": 3}, "served_by": "exa", "skipped": [{"provider": "kimi", "reason": "throttled"}]})
+        )
     );
     assert_eq!(
         *recorded.vault.requested.lock().unwrap(),

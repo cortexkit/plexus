@@ -100,7 +100,7 @@ fn code_target(value: &str) -> Option<CodeLookup> {
             }
         }
         "raw.githubusercontent.com" => Some(CodeLookup::RawGithub),
-        "gist.githubusercontent.com" => Some(CodeLookup::GistGithub),
+        "gist.github.com" | "gist.githubusercontent.com" => Some(CodeLookup::GistGithub),
         "docs.rs" => Some(CodeLookup::DocsRs),
         "crates.io" => Some(CodeLookup::CratesIo),
         "lib.rs" => Some(CodeLookup::LibRs),
@@ -115,7 +115,14 @@ fn hex_token(query: &str) -> bool {
     // Split on non-hex characters, so a 40-character substring of a longer hash cannot match.
     query
         .split(|character: char| !character.is_ascii_hexdigit())
-        .any(|token| matches!(token.len(), 40 | 64))
+        .any(|token| {
+            // A token written right after `0x` is a hex literal such as an
+            // Ethereum address. Git never writes a commit SHA that way, so
+            // it is not a source lookup.
+            let start = token.as_ptr() as usize - query.as_ptr() as usize;
+            let literal = query[..start].ends_with("0x") || query[..start].ends_with("0X");
+            matches!(token.len(), 40 | 64) && !literal
+        })
 }
 
 #[cfg(test)]

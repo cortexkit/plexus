@@ -386,7 +386,7 @@ fn a_rate_limit_falls_through_throttled() {
     assert_eq!(
         recorded.audit,
         Some(
-            json!({"served_by": "exa", "skipped": [{"provider": "ollama", "reason": "throttled"}]})
+            json!({"filters": {"max_results": 3}, "served_by": "exa", "skipped": [{"provider": "ollama", "reason": "throttled"}]})
         )
     );
     assert_eq!(

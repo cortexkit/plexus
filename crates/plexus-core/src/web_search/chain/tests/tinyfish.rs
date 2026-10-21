@@ -355,17 +355,7 @@ fn capability_skip_before_dispatch_has_no_allowance_or_cooldown() {
     // backend's 2000-character guard at the chain entry to prove its no-send
     // invariant even if the tool's envelope is widened later.
     let mut audit = CallAudit {
-        caller: "direct".into(),
-        principal: "direct".into(),
-        connection_id: None,
-        risk: None,
-        severity: None,
-        agent_id: None,
-        gate: "web_search",
-        query_text: None,
-        dispatched: false,
-        scope: None,
-        relay_origin: None,
+        search: facade::SearchAudit::new(facade::SearchTool::Web, "direct", None, None, None),
         chain: None,
     };
     assert_eq!(
@@ -384,7 +374,7 @@ fn capability_skip_before_dispatch_has_no_allowance_or_cooldown() {
         0
     );
     assert!(service.chain_cooldowns.lock().unwrap().is_empty());
-    assert!(!audit.dispatched);
+    assert!(audit.search.transmission.is_none());
     let skipped = audit.chain.unwrap().skipped;
     assert_eq!(
         skipped,

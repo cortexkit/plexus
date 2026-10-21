@@ -77,6 +77,33 @@ impl CodeSearchQuery {
         })
     }
 
+    /// The filters the caller set, for the search's audit row: each search
+    /// option that is on and each repository, path or language filter given.
+    /// They name what a search reads and are public, so they are recorded as
+    /// they are.
+    pub(crate) fn audited_filters(&self) -> serde_json::Map<String, Value> {
+        let mut filters = serde_json::Map::new();
+        for (name, on) in [
+            ("regex", self.regex),
+            ("match_case", self.match_case),
+            ("whole_words", self.whole_words),
+        ] {
+            if on {
+                filters.insert(name.into(), true.into());
+            }
+        }
+        if let Some(repo) = &self.repo {
+            filters.insert("repo".into(), repo.clone().into());
+        }
+        if let Some(path) = &self.path {
+            filters.insert("path".into(), path.clone().into());
+        }
+        if let Some(language) = &self.language {
+            filters.insert("language".into(), language.clone().into());
+        }
+        filters
+    }
+
     pub fn vendor_args(&self) -> Value {
         let mut args = json!({
             "query": self.query,

@@ -128,7 +128,9 @@ impl SkipReason {
         match refusal {
             WebSearchRefusal::NotGranted | WebSearchRefusal::Grant(_) => Self::NotGranted,
             WebSearchRefusal::BackendAmbiguous => Self::Ambiguous,
-            WebSearchRefusal::PerCallApprovalUnsupported => Self::Policy,
+            WebSearchRefusal::PerCallApprovalUnsupported | WebSearchRefusal::PolicyBlocked => {
+                Self::Policy
+            }
             WebSearchRefusal::BackendQuarantined { .. } => Self::Quarantined,
             _ => Self::Unavailable,
         }
@@ -164,9 +166,11 @@ impl WebSearchService {
         Ok(())
     }
 
-    /// Checks 3-5: policy and per-call approval, action status and connection
-    /// health. A cache hit must pass these too; cooldown, allowance and the
-    /// deadline only govern contacting the vendor, so they are kept apart.
+    /// Checks 3-5: connection health, action status, then policy and per-call
+    /// approval, in the order governance itself checks them. A cache hit must
+    /// pass these too; cooldown, the monthly allowance and the deadline only
+    /// govern contacting the vendor, so they are kept apart. (The rate limiter
+    /// is separate: an eligible cache hit is still charged against it.)
     fn standing_checks(
         &self,
         store: &PlexusStore,
@@ -174,23 +178,18 @@ impl WebSearchService {
         action: &CatalogAction,
         now_ms: i64,
     ) -> Result<(), SkipReason> {
-        // Policy, action status and connection health precede transient admission:
-        // a durable refusal must not be hidden by cooldown or quota exhaustion.
-        let effect = self
-            .policy_effect(store, connection, action, now_ms)
-            .map_err(|refusal| SkipReason::for_refusal(&refusal))?;
-        if effect != "allow" {
-            return Err(SkipReason::Policy);
-        }
-        match action.status.as_str() {
-            "active" => {}
-            "quarantined" => return Err(SkipReason::Quarantined),
-            _ => return Err(SkipReason::Unavailable),
-        }
-        if connection_denial(connection).is_some() {
-            return Err(SkipReason::ConnectionUnusable);
-        }
-        Ok(())
+        // These durable refusals precede transient admission: a durable
+        // refusal must not be hidden by cooldown or quota exhaustion.
+        facade::standing_checks(store, facade::SearchTool::Web, connection, action, now_ms).map_err(
+            |denial| match denial {
+                facade::SearchDenial::ConnectionUnusable => SkipReason::ConnectionUnusable,
+                facade::SearchDenial::Quarantined => SkipReason::Quarantined,
+                facade::SearchDenial::AskFirst | facade::SearchDenial::Blocked => {
+                    SkipReason::Policy
+                }
+                _ => SkipReason::Unavailable,
+            },
+        )
     }
 
     /// Serve a chain search from the cache, or return `None` for a miss.
@@ -231,16 +230,23 @@ impl WebSearchService {
         };
         let target = crate::grant_refusal::GrantTarget::new(
             crate::grant_refusal::Layer::Module,
-            &audit.caller,
+            &audit.search.caller,
             "web_search",
             Some(provider.name),
             provider.action,
         );
         let (connection, action) = self
-            .backing_connection_for(store, &audit.caller, now_ms, is_flow, identity, target)
+            .backing_connection_for(
+                store,
+                &audit.search.caller,
+                now_ms,
+                is_flow,
+                identity,
+                target,
+            )
             .ok()?;
-        self.cached_read_policy(store, &connection, &action, now_ms, is_flow)
-            .ok()?;
+        // Policy must allow the search outright: a cache hit never parks an
+        // approval request, so ask_first refuses here like block does.
         self.standing_checks(store, &connection, &action, now_ms)
             .ok()?;
         let instance = instance_digest(provider.name, backend.as_ref(), &connection).ok()?;
@@ -256,10 +262,7 @@ impl WebSearchService {
         self.limiter
             .try_acquire(name, caller_key, limits, now_ms)
             .ok()?;
-        audit.principal = connection.principal.clone();
-        audit.connection_id = Some(connection.connection_id.clone());
-        audit.risk = Some(action.risk.clone());
-        audit.severity = Some(action.severity.clone());
+        audit.search.resolved(&connection, &action);
         let chain = audit.chain.get_or_insert_with(ChainAudit::default);
         chain.attempted = Some(identity);
         chain.served_by = Some(name.to_string());
@@ -280,12 +283,13 @@ impl WebSearchService {
     ) -> Result<WebSearchResponse, WebSearchRefusal> {
         audit.chain = Some(ChainAudit::default());
         let is_flow = audit
+            .search
             .scope
             .as_ref()
             .is_some_and(|scope| scope.flow_id.is_some());
         let caller_key = CallerKey {
-            principal: audit.caller.clone(),
-            agent_id: audit.agent_id.clone(),
+            principal: audit.search.caller.clone(),
+            agent_id: audit.search.agent_id.clone(),
         };
         let cache_key = CacheKey::new(cache::CHAIN_CACHE_BACKEND, query);
         if let Some(hit) = self.chain_cache_hit(
@@ -302,7 +306,8 @@ impl WebSearchService {
         let deadline_at_ms =
             (self.clock)().saturating_add(WEB_SEARCH_CHAIN_DEADLINE.as_millis() as i64);
         let mut deadline_stopped = false;
-        let caller = &audit.caller;
+        // Owned, so the walk can update the audit record while it holds the name.
+        let caller = &audit.search.caller.clone();
         let mut all_not_granted = true;
         let mut first_grant_refusal = None;
         let mut retry_after = None::<u64>;
@@ -439,19 +444,17 @@ impl WebSearchService {
                     prepared.vendor_args,
                 )
                 .without_per_call_approval();
-                if let Some(agent_id) = &audit.agent_id {
+                if let Some(agent_id) = &audit.search.agent_id {
                     request = request.with_attributed_agent(agent_id);
                 }
-                if let Some(scope) = &audit.scope {
+                if let Some(scope) = &audit.search.scope {
                     request = request.with_scope_attribution_only(scope.clone());
                 }
-                if let Some(origin) = &audit.relay_origin {
+                if let Some(origin) = &audit.search.relay_origin {
                     request = request.with_relay_origin(origin.clone());
                 }
-                audit.principal = connection.principal.clone();
-                audit.connection_id = Some(connection.connection_id.clone());
-                audit.risk = Some(action.risk.clone());
-                audit.severity = Some(action.severity.clone());
+                audit.search.resolved(&connection, &action);
+                audit.search.new_attempt();
                 audit.chain.as_mut().unwrap().attempted = Some(identity);
                 // Connector-home ownership is mediated only by authorize, not
                 // preflight, so its denial is this provider's unavailable reason.
@@ -459,6 +462,7 @@ impl WebSearchService {
                     eprintln!(warn web_search: "web_search chain authorization refused on {} ({})", connection.connection_id, denial.reason_code());
                     SkipReason::for_refusal(&self.refusal_for_denial(caller, &denial))
                 })?;
+                audit.search.request_id = Some(reservation.request_id.clone());
                 let dispatched = engine.revalidate_and_dispatch(&reservation);
                 // Revalidation refusals also report NotSent. Sent and
                 // OutcomeUnknown may have reached the vendor, so they keep it.
@@ -467,7 +471,7 @@ impl WebSearchService {
                 } else {
                     drop(hold);
                 }
-                audit.dispatched = true;
+                audit.search.transmission = Some(dispatched.transmission);
                 let results = match outcome::classify(
                     backend.as_ref(),
                     &dispatched,

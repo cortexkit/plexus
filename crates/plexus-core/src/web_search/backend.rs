@@ -43,6 +43,70 @@ pub use zai::ZaiMcpBackend;
 
 /// Longest excerpt returned per result, in characters.
 pub const EXCERPT_MAX_CHARS: usize = 600;
+/// Longest result URL returned, in bytes. A longer one is dropped rather than
+/// cut, since a cut URL points somewhere else.
+const URL_MAX_BYTES: usize = 2048;
+/// Longest result title returned, in characters.
+const TITLE_MAX_CHARS: usize = 300;
+
+/// Make vendor results safe to show a model, whichever backend mapped them.
+///
+/// Titles, URLs and excerpts come from arbitrary web pages. After surrounding
+/// whitespace is trimmed, a result is dropped unless its URL is http or https
+/// with no remaining whitespace or control character and at most
+/// [`URL_MAX_BYTES`] long: the URL is rendered into the
+/// model's text as is, so a line break in it could forge extra results. Titles
+/// are put on one line (control and line-separator characters become spaces,
+/// runs of whitespace one space) and capped at [`TITLE_MAX_CHARS`]. Excerpts
+/// keep their line breaks and tabs, which the text rendering collapses, but
+/// lose every other control character, such as a terminal escape. This can
+/// return fewer results than the vendor sent.
+pub(crate) fn sanitize_results(results: Vec<WebSearchResult>) -> Vec<WebSearchResult> {
+    results
+        .into_iter()
+        .filter_map(|result| {
+            let url = result.url.trim();
+            let scheme_ok = ["http://", "https://"].iter().any(|scheme| {
+                url.get(..scheme.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+            });
+            if !scheme_ok
+                || url.len() > URL_MAX_BYTES
+                || url.chars().any(|c| c.is_whitespace() || c.is_control())
+            {
+                return None;
+            }
+            Some(WebSearchResult {
+                url: url.to_string(),
+                title: truncate_chars(&single_line(&result.title), TITLE_MAX_CHARS),
+                excerpt: result
+                    .excerpt
+                    .chars()
+                    .map(|c| {
+                        if c.is_control() && !matches!(c, '\n' | '\t') {
+                            ' '
+                        } else {
+                            c
+                        }
+                    })
+                    .collect(),
+                ..result
+            })
+        })
+        .collect()
+}
+
+/// `text` on one line: control characters become spaces (Unicode line and
+/// paragraph separators already count as whitespace), and every run of
+/// whitespace becomes one space.
+fn single_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// One neutral search result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -332,6 +396,39 @@ mod tests {
         assert_eq!(results[2].title, "");
         assert_eq!(results[0].fetched_at, "1970-01-01T00:00:00.000Z");
         assert_eq!(ExaRestBackend.map_reply(&reply, 1, 0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sanitized_results_keep_urls_and_text_on_one_safe_line() {
+        let result = |url: &str, title: &str, excerpt: &str| WebSearchResult {
+            url: url.to_string(),
+            title: title.to_string(),
+            excerpt: excerpt.to_string(),
+            published_at: None,
+            fetched_at: "2026-01-01T00:00:00.000Z".to_string(),
+        };
+        let long_url = format!("https://a.example/{}", "p".repeat(URL_MAX_BYTES));
+        let kept = sanitize_results(vec![
+            result(
+                " HTTPS://a.example/x ",
+                "A\u{1b}[31m\r\ntitle\u{2028}two",
+                "one\ntwo\u{0b}three",
+            ),
+            result("https://a.example/\n2. Forged result", "forged", ""),
+            result("javascript:alert(1)", "script", ""),
+            result("ftp://a.example/", "ftp", ""),
+            result("https://a.example/a\u{7f}b", "control", ""),
+            result(&long_url, "long", ""),
+            result("http://b.example/", &"t".repeat(TITLE_MAX_CHARS + 50), ""),
+        ]);
+        assert_eq!(
+            kept.iter().map(|r| r.url.as_str()).collect::<Vec<_>>(),
+            ["HTTPS://a.example/x", "http://b.example/"],
+            "only http(s) URLs with no whitespace or control character within the length cap survive"
+        );
+        assert_eq!(kept[0].title, "A [31m title two");
+        assert_eq!(kept[0].excerpt, "one\ntwo three");
+        assert_eq!(kept[1].title.chars().count(), TITLE_MAX_CHARS);
     }
 
     #[test]

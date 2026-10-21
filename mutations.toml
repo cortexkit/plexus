@@ -2912,9 +2912,9 @@ timeout_s = 60
 [[control]]
 id = "code-search-module-grant"
 guards = "Code search candidate selection requires a module grant before engine dispatch"
-file = "crates/plexus-core/src/code_search/mod.rs"
-old = "if scoped_grant_refusal(grant.as_ref(), ACTION, &action.risk, now).is_some() {"
-new = "if false && scoped_grant_refusal(grant.as_ref(), ACTION, &action.risk, now).is_some() { /* NON-VACUITY BREAK */"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "        match scoped_grant_refusal(grant.as_ref(), target.action, &action.risk, now_ms) {"
+new = "        match None::<GrantDenial> { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/code_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -3108,8 +3108,8 @@ timeout_s = 60
 id = "web-search-code-lookup-hex64"
 guards = "web_search refuses exact 64-hex checksum tokens as well as 40-hex commit tokens"
 file = "crates/plexus-core/src/web_search/code_lookup.rs"
-old = ".any(|token| matches!(token.len(), 40 | 64))"
-new = ".any(|token| token.len() == 40) // NON-VACUITY BREAK"
+old = "            matches!(token.len(), 40 | 64) && !literal"
+new = "            token.len() == 40 && !literal // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/web_search/code_lookup/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -4391,7 +4391,7 @@ build_timeout_s = 3600
 [[control]]
 id = "code-search-grant-before-rate-charge"
 guards = "code_search finds the caller's granted connection before charging the shared grep.app rate bucket, so ungranted callers cannot drain it"
-edits = [{ file = "crates/plexus-core/src/code_search/mod.rs", old = "let (connection, action) = backing_connection(engine.store(), caller, now)?;", new = "            if backing_connection(engine.store(), caller, now).is_err() { /* NON-VACUITY BREAK */\n            // Limits are stored by backend in web_search_limits. Charge the caller's\n            // module bucket and the global grep.app bucket, irrespective of agent identity.\n            let limits = engine\n                .store()\n                .web_search_limits(BACKEND)\n                .map_err(store_failure)?\n                .unwrap_or_else(default_limits);\n            self.limiter\n                .try_acquire(\n                    BACKEND,\n                    &CallerKey {\n                        principal: caller.to_string(),\n                        agent_id: None,\n                    },\n                    limits,\n                    now,\n                )\n                .map_err(|retry_after_ms| CodeSearchRefusal {\n                    retry_after_ms: Some(retry_after_ms),\n                    ..CodeSearchRefusal::new(RefusalCode::RateLimited)\n                })?;\n            }\n            let (connection, action) = backing_connection(engine.store(), caller, now)?; /* NON-VACUITY BREAK */" }, { file = "crates/plexus-core/src/code_search/mod.rs", old = "            let mut request =", new = "            /* NON-VACUITY BREAK: leave the normal granted-call quota charge in place */\n            let mut request =" }]
+edits = [{ file = "crates/plexus-core/src/code_search/mod.rs", old = "            let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());", new = "            let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());\n            if facade::resolve_connection(engine.store(), caller, now, false, TARGET, grant_target(caller)).is_err() { /* NON-VACUITY BREAK */\n            let limits = engine\n                .store()\n                .web_search_limits(BACKEND)\n                .map_err(store_failure)?\n                .unwrap_or_else(default_limits);\n            self.limiter\n                .try_acquire(\n                    BACKEND,\n                    &CallerKey {\n                        principal: caller.to_string(),\n                        agent_id: None,\n                    },\n                    limits,\n                    now,\n                )\n                .map_err(|retry_after_ms| CodeSearchRefusal {\n                    retry_after_ms: Some(retry_after_ms),\n                    ..CodeSearchRefusal::new(RefusalCode::RateLimited)\n                })?;\n            }" }, { file = "crates/plexus-core/src/code_search/mod.rs", old = "            let mut request =", new = "            /* NON-VACUITY BREAK: leave the normal granted-call quota charge in place */\n            let mut request =" }]
 test_file = "crates/plexus-core/src/code_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -4416,8 +4416,8 @@ build_timeout_s = 3600
 id = "web-search-grant-refusal-names-caller"
 guards = "A grant refusal met inside the engine names the calling module as grantee, not a fixed principal"
 file = "crates/plexus-core/src/web_search/mod.rs"
-old = "                    Self::grant_target(caller),\n                    refusal.detail().cause,"
-new = "                    Self::grant_target(\"reserved:basal\"), /* NON-VACUITY BREAK */\n                    refusal.detail().cause,"
+old = "        self.refusal_from(facade::denial_for(denial, Self::grant_target(caller)))"
+new = "        self.refusal_from(facade::denial_for(denial, Self::grant_target(\"reserved:basal\"))) /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -9013,9 +9013,9 @@ build_timeout_s = 3600
 [[control]]
 id = "web-block-before-shared-quota"
 guards = "Policy-blocked web searches cannot drain shared quota"
-file = "crates/plexus-core/src/web_search/mod.rs"
-old = "        if effect != \"allow\" {"
-new = "        if false && effect != \"allow\" { /* NON-VACUITY BREAK */"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "    if effect != \"allow\" {"
+new = "    if false && effect != \"allow\" { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -9028,7 +9028,7 @@ build_timeout_s = 3600
 [[control]]
 id = "code-policy-before-shared-quota"
 guards = "Policy-blocked code searches refuse before charging shared quota"
-edits = [{ file = "crates/plexus-core/src/code_search/mod.rs", old = "            if effect != \"allow\" {\n                return Err(CodeSearchRefusal::new(RefusalCode::NotGranted));\n            }", new = "            /* NON-VACUITY BREAK: policy moved after charging */" }, { file = "crates/plexus-core/src/code_search/mod.rs", old = "            let mut request = AuthorizationRequest::new(", new = "            if effect != \"allow\" { return Err(CodeSearchRefusal::new(RefusalCode::NotGranted)); }\n            let mut request = AuthorizationRequest::new(" }]
+edits = [{ file = "crates/plexus-core/src/code_search/mod.rs", old = "            facade::standing_checks(engine.store(), SearchTool::Code, &connection, &action, now)\n                .map_err(refusal_from)?;", new = "            /* NON-VACUITY BREAK: policy moved after charging */" }, { file = "crates/plexus-core/src/code_search/mod.rs", old = "            let mut request = AuthorizationRequest::new(", new = "            facade::standing_checks(engine.store(), SearchTool::Code, &connection, &action, now).map_err(refusal_from)?;\n            let mut request = AuthorizationRequest::new(" }]
 test_file = "crates/plexus-core/src/code_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -9072,8 +9072,8 @@ build_timeout_s = 3600
 id = "code-quarantine-refusal"
 guards = "Quarantined code search actions have a specific refusal"
 file = "crates/plexus-core/src/code_search/mod.rs"
-old = "        return Err(CodeSearchRefusal::new(RefusalCode::BackendQuarantined));"
-new = "        return Err(unavailable()); /* NON-VACUITY BREAK */"
+old = "        SearchDenial::Quarantined => CodeSearchRefusal::new(RefusalCode::BackendQuarantined),"
+new = "        SearchDenial::Quarantined => unavailable(), /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/code_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -9087,8 +9087,8 @@ build_timeout_s = 3600
 id = "code-ambiguous-refusal"
 guards = "Ambiguous code search connections have a specific refusal without dispatch"
 file = "crates/plexus-core/src/code_search/mod.rs"
-old = "        return Err(CodeSearchRefusal::new(RefusalCode::BackendAmbiguous));"
-new = "        return Err(unavailable()); /* NON-VACUITY BREAK */"
+old = "        SearchDenial::Ambiguous => CodeSearchRefusal::new(RefusalCode::BackendAmbiguous),"
+new = "        SearchDenial::Ambiguous => unavailable(), /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/code_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -9131,9 +9131,9 @@ build_timeout_s = 3600
 [[control]]
 id = "web-policy-diagnostics"
 guards = "Policy lookup errors retain their cause in operator diagnostics"
-file = "crates/plexus-core/src/web_search/mod.rs"
-old = "                eprintln!(error web_search: \"web_search policy lookup failed: {error}\");"
-new = "                let _ = error; /* NON-VACUITY BREAK */"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "            search_log!(tool, error, \"{} policy lookup failed: {error}\", tool.name());"
+new = "            let _ = (&error, tool); /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -15900,18 +15900,17 @@ build_timeout_s = 3600
 timeout_s = 120
 
 [[control]]
-id = "web-search-chain-policy-before-status"
-guards = "Policy refusal precedes action quarantine and later checks"
-file = "crates/plexus-core/src/web_search/chain.rs"
-old = 'let effect = self'
-new = '''if action.status == "quarantined" { return Err(SkipReason::Quarantined); } /* NON-VACUITY BREAK */
-        let effect = self'''
+id = "search-governance-check-order"
+guards = "A search checks connection health, then the catalog action's status, then policy, the order governance's own authorization uses, so it reports the refusal an invoke would"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "    if let Some(reason) = connection_denial(connection) {"
+new = "    if let Some(reason) = connection_denial(connection).filter(|_| action.status == \"active\") { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
 runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::chain::tests::policy_status_connection_cooldown_then_rate_is_the_failure_order"]
+expect_red = ["web_search::chain::tests::connection_status_policy_cooldown_then_rate_is_the_failure_order"]
 build_timeout_s = 3600
 timeout_s = 120
 
@@ -16005,7 +16004,7 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::chain::tests::policy_status_connection_cooldown_then_rate_is_the_failure_order"]
+expect_red = ["web_search::chain::tests::connection_status_policy_cooldown_then_rate_is_the_failure_order"]
 build_timeout_s = 3600
 timeout_s = 120
 
@@ -16275,8 +16274,8 @@ timeout_s = 120
 id = "web-search-outcome-completed-results"
 guards = "A mapped nonempty reply serves without contacting the next provider"
 file = "crates/plexus-core/src/web_search/chain/outcome.rs"
-old = 'Ok(results) => Classified::Serve(results),'
-new = 'Ok(results) if results.is_empty() => Classified::Serve(results), Ok(_) => Classified::MoveOn { reason: SkipReason::Unavailable, cooldown_ms: UNAVAILABLE_COOLDOWN_MS }, /* NON-VACUITY BREAK */'
+old = "Ok(results) => {\n                        Classified::Serve(crate::web_search::backend::sanitize_results(results))\n                    }"
+new = "Ok(results) if results.is_empty() => Classified::Serve(results), Ok(_) => Classified::MoveOn { reason: SkipReason::Unavailable, cooldown_ms: UNAVAILABLE_COOLDOWN_MS }, /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -16290,8 +16289,8 @@ timeout_s = 120
 id = "web-search-outcome-completed-empty"
 guards = "A mapped empty reply serves rather than failing over"
 file = "crates/plexus-core/src/web_search/chain/outcome.rs"
-old = 'Ok(results) => Classified::Serve(results),'
-new = 'Ok(results) if !results.is_empty() => Classified::Serve(results), Ok(_) => Classified::MoveOn { reason: SkipReason::Unavailable, cooldown_ms: UNAVAILABLE_COOLDOWN_MS }, /* NON-VACUITY BREAK */'
+old = "Ok(results) => {\n                        Classified::Serve(crate::web_search::backend::sanitize_results(results))\n                    }"
+new = "Ok(results) if !results.is_empty() => Classified::Serve(results), Ok(_) => Classified::MoveOn { reason: SkipReason::Unavailable, cooldown_ms: UNAVAILABLE_COOLDOWN_MS }, /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -20331,5 +20330,405 @@ target = "--lib"
 select = "expected"
 expect_red = ["web_search::chain::tests::outcomes::signals::declared_rest_success_cannot_emit_error_signals_and_serves_results"]
 expect_message = "successful REST data must never carry an error signal"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-limiter-backward-step-reanchors"
+guards = "A backward wall-clock step re-anchors a search rate bucket, so refill resumes instead of freezing for the length of the step"
+file = "crates/plexus-core/src/web_search/limiter.rs"
+old = "        self.updated_ms = now_ms;"
+new = "        self.updated_ms = now_ms.max(self.updated_ms); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/limiter.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::limiter::tests::a_backward_clock_step_does_not_freeze_refill"]
+expect_message = "refill must resume from the stepped-back time"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-cache-backward-step-expires"
+guards = "A search cache entry that seems stored in the future (the wall clock stepped back) is a miss, not served for the step plus its TTL"
+file = "crates/plexus-core/src/web_search/cache.rs"
+old = "    (0..CACHE_TTL_MS).contains(&age)"
+new = "    age < CACHE_TTL_MS /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/cache.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::cache::tests::a_backward_clock_step_expires_entries_instead_of_extending_them"]
+expect_message = "an entry stored after the current time must not be served"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "code-search-separator-blanks-unnumbered"
+guards = "Blank lines grep.app puts between and after snippets are not returned as numbered file lines"
+file = "crates/plexus-core/src/code_search/reply.rs"
+old = "            if line.trim().is_empty() {\n                continue;\n            }"
+new = "            /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/reply.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::reply::tests::blank_separator_lines_are_not_numbered"]
+expect_message = "a match must not end in a separator line"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "code-search-in-band-header-position"
+guards = "A header-shaped line inside a public file counts as a snippet header only where grep.app puts one, so file content cannot renumber lines"
+file = "crates/plexus-core/src/code_search/reply.rs"
+old = "            if number.is_none() || !pending.is_empty() {"
+new = "            if true { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/reply.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::reply::tests::header_shaped_code_lines_stay_code"]
+expect_message = "only the header after the blank separator renumbers lines"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "code-search-long-line-cap"
+guards = "One very long code line is cut and marked instead of using up the whole parse budget"
+file = "crates/plexus-core/src/code_search/reply.rs"
+old = "    if line.len() <= MAX_LINE_BYTES {"
+new = "    if true { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/reply.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::reply::tests::long_lines_are_cut_and_marked"]
+expect_message = "the matches after a long line are still returned"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-compat-results-sanitized"
+guards = "The compatibility web_search path passes vendor results through the shared sanitizer before serving or caching them"
+file = "crates/plexus-core/src/web_search/mod.rs"
+old = "            .map(backend::sanitize_results)"
+new = "            /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::both_search_paths_sanitize_vendor_results"]
+expect_message = "the compatibility path must sanitize vendor results"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-results-sanitized"
+guards = "An ordered web_search provider walk passes every provider's results through the shared sanitizer before serving or caching them"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = "Classified::Serve(crate::web_search::backend::sanitize_results(results))"
+new = "Classified::Serve(results) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::both_search_paths_sanitize_vendor_results"]
+expect_message = "the ordered path must sanitize vendor results"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-result-url-line-breaks-dropped"
+guards = "A vendor result URL holding whitespace or a control character is dropped, so a page cannot forge extra results in the model's listing"
+file = "crates/plexus-core/src/web_search/backend.rs"
+old = "                || url.chars().any(|c| c.is_whitespace() || c.is_control())"
+new = "                || false /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tests::sanitized_results_keep_urls_and_text_on_one_safe_line"]
+expect_message = "only http(s) URLs with no whitespace or control character within the length cap survive"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-code-lookup-0x-literal-served"
+guards = "A 0x-prefixed hex literal (an Ethereum address) in a web_search query is not refused as a commit lookup"
+file = "crates/plexus-core/src/web_search/code_lookup.rs"
+old = "            matches!(token.len(), 40 | 64) && !literal"
+new = "            matches!(token.len(), 40 | 64) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/code_lookup/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::code_lookup::tests::hex_literals_after_0x_are_not_source_lookups"]
+expect_message = "a 0x literal must be served"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-code-lookup-gist-host"
+guards = "gist.github.com pages and include_domains are refused as source lookups like gist.githubusercontent.com"
+file = "crates/plexus-core/src/web_search/code_lookup.rs"
+old = "        \"gist.github.com\" | \"gist.githubusercontent.com\" => Some(CodeLookup::GistGithub),"
+new = "        \"gist.githubusercontent.com\" => Some(CodeLookup::GistGithub), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/code_lookup/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::code_lookup::tests::gist_pages_are_source_lookups"]
+expect_message = "a gist.github.com page must refuse"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-candidates-use-callers-clock"
+guards = "The search candidate query judges grant expiry at the caller's now, the instant the caller's own grant check uses"
+file = "crates/plexus-core/src/store/web_search.rs"
+old = "statement.query_map((caller, app_key, now_ms), |row| row.get::<_, String>(0))?;"
+new = "statement.query_map((caller, app_key, super::now_ms()), |row| row.get::<_, String>(0))?; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/web_search_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::web_search_store::tests::candidate_grant_expiry_uses_the_callers_clock"]
+expect_message = "a grant still live at the caller's now must keep its connection a candidate"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-limit-accepts-code-search-backend"
+guards = "Operators can set code_search's grep_app rate limits through the limit op"
+file = "crates/plexus-module/src/ceremony.rs"
+old = "    if name == plexus_core::code_search::BACKEND {\n        return Ok(());\n    }"
+new = "    /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::admin::code_search_limits_are_settable_and_report_the_replaced_row"]
+expect_message = "the code_search backend's limits must be settable"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-limit-reports-replaced-row"
+guards = "An applied limit change reports and audits the row its own write replaced, not a value read separately"
+file = "crates/plexus-module/src/ceremony.rs"
+old = "    let (previous, previous_source) = with_source(previous);"
+new = "    let _replaced = previous; let (previous, previous_source) = with_source(state.store().web_search_limits(backend).ok().flatten()); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_tests::admin::code_search_limits_are_settable_and_report_the_replaced_row"]
+expect_message = "the reply must report the row the write replaced"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "code-search-flow-typed-grant-refusal"
+guards = "A flow refused code search for want of a grant gets the typed grant refusal naming the grant to restore"
+file = "crates/plexus-core/src/code_search/mod.rs"
+old = "            let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());"
+new = "            let is_flow = scope.is_some_and(|_| false); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::flow_without_a_grant_gets_a_typed_grant_refusal"]
+expect_message = "a flow must be told which grant to restore"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-authorize-quarantine-named"
+guards = "A quarantine governance meets at authorize is reported as backend_quarantined by both search tools"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "        Denial::Catalog(CatalogDenial::Quarantined) => SearchDenial::Quarantined,"
+new = "        Denial::Catalog(CatalogDenial::Quarantined) => SearchDenial::Unavailable, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::quarantine_met_at_authorize_is_backend_quarantined"]
+expect_message = "a quarantine met at authorize must name the quarantine"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-vendor-throttle-rate-limited"
+guards = "A vendor throttle after dispatch reaches both search tools as rate_limited with the vendor's delay or a default"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "            if code == \"throttled\" =>"
+new = "            if false && code == \"throttled\" => /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::vendor_throttle_is_rate_limited_with_the_vendor_delay"]
+expect_message = "a vendor throttle must tell the caller when to retry"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-block-policy-named"
+guards = "A block policy on the backing connection is refused as policy_blocked by both search tools, as governance names it, not as a missing grant"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "        return Err(SearchDenial::Blocked);"
+new = "        return Err(SearchDenial::NotGranted); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::blocked_searches_keep_the_rate_budget", "code_search::tests::blocked_searches_keep_the_code_search_rate_budget"]
+expect_message = "must not consume quota"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-row-carries-request-id"
+guards = "The search audit row carries the engine's request id so it joins the engine's authorization and dispatch rows"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "            request_id: self.request_id.clone(),"
+new = "            request_id: None, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::the_search_row_joins_the_engine_rows_by_request_id", "web_search::tests::the_search_row_joins_the_engine_rows_by_request_id"]
+expect_message = "the search row must carry a request id"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-row-outcome-from-transmission"
+guards = "A dispatched search's audit row states whether the request reached the vendor, from the dispatch's transmission state"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "            Some(TransmissionState::OutcomeUnknown) => (\"allow\", \"unknown\"),"
+new = "            Some(TransmissionState::OutcomeUnknown) => (\"deny\", \"failed\"), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::a_dispatched_search_row_states_what_reached_the_vendor"]
+expect_message = "the search row must state what reached the vendor"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-row-unsent-dispatch-not-sent"
+guards = "A dispatch that never left is audited as deny/not_sent, not as a failed send"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "            None | Some(TransmissionState::NotSent) => (\"deny\", \"not_sent\"),"
+new = "            None => (\"deny\", \"not_sent\"), Some(TransmissionState::NotSent) => (\"deny\", \"failed\"), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::a_dispatched_search_row_states_what_reached_the_vendor"]
+expect_message = "the search row must state what reached the vendor"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-cache-hit-single-policy-read"
+guards = "A compatibility web_search cache hit reads policy once, in the standing checks, not again before serving"
+file = "crates/plexus-core/src/web_search/mod.rs"
+old = "        if let Some(results) = self.cache.get(&key, now_ms) {\n            return Ok(WebSearchResponse {"
+new = "        if let Some(results) = self.cache.get(&key, now_ms) {\n            let _ = self.policy_effect(store, &connection, &action, now_ms); /* NON-VACUITY BREAK */\n            return Ok(WebSearchResponse {"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::a_cache_hit_reads_policy_once"]
+expect_message = "a compatibility cache hit must read policy once"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-unrecorded-cache-hit-withheld"
+guards = "A web_search cache hit whose only audit row cannot be written is withheld rather than served unrecorded"
+file = "crates/plexus-core/src/web_search/mod.rs"
+old = "            Ok(response) if response.cached && recorded.is_err() => {"
+new = "            Ok(response) if false && response.cached && recorded.is_err() => { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::an_unrecorded_cache_hit_is_withheld"]
+expect_message = "a cache hit whose audit row cannot be written must be withheld"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-row-records-filters"
+guards = "Both search tools record the caller's filters in the audit row's summary, not only the query text"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "        if !self.filters.is_empty() {\n            summary.insert(\"filters\".into(), Value::Object(self.filters.clone()));\n        }"
+new = "        /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::the_search_row_records_the_filters", "code_search::tests::the_search_row_records_the_filters"]
+expect_message = "search row must record the filters"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-query-credential-words-redacted"
+guards = "A credential-shaped word in a web or code search query is replaced before the query is stored in the audit journal"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "        self.query_text = Some(text);"
+new = "        let _ = text; self.query_text = Some(query.to_string()); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::credential_shaped_query_words_are_not_stored", "code_search::tests::credential_shaped_query_words_are_not_stored"]
+expect_message = "a credential-shaped query word must not be stored"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-filter-credential-words-redacted"
+guards = "A credential-shaped word in a code search filter is replaced before the filters are stored in the audit row"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "                    *text = redacted;"
+new = "                    let _ = redacted; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::credential_shaped_query_words_are_not_stored"]
+expect_message = "no search row may hold the token"
 build_timeout_s = 3600
 timeout_s = 120

@@ -1,6 +1,7 @@
 use super::*;
 use crate::storage::{
-    web_search_store::WebSearchLimits, CatalogActionInput, GrantInput, CATALOG_PRINCIPAL,
+    web_search_store::WebSearchLimits, CatalogActionInput, GrantInput, PlexusStore,
+    CATALOG_PRINCIPAL,
 };
 use crate::test_scratch::Scratch;
 use crate::{MockResponse, MockTransport, StubCredentialSource};
@@ -257,7 +258,7 @@ fn blocked_searches_keep_the_code_search_rate_budget() {
     for _ in 0..200 {
         assert_eq!(
             f.search("direct", None).unwrap_err().to_wire()["error"]["code"],
-            "code_search_not_granted",
+            "policy_blocked",
             "blocked code searches must not consume quota"
         );
     }
@@ -474,4 +475,204 @@ fn ungranted_callers_cannot_drain_the_global_bucket() {
         10
     );
     assert_eq!(f.transport.requests().len(), 1);
+}
+
+/// A flow is told which grant to restore, in the same typed form every flow
+/// refusal uses; a caller outside a flow keeps the tool's closed code.
+#[test]
+fn flow_without_a_grant_gets_a_typed_grant_refusal() {
+    let f = Fixture::new();
+    let scope = CallScope {
+        owner: "reserved:stranger".into(),
+        scope_ref: "flow-1".into(),
+        scope_epoch: 1,
+        kind: Some("worker".into()),
+        parent: None,
+        parent_state: None,
+        agent_id: None,
+        flow_id: Some("flow-1".into()),
+        delegates: true,
+        owner_authorized: true,
+    };
+    let wire = f
+        .search("reserved:stranger", Some(&scope))
+        .unwrap_err()
+        .to_wire();
+    assert_eq!(
+        wire["error"]["code"], "module_grant_absent",
+        "a flow must be told which grant to restore: {wire}"
+    );
+    assert_eq!(wire["error"]["detail"]["action"], ACTION);
+    assert_eq!(wire["error"]["detail"]["cause"], "missing");
+    assert_eq!(
+        f.search("reserved:stranger", None).unwrap_err().code,
+        "code_search_not_granted"
+    );
+    assert!(f.transport.requests().is_empty());
+}
+
+/// A quarantine denial from authorization (reachable when the action is
+/// quarantined after the preflight read it) maps to the quarantine refusal,
+/// as an invoke would report it, not to an unavailable backend.
+#[test]
+fn quarantine_met_at_authorize_is_backend_quarantined() {
+    let denial = crate::governance::Denial::Catalog(crate::governance::CatalogDenial::Quarantined);
+    assert_eq!(
+        refusal_from(facade::denial_for(&denial, grant_target("direct"))).code,
+        "backend_quarantined",
+        "a quarantine met at authorize must name the quarantine"
+    );
+}
+
+/// The search row carries the engine's request id, so a reviewer can join the
+/// query to the engine's authorization and dispatch rows for the same call.
+#[test]
+fn the_search_row_joins_the_engine_rows_by_request_id() {
+    let f = Fixture::new();
+    f.grant("direct");
+    f.search("direct", None).unwrap();
+    let db = rusqlite::Connection::open(f.path.path()).unwrap();
+    let request_id = |gate: &str| -> Option<String> {
+        db.query_row(
+            "SELECT request_id FROM audit_journal WHERE gate = ?1",
+            [gate],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let search = request_id("code_search");
+    assert!(search.is_some(), "the search row must carry a request id");
+    assert_eq!(
+        search,
+        request_id("dispatch"),
+        "the search row must carry the engine's request id"
+    );
+}
+
+/// After governance admitted a search, the row says whether the request
+/// reached the vendor: a vendor failure is an allowed call that failed, an
+/// unresolved send is unknown, and a dispatch that never left is not sent.
+#[test]
+fn a_dispatched_search_row_states_what_reached_the_vendor() {
+    let f = Fixture::new();
+    for (caller, response, expected) in [
+        (
+            "direct",
+            MockResponse::VendorError {
+                code: "http_503".into(),
+                message: "vendor down".into(),
+            },
+            ("allow", "failed"),
+        ),
+        (
+            "reserved:unknown",
+            MockResponse::OutcomeUnknown,
+            ("allow", "unknown"),
+        ),
+        (
+            "reserved:unsent",
+            MockResponse::TransientNotSent {
+                message: "connection refused".into(),
+            },
+            ("deny", "not_sent"),
+        ),
+    ] {
+        f.grant(caller);
+        f.transport.set_response(response);
+        assert!(f.search(caller, None).is_err());
+        let db = rusqlite::Connection::open(f.path.path()).unwrap();
+        let row: (String, String) = db
+            .query_row(
+                "SELECT decision, outcome FROM audit_journal WHERE gate = 'code_search' AND actor = ?1",
+                [caller],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (row.0.as_str(), row.1.as_str()),
+            expected,
+            "the search row must state what reached the vendor for {caller}"
+        );
+    }
+}
+
+/// The audit row records which repositories, paths and languages a search
+/// read and which match options it used, not only the query text.
+#[test]
+fn the_search_row_records_the_filters() {
+    let f = Fixture::new();
+    f.grant("direct");
+    f.service
+        .search_scoped(
+            &f.engine,
+            "direct",
+            json!({"query": "with_capacity", "regex": true, "repo": "rust-lang/rust",
+                "path": "library/", "language": ["Rust"]})
+            .as_object()
+            .unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+    let db = rusqlite::Connection::open(f.path.path()).unwrap();
+    let summary: String = db
+        .query_row(
+            "SELECT args_redaction_summary FROM audit_journal WHERE gate = 'code_search'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&summary).unwrap(),
+        json!({"filters": {"regex": true, "repo": "rust-lang/rust", "path": "library/",
+            "language": ["Rust"]}}),
+        "the search row must record the filters"
+    );
+}
+
+/// A credential pasted into a code search (to check whether it leaked) is
+/// sent to the vendor but never stored: the audit row keeps the other words
+/// and says a word was redacted. Filters get the same treatment.
+#[test]
+fn credential_shaped_query_words_are_not_stored() {
+    let f = Fixture::new();
+    f.grant("direct");
+    let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    f.service
+        .search_scoped(
+            &f.engine,
+            "direct",
+            json!({"query": format!("\"{token}\" leaked"), "repo": token})
+                .as_object()
+                .unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        f.transport.requests()[0].args["query"],
+        format!("\"{token}\" leaked"),
+        "the vendor still receives the query as written"
+    );
+    let db = rusqlite::Connection::open(f.path.path()).unwrap();
+    let (query_text, summary): (String, String) = db
+        .query_row(
+            "SELECT query_text, args_redaction_summary FROM audit_journal WHERE gate = 'code_search'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        query_text, "[redacted] leaked",
+        "a credential-shaped query word must not be stored"
+    );
+    let summary: Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(summary["query_redacted"], true);
+    assert_eq!(summary["filters_redacted"], true);
+    assert!(
+        !db.query_row("SELECT group_concat(coalesce(query_text,'') || coalesce(args_redaction_summary,''), ' ') FROM audit_journal", [], |row| row.get::<_, String>(0))
+            .unwrap()
+            .contains("ghp_abcdefghij"),
+        "no search row may hold the token"
+    );
 }

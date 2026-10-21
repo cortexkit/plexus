@@ -1,4 +1,5 @@
 use super::*;
+use crate::governance::CatalogDenial;
 use crate::storage::{CatalogActionInput, GrantInput};
 use crate::{MockTransport, StubCredentialSource};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -321,7 +322,7 @@ fn grant_before_charge_preserves_every_provider_bucket() {
 }
 
 #[test]
-fn policy_status_connection_cooldown_then_rate_is_the_failure_order() {
+fn connection_status_policy_cooldown_then_rate_is_the_failure_order() {
     let (engine, transport, path) =
         super::super::tests::granted_exa_engine_with_path("chain-check-order");
     let sql = rusqlite::Connection::open(&*path).unwrap();
@@ -359,6 +360,26 @@ fn policy_status_connection_cooldown_then_rate_is_the_failure_order() {
         .store()
         .set_policy("direct", "exa", "search", "block", None)
         .unwrap();
+    // Governance's own order: connection health, then the action's status,
+    // then policy.
+    assert_eq!(
+        search(&service, &engine, "direct"),
+        Err(unavailable(&[("exa", SkipReason::ConnectionUnusable)]))
+    );
+    sql.execute(
+        "UPDATE connections SET status = 'active' WHERE connection_id = 'exa'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        search(&service, &engine, "direct"),
+        Err(unavailable(&[("exa", SkipReason::Quarantined)]))
+    );
+    sql.execute(
+        "UPDATE catalog_actions SET status = 'active' WHERE connection_id = 'exa'",
+        [],
+    )
+    .unwrap();
     assert_eq!(
         search(&service, &engine, "direct"),
         Err(unavailable(&[("exa", SkipReason::Policy)]))
@@ -375,24 +396,6 @@ fn policy_status_connection_cooldown_then_rate_is_the_failure_order() {
         .store()
         .set_policy("direct", "exa", "search", "allow", None)
         .unwrap();
-    assert_eq!(
-        search(&service, &engine, "direct"),
-        Err(unavailable(&[("exa", SkipReason::Quarantined)]))
-    );
-    sql.execute(
-        "UPDATE catalog_actions SET status = 'active' WHERE connection_id = 'exa'",
-        [],
-    )
-    .unwrap();
-    assert_eq!(
-        search(&service, &engine, "direct"),
-        Err(unavailable(&[("exa", SkipReason::ConnectionUnusable)]))
-    );
-    sql.execute(
-        "UPDATE connections SET status = 'active' WHERE connection_id = 'exa'",
-        [],
-    )
-    .unwrap();
     assert_eq!(
         search(&service, &engine, "direct"),
         Err(unavailable(&[("exa", SkipReason::Cooldown)]))
@@ -552,7 +555,7 @@ fn compatibility_refusals_survive_set_then_clear() {
                     .store()
                     .set_policy("direct", "exa", "search", "block", None)
                     .unwrap();
-                WebSearchRefusal::NotGranted
+                WebSearchRefusal::PolicyBlocked
             }
             "unusable" => {
                 engine
@@ -649,10 +652,7 @@ fn compatibility_keeps_exa_cache_bucket_and_audit_without_chain_state() {
     {
         assert_eq!(row.app_key.as_deref(), Some("exa_rest"));
         assert_eq!(row.connection_id.as_deref(), Some("exa"));
-        assert_eq!(
-            row.args_redaction_summary.as_deref(),
-            Some("web_search query recorded in query_text; assertion and other arguments omitted")
-        );
+        assert_eq!(row.args_redaction_summary.as_deref(), Some("{}"));
     }
     assert!(transport.requests().is_empty());
 }

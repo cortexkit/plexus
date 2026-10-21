@@ -385,7 +385,9 @@ fn a_documented_rate_limit_falls_through_throttled() {
     assert_eq!(recorded.cooldown(), Some(7_000));
     assert_eq!(
         recorded.audit,
-        Some(json!({"served_by": "exa", "skipped": [{"provider": "kagi", "reason": "throttled"}]}))
+        Some(
+            json!({"filters": {"include_domains": ["apple.com", "wikipedia.org"], "max_results": 3, "recency": "week"}, "served_by": "exa", "skipped": [{"provider": "kagi", "reason": "throttled"}]})
+        )
     );
     assert_eq!(
         *recorded.vault.requested.lock().unwrap(),

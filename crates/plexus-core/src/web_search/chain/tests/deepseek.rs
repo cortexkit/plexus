@@ -335,7 +335,9 @@ fn insufficient_balance_is_quota_and_falls_through() {
     assert_eq!(recorded.cooldown(), Some(3_600_000));
     assert_eq!(
         recorded.audit,
-        Some(json!({"served_by": "exa", "skipped": [{"provider": "deepseek", "reason": "quota"}]}))
+        Some(
+            json!({"filters": {"include_domains": ["github.com", "huggingface.co"], "max_results": 3, "recency": "week"}, "served_by": "exa", "skipped": [{"provider": "deepseek", "reason": "quota"}]})
+        )
     );
     assert_eq!(
         *recorded.vault.requested.lock().unwrap(),

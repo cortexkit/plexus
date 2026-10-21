@@ -394,7 +394,9 @@ fn an_exhausted_brave_falls_through_to_the_next_provider() {
     assert_eq!(recorded.cooldown(), Some(3_600_000));
     assert_eq!(
         recorded.audit,
-        Some(json!({"served_by": "exa", "skipped": [{"provider": "brave", "reason": "quota"}]}))
+        Some(
+            json!({"filters": {"include_domains": ["docs.python.org", "realpython.com"], "max_results": 3, "recency": "week"}, "served_by": "exa", "skipped": [{"provider": "brave", "reason": "quota"}]})
+        )
     );
     assert_eq!(
         *recorded.vault.requested.lock().unwrap(),

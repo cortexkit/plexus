@@ -353,3 +353,81 @@ async fn order_and_allowance_require_direct_management_and_explicit_apply() {
     assert!(changes(&fixture, "set_web_search_order").is_empty());
     assert!(changes(&fixture, "set_web_search_allowance").is_empty());
 }
+
+/// code_search charges the grep_app row of the limits table, so the limit op
+/// must accept it; the order and allowance ops stay web-search only. An
+/// applied change reports and audits the row the write itself replaced.
+#[tokio::test]
+async fn code_search_limits_are_settable_and_report_the_replaced_row() {
+    let fixture = Fixture::new("code-search-limit");
+    let limit = manifest::ADMIN_SET_WEB_SEARCH_LIMIT_OP;
+    let backend = plexus_core::code_search::BACKEND;
+    let dry = command(
+        &fixture,
+        limit,
+        json!({"backend": backend, "per_caller_per_minute": 3, "per_backend_per_minute": 7}),
+    )
+    .await;
+    assert_eq!(
+        dry["result"]["outcome"], "would_set",
+        "the code_search backend's limits must be settable: {dry}"
+    );
+    for (per_caller, per_backend, previous, source) in [
+        (
+            3,
+            7,
+            json!({"per_caller_per_minute": 30, "per_backend_per_minute": 120}),
+            "default",
+        ),
+        (
+            4,
+            9,
+            json!({"per_caller_per_minute": 3, "per_backend_per_minute": 7}),
+            "set",
+        ),
+    ] {
+        let reply = command(
+            &fixture,
+            limit,
+            json!({"backend": backend, "per_caller_per_minute": per_caller,
+                "per_backend_per_minute": per_backend, "dry_run": false}),
+        )
+        .await;
+        assert_eq!(reply["result"]["outcome"], "set", "{reply}");
+        assert_eq!(
+            (
+                &reply["result"]["previous"],
+                &reply["result"]["previous_source"]
+            ),
+            (&previous, &json!(source)),
+            "the reply must report the row the write replaced: {reply}"
+        );
+    }
+    assert_eq!(
+        fixture.store.web_search_limits(backend).unwrap(),
+        Some(WebSearchLimits {
+            per_caller_per_minute: 4,
+            per_backend_per_minute: 9,
+        })
+    );
+    let db = Connection::open(fixture.path.as_ref() as &Path).unwrap();
+    let summary: String = db
+        .query_row(
+            "SELECT args_redaction_summary FROM audit_journal
+             WHERE action='set_web_search_limit' ORDER BY journal_id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        summary,
+        "backend=grep_app per_caller_per_minute 3 -> 4, per_backend_per_minute 7 -> 9 (previous values were set)"
+    );
+    for (op, params) in [
+        (ORDER, json!({"providers": [backend]})),
+        (ALLOWANCE, json!({"provider": backend, "count": 1})),
+    ] {
+        let reply = command(&fixture, op, params).await;
+        assert_eq!(code(&reply), "unknown_backend", "{op}: {reply}");
+    }
+}

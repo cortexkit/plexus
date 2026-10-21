@@ -51,12 +51,18 @@ struct Bucket {
 impl Bucket {
     /// Refill for the time elapsed since the last update, capped at
     /// `capacity`. A capacity lowered by the operator takes effect at once.
+    ///
+    /// The clock is the wall clock, which can step backwards (an NTP
+    /// correction, a manual change). A backward step refills nothing, and the
+    /// bucket re-anchors at the new time so refill resumes from there. Keeping
+    /// the later timestamp instead would freeze refill until real time caught
+    /// up with it, refusing every search for the length of the step.
     fn refill(&mut self, capacity: u32, now_ms: i64) {
         self.capacity = capacity;
         let elapsed = now_ms.saturating_sub(self.updated_ms).max(0) as f64;
         let rate = f64::from(capacity) / WINDOW_MS;
         self.tokens = (self.tokens + elapsed * rate).min(f64::from(capacity));
-        self.updated_ms = now_ms.max(self.updated_ms);
+        self.updated_ms = now_ms;
     }
 
     /// Milliseconds until one whole token is available; zero when it is now.
@@ -105,9 +111,12 @@ impl RateLimiter {
             .buckets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let last_pruned_ms = self.last_pruned_ms.load(Ordering::Relaxed);
+        // A clock that stepped back behind the last scan counts as due, so a
+        // backward step cannot postpone pruning for its whole length.
         if buckets.len() > PRUNE_THRESHOLD
-            && now_ms.saturating_sub(self.last_pruned_ms.load(Ordering::Relaxed))
-                >= PRUNE_INTERVAL_MS
+            && (now_ms.saturating_sub(last_pruned_ms) >= PRUNE_INTERVAL_MS
+                || now_ms < last_pruned_ms)
         {
             // The map lock serializes this timestamp with pruning. Refill each
             // backend at its own capacity, and scan at most once per second.
@@ -256,6 +265,31 @@ mod tests {
         assert!(limiter
             .try_acquire("exa", &one, limits(3, 100), 20_000)
             .is_ok());
+    }
+
+    #[test]
+    fn a_backward_clock_step_does_not_freeze_refill() {
+        let limiter = RateLimiter::default();
+        let one = caller("direct", None);
+        let later = 10_000_000;
+        for _ in 0..3 {
+            limiter
+                .try_acquire("exa", &one, limits(3, 100), later)
+                .unwrap();
+        }
+        // The wall clock steps back by far more than a minute.
+        let stepped_back = later - 5_000_000;
+        assert!(limiter
+            .try_acquire("exa", &one, limits(3, 100), stepped_back)
+            .is_err());
+        // A third of a minute after the step one token has refilled, as it
+        // would have without the step.
+        assert!(
+            limiter
+                .try_acquire("exa", &one, limits(3, 100), stepped_back + 20_000)
+                .is_ok(),
+            "refill must resume from the stepped-back time"
+        );
     }
 
     #[test]

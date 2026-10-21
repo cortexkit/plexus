@@ -170,6 +170,49 @@ fn exact_hex_lengths_and_non_hex_boundaries_are_required() {
     assert_eq!(lookup(&format!("0{}", "a".repeat(64)), &[]), None);
 }
 
+/// A hex literal written with `0x` (an Ethereum address, say) is not a
+/// commit SHA: git never writes one that way. Bare 40- and 64-hex tokens stay
+/// refused, since on real traffic they are commit and dependency-checksum
+/// lookups.
+#[test]
+fn hex_literals_after_0x_are_not_source_lookups() {
+    for query in [
+        "contract 0xdAC17F958D2ee523a2206206994597C13D831ec7 audit".to_string(),
+        format!("storage slot 0X{}", "ab".repeat(32)),
+    ] {
+        assert_eq!(
+            lookup(&query, &[]),
+            None,
+            "a 0x literal must be served: {query}"
+        );
+    }
+    for query in [
+        "dAC17F958D2ee523a2206206994597C13D831ec7".to_string(),
+        format!("sha256 {} malware", "c6".repeat(32)),
+        format!("x{}", "ab".repeat(20)),
+    ] {
+        assert_eq!(
+            lookup(&query, &[]),
+            Some(CodeLookup::HexToken),
+            "a bare hex token must still refuse: {query}"
+        );
+    }
+}
+
+#[test]
+fn gist_pages_are_source_lookups() {
+    assert_eq!(
+        lookup("https://gist.github.com/someone/0123abcd", &[]),
+        Some(CodeLookup::GistGithub),
+        "a gist.github.com page must refuse"
+    );
+    assert_eq!(
+        lookup("API documentation", &["gist.github.com"]),
+        Some(CodeLookup::GistGithub),
+        "gist.github.com in include_domains must refuse"
+    );
+}
+
 #[test]
 fn prose_and_explicit_documentation_examples_are_allowed() {
     for query in [

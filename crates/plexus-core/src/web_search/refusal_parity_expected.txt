@@ -1,0 +1,88 @@
+dispatched Web reply | ok backend=exa cached=false results=2
+dispatched Web audit | direct | direct | exa | exa_rest | search | read | S1 | allow | web_search_dispatched | completed | {} | pub fn with_capacity | 2 | vendor | request_id
+dispatched Code reply | ok matches=10 truncated=false
+dispatched Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | allow | code_search_dispatched | completed | {} | pub fn with_capacity | 10 | vendor | request_id
+cache_hit Web reply | ok backend=exa cached=true results=2
+cache_hit Web audit | direct | direct | exa | exa_rest | search | read | S1 | allow | web_search_cache_hit | cached | {} | pub fn with_capacity | 2 | cached | -
+invalid_query Web reply | {"error":{"code":"invalid_query","field":"query","message":"a web search argument is invalid; see field"}}
+invalid_query Web audit | direct | direct | - | exa_rest | search | - | - | deny | invalid_query | not_sent | {} | - | - | - | -
+invalid_query Code reply | {"error":{"code":"invalid_query","field":"query","message":"a code search argument is invalid; see field"}}
+invalid_query Code audit | direct | direct | - | grep_app | searchGitHub | - | - | deny | invalid_query | not_sent | {} | - | - | - | -
+code_lookup Web reply | {"error":{"code":"web_search_code_lookup","message":"web_search doesn't look up source code. For public repositories use code_search. For a dependency, read its source on disk (for Rust, ~/.cargo/registry/src). For a commit, use git."}}
+code_lookup Web audit | direct | direct | - | exa_rest | search | - | - | deny | web_search_code_lookup | not_sent | {} | site:github.com/owner/repo/blob/main/lib.rs | - | - | -
+not_granted Web reply | {"error":{"code":"web_search_not_granted","message":"no web search backend is granted to this caller"}}
+not_granted Web audit | reserved:stranger | reserved:stranger | - | exa_rest | search | - | - | deny | web_search_not_granted | not_sent | {} | pub fn with_capacity | - | - | -
+not_granted Code reply | {"error":{"code":"code_search_not_granted","message":"no code search backend is granted to this caller"}}
+not_granted Code audit | reserved:stranger | reserved:stranger | - | grep_app | searchGitHub | - | - | deny | code_search_not_granted | not_sent | {} | pub fn with_capacity | - | - | -
+flow_not_granted Web reply | {"error":{"code":"module_grant_absent","detail":{"action":"search","cause":"missing","connection":null,"grant":"g1.eyJhY3Rpb24iOiJzZWFyY2giLCJjb25uZWN0aW9uIjpudWxsLCJncmFudGVlIjoicmVzZXJ2ZWQ6c3RyYW5nZXIiLCJsYXllciI6Im1vZHVsZSIsInRvb2wiOiJ3ZWJfc2VhcmNoIn0","grant_label":"web search (module grant for reserved:stranger)","layer":"module"},"message":"no web search backend is granted to this caller"}}
+flow_not_granted Web audit | reserved:stranger | reserved:stranger | - | exa_rest | search | - | - | deny | module_grant_absent | not_sent | {} | pub fn with_capacity | - | - | -
+flow_not_granted Code reply | {"error":{"code":"module_grant_absent","detail":{"action":"searchGitHub","cause":"missing","connection":"grep_app","grant":"g1.eyJhY3Rpb24iOiJzZWFyY2hHaXRIdWIiLCJjb25uZWN0aW9uIjoiZ3JlcF9hcHAiLCJncmFudGVlIjoicmVzZXJ2ZWQ6c3RyYW5nZXIiLCJsYXllciI6Im1vZHVsZSIsInRvb2wiOiJjb2RlX3NlYXJjaCJ9","grant_label":"code_search: searchGitHub on grep_app (module grant for reserved:stranger)","layer":"module"},"message":"no code search backend is granted to this caller"}}
+flow_not_granted Code audit | reserved:stranger | reserved:stranger | - | grep_app | searchGitHub | - | - | deny | module_grant_absent | not_sent | {} | pub fn with_capacity | - | - | -
+ambiguous Web reply | {"error":{"code":"backend_ambiguous","message":"more than one connection could serve this web search; an operator must leave one"}}
+ambiguous Web audit | direct | direct | - | exa_rest | search | - | - | deny | backend_ambiguous | not_sent | {} | pub fn with_capacity | - | - | -
+ambiguous Code reply | {"error":{"code":"backend_ambiguous","message":"more than one connection could serve this code search; an operator must leave one"}}
+ambiguous Code audit | direct | direct | - | grep_app | searchGitHub | - | - | deny | backend_ambiguous | not_sent | {} | pub fn with_capacity | - | - | -
+ask_first Web reply | {"error":{"code":"policy_ask_first","message":"Searches cannot be approved per call; set the search policy to allow or block."}}
+ask_first Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | policy_ask_first | not_sent | {} | pub fn with_capacity | - | - | -
+ask_first Code reply | {"error":{"code":"policy_ask_first","message":"Searches cannot be approved per call; set the search policy to allow or block."}}
+ask_first Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | policy_ask_first | not_sent | {} | pub fn with_capacity | - | - | -
+block Web reply | {"error":{"code":"policy_blocked","message":"a policy blocks web search on the granted backend; an operator must change that policy"}}
+block Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | policy_blocked | not_sent | {} | pub fn with_capacity | - | - | -
+block Code reply | {"error":{"code":"policy_blocked","message":"a policy blocks code search on the granted backend; an operator must change that policy"}}
+block Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | policy_blocked | not_sent | {} | pub fn with_capacity | - | - | -
+quarantined Web reply | {"error":{"backend":"exa","code":"backend_quarantined","message":"the web search backend action is quarantined pending operator review"}}
+quarantined Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | backend_quarantined | not_sent | {} | pub fn with_capacity | - | - | -
+quarantined Code reply | {"error":{"code":"backend_quarantined","message":"the code search backend action is quarantined pending operator review"}}
+quarantined Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | backend_quarantined | not_sent | {} | pub fn with_capacity | - | - | -
+quarantined_ask_first Web reply | {"error":{"backend":"exa","code":"backend_quarantined","message":"the web search backend action is quarantined pending operator review"}}
+quarantined_ask_first Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | backend_quarantined | not_sent | {} | pub fn with_capacity | - | - | -
+quarantined_ask_first Code reply | {"error":{"code":"backend_quarantined","message":"the code search backend action is quarantined pending operator review"}}
+quarantined_ask_first Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | backend_quarantined | not_sent | {} | pub fn with_capacity | - | - | -
+connection_unusable Web reply | {"error":{"backend":"exa","code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+connection_unusable Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | -
+connection_unusable Code reply | {"error":{"code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+connection_unusable Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | -
+quarantined_unusable Web reply | {"error":{"backend":"exa","code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+quarantined_unusable Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | -
+quarantined_unusable Code reply | {"error":{"code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+quarantined_unusable Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | -
+connection_unusable_ask_first Web reply | {"error":{"backend":"exa","code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+connection_unusable_ask_first Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | -
+connection_unusable_ask_first Code reply | {"error":{"code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+connection_unusable_ask_first Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | -
+rate_limited Web reply | {"error":{"code":"rate_limited","message":"web search rate limit reached; retry after retry_after_ms","retry_after_ms":60000}}
+rate_limited Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | rate_limited | not_sent | {} | pub fn with_capacity | - | - | -
+rate_limited Code reply | {"error":{"code":"rate_limited","message":"code search rate limit reached; retry after retry_after_ms","retry_after_ms":60000}}
+rate_limited Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | rate_limited | not_sent | {} | pub fn with_capacity | - | - | -
+vendor_throttled Web reply | {"error":{"code":"rate_limited","message":"web search rate limit reached; retry after retry_after_ms","retry_after_ms":12000}}
+vendor_throttled Web audit | direct | direct | exa | exa_rest | search | read | S1 | allow | rate_limited | failed | {} | pub fn with_capacity | - | - | request_id
+vendor_throttled Code reply | {"error":{"code":"rate_limited","message":"code search rate limit reached; retry after retry_after_ms","retry_after_ms":12000}}
+vendor_throttled Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | allow | rate_limited | failed | {} | pub fn with_capacity | - | - | request_id
+vendor_throttled_no_delay Web reply | {"error":{"code":"rate_limited","message":"web search rate limit reached; retry after retry_after_ms","retry_after_ms":30000}}
+vendor_throttled_no_delay Web audit | direct | direct | exa | exa_rest | search | read | S1 | allow | rate_limited | failed | {} | pub fn with_capacity | - | - | request_id
+vendor_throttled_no_delay Code reply | {"error":{"code":"rate_limited","message":"code search rate limit reached; retry after retry_after_ms","retry_after_ms":30000}}
+vendor_throttled_no_delay Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | allow | rate_limited | failed | {} | pub fn with_capacity | - | - | request_id
+vendor_failed Web reply | {"error":{"backend":"exa","code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+vendor_failed Web audit | direct | direct | exa | exa_rest | search | read | S1 | allow | backend_unavailable | failed | {} | pub fn with_capacity | - | - | request_id
+vendor_failed Code reply | {"error":{"code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+vendor_failed Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | allow | backend_unavailable | failed | {} | pub fn with_capacity | - | - | request_id
+outcome_unknown Web reply | {"error":{"backend":"exa","code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+outcome_unknown Web audit | direct | direct | exa | exa_rest | search | read | S1 | allow | backend_unavailable | unknown | {} | pub fn with_capacity | - | - | request_id
+outcome_unknown Code reply | {"error":{"code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+outcome_unknown Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | allow | backend_unavailable | unknown | {} | pub fn with_capacity | - | - | request_id
+transient_not_sent Web reply | {"error":{"backend":"exa","code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+transient_not_sent Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | request_id
+transient_not_sent Code reply | {"error":{"code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+transient_not_sent Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | request_id
+reply_unreadable Web reply | {"error":{"backend":"exa","code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+reply_unreadable Web audit | direct | direct | exa | exa_rest | search | read | S1 | allow | backend_unavailable | failed | {} | pub fn with_capacity | - | - | request_id
+reply_unreadable Code reply | {"error":{"code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+reply_unreadable Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | allow | backend_unavailable | failed | {} | pub fn with_capacity | - | - | request_id
+home_not_held Web reply | {"error":{"backend":"exa","code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+home_not_held Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | -
+home_not_held Code reply | {"error":{"code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+home_not_held Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | -
+store_failure Web reply | {"error":{"backend":"exa","code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+store_failure Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | -
+store_failure Code reply | {"error":{"code":"backend_unavailable","message":"vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)"}}
+store_failure Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | backend_unavailable | not_sent | {} | pub fn with_capacity | - | - | -

@@ -348,7 +348,7 @@ fn payment_required_is_quota_and_falls_through() {
     assert_eq!(
         recorded.audit,
         Some(
-            json!({"served_by": "exa", "skipped": [{"provider": "firecrawl", "reason": "quota"}]})
+            json!({"filters": {"include_domains": ["docs.firecrawl.dev", "github.com"], "max_results": 3, "recency": "month"}, "served_by": "exa", "skipped": [{"provider": "firecrawl", "reason": "quota"}]})
         )
     );
     assert_eq!(
