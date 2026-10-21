@@ -852,8 +852,9 @@ fn journal_absent_or_empty_open_takes_no_write_fence() {
         if empty_file {
             std::fs::write(journal_path(&f), b"").unwrap();
         }
-        // A database copy retains its epoch but has a fresh path-derived lease.
-        // Any write fence rejects before its callback, even an empty callback.
+        // A database copy keeps its fence epoch (98). Opening a store with no
+        // revocations to replay must write nothing, so that epoch must still
+        // read 98 afterwards: any fenced write stamps the writer's own epoch.
         let store = crate::storage::PlexusStore::open(&descriptor(&f.to).unwrap())
             .expect("opening without revocations must not take the write fence");
         let conn = f.destination();
@@ -865,13 +866,17 @@ fn journal_absent_or_empty_open_takes_no_write_fence() {
         assert_eq!(std::fs::read(journal_path(&f)).unwrap(), b"");
         drop(conn);
         drop(store);
-        // Exercise the real fence against the same bytes: the tripwire must be
-        // armed, rather than merely assuming a chosen epoch will reject writes.
+        // Prove the epoch check above can fail: a real fenced write on the same
+        // copy succeeds (the store raises a copied lease past the database's
+        // epoch on open) and moves the epoch past 98.
         let raw = open_sqlite(&descriptor(&f.to).unwrap()).unwrap();
-        let error = raw.with_conn_fenced(|_| Ok(())).unwrap_err();
+        raw.with_conn_fenced(|_| Ok(()))
+            .expect("a fenced write on a copied store succeeds");
+        drop(raw);
+        let conn = f.destination();
         assert!(
-            matches!(error, cortexkit_store::StoreError::Fenced { holder_epoch, db_epoch: 98 } if holder_epoch < 98),
-            "{error}"
+            scalar::<u64>(&conn, "SELECT epoch FROM cortexkit_fence WHERE id=0") > 98,
+            "a fenced write must move the copied epoch, or the check above proves nothing"
         );
     }
 }
