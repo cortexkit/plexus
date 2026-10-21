@@ -11992,6 +11992,21 @@ build_timeout_s = 3600
 timeout_s = 120
 
 [[control]]
+id = "governance-dispatch-result-audit-failure-level"
+guards = "A failed dispatch-result audit append is reported at ERROR on plexus.governance, the level an operator's default view shows"
+file = "crates/plexus-core/src/governance.rs"
+old = "eprintln!(error governance: \"audit append failed: dispatch result outcome="
+new = "eprintln!(warn governance: /* NON-VACUITY BREAK */ \"audit append failed: dispatch result outcome="
+test_file = "crates/plexus-core/tests/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test governance"
+select = "expected"
+expect_red = ["dispatch_result_audit_failure_is_loud_and_preserves_completion"]
+build_timeout_s = 3600
+timeout_s = 180
+
+[[control]]
 id = "governance-consent-pending-backoff"
 guards = "An immediate pending consent reply cannot spin a held call's RPC loop"
 file = "crates/plexus-core/src/consent_card.rs"
