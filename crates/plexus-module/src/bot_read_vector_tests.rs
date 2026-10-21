@@ -117,7 +117,10 @@ async fn every_bot_read_vector_replays_byte_for_byte() {
         covered.insert(match actual["error"]["code"].as_str() {
             None => action.to_owned(),
             Some("endpoint_not_allowed") => {
-                format!("endpoint_not_allowed:{}", actual["error"]["field"].as_str().unwrap())
+                format!(
+                    "endpoint_not_allowed:{}",
+                    actual["error"]["field"].as_str().unwrap()
+                )
             }
             Some(code) => code.to_owned(),
         });
@@ -162,6 +165,9 @@ async fn every_bot_read_vector_replays_byte_for_byte() {
         "vendor_error",
     ];
     for vector in required {
-        assert!(covered.contains(vector), "no vector covers {vector}: {covered:?}");
+        assert!(
+            covered.contains(vector),
+            "no vector covers {vector}: {covered:?}"
+        );
     }
 }

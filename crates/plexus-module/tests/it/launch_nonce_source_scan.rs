@@ -1,5 +1,6 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+
+use crate::rust_sources::shipped_rust_sources;
 
 fn code_portion(line: &str) -> &str {
     line.split_once("//").map_or(line, |(code, _)| code).trim()
@@ -16,20 +17,6 @@ fn direct_nonce_lines(source: &str) -> Vec<usize> {
             (names_nonce && !code.contains("remove_var(")).then_some(index + 1)
         })
         .collect()
-}
-
-fn rust_sources(directory: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        let path = entry.path();
-        if kind.is_dir() {
-            rust_sources(&path, files)?;
-        } else if kind.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
-            files.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// Shipped Rust source must use the nonce accessor rather than read launch-nonce
@@ -52,21 +39,7 @@ fn shipped_source_does_not_read_launch_nonce_environment() {
         "positive control must detect the descriptor variable read"
     );
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("plexus-module must live under crates/");
-    let mut files = Vec::new();
-    for entry in fs::read_dir(root.join("crates")).expect("read workspace crates") {
-        let entry = entry.expect("read crate entry");
-        if entry.file_type().expect("read crate type").is_dir() {
-            let source = entry.path().join("src");
-            if source.is_dir() {
-                rust_sources(&source, &mut files).expect("walk shipped Rust source");
-            }
-        }
-    }
-    files.sort();
+    let (root, files) = shipped_rust_sources();
 
     let hello_source = root.join("crates/plexus-module/src/lib.rs");
     let mut visited_hello = false;
@@ -84,7 +57,9 @@ fn shipped_source_does_not_read_launch_nonce_environment() {
         for line in direct_nonce_lines(&source) {
             violations.push(format!(
                 "{}:{line}",
-                file.strip_prefix(root).expect("workspace source").display()
+                file.strip_prefix(&root)
+                    .expect("workspace source")
+                    .display()
             ));
         }
     }

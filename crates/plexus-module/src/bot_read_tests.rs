@@ -181,7 +181,11 @@ async fn a_worker_reads_with_the_bot_of_the_agent_it_works_for() {
         json!({"path": ""}),
     )
     .await;
-    assert_eq!(reply["result"]["body"], json!({"full_name": "o/x"}), "{reply}");
+    assert_eq!(
+        reply["result"]["body"],
+        json!({"full_name": "o/x"}),
+        "{reply}"
+    );
     assert_eq!(transport.requests()[0].connection_id, "github-handle-app-x");
     let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
     let rows: Vec<(Option<String>, Option<String>)> = db
@@ -196,7 +200,10 @@ async fn a_worker_reads_with_the_bot_of_the_agent_it_works_for() {
         .unwrap();
     assert_eq!(rows.len(), 2, "an authorization row and a dispatch row");
     for (agent, on_behalf_of) in rows {
-        assert_eq!(agent, None, "the worker's agent is never the audit row's agent_id");
+        assert_eq!(
+            agent, None,
+            "the worker's agent is never the audit row's agent_id"
+        );
         assert_eq!(on_behalf_of.as_deref(), Some("agent-x"));
     }
 }
@@ -234,7 +241,14 @@ async fn a_stamp_naming_no_usable_agent_is_refused_agent_identity_required() {
             let reply = read(&runtime, scope.clone(), action, "o/x", args).await;
             not_sent(&reply, "agent_identity_required");
         }
-        let reply = read(&runtime, scope, "github.actions.job_log", "o/x", json!({"job_id": 1})).await;
+        let reply = read(
+            &runtime,
+            scope,
+            "github.actions.job_log",
+            "o/x",
+            json!({"job_id": 1}),
+        )
+        .await;
         not_sent(&reply, "agent_identity_required");
         assert!(transport.requests().is_empty());
     }
@@ -249,7 +263,14 @@ async fn only_repositories_bound_to_the_agents_bot_are_visible() {
         (head(Some("agent-x")), "not-a-repository"),
     ] {
         let (runtime, _store, transport, _scratch) = bot_runtime();
-        let reply = read(&runtime, Some(scope), "github.repo.get", repository, json!({"path": ""})).await;
+        let reply = read(
+            &runtime,
+            Some(scope),
+            "github.repo.get",
+            repository,
+            json!({"path": ""}),
+        )
+        .await;
         not_sent(&reply, "repository_not_visible");
         assert!(transport.requests().is_empty());
     }
@@ -272,7 +293,14 @@ async fn refused_paths_accept_values_and_queries_send_nothing() {
         (json!({"path": "", "method": "DELETE"}), "method"),
     ] {
         let (runtime, _store, transport, _scratch) = bot_runtime();
-        let reply = read(&runtime, Some(head(Some("agent-x"))), "github.repo.get", "o/x", args.clone()).await;
+        let reply = read(
+            &runtime,
+            Some(head(Some("agent-x"))),
+            "github.repo.get",
+            "o/x",
+            args.clone(),
+        )
+        .await;
         not_sent(&reply, "endpoint_not_allowed");
         assert_eq!(reply["error"]["field"], field, "{args}: {reply}");
         assert!(transport.requests().is_empty(), "{args}");
@@ -307,14 +335,32 @@ async fn search_is_fenced_to_the_bound_repository() {
             json!({"owner":"o","repo":"x","q":"parse_config repo:o/x","page":2,"per_page":50})
         );
         for q in ["x repo:o/y", "x Org:o", "USER:someone"] {
-            let reply = read(&runtime, Some(head(Some("agent-x"))), action, "o/x", json!({"q": q})).await;
+            let reply = read(
+                &runtime,
+                Some(head(Some("agent-x"))),
+                action,
+                "o/x",
+                json!({"q": q}),
+            )
+            .await;
             not_sent(&reply, "endpoint_not_allowed");
             assert_eq!(reply["error"]["field"], "q");
         }
-        let reply = read(&runtime, Some(head(Some("agent-x"))), action, "o/x", json!({"q": "x", "per_page": 101})).await;
+        let reply = read(
+            &runtime,
+            Some(head(Some("agent-x"))),
+            action,
+            "o/x",
+            json!({"q": "x", "per_page": 101}),
+        )
+        .await;
         not_sent(&reply, "endpoint_not_allowed");
         assert_eq!(reply["error"]["field"], "per_page");
-        assert_eq!(transport.requests().len(), 1, "refused searches send nothing");
+        assert_eq!(
+            transport.requests().len(),
+            1,
+            "refused searches send nothing"
+        );
     }
 }
 
@@ -326,7 +372,14 @@ async fn a_spent_read_budget_refuses_before_anything_is_sent() {
         store.reserve_github_bot_read("app-x", 1, now).unwrap();
     }
     transport.set_response(envelope(json!({})));
-    let reply = read(&runtime, Some(head(Some("agent-x"))), "github.repo.get", "o/x", json!({"path": ""})).await;
+    let reply = read(
+        &runtime,
+        Some(head(Some("agent-x"))),
+        "github.repo.get",
+        "o/x",
+        json!({"path": ""}),
+    )
+    .await;
     not_sent(&reply, "read_budget_exhausted");
     let retry = reply["error"]["retry_after_ms"].as_i64().unwrap();
     assert!(retry > 0 && retry <= 3_600_000, "{reply}");
@@ -339,7 +392,11 @@ async fn a_spent_read_budget_refuses_before_anything_is_sent() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(statuses, ["invalidated"], "the unsent read's reservation is retired");
+    assert_eq!(
+        statuses,
+        ["invalidated"],
+        "the unsent read's reservation is retired"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -350,9 +407,23 @@ async fn github_reporting_under_a_thousand_remaining_stops_reads_until_reset() {
         "status": 200, "body": {}, "next_page": null,
         "rate_limit": {"remaining": 999, "reset_at_ms": reset},
     })));
-    let first = read(&runtime, Some(head(Some("agent-x"))), "github.repo.get", "o/x", json!({"path": ""})).await;
+    let first = read(
+        &runtime,
+        Some(head(Some("agent-x"))),
+        "github.repo.get",
+        "o/x",
+        json!({"path": ""}),
+    )
+    .await;
     assert!(first.get("result").is_some(), "{first}");
-    let second = read(&runtime, Some(head(Some("agent-x"))), "github.repo.get", "o/x", json!({"path": ""})).await;
+    let second = read(
+        &runtime,
+        Some(head(Some("agent-x"))),
+        "github.repo.get",
+        "o/x",
+        json!({"path": ""}),
+    )
+    .await;
     not_sent(&second, "read_budget_exhausted");
     let retry = second["error"]["retry_after_ms"].as_i64().unwrap();
     assert!(retry > 590_000 && retry <= 600_000, "{second}");
@@ -367,7 +438,14 @@ async fn a_github_refusal_is_vendor_error_with_its_status() {
             code: code.into(),
             message: String::new(),
         });
-        let reply = read(&runtime, Some(head(Some("agent-x"))), "github.repo.get", "o/x", json!({"path": "pulls/9"})).await;
+        let reply = read(
+            &runtime,
+            Some(head(Some("agent-x"))),
+            "github.repo.get",
+            "o/x",
+            json!({"path": "pulls/9"}),
+        )
+        .await;
         assert_eq!(reply["error"]["code"], "vendor_error", "{reply}");
         assert_eq!(reply["error"]["status"], status);
         assert_eq!(reply["error"]["transmission"], "sent");
@@ -378,7 +456,14 @@ async fn a_github_refusal_is_vendor_error_with_its_status() {
         code: "response_too_large".into(),
         message: String::new(),
     });
-    let reply = read(&runtime, Some(head(Some("agent-x"))), "github.repo.get", "o/x", json!({"path": "pulls/9.diff"})).await;
+    let reply = read(
+        &runtime,
+        Some(head(Some("agent-x"))),
+        "github.repo.get",
+        "o/x",
+        json!({"path": "pulls/9.diff"}),
+    )
+    .await;
     assert_eq!(reply["error"]["code"], "response_too_large", "{reply}");
     assert_eq!(reply["error"]["transmission"], "sent");
 }
@@ -394,9 +479,18 @@ async fn aft_job_log_reads_a_byte_range_with_the_agents_bot() {
     transport.set_response_for_method(
         "github.actions.job_log",
         "",
-        MockResponse::Success(json!({"body": "line\n", "offset": 0, "length": 5, "total_bytes": 5})),
+        MockResponse::Success(
+            json!({"body": "line\n", "offset": 0, "length": 5, "total_bytes": 5}),
+        ),
     );
-    let reply = read(&runtime, Some(head(Some("agent-x"))), "github.actions.job_log", "o/x", json!({"job_id": 42})).await;
+    let reply = read(
+        &runtime,
+        Some(head(Some("agent-x"))),
+        "github.actions.job_log",
+        "o/x",
+        json!({"job_id": 42}),
+    )
+    .await;
     assert_eq!(
         reply["result"],
         json!({"body": "line\n", "offset": 0, "length": 5, "total_bytes": 5}),
@@ -404,9 +498,14 @@ async fn aft_job_log_reads_a_byte_range_with_the_agents_bot() {
     );
     let sent = transport.requests();
     assert_eq!(sent.len(), 2);
-    assert!(sent.iter().all(|request| request.connection_id == "github-handle-app-x"));
+    assert!(sent
+        .iter()
+        .all(|request| request.connection_id == "github-handle-app-x"));
     assert_eq!(sent[0].action, "github.actions.job.get");
-    assert_eq!(sent[1].args, json!({"owner":"o","repo":"x","job_id":42,"offset":0,"length":1_048_576}));
+    assert_eq!(
+        sent[1].args,
+        json!({"owner":"o","repo":"x","job_id":42,"offset":0,"length":1_048_576})
+    );
     // The log read is two HTTP requests: GitHub's redirect and the storage
     // download it points to. With the job check that is three units.
     assert_eq!(
@@ -423,7 +522,14 @@ async fn aft_job_log_reads_a_byte_range_with_the_agents_bot() {
         (json!({"job_id": 0}), "job_id"),
         (json!({"job_id": 42, "since": "x"}), "since"),
     ] {
-        let reply = read(&runtime, Some(head(Some("agent-x"))), "github.actions.job_log", "o/x", args.clone()).await;
+        let reply = read(
+            &runtime,
+            Some(head(Some("agent-x"))),
+            "github.actions.job_log",
+            "o/x",
+            args.clone(),
+        )
+        .await;
         not_sent(&reply, "endpoint_not_allowed");
         assert_eq!(reply["error"]["field"], field, "{args}");
     }
@@ -434,7 +540,14 @@ async fn aft_job_log_reads_a_byte_range_with_the_agents_bot() {
 async fn an_unfinished_job_has_no_log_request() {
     let (runtime, _store, transport, _scratch) = bot_runtime();
     transport.set_response(envelope(json!({"status": "in_progress"})));
-    let reply = read(&runtime, Some(head(Some("agent-x"))), "github.actions.job_log", "o/x", json!({"job_id": 42})).await;
+    let reply = read(
+        &runtime,
+        Some(head(Some("agent-x"))),
+        "github.actions.job_log",
+        "o/x",
+        json!({"job_id": 42}),
+    )
+    .await;
     assert_eq!(reply["error"]["code"], "job_not_finished", "{reply}");
     assert_eq!(transport.requests().len(), 1);
 }
@@ -495,7 +608,14 @@ async fn a_403_on_a_bot_read_is_never_reported_to_the_vault_but_a_401_is() {
             code: code.into(),
             message: String::new(),
         });
-        let reply = read(&runtime, Some(head(Some("agent-x"))), "github.actions.job_log", "o/x", json!({"job_id": 42})).await;
+        let reply = read(
+            &runtime,
+            Some(head(Some("agent-x"))),
+            "github.actions.job_log",
+            "o/x",
+            json!({"job_id": 42}),
+        )
+        .await;
         assert_eq!(reply["error"]["code"], "vendor_error", "{reply}");
         assert_eq!(reply["error"]["transmission"], "sent");
         assert_eq!(*token.0.lock().unwrap(), reported, "{code}");

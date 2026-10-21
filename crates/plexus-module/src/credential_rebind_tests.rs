@@ -431,9 +431,12 @@ fn reference_rebind_rolls_back_when_audit_insert_fails() {
 
 #[test]
 fn reference_binding_log_fixture() {
-    logging::init_child();
+    if !diagnostic_child() {
+        return;
+    }
     let fixture = Fixture::new("reference-logs");
-    let _ = fixture.rebind(false);
+    let preview = fixture.rebind(false);
+    assert_eq!(preview["result"]["applied"], false, "{preview}");
     let result = fixture.rebind(true);
     assert_eq!(result["result"]["applied"], true);
     fixture.dispatch();

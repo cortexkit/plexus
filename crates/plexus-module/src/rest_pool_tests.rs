@@ -115,6 +115,7 @@ fn scheduler_polls_again_while_the_rest_sweep_skips_a_busy_entry() {
     // reqwest's blocking client panics if it's dropped inside a Tokio runtime.
     // So the transport that owns the clients is held outside the runtime and
     // dropped after it, including when an assertion below fails.
+    crate::test_support::assert_loopback_is_not_proxied();
     let rest = Arc::new(RestTransport::default());
     let executor = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

@@ -476,12 +476,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    mod diagnostic_logging {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../plexus-core/tests/support/logging.rs"
-        ));
-    }
+    use crate::test_logging as diagnostic_logging;
 
     #[test]
     fn configured_peer_warning_names_role_and_target_without_error_contents() {

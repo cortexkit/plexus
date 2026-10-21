@@ -5,45 +5,11 @@
 
 use super::*;
 use plexus_core::credentials::CredentialSource;
-use plexus_core::github::credential::HandleCredentialProvider;
 use plexus_core::governance::GovernanceEngine;
 use plexus_core::storage::github_store::{GithubGovernanceSeams, GithubHandle};
 use plexus_core::transport::Transport;
 use rusqlite::{params, Connection};
 use subc_protocol::scope::{ScopeAttributes, ScopeKind, ScopeStamp};
-
-struct Token;
-impl HandleCredentialProvider for Token {
-    fn prepare(
-        &self,
-        _: &str,
-        _: i64,
-        _: &str,
-    ) -> Result<plexus_core::ResolvedCredential, &'static str> {
-        Ok(plexus_core::ResolvedCredential::anonymous())
-    }
-    fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
-}
-
-/// Stands in for the daemon's session-scope lookup. Just before a bot write is
-/// sent, plexus asks the daemon whether the caller's session scope is still
-/// live and delegating; this answers with the scope the route was opened
-/// under, as the daemon does while that session is running.
-struct Live(CallScope);
-impl plexus_core::scope::ScopeReader for Live {
-    fn describe(
-        &self,
-        _: &str,
-        _: &str,
-    ) -> Result<plexus_core::scope::ScopeDescription, plexus_core::scope::ScopeReadError> {
-        Ok(plexus_core::scope::ScopeDescription {
-            status: plexus_core::scope::ScopeStatus::Live,
-            owner_synced: true,
-            owner_configured: true,
-            live: Some(self.0.clone()),
-        })
-    }
-}
 
 const AGENT: &str = "agent-fixture";
 
@@ -150,12 +116,15 @@ fn runtime(label: &str, carrier: &str) -> (Arc<ModuleState>, Arc<MockTransport>,
     )
     .with_governance_seams(Arc::new(GithubGovernanceSeams {
         store: store.clone(),
-        credential_provider: Some(Arc::new(Token)),
+        credential_provider: Some(crate::consent_test_support::anonymous_handle_credentials()),
     }))
-    .with_scope_reader(Arc::new(Live(CallScope::from_stamp(&stamp(
-        true,
-        carrier == "basal",
-    )))));
+    // Stands in for the daemon's session-scope lookup. Just before a bot write
+    // is sent, plexus asks the daemon whether the caller's session scope is
+    // still live and delegating; this answers with the scope the route was
+    // opened under, as the daemon does while that session is running.
+    .with_scope_reader(crate::consent_test_support::live_reader(
+        CallScope::from_stamp(&stamp(true, carrier == "basal")),
+    ));
     (
         Arc::new(ModuleState {
             health: Arc::new(health::HealthState::new()),

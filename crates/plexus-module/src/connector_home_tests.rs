@@ -230,17 +230,15 @@ fn health_reports_the_runtime_transports_panic_recoveries() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_skips_whole_scheduler_pass() {
     let (_scratch, state) = fixture(Arc::new(ConnectorHome::unavailable()));
+    // Ten test ticks: a scheduler that ran a pass would stamp it within one.
+    const UNHELD_WAIT_MS: u64 = 10 * crate::test_support::TEST_SCHEDULER_TICK.as_millis() as u64;
     let (shutdown, stop) = mpsc::channel(1);
-    let task = spawn_trigger_scheduler(
-        state.clone(),
-        stop,
-        DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY,
-    );
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let task = crate::test_support::spawn_test_scheduler(state.clone(), stop);
+    tokio::time::sleep(std::time::Duration::from_millis(UNHELD_WAIT_MS)).await;
     drop(shutdown);
     task.await.unwrap();
     let value = serde_json::to_value(state.health.report()).unwrap();
-    assert!(value["metrics"]["schedulerPassAgeMs"].as_u64().unwrap() >= 1000);
+    assert!(value["metrics"]["schedulerPassAgeMs"].as_u64().unwrap() >= UNHELD_WAIT_MS);
 }
 
 #[test]

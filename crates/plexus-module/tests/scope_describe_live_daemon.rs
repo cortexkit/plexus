@@ -17,16 +17,19 @@
 //! `approval_scope_verdict` decides whether a stored approval runs, is
 //! refused, or waits.
 
-#![cfg(test)]
-
 #[path = "support/bounded.rs"]
 mod bounded;
+#[path = "support/daemon_client.rs"]
+mod daemon_client;
+#[path = "support/shell.rs"]
+mod shell;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use daemon_client::connect_client;
 use plexus_core::scope::{
     approval_scope_verdict, recheck_call_scope, ApprovalScope, ApprovalScopeVerdict, CallScope,
     ScopeDescription, ScopeReader, ScopeStatus, SCOPE_ENDED, SCOPE_NOT_SYNCED, SCOPE_UNVERIFIABLE,
@@ -35,9 +38,10 @@ use plexus_core::test_scratch::Scratch;
 use plexus_module::scope_reader::{DaemonScopeReader, PendingControlReplies};
 use plexus_module::{manifest, wire};
 use serde_json::{json, Value};
+use shell::single_quoted;
 use subc_protocol::session::{ModuleControlRequestFromModule, ModuleControlResponseToModule};
 use subc_protocol::{Frame, FrameType, ModuleHelloAckBody, PROTOCOL_VERSION};
-use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
+use subc_transport::{connection_file, read_frame, write_frame};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
@@ -381,10 +385,7 @@ async fn start_daemon() -> Daemon {
     fs::create_dir_all(&home).expect("create isolated data home");
     let connection_file_path = directory.join("subc-connection.json");
     let results_path = directory.join("owner-results.json");
-    let test_binary = std::env::current_exe()
-        .unwrap()
-        .to_string_lossy()
-        .replace('\'', "'\\\"'\\\"'");
+    let test_binary = single_quoted(std::env::current_exe().unwrap());
     // The supervisor launches each module with `--subc <connection file>`
     // appended to its configured arguments, and the Rust test runner would
     // reject `--subc` as an unknown flag. So each fixture runs this shell
@@ -393,7 +394,7 @@ async fn start_daemon() -> Daemon {
     let launcher = directory.join("scope-owner-fixture.sh");
     fs::write(
         &launcher,
-        format!("exec '{test_binary}' --exact scope_owner_fixture --nocapture\n"),
+        format!("exec {test_binary} --exact scope_owner_fixture --nocapture\n"),
     )
     .unwrap();
     let fixture = |mode: &str| {
@@ -470,17 +471,6 @@ async fn wait_for_owner_results(path: &Path) -> Vec<Value> {
     })
     .await
     .expect("the scope owner fixture must sync within the deadline")
-}
-
-async fn connect_client(connection: &subc_transport::ConnectionInfo) -> TcpStream {
-    let endpoint = connection.endpoints.first().expect("daemon endpoint");
-    let mut stream = TcpStream::connect(format!("{}:{}", endpoint.host, endpoint.port))
-        .await
-        .expect("connect daemon");
-    authenticate_client(&mut stream, connection, Duration::from_secs(5))
-        .await
-        .expect("authenticate with the daemon");
-    stream
 }
 
 async fn hello(

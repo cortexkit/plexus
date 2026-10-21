@@ -46,9 +46,17 @@ fn a_normal_launch_still_requires_the_supervisor_environment() {
         "test binary command",
     )
     .expect("run ck-plexus");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // A refusal, not a crash: a panic also exits unsuccessfully (101), so the
+    // exit code and the reason are checked, not only failure.
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a launch without SUBC_MODULE_ID must refuse, not start or crash: {stderr}"
+    );
     assert!(
-        !output.status.success(),
-        "a launch without SUBC_MODULE_ID must refuse, not start"
+        stderr.starts_with("ck-plexus: ") && stderr.contains("SUBC_MODULE_ID"),
+        "the refusal must name the missing supervisor variable: {stderr}"
     );
 }
 
