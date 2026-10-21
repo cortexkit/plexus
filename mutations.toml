@@ -12007,6 +12007,22 @@ build_timeout_s = 3600
 timeout_s = 180
 
 [[control]]
+id = "governance-403-not-reported-as-auth-failure"
+guards = "A vendor 403 that reached the vendor is never reported to the vault as an auth failure; only a 401 is"
+file = "crates/plexus-core/src/governance.rs"
+old = "if response.provider_auth_status() == Some(401) {"
+new = "if response.provider_auth_status() == Some(401) || response.error_code.as_deref() == Some(\"http_403\") { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test governance"
+select = "expected"
+expect_red = ["a_401_is_reported_to_the_vault_but_a_403_is_not"]
+expect_message = "a 403 must not be reported as an auth failure"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "governance-consent-pending-backoff"
 guards = "An immediate pending consent reply cannot spin a held call's RPC loop"
 file = "crates/plexus-core/src/consent_card.rs"

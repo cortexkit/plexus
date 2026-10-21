@@ -2289,7 +2289,14 @@ fn a_401_is_reported_to_the_vault_but_a_403_is_not() {
     let reservation = engine
         .authorize(write_request())
         .expect("authorize for the forbidden response");
-    let _ = engine.revalidate_and_dispatch(&reservation);
+    let forbidden = engine.revalidate_and_dispatch(&reservation);
+    // "No report" means something only if the 403 actually reached the vendor:
+    // a call refused before dispatch would satisfy it trivially.
+    assert!(
+        matches!(forbidden.outcome, TransportOutcome::VendorFailed { ref code, .. } if code == "http_403"),
+        "the 403 must come back from the vendor: {forbidden:?}"
+    );
+    assert_eq!(engine.transport().requests().len(), 1);
     assert!(
         engine.credential_source().auth_failure_reports().is_empty(),
         "a 403 must not be reported as an auth failure: {:?}",

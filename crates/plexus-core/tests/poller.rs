@@ -4468,7 +4468,16 @@ fn a_watch_on_a_revoked_connection_is_not_reported_as_healthy() {
     // The suspension lands on the next tick rather than at revocation, so drive
     // one: before it, the row still reads active and only the connection says
     // otherwise.
-    let _ = poller.poll_once(PRINCIPAL, &subscription_id);
+    let cycle = poller.poll_once(PRINCIPAL, &subscription_id);
+    // The listing below must reflect a suspension this poll made, without
+    // contacting the vendor, not a row some other path happened to leave.
+    assert_eq!(
+        cycle,
+        PollCycle::Suspended {
+            reason: "connection_revoked".to_string()
+        }
+    );
+    assert!(engine.transport().requests().is_empty());
 
     let listed = engine
         .store()
