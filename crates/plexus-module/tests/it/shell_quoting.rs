@@ -9,11 +9,14 @@ use crate::shell::single_quoted;
 
 /// What `/bin/sh` reads back from `value` once it is quoted into a script.
 fn shell_round_trip(value: &str) -> String {
-    let output = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(format!("printf '%s' {}", single_quoted(value)))
-        .output()
-        .expect("run /bin/sh");
+    let output = crate::bounded::child_output(
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf '%s' {}", single_quoted(value))),
+        std::time::Duration::from_secs(30),
+        "quoting check shell",
+    )
+    .expect("run /bin/sh");
     assert!(
         output.status.success(),
         "/bin/sh rejected the quoted word for {value:?}: {}",
