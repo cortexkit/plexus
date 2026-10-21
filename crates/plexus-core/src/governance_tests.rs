@@ -2510,9 +2510,9 @@ fn reservation_audit_rows_record_the_app_handle_only_for_facade_calls() {
 }
 
 /// An engine built for production judges expiry on the real wall clock. A
-/// clock frozen when the engine was built would keep every grant, policy and
-/// approval alive forever, while the tests that run on a clock they move
-/// would stay green.
+/// clock frozen when the engine was built would never reach a future expiry,
+/// so grants, policies and approvals that should lapse would stay live, while
+/// the tests that run on a clock they move would stay green.
 #[test]
 fn a_new_engine_reads_the_real_wall_clock() {
     let engine = ordinary_test_engine();

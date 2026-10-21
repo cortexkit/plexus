@@ -21171,7 +21171,7 @@ timeout_s = 300
 
 [[control]]
 id = "mcp-throttle-wait-on-transport-clock"
-guards = "The MCP transport waits out a short vendor throttle on its own clock, not by sleeping on the real one behind it"
+guards = "The MCP transport waits out a short vendor throttle through its clock, so a test clock can show the wait without a real-time sleep"
 file = "crates/plexus-core/src/mcp_remote.rs"
 old = "            ThrottleGate::Wait(remaining) => state.clock.sleep(remaining),"
 new = "            ThrottleGate::Wait(remaining) => std::thread::sleep(remaining), /* NON-VACUITY BREAK */"
@@ -21204,7 +21204,7 @@ id = "mcp-transport-real-clock"
 guards = "An MCP transport built for production reads the real clock, not a manual one"
 file = "crates/plexus-core/src/mcp_remote.rs"
 old = "            clock: TransportClock::real(),"
-new = "            clock: TransportClock::manual(), /* NON-VACUITY BREAK */"
+new = "            clock: { #[cfg(test)] fn pick() -> TransportClock { TransportClock::manual() } #[cfg(not(test))] fn pick() -> TransportClock { TransportClock::real() } pick() }, /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/mcp_remote_transport_integration_tests.rs"
 runner = "cargo"
 package = "plexus-core"

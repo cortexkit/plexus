@@ -770,8 +770,9 @@ fn retry_after_is_returned_as_throttle_and_honored_before_next_call() {
     task.join().expect("throttle server exits");
 }
 
-/// A transport built for production reads the real clock: a manual or frozen
-/// one would make every throttle wait pass instantly.
+/// A transport built for production reads the real clock. A manual clock
+/// advances at once when slept on, so in production it would let every
+/// throttle wait pass instantly.
 #[test]
 fn a_new_mcp_transport_reads_the_real_clock() {
     let transport = McpRemoteTransport::default();

@@ -2256,8 +2256,9 @@ mod tests {
         task.join().expect("server exits");
     }
 
-    /// A transport built for production reads the real clock: a manual or
-    /// frozen one would make every throttle wait pass instantly.
+    /// A transport built for production reads the real clock. A manual clock
+    /// advances at once when slept on, so in production it would let every
+    /// throttle wait pass instantly.
     #[test]
     fn a_new_rest_transport_reads_the_real_clock() {
         let transport = RestTransport::default();

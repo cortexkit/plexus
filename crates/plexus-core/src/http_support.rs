@@ -745,10 +745,10 @@ mod tests {
     use super::*;
 
     /// The production transport clock is the real one: its readings move
-    /// with `Instant::now`, and its sleep really blocks. A clock frozen at
-    /// construction, or a sleep that returns at once, would let every
-    /// throttle wait pass instantly in production while the tests that run on
-    /// a manual clock stayed green.
+    /// with `Instant::now`, and its sleep really blocks. A reading frozen at
+    /// construction would misjudge idle and throttle time, and a sleep that
+    /// returns at once would let every throttle wait pass instantly, while the
+    /// tests that run on a manual clock stayed green.
     #[test]
     fn the_real_transport_clock_reads_and_sleeps_on_real_time() {
         let clock = TransportClock::real();
