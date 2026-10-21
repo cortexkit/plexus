@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::mcp_payload::{
-    decode_tool_result, tool_result_from_response, tools_call_params, tools_from_response,
-    tools_list_params,
+    collect_tool_pages, decode_tool_result, tool_result_from_response, tools_call_params,
+    ToolPagesError,
 };
 use crate::mcp_remote::DiscoveredAction;
 use crate::transport::{
@@ -131,44 +131,23 @@ impl<P: McpRoutePeer> McpRouteTransport<P> {
     /// Discover actions from the adapter-managed server assigned to `connection_id`.
     pub fn discover(&self, connection_id: &str) -> Result<Vec<DiscoveredAction>, McpRouteError> {
         let server = self.server_for(connection_id)?;
-        let mut actions = Vec::new();
-        let mut params = tools_list_params();
-        let mut cursors = std::collections::HashSet::new();
-        let mut names = std::collections::HashSet::new();
-        let mut bytes = 0usize;
-        for _ in 0..crate::mcp_remote::MAX_TOOL_PAGES {
-            let frame = self
+        collect_tool_pages(|params| {
+            match self
                 .peer
-                .call(adapter_request(server.clone(), "tools/list", params))?;
-            let McpRouteFrame::Success { payload, .. } = frame else {
-                return Err(McpRouteError::Transport);
-            };
-            bytes = bytes.saturating_add(
-                serde_json::to_vec(&payload)
-                    .map_err(|_| McpRouteError::Transport)?
-                    .len(),
-            );
-            if bytes > crate::http_support::MAX_RESPONSE_BODY_BYTES {
-                return Err(McpRouteError::Transport);
-            }
-            for tool in tools_from_response(&payload).map_err(|_| McpRouteError::Transport)? {
-                let action =
-                    DiscoveredAction::from_value(tool).map_err(|_| McpRouteError::Transport)?;
-                if !names.insert(action.name.clone())
-                    || actions.len() >= crate::mcp_remote::MAX_DISCOVERED_TOOLS
-                {
-                    return Err(McpRouteError::Transport);
-                }
-                actions.push(action);
-            }
-            match crate::mcp_remote::next_tool_cursor(&payload, &mut cursors)
-                .map_err(|_| McpRouteError::Transport)?
+                .call(adapter_request(server.clone(), "tools/list", params))?
             {
-                None => return Ok(actions),
-                Some(cursor) => params = serde_json::json!({"cursor": cursor}),
+                McpRouteFrame::Success { payload, .. } => Ok(payload),
+                _ => Err(McpRouteError::Transport),
             }
-        }
-        Err(McpRouteError::Transport)
+        })
+        .map_err(|error| match error {
+            ToolPagesError::Fetch(error) => error,
+            // The route plane reports every malformed or oversized catalog as
+            // one transport failure; the remote transport distinguishes them.
+            ToolPagesError::TooLarge | ToolPagesError::Protocol | ToolPagesError::Action(_) => {
+                McpRouteError::Transport
+            }
+        })
     }
 
     fn server_for(&self, connection_id: &str) -> Result<String, McpRouteError> {
