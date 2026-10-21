@@ -7301,111 +7301,50 @@ mod tests {
         assert_eq!(denial.reason_code(), "write_filters_absent");
     }
 
-    /// Two request IDs minted within the same millisecond in a process must not collide.
-    ///
-    /// Deriving an identifier only from a millisecond timestamp and a process ID
-    /// produces identical values for any calls occurring within that same millisecond.
-    /// Two calls sharing an ID interleave their audit journal rows, so an agent
-    /// write and a background poll become indistinguishable in the journal.
-    ///
-    /// The same-millisecond condition is guaranteed structurally: the test waits
-    /// for a millisecond clock transition, captures the millisecond timestamp before
-    /// and after minting two IDs, and only accepts the observation if both timestamps
-    /// are identical (`start_ms == end_ms`). Because time is monotonic, this guarantees
-    /// both ID generations executed entirely within that single millisecond.
-    ///
-    /// Restoring the old generator (which derived the digest from now_ms and pid)
-    /// deterministically reddens this test because both IDs evaluate to the exact
-    /// same hash.
+    /// Two request IDs minted back to back, as an agent write and a background
+    /// poll can be, must differ: calls sharing an ID interleave their audit
+    /// journal rows and become indistinguishable there. IDs are random bytes
+    /// (`storage::new_id`) with no clock component, so this holds however the
+    /// clock moves; `request_ids_large_batch_are_all_distinct` covers many
+    /// mints at once.
     #[test]
-    fn request_ids_minted_within_the_same_millisecond_are_distinct() {
-        let mut sample = None;
-        for _ in 0..100 {
-            let initial = crate::storage::now_ms();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while crate::storage::now_ms() == initial {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "system clock did not advance within 2s while sampling request IDs"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            let start_ms = crate::storage::now_ms();
-            let id1 = new_request_id();
-            let id2 = new_request_id();
-            let end_ms = crate::storage::now_ms();
-            if start_ms == end_ms {
-                sample = Some((id1, id2, start_ms));
-                break;
-            }
+    fn back_to_back_request_ids_are_distinct_and_well_formed() {
+        let id1 = new_request_id();
+        let id2 = new_request_id();
+        assert_ne!(id1, id2, "back-to-back request IDs must not collide");
+        for id in [&id1, &id2] {
+            assert!(
+                id.starts_with("req_"),
+                "request ID must retain req_ prefix: {id}"
+            );
+            assert_eq!(
+                id.len(),
+                28,
+                "request ID must be 28 characters (req_ + 24 hex)"
+            );
         }
-        let (id1, id2, ms) =
-            sample.expect("failed to sample two request IDs within a single millisecond window");
-        assert_ne!(
-            id1, id2,
-            "two request IDs minted within the same millisecond ({ms}) must not collide"
-        );
-        assert!(
-            id1.starts_with("req_"),
-            "request ID must retain req_ prefix: {id1}"
-        );
-        assert!(
-            id2.starts_with("req_"),
-            "request ID must retain req_ prefix: {id2}"
-        );
-        assert_eq!(
-            id1.len(),
-            28,
-            "request ID must be 28 characters (req_ + 24 hex)"
-        );
-        assert_eq!(
-            id2.len(),
-            28,
-            "request ID must be 28 characters (req_ + 24 hex)"
-        );
     }
 
-    /// Two distinct authorization requests (such as an agent write and a poller read
-    /// on different connections) constructed within the same millisecond must receive
-    /// distinct request IDs.
+    /// Two authorization requests built back to back (such as an agent write
+    /// and a poller read on different connections) receive distinct IDs.
     #[test]
-    fn authorization_requests_in_same_millisecond_receive_distinct_ids() {
-        let mut sample = None;
-        for _ in 0..100 {
-            let initial = crate::storage::now_ms();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while crate::storage::now_ms() == initial {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "system clock did not advance within 2s while sampling request IDs"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            let start_ms = crate::storage::now_ms();
-            let write_req = AuthorizationRequest::new(
-                "agent",
-                "conn-example-rest",
-                "add_reaction",
-                serde_json::json!({"reaction": "eyes"}),
-            );
-            let poll_req = AuthorizationRequest::new(
-                "poll",
-                "conn-github-prs",
-                "list_pull_requests",
-                serde_json::json!({}),
-            )
-            .for_poll("sub-prs");
-            let end_ms = crate::storage::now_ms();
-            if start_ms == end_ms {
-                sample = Some((write_req.request_id, poll_req.request_id, start_ms));
-                break;
-            }
-        }
-        let (id1, id2, ms) = sample
-            .expect("failed to sample authorization requests within a single millisecond window");
+    fn back_to_back_authorization_requests_receive_distinct_ids() {
+        let write_req = AuthorizationRequest::new(
+            "agent",
+            "conn-example-rest",
+            "add_reaction",
+            serde_json::json!({"reaction": "eyes"}),
+        );
+        let poll_req = AuthorizationRequest::new(
+            "poll",
+            "conn-github-prs",
+            "list_pull_requests",
+            serde_json::json!({}),
+        )
+        .for_poll("sub-prs");
         assert_ne!(
-            id1, id2,
-            "authorization requests constructed in the same millisecond ({ms}) must not share an ID"
+            write_req.request_id, poll_req.request_id,
+            "authorization requests built back to back must not share an ID"
         );
     }
 
