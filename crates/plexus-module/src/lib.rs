@@ -6113,7 +6113,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn selection_log_fixture() {
-        logging::init_child();
+        if !diagnostic_child() {
+            return;
+        }
         selection_health_scenario("log").await;
     }
 
@@ -6298,16 +6300,25 @@ mod tests {
 
     #[test]
     fn health_probe_listing_error_fixture() {
+        if !diagnostic_child() {
+            return;
+        }
         health_probe_scenario("listing");
     }
 
     #[test]
     fn health_probe_connection_error_fixture() {
+        if !diagnostic_child() {
+            return;
+        }
         health_probe_scenario("probe");
     }
 
     #[test]
     fn health_probe_principals_error_fixture() {
+        if !diagnostic_child() {
+            return;
+        }
         health_probe_scenario("principals");
     }
 
@@ -6322,7 +6333,9 @@ mod tests {
     /// the log line can be read back.
     #[test]
     fn failed_request_fixture() {
-        logging::init_child();
+        if !diagnostic_child() {
+            return;
+        }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -6523,11 +6536,17 @@ mod tests {
 
     #[test]
     fn health_probe_imported_handle_fixture() {
+        if !diagnostic_child() {
+            return;
+        }
         imported_handle_probe_scenario("active");
     }
 
     #[test]
     fn health_probe_imported_handle_degraded_fixture() {
+        if !diagnostic_child() {
+            return;
+        }
         imported_handle_probe_scenario("degraded");
     }
 
@@ -7277,7 +7296,9 @@ mod tests {
     /// `a_revoked_connection_is_neither_probed_nor_logged`.
     #[test]
     fn revoke_then_probe_fixture() {
-        logging::init_child();
+        if !diagnostic_child() {
+            return;
+        }
         let (path, store, state) = two_connection_fixture("revoke-probe");
         assert!(store
             .revoke_connection("direct", "conn-retire-rest")
@@ -7602,6 +7623,15 @@ mod tests {
         include!("../../plexus-core/tests/support/logging.rs");
     }
 
+    /// Whether this process is the child a diagnostic parent test spawned,
+    /// with its stderr logging set up. A `*_fixture` test exists to be run and
+    /// observed from its parent; in the ordinary run it returns at once rather
+    /// than repeat, unobserved, the scenario the child runs anyway.
+    fn diagnostic_child() -> bool {
+        logging::init_child();
+        std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some()
+    }
+
     fn module_diagnostic_output(test: &str) -> String {
         // Cold migrations and fixture imports can stall on shared storage. They
         // are not log-observation work; prepare them before timing the child.
@@ -7654,7 +7684,9 @@ mod tests {
 
     #[test]
     fn route_capacity_log_fixture() {
-        logging::init_child();
+        if !diagnostic_child() {
+            return;
+        }
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -7697,7 +7729,9 @@ mod tests {
 
     #[test]
     fn diagnostic_shadow_fixture() {
-        logging::init_child();
+        if !diagnostic_child() {
+            return;
+        }
         eprintln!(warn wire: "diagnostic_shadow_probe");
     }
 
