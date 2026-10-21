@@ -506,3 +506,45 @@ fn an_unrecorded_cache_hit_is_withheld() {
         "the withheld hit sent nothing"
     );
 }
+
+/// The audit row records which domains, recency window and result count a
+/// search asked for, on the compatibility path and on an ordered walk.
+#[test]
+fn the_search_row_records_the_filters() {
+    let (engine, transport) = granted_exa_engine("web-filters");
+    let service =
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000));
+    transport.set_response(crate::MockResponse::Success(json!({"results": []})));
+    for path in ["compatibility", "ordered"] {
+        if path == "ordered" {
+            engine
+                .store()
+                .set_web_search_order(&["exa".to_string()])
+                .unwrap();
+        }
+        service
+            .search(
+                &engine,
+                "direct",
+                json!({"query": format!("filtered {path}"), "include_domains": ["Example.ORG", "arxiv.org"],
+                    "recency": "week", "max_results": 3})
+                .as_object()
+                .unwrap(),
+            )
+            .unwrap();
+        let rows = engine.store().list_audit("direct").unwrap();
+        let summary: Value = serde_json::from_str(
+            rows.iter()
+                .filter(|row| row.gate.as_deref() == Some("web_search"))
+                .last()
+                .and_then(|row| row.args_redaction_summary.as_deref())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            summary["filters"],
+            json!({"include_domains": ["arxiv.org", "example.org"], "recency": "week", "max_results": 3}),
+            "the {path} search row must record the filters"
+        );
+    }
+}

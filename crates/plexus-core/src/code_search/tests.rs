@@ -595,3 +595,37 @@ fn a_dispatched_search_row_states_what_reached_the_vendor() {
         );
     }
 }
+
+/// The audit row records which repositories, paths and languages a search
+/// read and which match options it used, not only the query text.
+#[test]
+fn the_search_row_records_the_filters() {
+    let f = Fixture::new();
+    f.grant("direct");
+    f.service
+        .search_scoped(
+            &f.engine,
+            "direct",
+            json!({"query": "with_capacity", "regex": true, "repo": "rust-lang/rust",
+                "path": "library/", "language": ["Rust"]})
+            .as_object()
+            .unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+    let db = rusqlite::Connection::open(f.path.path()).unwrap();
+    let summary: String = db
+        .query_row(
+            "SELECT args_redaction_summary FROM audit_journal WHERE gate = 'code_search'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&summary).unwrap(),
+        json!({"filters": {"regex": true, "repo": "rust-lang/rust", "path": "library/",
+            "language": ["Rust"]}}),
+        "the search row must record the filters"
+    );
+}

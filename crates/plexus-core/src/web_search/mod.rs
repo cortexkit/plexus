@@ -373,6 +373,7 @@ impl WebSearchService {
         let caller = audit.search.caller.clone();
         let query = WebSearchQuery::parse(arguments)?;
         audit.search.query_text = Some(query.query.clone());
+        audit.search.filters = query.audited_filters();
 
         let agent = resolve_call_agent(audit.search.scope.as_ref());
         audit.search.agent_id = agent.attributed.clone();
@@ -638,15 +639,13 @@ impl WebSearchService {
                 chain.attempted.map(|backend| backend.action.to_string()),
             ),
         };
-        let summary = match &audit.chain {
-            None => {
-                "web_search query recorded in query_text; assertion and other arguments omitted"
-                    .to_string()
-            }
-            Some(chain) => {
-                json!({"served_by": chain.served_by, "skipped": chain.skipped}).to_string()
-            }
-        };
+        let summary = audit.search.summary(match &audit.chain {
+            None => Map::new(),
+            Some(chain) => Map::from_iter([
+                ("served_by".to_string(), json!(chain.served_by)),
+                ("skipped".to_string(), json!(chain.skipped)),
+            ]),
+        });
         // DELIBERATE EXCEPTION to the hash-only argument policy: every other
         // audit row records arguments only as hashes, but a web search is
         // unreviewable without the words searched for, and search terms are

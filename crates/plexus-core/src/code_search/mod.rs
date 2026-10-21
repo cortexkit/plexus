@@ -183,6 +183,7 @@ impl CodeSearchService {
         let outcome = (|| {
             let query = CodeSearchQuery::parse(arguments)?;
             audit.query_text = Some(query.query.clone());
+            audit.filters = query.audited_filters();
             let agent = resolve_call_agent(scope);
             let now = (self.clock)();
             let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());
@@ -271,11 +272,12 @@ impl CodeSearchService {
         // Code search queries are retained as text so usage can be analysed, like web search.
         // Journal retention defaults to 30 days (PLEXUS_AUDIT_RETENTION_DAYS).
         // Credentials are omitted; agent identity comes only from the daemon's route scope.
+        let summary = audit.summary(Map::new());
         let _ = audit.append(
             engine.store(),
             Some(BACKEND.to_string()),
             Some(ACTION.to_string()),
-            "code_search query recorded in query_text; other arguments omitted".to_string(),
+            summary,
             row,
         );
         outcome

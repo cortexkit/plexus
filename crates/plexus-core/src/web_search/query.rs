@@ -36,6 +36,16 @@ impl Recency {
         }
     }
 
+    /// The argument value that names this window.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+            Self::Year => "year",
+        }
+    }
+
     /// The window as a whole number of days. A month is 30 days and a year 365:
     /// the filter is a coarse freshness bound, not a calendar query.
     pub fn days(self) -> i64 {
@@ -61,6 +71,27 @@ pub struct WebSearchQuery {
 }
 
 impl WebSearchQuery {
+    /// The filters the caller set, normalized, for the search's audit row:
+    /// `include_domains` when any, `recency` when set, and `max_results` when
+    /// it differs from the default. These name what a search reads and are
+    /// public, so they are recorded as they are.
+    pub(crate) fn audited_filters(&self) -> serde_json::Map<String, Value> {
+        let mut filters = serde_json::Map::new();
+        if !self.include_domains.is_empty() {
+            filters.insert(
+                "include_domains".into(),
+                self.include_domains.clone().into(),
+            );
+        }
+        if let Some(recency) = self.recency {
+            filters.insert("recency".into(), recency.name().into());
+        }
+        if self.max_results != DEFAULT_MAX_RESULTS {
+            filters.insert("max_results".into(), self.max_results.into());
+        }
+        filters
+    }
+
     /// Validate the tool arguments. Every unknown key is refused by name so a
     /// misspelled filter never silently widens a search.
     pub fn parse(arguments: &Map<String, Value>) -> Result<Self, WebSearchRefusal> {

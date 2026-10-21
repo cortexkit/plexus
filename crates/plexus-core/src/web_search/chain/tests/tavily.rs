@@ -358,7 +358,7 @@ fn documented_plan_and_pay_as_you_go_limits_are_quota_and_fall_through() {
         assert_eq!(
             recorded.audit,
             Some(
-                json!({"served_by": "exa", "skipped": [{"provider": "tavily", "reason": "quota"}]})
+                json!({"filters": {"include_domains": ["britannica.com"], "max_results": 3, "recency": "year"}, "served_by": "exa", "skipped": [{"provider": "tavily", "reason": "quota"}]})
             ),
             "{record}"
         );

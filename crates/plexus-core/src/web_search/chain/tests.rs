@@ -652,10 +652,7 @@ fn compatibility_keeps_exa_cache_bucket_and_audit_without_chain_state() {
     {
         assert_eq!(row.app_key.as_deref(), Some("exa_rest"));
         assert_eq!(row.connection_id.as_deref(), Some("exa"));
-        assert_eq!(
-            row.args_redaction_summary.as_deref(),
-            Some("web_search query recorded in query_text; assertion and other arguments omitted")
-        );
+        assert_eq!(row.args_redaction_summary.as_deref(), Some("{}"));
     }
     assert!(transport.requests().is_empty());
 }

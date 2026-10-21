@@ -340,6 +340,8 @@ pub(crate) struct SearchAudit {
     pub risk: Option<String>,
     pub severity: Option<String>,
     pub query_text: Option<String>,
+    /// The search filters the caller set, recorded in the row's summary.
+    pub filters: serde_json::Map<String, Value>,
     /// The engine's request id once `authorize` admitted the call, so this
     /// row can be joined to the engine's own authorization and dispatch rows.
     pub request_id: Option<String>,
@@ -378,6 +380,7 @@ impl SearchAudit {
             risk: None,
             severity: None,
             query_text: None,
+            filters: serde_json::Map::new(),
             request_id: None,
             transmission: None,
             scope: scope.cloned(),
@@ -391,6 +394,18 @@ impl SearchAudit {
         self.connection_id = Some(connection.connection_id.clone());
         self.risk = Some(action.risk.clone());
         self.severity = Some(action.severity.clone());
+    }
+
+    /// The row's argument summary: a JSON object naming the filters the
+    /// caller set (omitted when none), plus any `extra` keys the tool adds.
+    /// The query itself is in the row's query_text.
+    pub(crate) fn summary(&self, extra: serde_json::Map<String, Value>) -> String {
+        let mut summary = serde_json::Map::new();
+        if !self.filters.is_empty() {
+            summary.insert("filters".into(), Value::Object(self.filters.clone()));
+        }
+        summary.extend(extra);
+        Value::Object(summary).to_string()
     }
 
     /// Forget an earlier provider's dispatch when the ordered walk moves on
