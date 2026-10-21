@@ -1532,13 +1532,11 @@ fn two_connection_fixture_with_retire_status(
     (path, store, state)
 }
 
-mod credential_rebind {
-    include!("credential_rebind_tests.rs");
-}
+#[path = "credential_rebind_tests.rs"]
+mod credential_rebind;
 
-mod operator_confirmation_tests {
-    include!("operator_confirmation_tests.rs");
-}
+#[path = "operator_confirmation_tests.rs"]
+mod operator_confirmation_tests;
 
 fn delete_audit_rows(path: &Path, connection_id: &str) -> i64 {
     rusqlite::Connection::open(path)

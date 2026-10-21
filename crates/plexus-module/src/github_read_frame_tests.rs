@@ -1,24 +1,17 @@
-mod issue_flow_tests {
-    include!("issue_flow_read_tests.rs");
-}
-mod ci_read_tests {
-    include!("ci_read_tests.rs");
-}
-mod job_log_tests {
-    include!("job_log_read_tests.rs");
-}
-mod artifact_file_tests {
-    include!("artifact_file_read_tests.rs");
-}
-mod review_threads_tests {
-    include!("review_threads_read_tests.rs");
-}
-mod bot_read_tests {
-    include!("bot_read_tests.rs");
-}
-mod bot_read_vector_tests {
-    include!("bot_read_vector_tests.rs");
-}
+#[path = "artifact_file_read_tests.rs"]
+mod artifact_file_tests;
+#[path = "bot_read_tests.rs"]
+mod bot_read_tests;
+#[path = "bot_read_vector_tests.rs"]
+mod bot_read_vector_tests;
+#[path = "ci_read_tests.rs"]
+mod ci_read_tests;
+#[path = "issue_flow_read_tests.rs"]
+mod issue_flow_tests;
+#[path = "job_log_read_tests.rs"]
+mod job_log_tests;
+#[path = "review_threads_read_tests.rs"]
+mod review_threads_tests;
 use super::*;
 use plexus_core::github::credential::HandleCredentialProvider;
 use plexus_core::storage::github_store::{GithubGovernanceSeams, GithubHandle, GithubImportRow};
