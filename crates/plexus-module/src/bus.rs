@@ -1469,38 +1469,46 @@ pub mod tests {
             serde_json::from_str::<Value>(&normalized).expect("parse manifest"),
         )
         .expect("ingest manifest");
-        let _ = store.upsert_manifest("system", &ingested);
-        let _ = store.insert_connection(
-            "direct",
-            conn_id,
-            &ingested.manifest.key,
-            "active",
-            &json!({"required": [], "optional": [], "write_enabling": []}),
-        );
-        let _ = store.upsert_catalog_action(&plexus_core::CatalogActionInput {
-            connection_id: conn_id.to_string(),
-            principal: "direct".to_string(),
-            name: "list_issues".to_string(),
-            title: None,
-            schema: json!({"type": "object", "properties": {}}),
-            schema_hash: "sha256:list-issues".to_string(),
-            risk: "read".to_string(),
-            severity: "S1".to_string(),
-            status: "active".to_string(),
-            quarantine_reason: None,
-            reconciliation: None,
-            ask_first: false,
-        });
-        let _ = store.insert_grant(&plexus_core::GrantInput {
-            grant_id: format!("grant-{conn_id}"),
-            principal: "direct".to_string(),
-            connection_id: conn_id.to_string(),
-            grantee_principal: "direct".to_string(),
-            risk_ceiling: "read".to_string(),
-            action_selectors: vec!["list_issues".to_string(), "list_pull_requests".to_string()],
-            authority_kind: "poll".to_string(),
-            expires_at: Some(i64::MAX / 2),
-        });
+        store
+            .upsert_manifest("system", &ingested)
+            .expect("seed the shipped GitHub manifest");
+        store
+            .insert_connection(
+                "direct",
+                conn_id,
+                &ingested.manifest.key,
+                "active",
+                &json!({"required": [], "optional": [], "write_enabling": []}),
+            )
+            .expect("seed the connection");
+        store
+            .upsert_catalog_action(&plexus_core::CatalogActionInput {
+                connection_id: conn_id.to_string(),
+                principal: "direct".to_string(),
+                name: "list_issues".to_string(),
+                title: None,
+                schema: json!({"type": "object", "properties": {}}),
+                schema_hash: "sha256:list-issues".to_string(),
+                risk: "read".to_string(),
+                severity: "S1".to_string(),
+                status: "active".to_string(),
+                quarantine_reason: None,
+                reconciliation: None,
+                ask_first: false,
+            })
+            .expect("seed the list_issues catalog action");
+        store
+            .insert_grant(&plexus_core::GrantInput {
+                grant_id: format!("grant-{conn_id}"),
+                principal: "direct".to_string(),
+                connection_id: conn_id.to_string(),
+                grantee_principal: "direct".to_string(),
+                risk_ceiling: "read".to_string(),
+                action_selectors: vec!["list_issues".to_string(), "list_pull_requests".to_string()],
+                authority_kind: "poll".to_string(),
+                expires_at: Some(i64::MAX / 2),
+            })
+            .expect("seed the poll grant");
         let sub = store
             .subscribe("direct", conn_id, "list_issues", 300)
             .expect("store")
