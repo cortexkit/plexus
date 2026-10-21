@@ -400,10 +400,7 @@ fn reconciliation_confirmed_not_found_ambiguous_and_denied_on_revoke() {
         connection_id: "conn-1".to_string(),
         action: "destroy_item".to_string(),
         args: write_args(),
-        occurred_at_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_millis() as i64)
-            .unwrap_or(0),
+        occurred_at_ms: plexus_core::now_ms(),
     };
 
     // A reservation and its approval intent have distinct ids; persist their
@@ -819,10 +816,7 @@ fn reconciliation_record(action: &str) -> OutcomeUnknownRecord {
         connection_id: "conn-1".to_string(),
         action: action.to_string(),
         args: write_args(),
-        occurred_at_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64,
+        occurred_at_ms: plexus_core::now_ms(),
     }
 }
 

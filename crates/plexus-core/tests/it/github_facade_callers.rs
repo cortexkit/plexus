@@ -148,10 +148,7 @@ impl Fixture {
             transport,
             scope,
             path,
-            now: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
+            now: plexus_core::now_ms(),
         }
     }
 

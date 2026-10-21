@@ -270,10 +270,7 @@ impl Fixture {
             nonce,
             nonce,
             "worker",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
+            plexus_core::now_ms(),
         )
     }
 

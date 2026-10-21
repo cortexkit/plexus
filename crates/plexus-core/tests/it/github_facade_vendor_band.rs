@@ -151,10 +151,7 @@ fn seen_marker_reaction_golden_is_a_real_facade_dispatch() {
     let request = json!({"operation":"gh.route","gh_route_schema":1,"action":"issue reaction","target":{"number":"42"},
         "body":{"reaction":"eyes"},"repository":"org/repo","manifest_version":14,"rung_as_of_unix_secs":1790209659,
         "metadata":{"agent_id":"agent-fixture","pid":6092}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -242,10 +239,7 @@ fn close_with_comment_records_two_effects_and_replays_without_a_second_write() {
     );
     let request =
         json!({"verb":"issue close", "repository":"org/repo", "number":"42", "comment":"done"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -323,10 +317,7 @@ fn issue_edit_human_using_bot_login_cannot_dispatch() {
     ));
     let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},
         "body":{"title":"changed"},"author_scope":"own"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -384,10 +375,7 @@ fn approved_close_with_comment_consumes_one_request_after_both_effects() {
     .unwrap();
     let request =
         json!({"verb":"issue close", "repository":"org/repo", "number":"42", "comment":"done"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let pending = bot_request_scoped(
         &store,
         &engine,
@@ -466,10 +454,7 @@ fn outcome_unknown_replays_without_dispatch_and_preserves_approval() {
     )
     .unwrap();
     let request = json!({"action":"issue reaction", "repository":"org/repo", "target":{"number":"42"}, "body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let pending = bot_request_scoped(
         &store,
         &engine,
@@ -550,10 +535,7 @@ fn vendor_403_is_sticky_but_a_401_rejects_the_credential_once() {
             message: "rejected".into(),
         });
         let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"}, "body":{"reaction":"eyes"}});
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = plexus_core::now_ms();
         let first = bot_request_scoped(
             &store,
             &engine,
@@ -598,10 +580,7 @@ fn g8_entry_grant_revalidation_stops_before_reads_or_credential() {
         &[("github.issue.get", "read"), ("close_issue", "write")],
     );
     let request = json!({"verb":"issue close", "repository":"org/repo", "number":"42"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let mut reply = gates::run_scoped(
         store.as_ref(),
         plexus_core::github::AFT_PRINCIPAL,
@@ -693,10 +672,7 @@ fn g9_policy_movement_after_get_stops_the_write() {
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -775,10 +751,7 @@ fn edit_last_paginates_then_gets_own_comment_before_patch() {
         .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue comment","repository":"org/repo","target":{"number":"42"},
         "edit_last":true,"body":{"body":"replacement"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -831,10 +804,7 @@ fn swept_uncertain_facade_effect_records_argument_free_disposition_with_original
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"},"body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         bot_request_scoped(
             &store,
@@ -922,10 +892,7 @@ fn swept_receipt_with_future_reconciliation_class_never_queues_empty_args() {
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"},"body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bot_request_scoped(
             &store,
@@ -1013,10 +980,7 @@ fn own_issue_label_edit_uses_ordered_mapped_legs() {
     )))
     .unwrap();
     request["repository"] = json!("org/repo");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -1073,10 +1037,7 @@ fn missing_handle_credential_is_reported_at_the_kind_specific_gate() {
             credential_provider: None,
         }))
         .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = plexus_core::now_ms();
         let result = bot_request_scoped(
             &store,
             &engine,
@@ -1116,10 +1077,7 @@ fn page_bound_is_sticky_without_treating_incomplete_list_as_no_comment() {
             .collect(),
     )));
     let request = json!({"action":"issue comment","repository":"org/repo","target":{"number":"42"},"edit_last":true,"body":{"body":"replacement"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -1191,10 +1149,7 @@ fn invalid_or_expired_list_releases_claim_for_same_nonce_retry() {
             json!([])
         }));
         let request = json!({"action":"issue comment","repository":"org/repo","target":{"number":"42"},"edit_last":true,"body":{"body":"replacement"}});
-        let current = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let current = plexus_core::now_ms();
         let first = bot_request_scoped(
             &store,
             &engine,
@@ -1254,10 +1209,7 @@ fn g8_read_ask_first_never_creates_an_inner_action_request() {
         )
         .unwrap();
     let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -1301,10 +1253,7 @@ fn g8_read_401_is_sticky_and_never_retransmits() {
         message: "expired".into(),
     });
     let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -1409,10 +1358,7 @@ fn recording_transport_read_set_is_exact_for_every_kind() {
             "",
             MockResponse::Success(json!({"user":{"login":"app-fixture[bot]","type":"Bot"}})),
         );
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = plexus_core::now_ms();
         let result = bot_request_scoped(
             &store,
             &engine,
@@ -1460,10 +1406,7 @@ fn comment_author_mismatch_refuses_before_patch_and_is_sticky() {
     );
     let request = json!({"action":"api:PATCH:/repos/*/*/issues/comments/*","repository":"org/repo",
         "target":{"comment_id":"123"},"body":{"body":"edited"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -1504,10 +1447,7 @@ fn vendor_path_fields_must_come_from_target_not_body() {
         setup("facade-path-field", &[("add_issue_comment", "write")]);
     let request = json!({"action":"issue comment","repository":"org/repo","target":{"number":"42"},
         "body":{"body":"safe","issue_number":999}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -1533,10 +1473,7 @@ fn store_failure_before_vendor_contact_releases_claim_and_retry_sends_once() {
     let db = Connection::open(scratch.path()).unwrap();
 
     let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"},"body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let mut reply = plexus_core::github::facade::gates::run_scoped(
         store.as_ref(),
         plexus_core::github::AFT_PRINCIPAL,
@@ -1616,10 +1553,7 @@ fn expired_retry_records_unknown_disposition_before_any_sweep_and_never_resends(
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"},"body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bot_request_scoped(
             &store,
@@ -1698,10 +1632,7 @@ fn close_with_comment_retries_only_unfinished_state_after_second_pretransmit_sto
     );
     let request =
         json!({"verb":"issue close","repository":"org/repo","number":"42","comment":"once"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let db = Connection::open(scratch.path()).unwrap();
     // Simulate a database failure when effect two is marked as about to be
     // sent. The state-changing request must not follow the completed comment.
@@ -1857,10 +1788,7 @@ fn g8_entry_matrix_blocks_each_read_branch_before_any_transport_contact() {
                 &format!("matrix-entry-{}-{movement}", case.label),
                 &case.actions,
             );
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
+            let now = plexus_core::now_ms();
             let mut reply = gates::run_scoped(
                 store.as_ref(),
                 plexus_core::github::AFT_PRINCIPAL,
@@ -1994,10 +1922,7 @@ fn g9_after_last_read_matrix_blocks_each_branch_before_mutation() {
                 store: store.clone(),
                 credential_provider: Some(Arc::new(Token)),
             }));
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
+            let now = plexus_core::now_ms();
             let result = bot_request_scoped(
                 &store,
                 &engine,
@@ -2208,10 +2133,7 @@ impl ResultRun {
             scope,
             _scratch: scratch,
             request,
-            now: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
+            now: plexus_core::now_ms(),
         }
     }
 
@@ -2774,10 +2696,7 @@ fn pr_create_without_the_agents_grant_refuses_and_sends_nothing() {
         "no-grant-nonce",
         "no-grant-id",
         "worker",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64,
+        plexus_core::now_ms(),
     );
     assert_eq!(
         reply["result"],
@@ -2848,10 +2767,7 @@ fn validation_facade_reply(label: &str, status: u16, body: &str) -> Value {
         }))
         .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"},"body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let reply = bot_request_scoped(
         &store,
         &engine,
@@ -3200,10 +3116,7 @@ mod scoped {
     }
 
     fn now() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
+        plexus_core::now_ms()
     }
 
     impl Scoped {
@@ -3698,10 +3611,7 @@ fn handle_unbind_after_authorization_stops_dispatch() {
         credential_provider: Some(Arc::new(Token)),
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -3787,10 +3697,7 @@ fn close_after_a_transient_second_leg_with_generation_failure(
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request =
         json!({"verb":"issue close","repository":"org/repo","number":"42","comment":"once"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let send = |owner: &str, at: i64| {
         bot_request_scoped(
             &store,

@@ -3003,13 +3003,7 @@ fn invoke_authority_does_not_authorize_a_poll_and_vice_versa() {
             authority_kind: AUTHORITY_POLL,
             requested_risk: "read",
             requested_selectors: &["read_item".to_string()],
-            expires_at: Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("clock")
-                    .as_millis() as i64
-                    + 3_600_000,
-            ),
+            expires_at: Some(plexus_core::now_ms() + 3_600_000),
         })
         .expect("mint bounded poll grant")
         .expect("bounded poll authority is accepted");

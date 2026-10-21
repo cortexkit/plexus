@@ -277,10 +277,7 @@ fn drive_with(label: &str, writes: &[&str], request: Value) -> Vec<(String, Valu
 
 /// Sends one bot request as AFT and returns the reply and every transport call.
 fn send(fixture: &Imported, label: &str, request: Value) -> (Value, Vec<(String, Value)>) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let reply = bot_request_scoped(
         &fixture.store,
         &fixture.engine,

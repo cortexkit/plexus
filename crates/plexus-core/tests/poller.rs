@@ -223,11 +223,7 @@ fn upsert_action_with_schema(
 }
 
 fn insert_poll_grant(engine: &GovernanceEngine<StubCredentialSource, MockTransport>, action: &str) {
-    let expiry = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_millis() as i64
-        + 3_600_000;
+    let expiry = plexus_core::now_ms() + 3_600_000;
     engine
         .store()
         .insert_grant(&GrantInput {
