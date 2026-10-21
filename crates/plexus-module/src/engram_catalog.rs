@@ -29,7 +29,8 @@ const CATALOG_BYTES: &[u8] = br#"{
       "class": "portable",
       "mechanism": "filetree",
       "path": "grant-revocations.jsonl",
-      "writer_interaction": "none"
+      "writer_interaction": "none",
+      "capture": "after_databases"
     },
     {
       "entry_id": "plexus/logs",
@@ -206,6 +207,10 @@ mod tests {
         assert_eq!(revocations["mechanism"], "filetree");
         assert_eq!(revocations["path"], "grant-revocations.jsonl");
         assert_eq!(revocations["writer_interaction"], "none");
+        // The journal must be captured after store.db, so a revocation that
+        // lands mid-backup is in the journal whenever it is in the store. A
+        // store restored with an older journal could otherwise re-arm it.
+        assert_eq!(revocations["capture"], "after_databases");
 
         let leases = entries
             .iter()
