@@ -6,12 +6,13 @@
 
 #[path = "support/bounded.rs"]
 mod bounded;
+#[path = "support/scratch_store.rs"]
+mod scratch_store;
 
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::test_scratch::Scratch;
 use plexus_core::{
     fingerprint, ingest_value, jcs_sha256, ActorSource, CatalogActionInput, GovernanceEngine,
@@ -49,32 +50,9 @@ const VENDOR_NAMED: &str = "read_vendor_named";
 /// implement, used to prove an unsupported kind suspends rather than guesses.
 const SNAPSHOT: &str = "read_snapshot";
 
-fn test_store(label: &str) -> (plexus_core::PlexusStore, Scratch) {
+fn test_store(label: &str) -> (Scratch, plexus_core::PlexusStore) {
     logging::init_child();
-    // The macOS clock ticks in microseconds, so the counter prevents same-tick test nonce collisions.
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let unique = format!(
-        "{}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_nanos())
-            .unwrap_or(0),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    let path = Scratch::database(&format!("poller-{label}"));
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("{label}-{unique}"),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: path.to_string_lossy().into_owned(),
-        },
-    };
-    (
-        plexus_core::PlexusStore::open(&descriptor).expect("open test store"),
-        path,
-    )
+    scratch_store::open(&format!("poller-{label}"))
 }
 
 fn manifest_value() -> Value {
@@ -245,11 +223,7 @@ fn upsert_action_with_schema(
 }
 
 fn insert_poll_grant(engine: &GovernanceEngine<StubCredentialSource, MockTransport>, action: &str) {
-    let expiry = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_millis() as i64
-        + 3_600_000;
+    let expiry = plexus_core::now_ms() + 3_600_000;
     engine
         .store()
         .insert_grant(&GrantInput {
@@ -274,12 +248,12 @@ fn insert_poll_grant(engine: &GovernanceEngine<StubCredentialSource, MockTranspo
 fn fixture(
     label: &str,
 ) -> (
+    Scratch,
     Poller<StubCredentialSource, MockTransport>,
     GovernanceEngine<StubCredentialSource, MockTransport>,
-    Scratch,
     String,
 ) {
-    let (store, path) = test_store(label);
+    let (path, store) = test_store(label);
     store
         .insert_connection(
             PRINCIPAL,
@@ -325,7 +299,7 @@ fn fixture(
         .expect("subscribe store")
         .expect("subscription accepted");
     let poller = Poller::new(engine.clone());
-    (poller, engine, path, subscription.subscription_id)
+    (path, poller, engine, subscription.subscription_id)
 }
 
 fn actor_subscription(
@@ -629,7 +603,7 @@ fn drift_catalog_raw(path: &Path, column: &str, value: &str, action: &str) {
 /// fails the event-count assertion.
 #[test]
 fn healthy_poll_advances_the_cursor_and_writes_its_events() {
-    let (poller, engine, path, id) = fixture("healthy");
+    let (_path, poller, engine, id) = fixture("healthy");
     engine
         .transport()
         .set_response(MockResponse::Success(json!({
@@ -668,7 +642,6 @@ fn healthy_poll_advances_the_cursor_and_writes_its_events() {
     assert!(events
         .iter()
         .any(|event| event.vendor_event_id.as_deref() == Some("e2")));
-    let _ = std::fs::remove_file(path);
 }
 
 struct DeactivateBeforePollCommit {
@@ -694,7 +667,7 @@ impl plexus_core::Transport for DeactivateBeforePollCommit {
 #[test]
 fn deactivation_between_selection_and_commit_is_not_eligible() {
     for probe in [false, true] {
-        let (_poller, engine, _path, feed_id) = fixture(if probe {
+        let (_path, _poller, engine, feed_id) = fixture(if probe {
             "probe-commit-race"
         } else {
             "poll-commit-race"
@@ -754,7 +727,7 @@ fn deactivation_between_selection_and_commit_is_not_eligible() {
 /// assertion then fails while bound-path actor tests remain green.
 #[test]
 fn an_unbound_actor_source_stores_unknown_actors() {
-    let (poller, engine, path, id) = fixture("actor-source-unbound");
+    let (_path, poller, engine, id) = fixture("actor-source-unbound");
     assert_eq!(
         subscription(&engine, &id).actor_source,
         None,
@@ -778,7 +751,6 @@ fn an_unbound_actor_source_stores_unknown_actors() {
         .pop()
         .expect("unbound event stored");
     assert_eq!(event.actor_logins, None);
-    let _ = std::fs::remove_file(path);
 }
 
 /// A bound source cannot identify actors when the watched action no longer has
@@ -789,7 +761,7 @@ fn an_unbound_actor_source_stores_unknown_actors() {
 /// changing the shared early-return value from `None` to `Some([])`.
 #[test]
 fn a_missing_item_kind_stores_unknown_actors() {
-    let (poller, engine, path, _) = fixture("actor-kind-missing");
+    let (_path, poller, engine, _) = fixture("actor-kind-missing");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     let mut manifest = manifest_value();
     let feed = manifest["actions_baseline"]
@@ -845,7 +817,6 @@ fn a_missing_item_kind_stores_unknown_actors() {
         0,
         "a missing kind must stop before actor dispatch"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A source whose method set does not cover the watched item kind stores unknown
@@ -855,7 +826,7 @@ fn a_missing_item_kind_stores_unknown_actors() {
 /// by changing the shared early-return value from `None` to `Some([])`.
 #[test]
 fn methods_that_do_not_cover_the_item_kind_store_unknown_actors() {
-    let (poller, engine, path, _) = fixture("actor-methods-mismatch");
+    let (_path, poller, engine, _) = fixture("actor-methods-mismatch");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_review_comments"]);
     assert_eq!(
         subscription(&engine, &id)
@@ -893,7 +864,6 @@ fn methods_that_do_not_cover_the_item_kind_store_unknown_actors() {
         0,
         "a method mismatch must stop before actor dispatch"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A successful issue-comment read stamps every login in stable order.
@@ -903,7 +873,7 @@ fn methods_that_do_not_cover_the_item_kind_store_unknown_actors() {
 /// the stored actor assertion.
 #[test]
 fn issue_comment_actors_round_trip_in_stable_order() {
-    let (poller, engine, path, _) = fixture("issue-actors");
+    let (_path, poller, engine, _) = fixture("issue-actors");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine
         .transport()
@@ -942,7 +912,6 @@ fn issue_comment_actors_round_trip_in_stable_order() {
         events[0].actor_logins,
         Some(vec!["alice".to_string(), "zara".to_string()])
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// Actor extraction excludes comments from strictly older reported seconds and
@@ -953,7 +922,7 @@ fn issue_comment_actors_round_trip_in_stable_order() {
 /// comment; using the current observation as the baseline drops the new one.
 #[test]
 fn actor_window_excludes_before_and_includes_after_previous_observation() {
-    let (poller, engine, path, _) = fixture("actor-window");
+    let (path, poller, engine, _) = fixture("actor-window");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine.transport().set_response_for_method(
         ISSUE_READ,
@@ -1018,7 +987,6 @@ fn actor_window_excludes_before_and_includes_after_previous_observation() {
         .find(|event| event.payload["title"] == "after")
         .expect("changed version stored");
     assert_eq!(changed.actor_logins, Some(vec!["after".to_string()]));
-    let _ = std::fs::remove_file(path);
 }
 
 /// Editing is activity even when the comment itself predates the observation.
@@ -1026,7 +994,7 @@ fn actor_window_excludes_before_and_includes_after_previous_observation() {
 /// stored actor set unknown.
 #[test]
 fn edited_comment_created_before_window_is_attributed() {
-    let (poller, engine, path, _) = fixture("actor-window-edited-comment");
+    let (path, poller, engine, _) = fixture("actor-window-edited-comment");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     prime_issue_actor_window(&poller, &engine, &path, &id);
 
@@ -1041,7 +1009,6 @@ fn edited_comment_created_before_window_is_attributed() {
         }]),
         Some(vec!["edited-human"]),
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A concurrent operator comment must not hide the external author whose old
@@ -1050,7 +1017,7 @@ fn edited_comment_created_before_window_is_attributed() {
 /// wake caused by the external edit.
 #[test]
 fn edited_external_comment_prevents_an_operator_only_actor_set() {
-    let (poller, engine, path, _) = fixture("actor-window-edited-external-and-operator");
+    let (path, poller, engine, _) = fixture("actor-window-edited-external-and-operator");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     prime_issue_actor_window(&poller, &engine, &path, &id);
 
@@ -1072,7 +1039,6 @@ fn edited_external_comment_prevents_an_operator_only_actor_set() {
         ]),
         Some(vec!["external-human", "operator"]),
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// Creation and update both before the observation remain historical. Dropping
@@ -1080,7 +1046,7 @@ fn edited_external_comment_prevents_an_operator_only_actor_set() {
 /// this event's attribution into unrelated history.
 #[test]
 fn comment_created_and_updated_before_window_stays_excluded() {
-    let (poller, engine, path, _) = fixture("actor-window-historical-update");
+    let (path, poller, engine, _) = fixture("actor-window-historical-update");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     prime_issue_actor_window(&poller, &engine, &path, &id);
 
@@ -1102,7 +1068,6 @@ fn comment_created_and_updated_before_window_stays_excluded() {
         ]),
         Some(vec!["new-external"]),
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// An edit reported in the host observation's second is just as ambiguous as a
@@ -1110,7 +1075,7 @@ fn comment_created_and_updated_before_window_stays_excluded() {
 /// preserving only the definitely newer operator.
 #[test]
 fn same_second_comment_update_fails_open_to_unknown() {
-    let (poller, engine, path, _) = fixture("actor-window-same-second-update");
+    let (path, poller, engine, _) = fixture("actor-window-same-second-update");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     prime_issue_actor_window(&poller, &engine, &path, &id);
 
@@ -1132,7 +1097,6 @@ fn same_second_comment_update_fails_open_to_unknown() {
         ]),
         None,
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A comment created after the host's previous observation can share its
@@ -1142,7 +1106,7 @@ fn same_second_comment_update_fails_open_to_unknown() {
 /// partial actor set from suppressing a wake.
 #[test]
 fn same_second_comment_after_previous_observation_fails_open_to_unknown() {
-    let (poller, engine, path, _) = fixture("actor-window-same-second");
+    let (path, poller, engine, _) = fixture("actor-window-same-second");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine.transport().set_response_for_method(
         ISSUE_READ,
@@ -1211,7 +1175,6 @@ fn same_second_comment_after_previous_observation_fails_open_to_unknown() {
         changed.actor_logins, None,
         "same-second uncertainty must fail open rather than store a partial set"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// The definitely newer agent comment is intentionally ordered before the
@@ -1221,7 +1184,7 @@ fn same_second_comment_after_previous_observation_fails_open_to_unknown() {
 /// load-bearing because an empty partial set is already collapsed to unknown.
 #[test]
 fn ambiguous_human_after_collected_agent_cannot_leave_suppressing_partial_set() {
-    let (poller, engine, path, _) = fixture("actor-window-agent-before-ambiguous-human");
+    let (path, poller, engine, _) = fixture("actor-window-agent-before-ambiguous-human");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine.transport().set_response_for_method(
         ISSUE_READ,
@@ -1288,7 +1251,6 @@ fn ambiguous_human_after_collected_agent_cannot_leave_suppressing_partial_set() 
         changed.actor_logins, None,
         "an ambiguous human must not leave behind a suppressing agent-only set"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// Replays an anonymized `get_comments` capture from GitHub issue
@@ -1311,7 +1273,7 @@ fn ambiguous_human_after_collected_agent_cannot_leave_suppressing_partial_set() 
 /// timestamps) over the same window logic.
 #[test]
 fn the_real_mc289_payload_windows_to_the_single_in_window_commenter() {
-    let (poller, engine, path, _) = fixture("actor-window-mc289");
+    let (path, poller, engine, _) = fixture("actor-window-mc289");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine.transport().set_response_for_method(
         ISSUE_READ,
@@ -1379,7 +1341,6 @@ fn the_real_mc289_payload_windows_to_the_single_in_window_commenter() {
         "only the in-window commenter may survive; the two Aug-09 authors \
          predate the pinned observation"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// Known empty and unknown actor sets survive as opposite storage and wire
@@ -1392,7 +1353,7 @@ fn the_real_mc289_payload_windows_to_the_single_in_window_commenter() {
 /// second assertion; mapping successful empty to unknown breaks the first.
 #[test]
 fn successful_empty_and_failed_actor_reads_do_not_collapse() {
-    let (poller, engine, path, _) = fixture("actor-empty-unknown");
+    let (_path, poller, engine, _) = fixture("actor-empty-unknown");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine.transport().set_response_for_method(
         ISSUE_READ,
@@ -1471,7 +1432,6 @@ fn successful_empty_and_failed_actor_reads_do_not_collapse() {
             .is_none(),
         "unknown actors must be absent rather than serialized as null or empty"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// Pull requests require both GitHub comment objects. Their actor sets are
@@ -1481,7 +1441,7 @@ fn successful_empty_and_failed_actor_reads_do_not_collapse() {
 /// request-method assertion also proves both calls traversed dispatch.
 #[test]
 fn pull_request_actors_union_issue_and_review_comments() {
-    let (poller, engine, path, _) = fixture("pr-actors");
+    let (_path, poller, engine, _) = fixture("pr-actors");
     let id = actor_subscription(
         &engine,
         PR_FEED,
@@ -1550,12 +1510,11 @@ fn pull_request_actors_union_issue_and_review_comments() {
     assert!(actor_requests.iter().all(|request| {
         request.args["pullNumber"] == 7 && request.args.get("issue_number").is_none()
     }));
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn pr_v2_comment_metadata_reuses_actor_reads_without_extra_calls() {
-    let (poller, engine, path, _) = fixture("pr-v2-comment");
+    let (path, poller, engine, _) = fixture("pr-v2-comment");
     let id = actor_subscription(
         &engine,
         PR_FEED,
@@ -1647,7 +1606,7 @@ fn pr_v2_comment_metadata_reuses_actor_reads_without_extra_calls() {
 /// Accepting partial extraction stores `alice` and fails this NULL assertion.
 #[test]
 fn unrecognised_review_comment_shape_is_unknown_not_partial() {
-    let (poller, engine, path, _) = fixture("pr-review-unknown");
+    let (_path, poller, engine, _) = fixture("pr-review-unknown");
     let id = actor_subscription(
         &engine,
         PR_FEED,
@@ -1705,7 +1664,6 @@ fn unrecognised_review_comment_shape_is_unknown_not_partial() {
         2,
         "both PR actor objects must be read before the malformed leaf is judged"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// Revoking only the enrichment connection cannot damage the working feed. The
@@ -1716,7 +1674,7 @@ fn unrecognised_review_comment_shape_is_unknown_not_partial() {
 /// assertions together.
 #[test]
 fn enrichment_authority_failure_is_isolated_from_poll_success() {
-    let (poller, engine, path, _) = fixture("actor-failure-isolation");
+    let (_path, poller, engine, _) = fixture("actor-failure-isolation");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     assert!(engine
         .store()
@@ -1757,7 +1715,6 @@ fn enrichment_authority_failure_is_isolated_from_poll_success() {
         0,
         "revoked enrichment authority must refuse before vendor dispatch"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A large derived batch can issue at most the named enrichment-call cap. Events
@@ -1766,7 +1723,7 @@ fn enrichment_authority_failure_is_isolated_from_poll_success() {
 /// Removing the cap makes the transport count and known/unknown split both fail.
 #[test]
 fn actor_enrichment_call_cap_bounds_a_poll_cycle() {
-    let (poller, engine, path, _) = fixture("actor-call-cap");
+    let (_path, poller, engine, _) = fixture("actor-call-cap");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     let items = (0..=ACTOR_ENRICHMENT_MAX_CALLS_PER_CYCLE)
         .map(|index| {
@@ -1823,7 +1780,6 @@ fn actor_enrichment_call_cap_bounds_a_poll_cycle() {
             .count(),
         1
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A two-method event at the cycle cap consumes at most 32 governed reads; the
@@ -1836,7 +1792,7 @@ fn actor_enrichment_call_cap_bounds_a_poll_cycle() {
 /// event dispatch call 33 and reddens the request-count assertion.
 #[test]
 fn two_method_event_at_the_call_cap_refuses_the_33rd_read() {
-    let (poller, engine, path, _) = fixture("pr-call-cap-33");
+    let (_path, poller, engine, _) = fixture("pr-call-cap-33");
     let id = actor_subscription(
         &engine,
         PR_FEED,
@@ -1913,7 +1869,6 @@ fn two_method_event_at_the_call_cap_refuses_the_33rd_read() {
             .count(),
         1
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A retry for one method must leave room for every undispatched method of the
@@ -1924,7 +1879,7 @@ fn two_method_event_at_the_call_cap_refuses_the_33rd_read() {
 /// reddening the exact request-count assertion.
 #[test]
 fn two_method_retry_preserves_cycle_call_cap() {
-    let (poller, engine, path, _) = fixture("pr-retry-cap");
+    let (_path, poller, engine, _) = fixture("pr-retry-cap");
     let id = actor_subscription(
         &engine,
         PR_FEED,
@@ -1996,7 +1951,6 @@ fn two_method_retry_preserves_cycle_call_cap() {
         .find(|event| event.payload["title"] == format!("item-{fully_enriched_events}"))
         .expect("boundary PR event stored");
     assert_eq!(boundary.actor_logins, None);
-    let _ = std::fs::remove_file(path);
 }
 
 /// A pull request that cannot afford both actor reads must dispatch neither one.
@@ -2007,7 +1961,7 @@ fn two_method_retry_preserves_cycle_call_cap() {
 /// actors stores the operator-only partial set instead of NULL.
 #[test]
 fn budget_exhaustion_keeps_two_method_enrichment_atomic() {
-    let (poller, engine, path, _) = fixture("pr-atomic-cap");
+    let (_path, poller, engine, _) = fixture("pr-atomic-cap");
     let id = actor_subscription(
         &engine,
         PR_FEED,
@@ -2094,7 +2048,6 @@ fn budget_exhaustion_keeps_two_method_enrichment_atomic() {
         0,
         "a budget-exhausted event must dispatch none of its methods"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A transient dispatch failure is retried once and, when the retry succeeds,
@@ -2109,7 +2062,7 @@ fn budget_exhaustion_keeps_two_method_enrichment_atomic() {
 /// actor_logins and the count assertions.
 #[test]
 fn transient_dispatch_failure_is_retried_once_and_attributes() {
-    let (poller, engine, path, _) = fixture("actor-transient-retry");
+    let (_path, poller, engine, _) = fixture("actor-transient-retry");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine.transport().set_response_sequence_for_method(
         ISSUE_READ,
@@ -2157,7 +2110,6 @@ fn transient_dispatch_failure_is_retried_once_and_attributes() {
         2,
         "the transient failure must be retried exactly once"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// Two consecutive transient failures leave the event unknown, with no third
@@ -2167,7 +2119,7 @@ fn transient_dispatch_failure_is_retried_once_and_attributes() {
 /// the second failure and reddens the dispatch-count assertion.
 #[test]
 fn transient_twice_stays_unknown() {
-    let (poller, engine, path, _) = fixture("actor-transient-twice");
+    let (_path, poller, engine, _) = fixture("actor-transient-twice");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine.transport().set_response_sequence_for_method(
         ISSUE_READ,
@@ -2211,7 +2163,6 @@ fn transient_twice_stays_unknown() {
         2,
         "both attempts fail and no third attempt is made"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A deterministic miss (unbuildable actor-read args) is never retried.
@@ -2225,7 +2176,7 @@ fn transient_twice_stays_unknown() {
 /// reddens the dispatch-count assertion.
 #[test]
 fn deterministic_miss_does_not_retry() {
-    let (poller, engine, path, _) = fixture("actor-deterministic-miss");
+    let (_path, poller, engine, _) = fixture("actor-deterministic-miss");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine
         .transport()
@@ -2262,7 +2213,6 @@ fn deterministic_miss_does_not_retry() {
         0,
         "an unbuildable-args miss must not dispatch, let alone retry"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A semantic unknown (later observation, empty in-window actor set) is never
@@ -2276,7 +2226,7 @@ fn deterministic_miss_does_not_retry() {
 /// observation and reddens the dispatch-count assertion.
 #[test]
 fn semantic_unknown_does_not_retry() {
-    let (poller, engine, path, _) = fixture("actor-semantic-unknown");
+    let (path, poller, engine, _) = fixture("actor-semantic-unknown");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     // The empty comment window falls through to the timeline, which is empty
     // too, so the event stays `empty_actor_window`.
@@ -2360,7 +2310,6 @@ fn semantic_unknown_does_not_retry() {
         1,
         "the semantic-unknown read must dispatch exactly once, never retried"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A retry that would exceed the cycle call cap is refused: the first attempt
@@ -2375,7 +2324,7 @@ fn semantic_unknown_does_not_retry() {
 /// the dispatch-count assertion.
 #[test]
 fn retry_respects_the_cycle_call_cap() {
-    let (poller, engine, path, _) = fixture("actor-cap-fence");
+    let (_path, poller, engine, _) = fixture("actor-cap-fence");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     let items = (0..ACTOR_ENRICHMENT_MAX_CALLS_PER_CYCLE)
         .map(|index| {
@@ -2433,7 +2382,6 @@ fn retry_respects_the_cycle_call_cap() {
         last.actor_logins, None,
         "the capped-out event stays unknown"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A subscription may only name an action reviewed as `read`, and may only be
@@ -2460,7 +2408,7 @@ fn retry_respects_the_cycle_call_cap() {
 /// stored state.
 #[test]
 fn subscribe_refuses_a_write_action_and_a_missing_poll_grant() {
-    let (_, engine, path, _) = fixture("subscribe-authority");
+    let (_path, _, engine, _) = fixture("subscribe-authority");
 
     // A write action, otherwise perfectly subscribable: active, schema'd, and
     // covered by a poll grant, so risk is the only thing that can refuse it.
@@ -2577,8 +2525,6 @@ fn subscribe_refuses_a_write_action_and_a_missing_poll_grant() {
                 && subscription.action != TIMESTAMPED),
         "a refused subscription must not be left for the scheduler to pick up"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A fixed cursor argument is refused using the non-default request field read
@@ -2590,7 +2536,7 @@ fn subscribe_refuses_a_write_action_and_a_missing_poll_grant() {
 /// argument, so this assertion fails.
 #[test]
 fn subscribe_refuses_a_real_manifest_cursor_key_in_fixed_args() {
-    let (_, engine, path, _) = fixture("fixed-owned-key");
+    let (_path, _, engine, _) = fixture("fixed-owned-key");
     upsert_action_with_schema(
         &engine,
         TIMESTAMPED,
@@ -2632,7 +2578,6 @@ fn subscribe_refuses_a_real_manifest_cursor_key_in_fixed_args() {
             .all(|subscription| subscription.action != TIMESTAMPED),
         "a refused fixed argument must not create a subscription"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// The sync-token strategy also protects the request name declared by the
@@ -2644,7 +2589,7 @@ fn subscribe_refuses_a_real_manifest_cursor_key_in_fixed_args() {
 /// the assertion fails.
 #[test]
 fn subscribe_refuses_a_declared_sync_token_request_key() {
-    let (_, engine, path, _) = fixture("fixed-sync-owned-key");
+    let (_path, _, engine, _) = fixture("fixed-sync-owned-key");
     upsert_action_with_schema(
         &engine,
         VENDOR_NAMED,
@@ -2683,14 +2628,13 @@ fn subscribe_refuses_a_declared_sync_token_request_key() {
             .all(|subscription| subscription.action != VENDOR_NAMED),
         "a refused fixed argument must not create a subscription"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// Fixed arguments are checked against the pinned action schema for key presence
 /// and JSON type, without attempting full JSON Schema evaluation.
 #[test]
 fn subscribe_refuses_undeclared_and_mistyped_fixed_args() {
-    let (_, engine, path, _) = fixture("fixed-schema");
+    let (_path, _, engine, _) = fixture("fixed-schema");
     upsert_action_with_schema(
         &engine,
         TIMESTAMPED,
@@ -2732,7 +2676,6 @@ fn subscribe_refuses_undeclared_and_mistyped_fixed_args() {
         .expect("subscribe check")
         .expect_err("a mistyped fixed argument must be refused");
     assert_eq!(mistyped.code(), "fixed_arg_type_mismatch");
-    let _ = std::fs::remove_file(path);
 }
 
 /// A required argument the subscription cannot supply is refused at subscribe,
@@ -2759,7 +2702,7 @@ fn subscribe_refuses_undeclared_and_mistyped_fixed_args() {
 /// dropping the `supplied_elsewhere` carve-out refuses the second.
 #[test]
 fn subscribe_refuses_a_required_argument_nothing_can_supply() {
-    let (_, engine, path, _) = fixture("fixed-required");
+    let (_path, _, engine, _) = fixture("fixed-required");
     upsert_action_with_schema(
         &engine,
         TIMESTAMPED,
@@ -2817,8 +2760,6 @@ fn subscribe_refuses_a_required_argument_nothing_can_supply() {
         )
         .expect("subscribe check")
         .expect("a fully scoped subscription must be accepted");
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A required key the POLLER supplies must not be demanded from the operator.
@@ -2831,7 +2772,7 @@ fn subscribe_refuses_a_required_argument_nothing_can_supply() {
 /// refused by design (it would pin the watermark forever).
 #[test]
 fn subscribe_allows_a_required_key_the_cursor_supplies() {
-    let (_, engine, path, _) = fixture("fixed-required-cursor");
+    let (_path, _, engine, _) = fixture("fixed-required-cursor");
     upsert_action_with_schema(
         &engine,
         TIMESTAMPED,
@@ -2865,8 +2806,6 @@ fn subscribe_allows_a_required_key_the_cursor_supplies() {
         )
         .expect("subscribe check")
         .expect("a required cursor key must not be demanded from fixed_args");
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// An expired poll grant suspends the subscription and reaches no vendor.
@@ -2893,7 +2832,7 @@ fn subscribe_allows_a_required_key_the_cursor_supplies() {
 /// reach the vendor, failing this on both the request count and the status.
 #[test]
 fn an_expired_poll_grant_suspends_the_subscription() {
-    let (poller, engine, path, subscription_id) = fixture("grant-expired");
+    let (_path, poller, engine, subscription_id) = fixture("grant-expired");
 
     // Replace the fixture's live grant with an expired one, leaving everything
     // else intact so the expiry is the only thing that can refuse this poll.
@@ -2940,8 +2879,6 @@ fn an_expired_poll_grant_suspends_the_subscription() {
         engine.transport().requests().is_empty(),
         "an expired grant must refuse before the vendor is contacted"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A listed subscription reports the deadline of the authority behind it, and
@@ -2967,7 +2904,7 @@ fn an_expired_poll_grant_suspends_the_subscription() {
 /// deadline assertion.
 #[test]
 fn a_listed_subscription_reports_the_deadline_of_its_authority() {
-    let (_poller, engine, path, subscription_id) = fixture("authority-expiry");
+    let (_path, _poller, engine, subscription_id) = fixture("authority-expiry");
 
     // Leg 1: the fixture's grant is live and names the action.
     let listed = engine
@@ -3060,8 +2997,6 @@ fn a_listed_subscription_reports_the_deadline_of_its_authority() {
         watch.authority_expires_at_ms, None,
         "no deadline explains this refusal, so reporting one would mislead"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A transient vault failure is counted as a vendor failure, never a
@@ -3083,7 +3018,7 @@ fn a_listed_subscription_reports_the_deadline_of_its_authority() {
 /// References resolve at dispatch; an unsent failure is inconclusive.
 #[test]
 fn a_transient_reference_failure_is_inconclusive_instead_of_suspending() {
-    let (poller, engine, path, subscription_id) = fixture("vault-transient");
+    let (_path, poller, engine, subscription_id) = fixture("vault-transient");
 
     // Momentarily unavailable rather than refusing: the shape of a locked or
     // restarting credential module, not a revoked handle.
@@ -3112,8 +3047,6 @@ fn a_transient_reference_failure_is_inconclusive_instead_of_suspending() {
         stored.consecutive_vendor_failures, 0,
         "an unsent vault failure must not count as a vendor failure"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A credential only a person can repair (the vault wants the user to
@@ -3138,7 +3071,7 @@ fn a_credential_needing_human_repair_defers_the_watch_and_recovers_by_itself() {
             "credential_permanent",
         ),
     ] {
-        let (_poller, engine, path, id) = fixture(label);
+        let (_path, _poller, engine, id) = fixture(label);
         engine.credential_source().set_error(BINDING_HANDLE, error);
         let scheduler = Scheduler::new(engine.clone(), 30 * 86_400_000);
         let principals = [PRINCIPAL.to_string()];
@@ -3193,19 +3126,21 @@ fn a_credential_needing_human_repair_defers_the_watch_and_recovers_by_itself() {
             due(plexus_core::now_ms() + 31_000),
             "{label}: a successful poll must restore the cadence"
         );
-        let _ = std::fs::remove_file(path);
     }
 }
 
 /// Runs only inside the child process of
 /// [`a_credential_needing_repair_is_logged_once_per_state_change`], where it
-/// has the process-wide repair metrics and log to itself.
+/// has the process-wide repair metrics and log to itself. Ignored so an
+/// ordinary run does not count a pass for it; the guard keeps an
+/// `--include-ignored` run from sharing those metrics with other tests.
 #[test]
+#[ignore = "child-process fixture run by a_credential_needing_repair_is_logged_once_per_state_change"]
 fn credential_repair_log_fixture() {
     if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
         return;
     }
-    let (poller, engine, path, id) = fixture("credential-repair-log");
+    let (_path, poller, engine, id) = fixture("credential-repair-log");
     let repair = || {
         plexus_core::poller::poll_accounting_metrics()["credentialNeedsRepairByConnection"].clone()
     };
@@ -3235,7 +3170,6 @@ fn credential_repair_log_fixture() {
         PollCycle::Completed { .. }
     ));
     assert_eq!(repair(), json!({}));
-    let _ = std::fs::remove_file(path);
 }
 
 /// A credential needing repair is loud once per state change, not once per
@@ -3271,7 +3205,7 @@ fn a_credential_needing_repair_is_logged_once_per_state_change() {
 /// and repo assertions; dropping cursor arguments fails the syncToken assertion.
 #[test]
 fn poll_dispatches_fixed_args_alongside_cursor_args() {
-    let (poller, engine, path, _) = fixture("fixed-poll");
+    let (_path, poller, engine, _) = fixture("fixed-poll");
     upsert_action_with_schema(
         &engine,
         VENDOR_NAMED,
@@ -3332,7 +3266,6 @@ fn poll_dispatches_fixed_args_alongside_cursor_args() {
         stored.fixed_args,
         json!({"owner": "octocat", "repo": "hello-world"})
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// Cursor arguments must win over fixed arguments when a legacy or direct store
@@ -3342,7 +3275,7 @@ fn poll_dispatches_fixed_args_alongside_cursor_args() {
 /// reach the transport and fails the assertion below.
 #[test]
 fn poll_merges_fixed_args_under_cursor_args() {
-    let (poller, engine, path, id) = fixture("fixed-merge");
+    let (path, poller, engine, id) = fixture("fixed-merge");
     engine
         .transport()
         .set_response(MockResponse::Success(json!({
@@ -3392,7 +3325,6 @@ fn poll_merges_fixed_args_under_cursor_args() {
         fingerprint(&serde_json::to_vec(&json!("fixed-must-lose")).expect("fixed bytes"));
     assert_eq!(args.get("sync_token"), Some(&json!(cursor_value)));
     assert_ne!(args.get("sync_token"), Some(&json!(fixed_value)));
-    let _ = std::fs::remove_file(path);
 }
 
 /// A row written before migration 9 omits the new column. SQLite's migration
@@ -3402,7 +3334,7 @@ fn poll_merges_fixed_args_under_cursor_args() {
 /// fail; removing the poll merge path makes the poll request assertion fail.
 #[test]
 fn pre_v9_subscription_row_polls_with_empty_fixed_args() {
-    let (poller, engine, path, _) = fixture("fixed-migration");
+    let (path, poller, engine, _) = fixture("fixed-migration");
     let legacy_id = "subscription-before-v9";
     let conn = rusqlite::Connection::open(&path).expect("open subscription store");
     conn.execute(
@@ -3442,7 +3374,6 @@ fn pre_v9_subscription_row_polls_with_empty_fixed_args() {
         }
     );
     assert_eq!(engine.transport().requests().len(), 1);
-    let _ = std::fs::remove_file(path);
 }
 
 /// The poller reads the RESPONSE field names the manifest declares, and sends
@@ -3465,7 +3396,7 @@ fn pre_v9_subscription_row_polls_with_empty_fixed_args() {
 /// the argument assertion alone.
 #[test]
 fn the_poller_honours_the_field_names_the_manifest_declares() {
-    let (_, engine, path, _) = fixture("vendor-named");
+    let (_path, _, engine, _) = fixture("vendor-named");
     let created = engine
         .store()
         .subscribe(PRINCIPAL, CONNECTION, VENDOR_NAMED, 30)
@@ -3521,7 +3452,6 @@ fn the_poller_honours_the_field_names_the_manifest_declares() {
         "the storage key leaked into the vendor request: {:?}",
         last.args
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A definitive vendor failure increments the vendor streak and leaves the
@@ -3532,7 +3462,7 @@ fn the_poller_honours_the_field_names_the_manifest_declares() {
 /// `status == active` and `consecutive_vendor_failures == 1` assertions.
 #[test]
 fn vendor_failure_increments_the_streak_and_leaves_the_cursor_unmoved() {
-    let (poller, engine, path, id) = fixture("vendor-failure");
+    let (_path, poller, engine, id) = fixture("vendor-failure");
     // First advance the cursor to a known value so "unmoved" is observable.
     engine
         .transport()
@@ -3566,7 +3496,6 @@ fn vendor_failure_increments_the_streak_and_leaves_the_cursor_unmoved() {
         "a vendor failure is not a suspension"
     );
     assert_eq!(stored.consecutive_vendor_failures, 1);
-    let _ = std::fs::remove_file(path);
 }
 
 /// A probe's definitive vendor failure reaches the same durable streak used by
@@ -3576,7 +3505,7 @@ fn vendor_failure_increments_the_streak_and_leaves_the_cursor_unmoved() {
 /// leaves the stored streak at zero and fails this test.
 #[test]
 fn probe_vendor_failure_advances_the_streak() {
-    let (poller, engine, path, _ordinary_id) = fixture("probe-vendor-failure");
+    let (_path, poller, engine, _ordinary_id) = fixture("probe-vendor-failure");
     let probe_id = register_read_probe(&engine, "vendor-failure-probe");
     engine.transport().set_response(MockResponse::VendorError {
         code: "http_503".to_string(),
@@ -3595,8 +3524,6 @@ fn probe_vendor_failure_advances_the_streak() {
         stored.consecutive_vendor_failures, 1,
         "the probe failure must feed scheduler backoff"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// An unknown probe dispatch preserves the active watch without advancing its
@@ -3606,7 +3533,7 @@ fn probe_vendor_failure_advances_the_streak() {
 /// streak and fails this test.
 #[test]
 fn probe_outcome_unknown_does_not_advance_the_streak() {
-    let (poller, engine, path, _ordinary_id) = fixture("probe-outcome-unknown");
+    let (_path, poller, engine, _ordinary_id) = fixture("probe-outcome-unknown");
     let probe_id = register_read_probe(&engine, "outcome-unknown-probe");
     engine
         .transport()
@@ -3624,8 +3551,6 @@ fn probe_outcome_unknown_does_not_advance_the_streak() {
         stored.consecutive_vendor_failures, 0,
         "an unknown outcome must remain safe to reconcile or retry"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A request that never reached the vendor must not consume circuit-breaker
@@ -3636,7 +3561,7 @@ fn probe_outcome_unknown_does_not_advance_the_streak() {
 /// the streak and fails this test.
 #[test]
 fn probe_not_sent_does_not_advance_the_streak() {
-    let (poller, engine, path, _ordinary_id) = fixture("probe-not-sent");
+    let (_path, poller, engine, _ordinary_id) = fixture("probe-not-sent");
     let probe_id = register_read_probe(&engine, "not-sent-probe");
     engine
         .transport()
@@ -3656,8 +3581,6 @@ fn probe_not_sent_does_not_advance_the_streak() {
         stored.consecutive_vendor_failures, 0,
         "a request that was not sent must not drive vendor backoff"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A probe whose stored spec can never complete a run is suspended with a
@@ -3682,7 +3605,7 @@ fn an_unusable_probe_spec_or_cursor_suspends_without_dispatch() {
             "cursor_state_unusable",
         ),
     ] {
-        let (poller, engine, path, _ordinary_id) = fixture(label);
+        let (path, poller, engine, _ordinary_id) = fixture(label);
         let probe_id = register_read_probe(&engine, label);
         engine
             .transport()
@@ -3706,7 +3629,6 @@ fn an_unusable_probe_spec_or_cursor_suspends_without_dispatch() {
             engine.transport().requests().is_empty(),
             "{label}: an unusable probe must not reach the vendor"
         );
-        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -3715,7 +3637,7 @@ fn an_unusable_probe_spec_or_cursor_suspends_without_dispatch() {
 /// also inconclusive and must leave the vendor streak untouched.
 #[test]
 fn probe_host_inconclusive_does_not_advance_the_streak() {
-    let (poller, engine, path, _ordinary_id) = fixture("probe-host-inconclusive");
+    let (_path, poller, engine, _ordinary_id) = fixture("probe-host-inconclusive");
     let probe_id = register_read_probe_with_script(
         &engine,
         "host-inconclusive-probe",
@@ -3735,15 +3657,13 @@ fn probe_host_inconclusive_does_not_advance_the_streak() {
         engine.transport().requests().is_empty(),
         "an invalid host argument must fail before transport dispatch"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A store failure while creating probe dispatch authority remains a store
 /// failure and never mutates the vendor streak.
 #[test]
 fn probe_action_store_failure_surfaces_without_advancing_the_streak() {
-    let (poller, engine, path, _ordinary_id) = fixture("probe-action-store-failure");
+    let (path, poller, engine, _ordinary_id) = fixture("probe-action-store-failure");
     let probe_id = register_read_probe(&engine, "action-store-failure-probe");
     let conn = rusqlite::Connection::open(&path).expect("open probe store fixture");
     conn.execute_batch(
@@ -3765,8 +3685,6 @@ fn probe_action_store_failure_surfaces_without_advancing_the_streak() {
     assert_eq!(stored.status, "active");
     assert_eq!(stored.consecutive_vendor_failures, 0);
     assert!(engine.transport().requests().is_empty());
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// Repeated probe vendor failures trip the scheduler's real circuit breaker,
@@ -3774,7 +3692,7 @@ fn probe_action_store_failure_surfaces_without_advancing_the_streak() {
 /// returned from one poll call.
 #[test]
 fn repeated_probe_vendor_failures_trip_the_circuit_breaker() {
-    let (poller, engine, path, _ordinary_id) = fixture("probe-circuit-breaker");
+    let (_path, poller, engine, _ordinary_id) = fixture("probe-circuit-breaker");
     let probe_id = register_read_probe(&engine, "breaker-probe");
     engine.transport().set_response(MockResponse::VendorError {
         code: "http_503".to_string(),
@@ -3810,15 +3728,13 @@ fn repeated_probe_vendor_failures_trip_the_circuit_breaker() {
         stored.suspended_reason.as_deref(),
         Some(CIRCUIT_BREAKER_SUSPENSION_REASON)
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// Failure to persist the probe vendor streak is a store failure, never a
 /// successful-looking vendor-failure result.
 #[test]
 fn probe_vendor_failure_recording_error_surfaces_as_store_failed() {
-    let (poller, engine, path, _ordinary_id) = fixture("probe-store-failure");
+    let (path, poller, engine, _ordinary_id) = fixture("probe-store-failure");
     let probe_id = register_read_probe(&engine, "store-failure-probe");
     engine.transport().set_response(MockResponse::VendorError {
         code: "http_503".to_string(),
@@ -3843,15 +3759,13 @@ fn probe_vendor_failure_recording_error_surfaces_as_store_failed() {
         subscription(&engine, &probe_id).consecutive_vendor_failures,
         0
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// Probe authorization refusals follow ordinary poll semantics: a standing
 /// denial suspends and records a gap instead of consuming breaker capacity.
 #[test]
 fn probe_authorization_refusal_suspends_without_counting() {
-    let (poller, engine, path, _ordinary_id) = fixture("probe-auth-refusal");
+    let (_path, poller, engine, _ordinary_id) = fixture("probe-auth-refusal");
     let probe_id = register_read_probe(&engine, "authorization-refusal-probe");
     for action in [FEED, TIMESTAMPED, VENDOR_NAMED, SNAPSHOT] {
         engine
@@ -3869,15 +3783,13 @@ fn probe_authorization_refusal_suspends_without_counting() {
     let stored = subscription(&engine, &probe_id);
     assert_eq!(stored.status, "suspended");
     assert_eq!(stored.consecutive_vendor_failures, 0);
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A transient credential fault during probe authorization remains retryable:
 /// it leaves the watch active without counting an unsent call as a vendor failure.
 #[test]
 fn probe_transient_reference_failure_is_inconclusive_without_suspending() {
-    let (poller, engine, path, _ordinary_id) = fixture("probe-auth-transient");
+    let (_path, poller, engine, _ordinary_id) = fixture("probe-auth-transient");
     let probe_id = register_read_probe(&engine, "transient-credential-probe");
     engine.credential_source().set_error(
         BINDING_HANDLE,
@@ -3891,8 +3803,6 @@ fn probe_transient_reference_failure_is_inconclusive_without_suspending() {
     let stored = subscription(&engine, &probe_id);
     assert_eq!(stored.status, "active");
     assert_eq!(stored.consecutive_vendor_failures, 0);
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// An authorization denial suspends the subscription with a machine-readable
@@ -3933,7 +3843,7 @@ fn probe_transient_reference_failure_is_inconclusive_without_suspending() {
 /// fails on its own.
 #[test]
 fn revoking_a_connection_stops_its_pollers_without_revoking_grants() {
-    let (poller, engine, path, id) = fixture("connection-revoked");
+    let (_path, poller, engine, id) = fixture("connection-revoked");
 
     // Every poll grant stays in place, so nothing but the connection's own
     // status can refuse this poll.
@@ -3963,13 +3873,11 @@ fn revoking_a_connection_stops_its_pollers_without_revoking_grants() {
         engine.transport().requests().is_empty(),
         "a revocation honoured after the request goes out is not a revocation"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn authorization_denial_suspends_and_does_not_count_as_a_vendor_failure() {
-    let (poller, engine, path, id) = fixture("denial-suspends");
+    let (_path, poller, engine, id) = fixture("denial-suspends");
     // Revoke every poll grant on the connection: the read is still catalogued,
     // but the timer no longer has authority to exercise it. ALL of them are
     // revoked, not just the subscribed action's, so the denial is a clean
@@ -4010,7 +3918,6 @@ fn authorization_denial_suspends_and_does_not_count_as_a_vendor_failure() {
         engine.transport().requests().is_empty(),
         "a denied poll never reaches the vendor"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// The pre-gate refusal is load-bearing: an action that drifted off `read` is
@@ -4022,7 +3929,7 @@ fn authorization_denial_suspends_and_does_not_count_as_a_vendor_failure() {
 /// the refusal as a vendor failure fails the streak and suspension assertions.
 #[test]
 fn pregate_refusal_of_a_drifted_action_suspends_before_authorize() {
-    let (poller, engine, path, id) = fixture("pregate-refusal");
+    let (path, poller, engine, id) = fixture("pregate-refusal");
     // Simulate the drift-before-reconcile window: the reviewed action is no
     // longer a read, but the subscription has not been suspended yet.
     drift_catalog_raw(&path, "risk", "write", FEED);
@@ -4042,7 +3949,6 @@ fn pregate_refusal_of_a_drifted_action_suspends_before_authorize() {
         engine.transport().requests().is_empty(),
         "the pre-gate refusal must stop the cycle before any dispatch"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// An unsupported cursor in a legacy store must suspend rather than guess,
@@ -4053,7 +3959,7 @@ fn pregate_refusal_of_a_drifted_action_suspends_before_authorize() {
 /// suspending) fails the `cursor_kind_unsupported` suspension assertion.
 #[test]
 fn unsupported_cursor_kind_suspends_with_cursor_kind_unsupported() {
-    let (poller, engine, path, _feed_id) = fixture("unsupported-cursor");
+    let (path, poller, engine, _feed_id) = fixture("unsupported-cursor");
     let mut legacy = manifest_value();
     legacy["actions_baseline"]
         .as_array_mut()
@@ -4092,7 +3998,6 @@ fn unsupported_cursor_kind_suspends_with_cursor_kind_unsupported() {
     );
     assert_eq!(stored.consecutive_vendor_failures, 0);
     assert!(engine.transport().requests().is_empty());
-    let _ = std::fs::remove_file(path);
 }
 
 /// The ordered-timestamp happy path at the integration level: a healthy poll
@@ -4103,7 +4008,7 @@ fn unsupported_cursor_kind_suspends_with_cursor_kind_unsupported() {
 /// dropping the event commit fails the inserted-count assertion.
 #[test]
 fn ordered_timestamp_poll_advances_the_watermark_and_commits_events() {
-    let (poller, engine, path, _feed_id) = fixture("ordered-timestamp");
+    let (_path, poller, engine, _feed_id) = fixture("ordered-timestamp");
     engine
         .transport()
         .set_response(MockResponse::Success(json!({
@@ -4163,7 +4068,6 @@ fn ordered_timestamp_poll_advances_the_watermark_and_commits_events() {
         ids.contains(&"a".to_string()) && ids.contains(&"b".to_string()),
         "{ids:?}"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A second-resolution timestamp cannot distinguish two edits of one item, so a
@@ -4174,7 +4078,7 @@ fn ordered_timestamp_poll_advances_the_watermark_and_commits_events() {
 /// inserted count.
 #[test]
 fn same_second_edit_is_delivered() {
-    let (poller, engine, path, _) = fixture("sorted-head-same-second-edit");
+    let (_path, poller, engine, _) = fixture("sorted-head-same-second-edit");
     let id = sorted_head_subscription(&engine);
     let timestamp = "2026-09-06T12:00:00Z";
     engine
@@ -4219,7 +4123,6 @@ fn same_second_edit_is_delivered() {
         .expect("list same-second versions");
     assert_eq!(events.len(), 2, "both content versions must be durable");
     assert!(events.iter().any(|event| event.payload["title"] == "after"));
-    let _ = std::fs::remove_file(path);
 }
 
 /// An unchanged boundary replay is removed before actor enrichment and therefore
@@ -4229,7 +4132,7 @@ fn same_second_edit_is_delivered() {
 /// in the batch and makes the second-poll dispatch count one instead of zero.
 #[test]
 fn unchanged_boundary_item_never_reaches_enrichment() {
-    let (poller, engine, path, _) = fixture("sorted-head-unchanged-boundary");
+    let (_path, poller, engine, _) = fixture("sorted-head-unchanged-boundary");
     let id = actor_subscription(&engine, SORTED_HEAD, ISSUE_READ, &["get_comments"]);
     let response = json!({
         "items": [{
@@ -4281,7 +4184,6 @@ fn unchanged_boundary_item_never_reaches_enrichment() {
         },
         "identical boundary content must be dropped before commit"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A boundary id with no prior event row is new content even when its timestamp
@@ -4291,7 +4193,7 @@ fn unchanged_boundary_item_never_reaches_enrichment() {
 /// and fails both the inserted count and durable-id assertion.
 #[test]
 fn unseen_boundary_item_is_emitted() {
-    let (poller, engine, path, _) = fixture("sorted-head-unseen-boundary");
+    let (_path, poller, engine, _) = fixture("sorted-head-unseen-boundary");
     let id = sorted_head_subscription(&engine);
     let timestamp = "2026-09-06T12:00:00Z";
     engine
@@ -4329,7 +4231,6 @@ fn unseen_boundary_item_is_emitted() {
             .any(|event| event.vendor_event_id.as_deref() == Some("pr-a")),
         "an unseen boundary id must be committed"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// The subscription's pinned schema hash is passed as `expected_schema_hash`, so
@@ -4341,7 +4242,7 @@ fn unseen_boundary_item_is_emitted() {
 /// assertion below would fail.
 #[test]
 fn schema_drift_suspends_at_the_catalog_gate() {
-    let (poller, engine, path, id) = fixture("schema-drift");
+    let (path, poller, engine, id) = fixture("schema-drift");
     // The subscription pinned the original hash; drift the catalog's in the
     // window before reconcile would suspend it.
     drift_catalog_raw(&path, "schema_hash", "sha256:drifted-schema", FEED);
@@ -4358,7 +4259,6 @@ fn schema_drift_suspends_at_the_catalog_gate() {
     assert_eq!(stored.status, "suspended");
     assert_eq!(stored.consecutive_vendor_failures, 0);
     assert!(engine.transport().requests().is_empty());
-    let _ = std::fs::remove_file(path);
 }
 
 /// An unknown dispatch outcome is benign to repeat and catastrophic to skip, so
@@ -4369,7 +4269,7 @@ fn schema_drift_suspends_at_the_catalog_gate() {
 /// suspending fails the `status == active` assertion.
 #[test]
 fn outcome_unknown_leaves_cursor_and_streak_untouched() {
-    let (poller, engine, path, id) = fixture("outcome-unknown");
+    let (_path, poller, engine, id) = fixture("outcome-unknown");
     engine
         .transport()
         .set_response(MockResponse::Success(json!({
@@ -4396,14 +4296,13 @@ fn outcome_unknown_leaves_cursor_and_streak_untouched() {
     assert_eq!(stored.cursor_state, json!({"sync_token": "tok-1"}));
     assert_eq!(stored.status, "active");
     assert_eq!(stored.consecutive_vendor_failures, 0);
-    let _ = std::fs::remove_file(path);
 }
 
 /// A subscription that does not exist for this principal is not eligible, and
 /// nothing is written.
 #[test]
 fn missing_subscription_is_not_eligible() {
-    let (poller, _engine, path, _id) = fixture("missing");
+    let (_path, poller, _engine, _id) = fixture("missing");
     let cycle = poller.poll_once(PRINCIPAL, "sub_does_not_exist");
     assert_eq!(
         cycle,
@@ -4411,7 +4310,6 @@ fn missing_subscription_is_not_eligible() {
             reason: "subscription_not_found".to_string()
         }
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A stored cursor the strategy cannot use suspends rather than polling from a
@@ -4422,7 +4320,7 @@ fn missing_subscription_is_not_eligible() {
 /// suspension assertion and silently re-read the vendor from the beginning.
 #[test]
 fn unusable_cursor_state_suspends_with_cursor_state_unusable() {
-    let (poller, engine, path, _id) = fixture("unusable-cursor");
+    let (_path, poller, engine, _id) = fixture("unusable-cursor");
     let sub = engine
         .store()
         .subscribe_with_cursor_state(
@@ -4447,7 +4345,52 @@ fn unusable_cursor_state_suspends_with_cursor_state_unusable() {
     assert_eq!(stored.status, "suspended");
     assert_eq!(stored.consecutive_vendor_failures, 0);
     assert!(engine.transport().requests().is_empty());
-    let _ = std::fs::remove_file(path);
+}
+
+/// An ordered-timestamp cursor whose window change stamp is not a number is
+/// refused before the vendor read, not after it.
+///
+/// The stamp is only carried forward, never sent, so nothing about the request
+/// depends on it. It was once checked only when the response was folded into
+/// the cursor: the corrupt row then spent a governed vendor call and was
+/// suspended under `response_shape_invalid`, blaming the vendor for a fault in
+/// the stored cursor.
+#[test]
+fn corrupt_ordered_window_stamp_suspends_before_any_vendor_read() {
+    let (_path, poller, engine, _id) = fixture("corrupt-window-stamp");
+    engine
+        .transport()
+        .set_response(MockResponse::Success(json!({
+            "items": [{"id": "a", "updated_at": "2024-01-15T10:00:00Z"}]
+        })));
+    let sub = engine
+        .store()
+        .subscribe_with_cursor_state(
+            PRINCIPAL,
+            CONNECTION,
+            TIMESTAMPED,
+            30,
+            &json!({"watermark_ms": 1_700_000_000_000_i64, "window_changed_ms": "soon"}),
+            &json!({}),
+        )
+        .expect("subscribe store")
+        .expect("subscription accepted");
+
+    let cycle = poller.poll_once(PRINCIPAL, &sub.subscription_id);
+    assert_eq!(
+        cycle,
+        PollCycle::Suspended {
+            reason: "cursor_state_unusable".to_string()
+        }
+    );
+    assert!(
+        engine.transport().requests().is_empty(),
+        "a cursor the strategy cannot use must not reach the vendor"
+    );
+    assert_eq!(
+        subscription(&engine, &sub.subscription_id).status,
+        "suspended"
+    );
 }
 
 /// A completed read whose body cannot be parsed into a cursor advance suspends
@@ -4459,7 +4402,7 @@ fn unusable_cursor_state_suspends_with_cursor_state_unusable() {
 /// only safe action is to stop and make the gap visible.
 #[test]
 fn unparseable_response_suspends_with_response_shape_invalid() {
-    let (poller, engine, path, id) = fixture("bad-response");
+    let (_path, poller, engine, id) = fixture("bad-response");
     // Advance to a known cursor first so "unmoved" is observable.
     engine
         .transport()
@@ -4492,7 +4435,6 @@ fn unparseable_response_suspends_with_response_shape_invalid() {
         "an unparseable response must not advance the cursor"
     );
     assert_eq!(stored.consecutive_vendor_failures, 0);
-    let _ = std::fs::remove_file(path);
 }
 
 /// A watch on a revoked connection does not read as healthy.
@@ -4510,7 +4452,7 @@ fn unparseable_response_suspends_with_response_shape_invalid() {
 /// required to read a watch correctly, and that the pair is unambiguous.
 #[test]
 fn a_watch_on_a_revoked_connection_is_not_reported_as_healthy() {
-    let (poller, engine, path, subscription_id) = fixture("revoked-authority");
+    let (_path, poller, engine, subscription_id) = fixture("revoked-authority");
 
     assert!(
         engine
@@ -4522,7 +4464,16 @@ fn a_watch_on_a_revoked_connection_is_not_reported_as_healthy() {
     // The suspension lands on the next tick rather than at revocation, so drive
     // one: before it, the row still reads active and only the connection says
     // otherwise.
-    let _ = poller.poll_once(PRINCIPAL, &subscription_id);
+    let cycle = poller.poll_once(PRINCIPAL, &subscription_id);
+    // The listing below must reflect a suspension this poll made, without
+    // contacting the vendor, not a row some other path happened to leave.
+    assert_eq!(
+        cycle,
+        PollCycle::Suspended {
+            reason: "connection_revoked".to_string()
+        }
+    );
+    assert!(engine.transport().requests().is_empty());
 
     let listed = engine
         .store()
@@ -4545,8 +4496,6 @@ fn a_watch_on_a_revoked_connection_is_not_reported_as_healthy() {
         "the reason must name the connection, not the authority: an operator \
          renewing a grant here would wait forever for a feed"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A seeded cursor state whose key the cursor kind does not read is refused.
@@ -4569,7 +4518,7 @@ fn a_watch_on_a_revoked_connection_is_not_reported_as_healthy() {
 /// refuses the correctly-spelled seed.
 #[test]
 fn a_seed_under_a_key_the_cursor_kind_ignores_is_refused() {
-    let (_poller, engine, path, _subscription_id) = fixture("seed-key-unknown");
+    let (_path, _poller, engine, _subscription_id) = fixture("seed-key-unknown");
 
     // A plausible misspelling of the real key (`watermark` for `watermark_ms`).
     // Without the key check this seed is accepted and the watch baselines as
@@ -4628,20 +4577,16 @@ fn a_seed_under_a_key_the_cursor_kind_ignores_is_refused() {
         )
         .expect("subscribe query")
         .expect("an unseeded subscription must remain valid");
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// Capture the actual stderr of an isolated test process, not a formatting proxy.
 fn actor_diagnostic_output(test: &str) -> String {
-    let output = bounded::child_output(
-        std::process::Command::new(std::env::current_exe().expect("test executable"))
-            .args(["--exact", test, "--nocapture", "--include-ignored"])
-            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+    let output = bounded::child_test_output(
+        test,
+        &[("PLEXUS_LOG_STDERR_CHILD", "1")],
         std::time::Duration::from_secs(30),
         "test binary child",
-    )
-    .expect("run diagnostic fixture");
+    );
     assert!(
         output.status.success(),
         "fixture {test} failed: {} {}",
@@ -4676,7 +4621,7 @@ fn diagnostic_helper_writes_fleet_attribution_to_real_stderr() {
 
 #[test]
 fn quarantined_enrichment_is_fail_open() {
-    let (poller, engine, path, _) = fixture("actor-quarantine-isolation");
+    let (_path, poller, engine, _) = fixture("actor-quarantine-isolation");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine
         .store()
@@ -4733,7 +4678,6 @@ fn quarantined_enrichment_is_fail_open() {
         0
     );
     eprintln!("fixture_subscription={id:?}");
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -4765,7 +4709,7 @@ fn governed_refusal_diagnostic_names_code_and_operator_remedy() {
 
 #[test]
 fn saturated_comment_page_is_fail_open() {
-    let (poller, engine, path, _) = fixture("actor-saturated-page");
+    let (_path, poller, engine, _) = fixture("actor-saturated-page");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine.transport().set_response_for_method(
         ISSUE_READ,
@@ -4799,7 +4743,6 @@ fn saturated_comment_page_is_fail_open() {
         .unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].actor_logins, None);
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -4891,7 +4834,7 @@ fn timestamp_page(start: usize, count: usize, timestamp: &str, cursor: &str) -> 
 
 #[test]
 fn ordered_timestamp_dense_window_continues_after_restart_without_new_replays() {
-    let (poller, engine, _path, _) = fixture("timestamp-dense");
+    let (_path, poller, engine, _) = fixture("timestamp-dense");
     let id = paginated_timestamp_subscription(&engine);
     engine.transport().set_response_sequence_for_method(
         TIMESTAMPED,
@@ -4960,7 +4903,7 @@ fn ordered_timestamp_dense_window_continues_after_restart_without_new_replays() 
 
 #[test]
 fn sorted_head_late_visibility_and_disappearing_newest_keep_stored_items_quiet() {
-    let (poller, engine, _path, _) = fixture("sorted-late");
+    let (_path, poller, engine, _) = fixture("sorted-late");
     let id = sorted_head_subscription(&engine);
     let older = json!({"id": 1, "updated_at": "2024-01-15T10:00:05Z"});
     let newest = json!({"id": 3, "updated_at": "2024-01-15T10:00:10Z"});
@@ -4990,7 +4933,7 @@ fn sorted_head_late_visibility_and_disappearing_newest_keep_stored_items_quiet()
 
 #[test]
 fn ordered_timestamp_overlap_full_page_drains_later_item() {
-    let (poller, engine, path, _) = fixture("timestamp-drain");
+    let (_path, poller, engine, _) = fixture("timestamp-drain");
     let id = paginated_timestamp_subscription(&engine);
     engine.transport().set_response_sequence_for_method(
         TIMESTAMPED,
@@ -5048,12 +4991,11 @@ fn ordered_timestamp_overlap_full_page_drains_later_item() {
     );
     assert_eq!(subscription(&engine, &id).cursor_state["window_ms"], 60_000);
     assert!(events.iter().all(|event| event.kind != "gap"));
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn ordered_timestamp_short_page_uses_one_call() {
-    let (poller, engine, path, _) = fixture("timestamp-short");
+    let (_path, poller, engine, _) = fixture("timestamp-short");
     let id = paginated_timestamp_subscription(&engine);
     // Even a stale hasNextPage flag cannot turn a short answer into more calls.
     engine
@@ -5084,12 +5026,11 @@ fn ordered_timestamp_short_page_uses_one_call() {
             .len(),
         1
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn ordered_timestamp_page_bound_saves_continuation_and_commits() {
-    let (poller, engine, path, _) = fixture("timestamp-bound");
+    let (_path, poller, engine, _) = fixture("timestamp-bound");
     let id = paginated_timestamp_subscription(&engine);
     engine.transport().set_response_sequence_for_method(
         TIMESTAMPED,
@@ -5139,12 +5080,11 @@ fn ordered_timestamp_page_bound_saves_continuation_and_commits() {
     );
     assert_eq!(subscription(&engine, &id).status, "active");
     assert!(subscription(&engine, &id).last_success_at_ms.is_some());
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn ordered_timestamp_missing_cursor_records_gap_without_suspending() {
-    let (poller, engine, path, _) = fixture("timestamp-missing-cursor");
+    let (_path, poller, engine, _) = fixture("timestamp-missing-cursor");
     let id = paginated_timestamp_subscription(&engine);
     engine
         .transport()
@@ -5165,12 +5105,11 @@ fn ordered_timestamp_missing_cursor_records_gap_without_suspending() {
         .iter()
         .any(|event| event.gap_reason.as_deref() == Some("ordered_timestamp_cursor_unusable")));
     assert_eq!(subscription(&engine, &id).status, "active");
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn progressing_ordered_backlog_is_not_a_coverage_gap() {
-    let (poller, engine, path, _) = fixture("timestamp-progress-backlog");
+    let (_path, poller, engine, _) = fixture("timestamp-progress-backlog");
     let id = paginated_timestamp_subscription(&engine);
     engine.transport().set_response_sequence_for_method(
         TIMESTAMPED,
@@ -5198,12 +5137,11 @@ fn progressing_ordered_backlog_is_not_a_coverage_gap() {
         !events.iter().any(|event| event.kind == "gap"),
         "resumable advancing backlog must not claim lost coverage"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn future_vendor_gap_keeps_the_vendor_boundary() {
-    let (poller, engine, path, _) = fixture("timestamp-future-boundary");
+    let (_path, poller, engine, _) = fixture("timestamp-future-boundary");
     let id = paginated_timestamp_subscription(&engine);
     engine
         .transport()
@@ -5224,7 +5162,6 @@ fn future_vendor_gap_keeps_the_vendor_boundary() {
         "vendor boundary must not be replaced by the host clock"
     );
     assert_eq!(gap.gap_to_ms, Some(vendor));
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -5304,7 +5241,7 @@ fn assert_served_unknown(served: &Value, reason: &str, class: &str) {
 /// previous observation, so the fallback read runs and still finds nobody.
 #[test]
 fn empty_actor_window_is_stored_and_served_as_undeterminable() {
-    let (poller, engine, path, _) = fixture("actor-unknown-empty-window");
+    let (path, poller, engine, _) = fixture("actor-unknown-empty-window");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     bind_timeline_handle(&engine, true);
     set_timeline_pages(
@@ -5330,7 +5267,6 @@ fn empty_actor_window_is_stored_and_served_as_undeterminable() {
     let first = served_event(&engine, &id, "before");
     assert_eq!(first.get("actor_logins"), Some(&json!([])));
     assert!(first.get("actor_unknown").is_none(), "{first}");
-    let _ = std::fs::remove_file(path);
 }
 
 /// A well-formed page whose comment shares the previous observation's second
@@ -5338,7 +5274,7 @@ fn empty_actor_window_is_stored_and_served_as_undeterminable() {
 /// Both used to collapse into the second code.
 #[test]
 fn same_second_ambiguity_is_told_apart_from_an_unrecognized_shape() {
-    let (poller, engine, path, _) = fixture("actor-unknown-same-second");
+    let (path, poller, engine, _) = fixture("actor-unknown-same-second");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     prime_issue_actor_window(&poller, &engine, &path, &id);
     assert_changed_issue_actors(
@@ -5361,7 +5297,7 @@ fn same_second_ambiguity_is_told_apart_from_an_unrecognized_shape() {
         "undeterminable",
     );
 
-    let (poller, engine, path_malformed, _) = fixture("actor-unknown-malformed");
+    let (path_malformed, poller, engine, _) = fixture("actor-unknown-malformed");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     prime_issue_actor_window(&poller, &engine, &path_malformed, &id);
     // Same window and timestamp as above, but the comment has no login.
@@ -5384,15 +5320,13 @@ fn same_second_ambiguity_is_told_apart_from_an_unrecognized_shape() {
         "unrecognized_response_shape",
         "unexpected",
     );
-    let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_file(path_malformed);
 }
 
 /// A vendor failure on the actor read is transient. Its message carries
 /// arbitrary text (including `:`), and only the bare code may be stored.
 #[test]
 fn transport_failure_stores_only_its_code_and_serves_transient() {
-    let (poller, engine, path, _) = fixture("actor-unknown-transport");
+    let (path, poller, engine, _) = fixture("actor-unknown-transport");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine.transport().set_response_for_method(
         ISSUE_READ,
@@ -5424,13 +5358,12 @@ fn transport_failure_stores_only_its_code_and_serves_transient() {
         !served.to_string().contains("private-detail-7f3a"),
         "the failure detail must never reach the wire: {served}"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A successful read serves the login list and nothing else.
 #[test]
 fn successful_enrichment_serves_logins_and_no_actor_unknown() {
-    let (poller, engine, path, _) = fixture("actor-unknown-success");
+    let (path, poller, engine, _) = fixture("actor-unknown-success");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     prime_issue_actor_window(&poller, &engine, &path, &id);
     assert_changed_issue_actors(
@@ -5447,14 +5380,13 @@ fn successful_enrichment_serves_logins_and_no_actor_unknown() {
     let served = served_event(&engine, &id, "after");
     assert_eq!(served.get("actor_logins"), Some(&json!(["alice"])));
     assert!(served.get("actor_unknown").is_none(), "{served}");
-    let _ = std::fs::remove_file(path);
 }
 
 /// A watch with no actor source (a release watch) carries neither field, and
 /// stores no reason.
 #[test]
 fn a_watch_without_an_actor_source_serves_neither_actor_field() {
-    let (poller, engine, path, id) = fixture("actor-unknown-unbound");
+    let (path, poller, engine, id) = fixture("actor-unknown-unbound");
     assert_eq!(subscription(&engine, &id).actor_source, None);
     engine
         .transport()
@@ -5470,7 +5402,6 @@ fn a_watch_without_an_actor_source_serves_neither_actor_field() {
     let served = served_event(&engine, &id, "v1");
     assert!(served.get("actor_logins").is_none(), "{served}");
     assert!(served.get("actor_unknown").is_none(), "{served}");
-    let _ = std::fs::remove_file(path);
 }
 
 /// A row written before the reason column existed has neither field stored.
@@ -5478,7 +5409,7 @@ fn a_watch_without_an_actor_source_serves_neither_actor_field() {
 /// exactly one actor field from the first read after the upgrade.
 #[test]
 fn a_row_with_neither_field_stored_serves_unrecorded() {
-    let (poller, engine, path, _) = fixture("actor-unknown-unrecorded");
+    let (path, poller, engine, _) = fixture("actor-unknown-unrecorded");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     engine.transport().set_response_for_method(
         ISSUE_READ,
@@ -5515,7 +5446,6 @@ fn a_row_with_neither_field_stored_serves_unrecorded() {
         "unrecorded",
         "unexpected",
     );
-    let _ = std::fs::remove_file(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -5774,12 +5704,12 @@ fn timeline_fixture(
     label: &str,
     pages: Vec<Value>,
 ) -> (
+    Scratch,
     Poller<StubCredentialSource, MockTransport>,
     GovernanceEngine<StubCredentialSource, MockTransport>,
-    Scratch,
     String,
 ) {
-    let (poller, engine, path, _) = fixture(label);
+    let (path, poller, engine, _) = fixture(label);
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     bind_timeline_handle(&engine, true);
     set_timeline_pages(&engine, pages);
@@ -5788,7 +5718,7 @@ fn timeline_fixture(
         timeline_requests(&engine).is_empty(),
         "a first observation proves its own empty history and never reads the timeline"
     );
-    (poller, engine, path, id)
+    (path, poller, engine, id)
 }
 
 /// Modelled on a real pull request (magic-context#532) whose events all had
@@ -5797,7 +5727,7 @@ fn timeline_fixture(
 /// the actor its timeline window shows.
 #[test]
 fn timeline_names_the_reviewer_and_the_merger_of_an_empty_comment_window() {
-    let (poller, engine, path, id) = timeline_fixture(
+    let (path, poller, engine, id) = timeline_fixture(
         "timeline-review",
         vec![json!([
             timeline_labeled(OPERATOR, "2026-08-19T09:00:00Z"),
@@ -5814,9 +5744,8 @@ fn timeline_names_the_reviewer_and_the_merger_of_an_empty_comment_window() {
         requests[0],
         json!({"owner": "cortexkit", "repo": "plexus", "issue_number": 17, "per_page": 100, "page": 1})
     );
-    let _ = std::fs::remove_file(path);
 
-    let (poller, engine, path, id) = timeline_fixture(
+    let (path, poller, engine, id) = timeline_fixture(
         "timeline-merge",
         vec![json!([
             timeline_reviewed(AGENT_BOT, "2026-08-19T12:03:00Z"),
@@ -5827,7 +5756,6 @@ fn timeline_names_the_reviewer_and_the_merger_of_an_empty_comment_window() {
         poll_empty_comment_window(&poller, &engine, &path, &id),
         (Some(vec![OPERATOR.to_string()]), None)
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A commit's git author name is free text. One that equals the agent's bot
@@ -5838,7 +5766,7 @@ fn timeline_names_the_reviewer_and_the_merger_of_an_empty_comment_window() {
 /// `["magic-alfonso[bot]"]` and reddens the tuple assertion.
 #[test]
 fn a_commit_whose_git_name_equals_a_bot_login_is_unresolved_not_that_login() {
-    let (poller, engine, path, id) = timeline_fixture(
+    let (path, poller, engine, id) = timeline_fixture(
         "timeline-commit-collision",
         vec![json!([timeline_committed(
             AGENT_BOT,
@@ -5855,14 +5783,13 @@ fn a_commit_whose_git_name_equals_a_bot_login_is_unresolved_not_that_login() {
         "unresolved_commit_author",
         "undeterminable",
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A GitHub noreply email encodes the account's login, in both its current
 /// `<id>+<login>` form and the older bare `<login>` form.
 #[test]
 fn a_noreply_commit_email_names_its_login() {
-    let (poller, engine, path, id) = timeline_fixture(
+    let (path, poller, engine, id) = timeline_fixture(
         "timeline-commit-noreply",
         vec![json!([
             timeline_committed(
@@ -5887,7 +5814,6 @@ fn a_noreply_commit_email_names_its_login() {
             None
         )
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A bot's label change and an unattributable commit in one window: the event
@@ -5898,7 +5824,7 @@ fn a_noreply_commit_email_names_its_login() {
 /// `["magic-alfonso[bot]"]` and reddens the tuple assertion.
 #[test]
 fn a_bot_label_beside_an_unresolved_commit_is_unknown_not_a_partial_set() {
-    let (poller, engine, path, id) = timeline_fixture(
+    let (path, poller, engine, id) = timeline_fixture(
         "timeline-mixed-window",
         vec![json!([
             timeline_labeled(AGENT_BOT, "2026-08-20T12:02:00Z"),
@@ -5909,7 +5835,6 @@ fn a_bot_label_beside_an_unresolved_commit_is_unknown_not_a_partial_set() {
         poll_empty_comment_window(&poller, &engine, &path, &id),
         (None, Some("unresolved_commit_author".to_string()))
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// GitHub serves the timeline oldest first, so the newest activity is on the
@@ -5923,7 +5848,7 @@ fn the_timeline_walk_reaches_the_newest_entries_on_the_last_page() {
     let old_history: Vec<Value> = (0..100)
         .map(|_| timeline_labeled(AGENT_BOT, "2026-08-01T08:00:00Z"))
         .collect();
-    let (poller, engine, path, id) = timeline_fixture(
+    let (path, poller, engine, id) = timeline_fixture(
         "timeline-last-page",
         vec![
             Value::Array(old_history),
@@ -5939,14 +5864,13 @@ fn the_timeline_walk_reaches_the_newest_entries_on_the_last_page() {
         .map(|args| args["page"].clone())
         .collect();
     assert_eq!(pages, vec![json!(1), json!(2)]);
-    let _ = std::fs::remove_file(path);
 }
 
 /// A timeline entry in the same wall-clock second as the previous observation
 /// could be on either side of it: `same_second_ambiguity`, not an actor set.
 #[test]
 fn a_timeline_entry_in_the_previous_observations_second_is_ambiguous() {
-    let (poller, engine, path, id) = timeline_fixture(
+    let (path, poller, engine, id) = timeline_fixture(
         "timeline-same-second",
         vec![json!([timeline_merged(OPERATOR, "2026-08-20T12:00:00Z")])],
     );
@@ -5954,7 +5878,6 @@ fn a_timeline_entry_in_the_previous_observations_second_is_ambiguous() {
         poll_empty_comment_window(&poller, &engine, &path, &id),
         (None, Some("same_second_ambiguity".to_string()))
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// No handle connection is bound to the watched repository: the timeline read
@@ -5962,7 +5885,7 @@ fn a_timeline_entry_in_the_previous_observations_second_is_ambiguous() {
 /// wakes) and nothing is dispatched.
 #[test]
 fn an_unbound_repository_refuses_the_timeline_read_by_name_without_dispatch() {
-    let (poller, engine, path, _) = fixture("timeline-unbound");
+    let (path, poller, engine, _) = fixture("timeline-unbound");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     prime_issue_actor_window(&poller, &engine, &path, &id);
     assert_eq!(
@@ -5975,7 +5898,6 @@ fn an_unbound_repository_refuses_the_timeline_read_by_name_without_dispatch() {
         "transient",
     );
     assert!(timeline_requests(&engine).is_empty());
-    let _ = std::fs::remove_file(path);
 }
 
 /// The handle is bound but the poller's principal holds no poll grant for the
@@ -5983,7 +5905,7 @@ fn an_unbound_repository_refuses_the_timeline_read_by_name_without_dispatch() {
 /// with nothing dispatched.
 #[test]
 fn a_missing_timeline_poll_grant_refuses_by_name_without_dispatch() {
-    let (poller, engine, path, _) = fixture("timeline-ungranted");
+    let (path, poller, engine, _) = fixture("timeline-ungranted");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     bind_timeline_handle(&engine, false);
     set_timeline_pages(
@@ -5996,7 +5918,6 @@ fn a_missing_timeline_poll_grant_refuses_by_name_without_dispatch() {
         (None, Some("governed_read_refusal".to_string()))
     );
     assert!(timeline_requests(&engine).is_empty());
-    let _ = std::fs::remove_file(path);
 }
 
 /// An anonymized GitHub pull-request timeline with ten oldest-first entries,
@@ -6022,7 +5943,7 @@ fn attribute_real_timeline_window(
     entries_so_far: usize,
 ) -> (Option<Vec<String>>, Option<String>) {
     let timeline = magic_context_532_timeline();
-    let (poller, engine, path, _) = fixture(label);
+    let (path, poller, engine, _) = fixture(label);
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     bind_timeline_handle(&engine, true);
     set_timeline_pages(
@@ -6036,7 +5957,6 @@ fn attribute_real_timeline_window(
         1,
         "{label}: one short page"
     );
-    let _ = std::fs::remove_file(path);
     outcome
 }
 
@@ -6120,34 +6040,7 @@ impl plexus_core::github::credential::HandleCredentialProvider for VaultStub {
 /// read, to reproduce the manifest the fleet's handles were imported under.
 fn github_rest_manifest(with_timeline: bool) -> plexus_core::IngestedManifest {
     let source = include_str!("../../../catalog/github_rest.jsonc");
-    // Strip `//` comments outside strings (JSONC to JSON).
-    let mut clean = String::new();
-    let mut chars = source.chars().peekable();
-    let (mut quoted, mut escaped) = (false, false);
-    while let Some(ch) = chars.next() {
-        if quoted {
-            clean.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-        } else if ch == '"' {
-            quoted = true;
-            clean.push(ch);
-        } else if ch == '/' && chars.peek() == Some(&'/') {
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    clean.push(next);
-                    break;
-                }
-            }
-        } else {
-            clean.push(ch);
-        }
-    }
+    let clean = subc_jsonc::jsonc_to_json(source).expect("shipped catalog is valid JSONC");
     let mut value: Value = serde_json::from_str(&clean).expect("github_rest manifest is JSON");
     if !with_timeline {
         value["actions_baseline"]
@@ -6223,7 +6116,7 @@ fn an_imported_handle_reads_the_timeline_after_manifest_refresh_and_poll_grant()
     use plexus_core::storage::github_store::{
         GithubGovernanceSeams, GithubHandle, GithubImportRow,
     };
-    let (_, engine, path, _) = fixture("timeline-live-path");
+    let (path, _, engine, _) = fixture("timeline-live-path");
     let id = actor_subscription(&engine, FEED, ISSUE_READ, &["get_comments"]);
     let store = engine.store().clone();
 
@@ -6363,7 +6256,6 @@ fn an_imported_handle_reads_the_timeline_after_manifest_refresh_and_poll_grant()
         (Some(vec![OPERATOR.to_string()]), None)
     );
     assert_eq!(timeline_requests(&engine).len(), 1);
-    let _ = std::fs::remove_file(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -6383,12 +6275,12 @@ fn timestamped_actor_fixture(
     label: &str,
     timeline_pages: Vec<Value>,
 ) -> (
+    Scratch,
     Poller<StubCredentialSource, MockTransport>,
     GovernanceEngine<StubCredentialSource, MockTransport>,
-    Scratch,
     String,
 ) {
-    let (poller, engine, path, _) = fixture(label);
+    let (path, poller, engine, _) = fixture(label);
     let id = actor_subscription(&engine, TIMESTAMPED, ISSUE_READ, &["get_comments"]);
     bind_timeline_handle(&engine, true);
     set_timeline_pages(&engine, timeline_pages);
@@ -6397,7 +6289,7 @@ fn timestamped_actor_fixture(
         "get_comments",
         MockResponse::Success(json!([])),
     );
-    (poller, engine, path, id)
+    (path, poller, engine, id)
 }
 
 fn serve_timestamped_issue(
@@ -6466,7 +6358,7 @@ fn first_timestamped_pass(
 /// delta is 2 instead of 0.
 #[test]
 fn unchanged_watermark_item_is_not_re_enriched() {
-    let (poller, engine, path, id) =
+    let (path, poller, engine, id) =
         timestamped_actor_fixture("timestamped-unchanged", vec![json!([])]);
     first_timestamped_pass(&poller, &engine, &path, &id);
     let before = enrichment_dispatches(&engine);
@@ -6495,7 +6387,6 @@ fn unchanged_watermark_item_is_not_re_enriched() {
         .list_events(PRINCIPAL, None, Some(&id))
         .expect("list events");
     assert_eq!(events.len(), 1, "nothing new stored");
-    let _ = std::fs::remove_file(path);
 }
 
 /// The same item with a changed payload is a new observation: it is enriched
@@ -6506,7 +6397,7 @@ fn unchanged_watermark_item_is_not_re_enriched() {
 /// its payload, drops the edit before enrichment and fails the cycle assertion.
 #[test]
 fn changed_watermark_item_is_enriched_and_stored() {
-    let (poller, engine, path, id) = timestamped_actor_fixture(
+    let (path, poller, engine, id) = timestamped_actor_fixture(
         "timestamped-changed",
         vec![json!([timeline_labeled(OPERATOR, "2026-08-20T12:03:00Z")])],
     );
@@ -6536,7 +6427,6 @@ fn changed_watermark_item_is_enriched_and_stored() {
         .find(|event| event.payload["title"] == "after")
         .expect("changed version stored");
     assert_eq!(changed.actor_logins, Some(vec![OPERATOR.to_string()]));
-    let _ = std::fs::remove_file(path);
 }
 
 const LEDGER_CHILD_ENV: &str = "PLEXUS_POLL_LEDGER_CHILD";
@@ -6554,14 +6444,12 @@ const LEDGER_CHILD_ENV: &str = "PLEXUS_POLL_LEDGER_CHILD";
 fn skipped_watermark_item_balances_the_drop_ledger() {
     const TEST: &str = "skipped_watermark_item_balances_the_drop_ledger";
     if std::env::var_os(LEDGER_CHILD_ENV).is_none() {
-        let output = bounded::child_output(
-            std::process::Command::new(std::env::current_exe().expect("test executable"))
-                .args(["--exact", TEST, "--nocapture"])
-                .env(LEDGER_CHILD_ENV, "1"),
+        let output = bounded::child_test_output(
+            TEST,
+            &[(LEDGER_CHILD_ENV, "1")],
             std::time::Duration::from_secs(30),
             "test binary child",
-        )
-        .expect("run ledger child");
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             output.status.success() && stdout.contains("1 passed"),
@@ -6570,7 +6458,7 @@ fn skipped_watermark_item_balances_the_drop_ledger() {
         );
         return;
     }
-    let (poller, engine, path, id) =
+    let (path, poller, engine, id) =
         timestamped_actor_fixture("timestamped-ledger", vec![json!([])]);
     first_timestamped_pass(&poller, &engine, &path, &id);
     serve_timestamped_issue(&engine, "before");
@@ -6598,7 +6486,6 @@ fn skipped_watermark_item_balances_the_drop_ledger() {
             "credentialNeedsRepairByConnection": {}
         })
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A read action polled by the scalar-diff strategy in the closed-schema test.
@@ -6650,7 +6537,7 @@ fn pin_closed_poll_schema(
 /// run on the poll path.
 #[test]
 fn every_shipped_cursor_strategy_polls_with_only_declared_arguments() {
-    let (poller, engine, path, _) = fixture("closed-schema-strategies");
+    let (_path, poller, engine, _) = fixture("closed-schema-strategies");
     let mut manifest = manifest_value();
     // The ordered-timestamp action reads pages of `perPage` items and sends
     // the next page's cursor as `after`, as GitHub's list_issues does.
@@ -6785,7 +6672,6 @@ fn every_shipped_cursor_strategy_polls_with_only_declared_arguments() {
     assert_eq!(sent.len(), 1, "the probe's one read");
     let keys: BTreeSet<String> = sent[0].args.as_object().unwrap().keys().cloned().collect();
     assert!(keys.is_subset(&declared), "probe sent {keys:?}");
-    let _ = std::fs::remove_file(path);
 }
 
 /// The undeclared-argument check runs on the poll path: a resumed sync-token
@@ -6794,7 +6680,7 @@ fn every_shipped_cursor_strategy_polls_with_only_declared_arguments() {
 /// reason. Removing the check for poll requests fails this test.
 #[test]
 fn a_poll_sending_an_undeclared_argument_suspends_by_name() {
-    let (poller, engine, path, _) = fixture("undeclared-poll-argument");
+    let (_path, poller, engine, _) = fixture("undeclared-poll-argument");
     upsert_action_with_schema(
         &engine,
         FEED,
@@ -6835,12 +6721,11 @@ fn a_poll_sending_an_undeclared_argument_suspends_by_name() {
                 && row.gate.as_deref() == Some("catalog")),
         "{audit:?}"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn malformed_response_can_resume_with_detailed_reason_and_cursor_intact() {
-    let (poller, engine, _path, id) = fixture("resume-malformed");
+    let (_path, poller, engine, id) = fixture("resume-malformed");
     engine.transport().set_response(MockResponse::Success(
         json!({"items":[{"id":"first"}],"next_cursor":"first"}),
     ));
@@ -6870,7 +6755,7 @@ fn malformed_response_can_resume_with_detailed_reason_and_cursor_intact() {
 
 #[test]
 fn sorted_head_overlap_stays_quiet_after_retention_and_newest_disappears() {
-    let (poller, engine, path, _) = fixture("sorted-retention");
+    let (path, poller, engine, _) = fixture("sorted-retention");
     let id = sorted_head_subscription(&engine);
     let older = json!({"id":1,"updated_at":"2024-01-15T10:00:05Z"});
     engine.transport().set_response(MockResponse::Success(

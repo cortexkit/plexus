@@ -194,6 +194,7 @@ impl RouteBindings {
         Self::default()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn insert_mode(
         &self,
         channel: u16,

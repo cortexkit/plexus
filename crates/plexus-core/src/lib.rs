@@ -178,6 +178,8 @@ pub mod agent_retirement;
 #[cfg(test)]
 #[path = "../tests/support/bounded.rs"]
 pub(crate) mod bounded;
+// One copy of the diagnostic-child helpers for every in-crate test module.
+// The integration test binaries include the same file through their own path.
 pub mod catalog;
 pub mod code_search;
 pub mod consent_card;
@@ -210,6 +212,9 @@ pub mod scope;
 pub mod storage;
 #[cfg(test)]
 mod test_http;
+#[cfg(test)]
+#[path = "../tests/support/logging.rs"]
+pub(crate) mod test_logging;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_scratch;
 pub mod transport;

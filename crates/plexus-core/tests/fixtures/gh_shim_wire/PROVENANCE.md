@@ -2,6 +2,8 @@
 
 Copied byte-for-byte from the AFT repository, commit `5d879f59f`, directory `docs/investigations/gh-shim-wire-goldens/`. All 56 files were compared against that commit after copying and none differed. Everything in this directory except this file is AFT's. (The first copy was taken at `d5bcb0c0a`, an ancestor; `5d879f59f` adds the own-issue `issue edit` captures.)
 
+Only the request captures are kept here: plexus serves the shim's `gh.route` requests, and its tests read `requests/*.request.json` and nothing else. AFT's directory also holds `exchanges/`, `responses/`, `exits.md` and `requests/session-v1-issue-comment.frames.json`, which describe what the route holder answers and how the shim exits. No plexus test read them, so nothing here would fail if they drifted; they were removed rather than left to suggest the response side is checked. `README.md` is AFT's description of its full directory and still mentions them.
+
 ## Which manifest version these describe
 
 The v14 rows (`issue create`, the body-only comment PATCH, own-issue `issue edit`) exist in the shim's code but refuse as unclassified until a signed v14 manifest declares them. These fixtures were captured against a dev-signed v14 test manifest in an isolated state directory, so the v14 requests here are what the shim sends once a v14 manifest is signed. Plexus must serve them, because they route the moment v14 activates.

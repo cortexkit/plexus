@@ -1113,11 +1113,7 @@ mod tests {
                 reconciliation: None,
             })
             .expect("upsert catalog action");
-        let expiry = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_millis() as i64
-            + 3_600_000;
+        let expiry = crate::now_ms() + 3_600_000;
         engine
             .store()
             .insert_grant(&GrantInput {

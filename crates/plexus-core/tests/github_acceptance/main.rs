@@ -13,46 +13,20 @@ use plexus_core::scope::CallScope;
 use plexus_core::storage::github_store::{GithubGovernanceSeams, GithubHandle};
 use plexus_core::transport::{Transport, TransportRequest, TransportResponse};
 use plexus_core::PlexusStore;
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use scope_support::{delegating_scope, LiveScopeReader};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
+#[path = "../support/facade_rows.rs"]
+mod facade_rows;
 #[path = "../support/logging.rs"]
 mod logging;
 
 /// The shipped reviewed GitHub REST manifest, parsed from its JSONC source.
 fn github_manifest() -> plexus_core::AppManifest {
     let source = include_str!("../../../../catalog/github_rest.jsonc");
-    let mut clean = String::new();
-    let mut chars = source.chars().peekable();
-    let mut quoted = false;
-    let mut escaped = false;
-    while let Some(ch) = chars.next() {
-        if quoted {
-            clean.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-        } else if ch == '"' {
-            quoted = true;
-            clean.push(ch);
-        } else if ch == '/' && chars.peek() == Some(&'/') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    clean.push(next);
-                    break;
-                }
-            }
-        } else {
-            clean.push(ch);
-        }
-    }
+    let clean = subc_jsonc::jsonc_to_json(source).expect("shipped catalog is valid JSONC");
     plexus_core::ingest_value(serde_json::from_str(&clean).unwrap())
         .unwrap()
         .manifest
@@ -183,14 +157,16 @@ fn vault_token(credential_id: &str) -> Value {
 const NOW: i64 = 1_700_000_100_000;
 
 type Engine = GovernanceEngine<plexus_core::credentials::StubCredentialSource, RecordingGithub>;
+// Fields drop in declaration order: the scratch guard is last so the store
+// and engine close before it removes their directory.
 struct Fixture {
-    _scratch: plexus_core::test_scratch::Scratch,
     store: Arc<PlexusStore>,
     engine: Engine,
     github: Arc<RecordingGithub>,
     scope: CallScope,
     path: std::path::PathBuf,
     now: i64,
+    _scratch: plexus_core::test_scratch::Scratch,
 }
 impl Fixture {
     fn new(actions: &[(&str, &str)]) -> Self {
@@ -257,12 +233,7 @@ impl Fixture {
         // arguments from it, and each catalog row pins that action's reviewed
         // argument schema, as an imported handle connection does.
         let manifest = github_manifest();
-        db.execute(
-            "INSERT INTO app_manifests (principal,key,schema_version,content_hash,manifest_json,ingested_at_ms)
-             VALUES ('system','github_rest',1,'fixture',?1,1)",
-            params![serde_json::to_string(&manifest).unwrap()],
-        )
-        .unwrap();
+        facade_rows::insert_reviewed_manifest(&db, &serde_json::to_string(&manifest).unwrap());
         let selectors =
             serde_json::to_string(&actions.iter().map(|(a, _)| *a).collect::<Vec<_>>()).unwrap();
         for (action, risk) in actions {
@@ -272,10 +243,10 @@ impl Fixture {
                 .find(|declared| declared.name == *action)
                 .and_then(|declared| declared.http.as_ref())
                 .map_or_else(|| json!({}), |http| http.args_schema.clone());
-            db.execute("INSERT INTO catalog_actions (connection_id,principal,name,schema_json,schema_hash,risk,severity,status,first_seen_at_ms,last_seen_at_ms,ask_first) VALUES ('conn-fixture','operator',?1,?3,'schema',?2,'S1','active',1,1,0)", params![action,risk,schema.to_string()]).unwrap();
+            facade_rows::insert_catalog_action(&db, action, risk, &schema.to_string(), false);
         }
         for (grant, agent) in [("module", None), ("agent", Some("agent-fixture"))] {
-            db.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,authority_kind,created_at_ms,action_selectors,agent_id) VALUES (?1,'operator','conn-fixture','reserved:aft','write','invoke',1,?2,?3)",params![grant,selectors,agent]).unwrap();
+            facade_rows::insert_invoke_grant(&db, grant, "reserved:aft", &selectors, agent);
         }
         let scope = delegating_scope("agent-fixture");
         let github = Arc::new(RecordingGithub::default());
@@ -294,10 +265,7 @@ impl Fixture {
         }))
         .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
         Self {
-            now: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
+            now: plexus_core::now_ms(),
             _scratch: scratch,
             store,
             engine,
@@ -496,15 +464,12 @@ fn bot_request_handle_refusal_audits_and_logs_stamped_agent() {
     }
 
     // A separate process exposes the renderer's actual stderr, not libtest's capture buffer.
-    let output = bounded::child_output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
-            .env(CHILD, TEST)
-            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+    let output = bounded::child_test_output(
+        TEST,
+        &[(CHILD, TEST), ("PLEXUS_LOG_STDERR_CHILD", "1")],
         std::time::Duration::from_secs(30),
         "test binary child",
-    )
-    .unwrap();
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
@@ -731,7 +696,13 @@ fn transient_missing_agent_grant_allows_same_nonce_after_minting() {
         .github_receipt("agent-fixture", "case")
         .unwrap()
         .is_none());
-    f.db().execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,authority_kind,created_at_ms,action_selectors,agent_id) VALUES ('agent','operator','conn-fixture','reserved:aft','write','invoke',1,'[\"add_issue_comment\"]','agent-fixture')", []).unwrap();
+    facade_rows::insert_invoke_grant(
+        &f.db(),
+        "agent",
+        "reserved:aft",
+        "[\"add_issue_comment\"]",
+        Some("agent-fixture"),
+    );
     let completed = f.request(&comment(), "case");
     assert_eq!(completed["result"]["status"], "completed", "{completed}");
     assert_eq!(f.github.comments.lock().unwrap().as_slice(), ["hello"]);

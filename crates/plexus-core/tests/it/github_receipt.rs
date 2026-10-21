@@ -1,4 +1,3 @@
-use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::credentials::ResolvedCredential;
 use plexus_core::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS;
 use plexus_core::github::receipt::{Claim, Effect, RETENTION_MS};
@@ -9,16 +8,7 @@ use serde_json::json;
 use std::sync::{Arc, Barrier};
 
 fn fixture() -> (plexus_core::test_scratch::Scratch, PlexusStore) {
-    let file = plexus_core::test_scratch::Scratch::database("github-receipt");
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".into(),
-        storage_namespace: "github-receipt".into(),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: file.path().to_string_lossy().into_owned(),
-        },
-    };
-    let store = PlexusStore::open(&descriptor).unwrap();
+    let (file, store) = crate::scratch_store::open("github-receipt");
     (file, store)
 }
 

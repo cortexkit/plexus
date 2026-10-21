@@ -227,24 +227,29 @@ mod tests {
             .collect();
         let start = std::time::Instant::now();
         let mut allocated = 0;
+        let mut allocated_order = Vec::new();
         for _ in 0..2_000 {
             let mut entries: Vec<_> = keys.iter().collect();
             entries.sort_by_key(|key| {
                 allocated += 1;
                 key.encode_utf16().collect::<Vec<_>>()
             });
-            std::hint::black_box(entries);
+            allocated_order = std::hint::black_box(entries);
         }
         println!(
             "allocated comparator: {:?}, {allocated} Vec allocations",
             start.elapsed()
         );
         let start = std::time::Instant::now();
+        let mut iterator_order = Vec::new();
         for _ in 0..2_000 {
             let mut entries: Vec<_> = keys.iter().collect();
             entries.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
-            std::hint::black_box(entries);
+            iterator_order = std::hint::black_box(entries);
         }
+        // The cheaper comparator is only worth measuring if it sorts the same.
+        assert_eq!(iterator_order, allocated_order);
+        assert_eq!(iterator_order.len(), 256);
         println!(
             "iterator comparator: {:?}, 0 comparator allocations",
             start.elapsed()

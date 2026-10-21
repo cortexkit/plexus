@@ -96,9 +96,40 @@ impl Storage {
 impl Drop for Storage {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.worker.take().unwrap().join().unwrap();
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        // While a failing test unwinds, neither wait for the worker nor
+        // re-raise its panic: a second panic in a destructor aborts the whole
+        // test binary and loses every other result. The worker is left
+        // detached and ends at its own accept deadline.
+        if std::thread::panicking() {
+            return;
+        }
+        if worker.join().is_err() {
+            panic!("the TLS storage fixture's worker panicked; its message is above");
+        }
     }
 }
+/// Assert that no field of a transport reply that reaches the agent carries
+/// `secret`. Checks the fields themselves rather than the Debug rendering,
+/// which would pass for nothing if a Debug impl stopped printing a field.
+pub(in crate::rest_api) fn assert_reply_omits(reply: &TransportResponse, secret: &str) {
+    let fields = [
+        ("error_code", reply.error_code.clone()),
+        ("error_message", reply.error_message.clone()),
+        ("vendor_request_id", reply.vendor_request_id.clone()),
+        ("served_from", reply.served_from.clone()),
+        ("response", reply.response.as_ref().map(Value::to_string)),
+    ];
+    for (name, value) in fields {
+        assert!(
+            !value.as_deref().unwrap_or("").contains(secret),
+            "reply field {name} carries the secret: {value:?}"
+        );
+    }
+}
+
 pub(in crate::rest_api) fn response(status: u16, headers: &str, body: &str) -> String {
     format!("HTTP/1.1 {status} Test\r\n{headers}Connection: close\r\n\r\n{body}")
 }
@@ -384,17 +415,15 @@ fn signed_url_never_appears_in_operator_diagnostics() {
             result.error_code.as_deref(),
             Some("job_log_download_failed")
         );
-        assert!(!format!("{result:?}").contains("SIGNED-URL-SECRET"));
+        assert_reply_omits(&result, "SIGNED-URL-SECRET");
         return;
     }
-    let output = crate::test_http::bounded::child_output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
-            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+    let output = crate::test_http::bounded::child_test_output(
+        TEST,
+        &[("PLEXUS_LOG_STDERR_CHILD", "1")],
         Duration::from_secs(20),
         "job log diagnostic child",
-    )
-    .unwrap();
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(

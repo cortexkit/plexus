@@ -65,35 +65,7 @@ impl InstallationReader for Repositories {
 // imported connection is seeded from the real catalog.
 fn github_manifest() -> plexus_core::IngestedManifest {
     let source = include_str!(concat!("../", "../../../catalog/github_rest.jsonc"));
-    let mut clean = String::new();
-    let mut chars = source.chars().peekable();
-    let mut quoted = false;
-    let mut escaped = false;
-    while let Some(ch) = chars.next() {
-        if quoted {
-            clean.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-        } else if ch == '"' {
-            quoted = true;
-            clean.push(ch);
-        } else if ch == '/' && chars.peek() == Some(&'/') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    clean.push(next);
-                    break;
-                }
-            }
-        } else {
-            clean.push(ch);
-        }
-    }
+    let clean = subc_jsonc::jsonc_to_json(source).expect("shipped catalog is valid JSONC");
     ingest_value(serde_json::from_str(&clean).unwrap()).unwrap()
 }
 
@@ -121,12 +93,14 @@ fn inventory(writes: &[&str]) -> Inventory {
     }
 }
 
+// Fields drop in declaration order: the scratch guard is last so the store
+// and engine close before it removes their directory.
 struct Imported {
-    _scratch: plexus_core::test_scratch::Scratch,
     store: Arc<PlexusStore>,
     engine: GovernanceEngine<plexus_core::credentials::StubCredentialSource, MockTransport>,
     transport: Arc<MockTransport>,
     scope: CallScope,
+    _scratch: plexus_core::test_scratch::Scratch,
 }
 
 /// Imports `writes` for the fixture agent through the real import, proves the
@@ -303,10 +277,7 @@ fn drive_with(label: &str, writes: &[&str], request: Value) -> Vec<(String, Valu
 
 /// Sends one bot request as AFT and returns the reply and every transport call.
 fn send(fixture: &Imported, label: &str, request: Value) -> (Value, Vec<(String, Value)>) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let reply = bot_request_scoped(
         &fixture.store,
         &fixture.engine,

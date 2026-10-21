@@ -1,5 +1,9 @@
 #[path = "../support/bounded.rs"]
 mod bounded;
+#[path = "../support/facade_rows.rs"]
+mod facade_rows;
+#[path = "../support/scratch_store.rs"]
+mod scratch_store;
 #[path = "../support/system_manifest.rs"]
 mod system_manifest;
 

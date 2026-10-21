@@ -1,4 +1,4 @@
-use super::super::job_log::tests::{response, Storage, CERT};
+use super::super::job_log::tests::{assert_reply_omits, response, Storage, CERT};
 use super::*;
 use crate::manifest::CredentiallessTail;
 use serde_json::json;
@@ -488,17 +488,15 @@ fn artifact_signed_url_never_appears_in_operator_diagnostics() {
             result.error_code.as_deref(),
             Some("artifact_download_failed")
         );
-        assert!(!format!("{result:?}").contains("SIGNED-URL-SECRET"));
+        assert_reply_omits(&result, "SIGNED-URL-SECRET");
         return;
     }
-    let output = crate::test_http::bounded::child_output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
-            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+    let output = crate::test_http::bounded::child_test_output(
+        TEST,
+        &[("PLEXUS_LOG_STDERR_CHILD", "1")],
         Duration::from_secs(20),
         "artifact diagnostic child",
-    )
-    .unwrap();
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(

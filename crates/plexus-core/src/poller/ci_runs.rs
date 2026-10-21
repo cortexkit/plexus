@@ -1212,11 +1212,9 @@ mod tests {
 
     #[test]
     fn ci_page_size_matches_the_catalog_transport_constants() {
-        let source = include_str!("../../../../catalog/github_actions.jsonc")
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let source =
+            subc_jsonc::jsonc_to_json(include_str!("../../../../catalog/github_actions.jsonc"))
+                .expect("shipped catalog is valid JSONC");
         let manifest: Value = serde_json::from_str(&source).unwrap();
         for name in ["list_workflow_runs", JOBS_READ] {
             let action = manifest["actions_baseline"]
@@ -1290,6 +1288,11 @@ mod tests {
         f.add(waiting, jobs(500, f.now), false);
         let started = std::time::Instant::now();
         f.poll_checked(0);
+        // A measurement must have measured something: the attempt was polled.
+        assert!(
+            !f.requests().is_empty(),
+            "the 500-job attempt was not polled"
+        );
         println!(
             "waiting 500-job attempt: {} requests, {}ms, {} delivered jobs",
             f.requests().len(),
@@ -1339,6 +1342,7 @@ mod tests {
                     bk,
                 ))
         });
+        assert!(parses.get() > 0, "the comparator sort compared nothing");
         println!(
             "1000 open-attempt comparator sort: {}us, {} timestamp parses",
             started.elapsed().as_micros(),
@@ -1739,11 +1743,9 @@ mod tests {
                 })
                 .unwrap(),
             );
-            let source = include_str!("../../../../catalog/github_actions.jsonc")
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let source =
+                subc_jsonc::jsonc_to_json(include_str!("../../../../catalog/github_actions.jsonc"))
+                    .expect("shipped catalog is valid JSONC");
             let manifest =
                 crate::manifest::ingest_value(serde_json::from_str(&source).unwrap()).unwrap();
             store
@@ -3171,14 +3173,12 @@ mod tests {
         const TEST: &str = "poller::ci_runs::tests::a_ci_cycle_balances_the_poll_ledger";
         const CHILD: &str = "PLEXUS_CI_LEDGER_CHILD";
         if std::env::var_os(CHILD).is_none() {
-            let output = crate::test_http::bounded::child_output(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", TEST, "--nocapture"])
-                    .env(CHILD, "1"),
+            let output = crate::test_http::bounded::child_test_output(
+                TEST,
+                &[(CHILD, "1")],
                 std::time::Duration::from_secs(60),
                 "CI ledger test child",
-            )
-            .expect("run child");
+            );
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
                 output.status.success() && stdout.contains("1 passed"),

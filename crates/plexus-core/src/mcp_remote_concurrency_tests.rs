@@ -5,6 +5,13 @@ use super::*;
 use crate::bounded::Task;
 use std::sync::{mpsc, TryLockError};
 
+/// How long a step that must make progress while another connection's RPC is
+/// held may take. The busy RPC stays blocked until the test releases it, so the
+/// failure being caught is waiting forever, and a generous bound costs nothing
+/// when the step proceeds at once; a tight one only turns a loaded host into a
+/// false "serialized" verdict.
+const MUST_PROGRESS: Duration = Duration::from_secs(5);
+
 fn vendor(
     arrived: mpsc::Sender<()>,
     release: Option<mpsc::Receiver<()>>,
@@ -29,8 +36,12 @@ fn vendor(
                     .contains("mcp-session-id: vendor-session"));
                 arrived.send(()).unwrap();
                 if let Some(release) = &release {
+                    // Longer than every MUST_PROGRESS wait a red run spends
+                    // before releasing, and shorter than the client's 30 s
+                    // request timeout, so a serialized pool fails on its own
+                    // assertion rather than on this gate.
                     release
-                        .recv_timeout(Duration::from_secs(10))
+                        .recv_timeout(Duration::from_secs(25))
                         .expect("release gated MCP RPC");
                 }
                 response(
@@ -106,13 +117,13 @@ fn mcp_sweep_and_other_connection_dispatch_progress_during_a_busy_rpc() {
         let removed = sweep_transport.sweep_idle();
         swept.send(removed).unwrap();
     });
-    let sweep_result = sweeps.recv_timeout(Duration::from_secs(1));
+    let sweep_result = sweeps.recv_timeout(MUST_PROGRESS);
 
     let (arrived, requests) = mpsc::channel();
     let (endpoint, other_vendor) = vendor(arrived, None);
     transport.register_config("other", config(endpoint));
     let other_call = dispatch(Arc::clone(&transport), "other");
-    let other_started = requests.recv_timeout(Duration::from_secs(1));
+    let other_started = requests.recv_timeout(MUST_PROGRESS);
 
     // Always release and join the gated vendor before reporting a red control.
     busy.finish();
@@ -160,7 +171,7 @@ fn mcp_reconnect_waits_only_for_its_own_busy_connection() {
     // reconnect has looked up that entry; a held map detects the old lock order.
     // Either observation places reconnect at the busy entry before dispatching
     // the other connection, without a timing sleep or a production test hook.
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + MUST_PROGRESS;
     let reconnect_started = loop {
         if Arc::strong_count(&entry) > owners_before_reset
             || matches!(transport.entries.try_lock(), Err(TryLockError::WouldBlock))
@@ -177,7 +188,7 @@ fn mcp_reconnect_waits_only_for_its_own_busy_connection() {
     let (endpoint, other_vendor) = vendor(arrived, None);
     transport.register_config("other", config(endpoint));
     let other_call = dispatch(Arc::clone(&transport), "other");
-    let other_started = requests.recv_timeout(Duration::from_secs(1));
+    let other_started = requests.recv_timeout(MUST_PROGRESS);
 
     busy.finish();
     reconnect.join_timeout(Duration::from_secs(5)).unwrap();

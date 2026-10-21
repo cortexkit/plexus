@@ -5,10 +5,6 @@ use crate::bounded;
 #[path = "logging.rs"]
 mod logging;
 
-#[path = "github_facade.rs"]
-#[allow(dead_code)]
-pub mod github_facade;
-
 pub fn reject_inserts(path: &Path) {
     rusqlite::Connection::open(path)
         .unwrap()
@@ -29,15 +25,15 @@ pub fn captured_by_parent(test: &str, context: &str) -> bool {
         logging::init_child();
         return false;
     }
-    let output = bounded::child_output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test, "--nocapture"])
-            .env("PLEXUS_AUDIT_STDERR_CHILD", test)
-            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+    let output = bounded::child_test_output(
+        test,
+        &[
+            ("PLEXUS_AUDIT_STDERR_CHILD", test),
+            ("PLEXUS_LOG_STDERR_CHILD", "1"),
+        ],
         std::time::Duration::from_secs(30),
         "test binary child",
-    )
-    .unwrap();
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
@@ -47,22 +43,28 @@ pub fn captured_by_parent(test: &str, context: &str) -> bool {
         .filter(|line| line.contains("audit append failed:"))
         .collect();
     assert_eq!(lines.len(), 1, "{stderr}");
-    let message = lines[0]
-        .split_once("plexus.governance: ")
-        .expect("component attribution")
-        .1;
+    // The message carries per-call ids the test cannot predict, so its text is
+    // checked by its fixed parts below: the prefix naming the record that
+    // failed, the principal, and the injected cause. `assert_diagnostic` then
+    // checks the level, the logger and the column layout around that message;
+    // it cannot check the message itself, which is read from the same line.
+    let message = cortexkit_log::parse_line(lines[0])
+        .expect("fleet-formatted diagnostic")
+        .body;
+    assert!(
+        message.starts_with(&format!("audit append failed: {context}")),
+        "{stderr}"
+    );
+    assert!(message.contains("principal=\"direct\""), "{stderr}");
+    assert!(
+        message.contains("injected audit insert failure"),
+        "{stderr}"
+    );
     logging::assert_diagnostic(
         lines[0],
         cortexkit_log::ParsedLevel::Error,
         "plexus.governance",
         message,
-    );
-    assert!(message.starts_with("audit append failed:"), "{stderr}");
-    assert!(lines[0].contains(context), "{stderr}");
-    assert!(lines[0].contains("principal=\"direct\""), "{stderr}");
-    assert!(
-        lines[0].contains("injected audit insert failure"),
-        "{stderr}"
     );
     true
 }

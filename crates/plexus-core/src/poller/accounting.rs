@@ -331,9 +331,7 @@ fn close_ledger(
 mod tests {
     use super::*;
 
-    mod logging {
-        include!("../../tests/support/logging.rs");
-    }
+    use crate::test_logging as logging;
 
     #[test]
     fn drop_ledger_violation_logs_without_panicking() {
@@ -353,14 +351,12 @@ mod tests {
             )));
             return;
         }
-        let output = crate::test_http::bounded::child_output(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST, "--nocapture"])
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+        let output = crate::test_http::bounded::child_test_output(
+            TEST,
+            &[("PLEXUS_LOG_STDERR_CHILD", "1")],
             std::time::Duration::from_secs(30),
             "poll accounting diagnostic test child",
-        )
-        .expect("run child");
+        );
         assert!(output.status.success(), "{output:?}");
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
         let log = String::from_utf8(output.stderr).unwrap();

@@ -6,16 +6,7 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 
 fn fixture() -> (plexus_core::test_scratch::Scratch, PlexusStore) {
-    let path = plexus_core::test_scratch::Scratch::database("github-store");
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".into(),
-        storage_namespace: "github-store".into(),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: path.path().to_string_lossy().into_owned(),
-        },
-    };
-    let store = PlexusStore::open(&descriptor).unwrap();
+    let (path, store) = crate::scratch_store::open("github-store");
     (path, store)
 }
 

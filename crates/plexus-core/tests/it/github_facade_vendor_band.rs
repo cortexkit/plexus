@@ -1,5 +1,5 @@
+use crate::facade_rows;
 use crate::scope_support::{delegating_scope, LiveScopeReader};
-use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::credentials::ResolvedCredential;
 use plexus_core::github::credential::HandleCredentialProvider;
 use plexus_core::github::facade::bot_request_scoped;
@@ -8,7 +8,7 @@ use plexus_core::scope::CallScope;
 use plexus_core::storage::github_store::{GithubGovernanceSeams, GithubHandle};
 use plexus_core::transport::{MockResponse, MockTransport};
 use plexus_core::PlexusStore;
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -40,35 +40,7 @@ fn github_manifest() -> plexus_core::AppManifest {
 }
 
 fn parse_catalog_source(source: &str) -> plexus_core::AppManifest {
-    let mut clean = String::new();
-    let mut chars = source.chars().peekable();
-    let mut quoted = false;
-    let mut escaped = false;
-    while let Some(ch) = chars.next() {
-        if quoted {
-            clean.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-        } else if ch == '"' {
-            quoted = true;
-            clean.push(ch);
-        } else if ch == '/' && chars.peek() == Some(&'/') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    clean.push(next);
-                    break;
-                }
-            }
-        } else {
-            clean.push(ch);
-        }
-    }
+    let clean = subc_jsonc::jsonc_to_json(source).expect("shipped catalog is valid JSONC");
     plexus_core::ingest_value(serde_json::from_str(&clean).unwrap())
         .unwrap()
         .manifest
@@ -81,16 +53,8 @@ fn setup(label: &str, actions: &[(&str, &str)]) -> Setup {
 /// `module` is the calling module that holds the module grant. The agent grant
 /// keeps the grantee the import gives it, reserved:aft.
 fn setup_as(label: &str, actions: &[(&str, &str)], module: &str) -> Setup {
-    let scratch = plexus_core::test_scratch::Scratch::database(label);
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".into(),
-        storage_namespace: label.into(),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: scratch.path().to_string_lossy().into_owned(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).unwrap());
+    let (scratch, store) = crate::scratch_store::open(label);
+    let store = Arc::new(store);
     store
         .insert_connection(
             "operator",
@@ -122,12 +86,7 @@ fn setup_as(label: &str, actions: &[(&str, &str)], module: &str) -> Setup {
     // governance refuses any argument a leg sends that the schema does not
     // declare. An action the manifest does not declare keeps an empty schema.
     let manifest = github_manifest();
-    db.execute(
-        "INSERT INTO app_manifests (principal,key,schema_version,content_hash,manifest_json,ingested_at_ms)
-         VALUES ('system','github_rest',1,'fixture',?1,1)",
-        params![serde_json::to_string(&manifest).unwrap()],
-    )
-    .unwrap();
+    facade_rows::insert_reviewed_manifest(&db, &serde_json::to_string(&manifest).unwrap());
     let selectors =
         serde_json::to_string(&actions.iter().map(|(action, _)| action).collect::<Vec<_>>())
             .unwrap();
@@ -138,8 +97,7 @@ fn setup_as(label: &str, actions: &[(&str, &str)], module: &str) -> Setup {
             .find(|declared| declared.name == *name)
             .and_then(|declared| declared.http.as_ref())
             .map_or_else(|| json!({}), |http| http.args_schema.clone());
-        db.execute("INSERT INTO catalog_actions (connection_id,principal,name,schema_json,schema_hash,risk,severity,status,first_seen_at_ms,last_seen_at_ms,ask_first)
-            VALUES ('conn-fixture','operator',?1,?3,'schema',?2,'S1','active',1,1,0)", params![name,risk,schema.to_string()]).unwrap();
+        facade_rows::insert_catalog_action(&db, name, risk, &schema.to_string(), false);
     }
     for (grant, grantee, agent) in [
         ("module", module, None),
@@ -149,8 +107,7 @@ fn setup_as(label: &str, actions: &[(&str, &str)], module: &str) -> Setup {
             Some("agent-fixture"),
         ),
     ] {
-        db.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,authority_kind,created_at_ms,action_selectors,agent_id)
-            VALUES (?1,'operator','conn-fixture',?4,'write','invoke',1,?2,?3)", params![grant,selectors,agent,grantee]).unwrap();
+        facade_rows::insert_invoke_grant(&db, grant, grantee, &selectors, agent);
     }
     let scope = delegating_scope("agent-fixture");
     let transport = Arc::new(MockTransport::default());
@@ -188,10 +145,7 @@ fn seen_marker_reaction_golden_is_a_real_facade_dispatch() {
     let request = json!({"operation":"gh.route","gh_route_schema":1,"action":"issue reaction","target":{"number":"42"},
         "body":{"reaction":"eyes"},"repository":"org/repo","manifest_version":14,"rung_as_of_unix_secs":1790209659,
         "metadata":{"agent_id":"agent-fixture","pid":6092}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -279,10 +233,7 @@ fn close_with_comment_records_two_effects_and_replays_without_a_second_write() {
     );
     let request =
         json!({"verb":"issue close", "repository":"org/repo", "number":"42", "comment":"done"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -360,10 +311,7 @@ fn issue_edit_human_using_bot_login_cannot_dispatch() {
     ));
     let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},
         "body":{"title":"changed"},"author_scope":"own"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -421,10 +369,7 @@ fn approved_close_with_comment_consumes_one_request_after_both_effects() {
     .unwrap();
     let request =
         json!({"verb":"issue close", "repository":"org/repo", "number":"42", "comment":"done"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let pending = bot_request_scoped(
         &store,
         &engine,
@@ -503,10 +448,7 @@ fn outcome_unknown_replays_without_dispatch_and_preserves_approval() {
     )
     .unwrap();
     let request = json!({"action":"issue reaction", "repository":"org/repo", "target":{"number":"42"}, "body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let pending = bot_request_scoped(
         &store,
         &engine,
@@ -587,10 +529,7 @@ fn vendor_403_is_sticky_but_a_401_rejects_the_credential_once() {
             message: "rejected".into(),
         });
         let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"}, "body":{"reaction":"eyes"}});
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = plexus_core::now_ms();
         let first = bot_request_scoped(
             &store,
             &engine,
@@ -635,10 +574,7 @@ fn g8_entry_grant_revalidation_stops_before_reads_or_credential() {
         &[("github.issue.get", "read"), ("close_issue", "write")],
     );
     let request = json!({"verb":"issue close", "repository":"org/repo", "number":"42"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let mut reply = gates::run_scoped(
         store.as_ref(),
         plexus_core::github::AFT_PRINCIPAL,
@@ -730,10 +666,7 @@ fn g9_policy_movement_after_get_stops_the_write() {
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -812,10 +745,7 @@ fn edit_last_paginates_then_gets_own_comment_before_patch() {
         .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue comment","repository":"org/repo","target":{"number":"42"},
         "edit_last":true,"body":{"body":"replacement"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -868,10 +798,7 @@ fn swept_uncertain_facade_effect_records_argument_free_disposition_with_original
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"},"body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         bot_request_scoped(
             &store,
@@ -959,10 +886,7 @@ fn swept_receipt_with_future_reconciliation_class_never_queues_empty_args() {
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"},"body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bot_request_scoped(
             &store,
@@ -1050,10 +974,7 @@ fn own_issue_label_edit_uses_ordered_mapped_legs() {
     )))
     .unwrap();
     request["repository"] = json!("org/repo");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -1110,10 +1031,7 @@ fn missing_handle_credential_is_reported_at_the_kind_specific_gate() {
             credential_provider: None,
         }))
         .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = plexus_core::now_ms();
         let result = bot_request_scoped(
             &store,
             &engine,
@@ -1153,10 +1071,7 @@ fn page_bound_is_sticky_without_treating_incomplete_list_as_no_comment() {
             .collect(),
     )));
     let request = json!({"action":"issue comment","repository":"org/repo","target":{"number":"42"},"edit_last":true,"body":{"body":"replacement"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -1228,10 +1143,7 @@ fn invalid_or_expired_list_releases_claim_for_same_nonce_retry() {
             json!([])
         }));
         let request = json!({"action":"issue comment","repository":"org/repo","target":{"number":"42"},"edit_last":true,"body":{"body":"replacement"}});
-        let current = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let current = plexus_core::now_ms();
         let first = bot_request_scoped(
             &store,
             &engine,
@@ -1291,10 +1203,7 @@ fn g8_read_ask_first_never_creates_an_inner_action_request() {
         )
         .unwrap();
     let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -1338,10 +1247,7 @@ fn g8_read_401_is_sticky_and_never_retransmits() {
         message: "expired".into(),
     });
     let request = json!({"action":"issue edit","repository":"org/repo","target":{"number":"42"},"body":{"title":"changed"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -1446,10 +1352,7 @@ fn recording_transport_read_set_is_exact_for_every_kind() {
             "",
             MockResponse::Success(json!({"user":{"login":"app-fixture[bot]","type":"Bot"}})),
         );
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = plexus_core::now_ms();
         let result = bot_request_scoped(
             &store,
             &engine,
@@ -1497,10 +1400,7 @@ fn comment_author_mismatch_refuses_before_patch_and_is_sticky() {
     );
     let request = json!({"action":"api:PATCH:/repos/*/*/issues/comments/*","repository":"org/repo",
         "target":{"comment_id":"123"},"body":{"body":"edited"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let first = bot_request_scoped(
         &store,
         &engine,
@@ -1541,10 +1441,7 @@ fn vendor_path_fields_must_come_from_target_not_body() {
         setup("facade-path-field", &[("add_issue_comment", "write")]);
     let request = json!({"action":"issue comment","repository":"org/repo","target":{"number":"42"},
         "body":{"body":"safe","issue_number":999}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -1570,10 +1467,7 @@ fn store_failure_before_vendor_contact_releases_claim_and_retry_sends_once() {
     let db = Connection::open(scratch.path()).unwrap();
 
     let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"},"body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let mut reply = plexus_core::github::facade::gates::run_scoped(
         store.as_ref(),
         plexus_core::github::AFT_PRINCIPAL,
@@ -1653,10 +1547,7 @@ fn expired_retry_records_unknown_disposition_before_any_sweep_and_never_resends(
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"},"body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bot_request_scoped(
             &store,
@@ -1735,10 +1626,7 @@ fn close_with_comment_retries_only_unfinished_state_after_second_pretransmit_sto
     );
     let request =
         json!({"verb":"issue close","repository":"org/repo","number":"42","comment":"once"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let db = Connection::open(scratch.path()).unwrap();
     // Simulate a database failure when effect two is marked as about to be
     // sent. The state-changing request must not follow the completed comment.
@@ -1894,10 +1782,7 @@ fn g8_entry_matrix_blocks_each_read_branch_before_any_transport_contact() {
                 &format!("matrix-entry-{}-{movement}", case.label),
                 &case.actions,
             );
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
+            let now = plexus_core::now_ms();
             let mut reply = gates::run_scoped(
                 store.as_ref(),
                 plexus_core::github::AFT_PRINCIPAL,
@@ -2031,10 +1916,7 @@ fn g9_after_last_read_matrix_blocks_each_branch_before_mutation() {
                 store: store.clone(),
                 credential_provider: Some(Arc::new(Token)),
             }));
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
+            let now = plexus_core::now_ms();
             let result = bot_request_scoped(
                 &store,
                 &engine,
@@ -2217,10 +2099,16 @@ fn result_actions() -> Vec<(&'static str, &'static str)> {
     actions
 }
 
+// Fields drop in declaration order, so the store and engine close before the
+// scratch guard removes the directory holding their database.
 struct ResultRun {
-    setup: Setup,
+    store: Arc<PlexusStore>,
+    engine: GovernanceEngine<plexus_core::credentials::StubCredentialSource, MockTransport>,
+    transport: Arc<MockTransport>,
+    scope: CallScope,
     request: Value,
     now: i64,
+    _scratch: plexus_core::test_scratch::Scratch,
 }
 
 impl ResultRun {
@@ -2229,26 +2117,26 @@ impl ResultRun {
     fn new(label: &str, request: Value, adjust: impl FnOnce(&MockTransport)) -> Self {
         let mut request = request;
         request["repository"] = json!("org/repo");
-        let setup = setup(label, &result_actions());
-        github_bodies(&setup.3);
-        adjust(&setup.3);
+        let (scratch, store, engine, transport, scope) = setup(label, &result_actions());
+        github_bodies(&transport);
+        adjust(&transport);
         Self {
-            setup,
+            store,
+            engine,
+            transport,
+            scope,
+            _scratch: scratch,
             request,
-            now: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
+            now: plexus_core::now_ms(),
         }
     }
 
     fn call(&self, nonce: &str, request_id: &str, owner: &str, offset: i64) -> Value {
-        let (_, store, engine, _, scope) = &self.setup;
         bot_request_scoped(
-            store,
-            engine,
+            &self.store,
+            &self.engine,
             plexus_core::github::AFT_PRINCIPAL,
-            Some(scope),
+            Some(&self.scope),
             &self.request,
             nonce,
             request_id,
@@ -2258,7 +2146,7 @@ impl ResultRun {
     }
 
     fn sent(&self) -> usize {
-        self.setup.3.requests().len()
+        self.transport.requests().len()
     }
 }
 
@@ -2483,8 +2371,7 @@ fn every_facade_leg_sends_only_its_actions_declared_arguments() {
         let reply = run.call("legs-nonce", "legs-id", "worker", 0);
         assert_eq!(reply["result"]["status"], "completed", "{label}: {reply}");
         let sent: Vec<(String, BTreeSet<String>)> = run
-            .setup
-            .3
+            .transport
             .requests()
             .into_iter()
             .map(|request| {
@@ -2667,7 +2554,7 @@ fn pr_create_sends_one_post_with_only_the_allowlisted_fields_and_replays_the_rec
         json!({"status":"completed","result":projection}),
         "{first}"
     );
-    let requests = run.setup.3.requests();
+    let requests = run.transport.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].action, "create_pull_request");
     assert_eq!(
@@ -2678,8 +2565,7 @@ fn pr_create_sends_one_post_with_only_the_allowlisted_fields_and_replays_the_rec
     // The receipt stores the completed reply, so the retry below is answered
     // from it without a second POST.
     let receipt = run
-        .setup
-        .1
+        .store
         .github_receipt("agent-fixture", "pr-create-nonce")
         .unwrap()
         .unwrap();
@@ -2804,10 +2690,7 @@ fn pr_create_without_the_agents_grant_refuses_and_sends_nothing() {
         "no-grant-nonce",
         "no-grant-id",
         "worker",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64,
+        plexus_core::now_ms(),
     );
     assert_eq!(
         reply["result"],
@@ -2878,10 +2761,7 @@ fn validation_facade_reply(label: &str, status: u16, body: &str) -> Value {
         }))
         .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request = json!({"action":"issue reaction","repository":"org/repo","target":{"number":"42"},"body":{"reaction":"eyes"}});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let reply = bot_request_scoped(
         &store,
         &engine,
@@ -3207,12 +3087,13 @@ mod scoped {
         Err(ScopeReadError("scope.describe timed out".into()))
     }
 
+    // The scratch guard is declared last so it drops after the store it holds.
     struct Scoped {
-        scratch: plexus_core::test_scratch::Scratch,
         store: Arc<PlexusStore>,
         engine: GovernanceEngine<plexus_core::credentials::StubCredentialSource, MockTransport>,
         transport: Arc<MockTransport>,
         reader: Arc<ScriptedScope>,
+        scratch: plexus_core::test_scratch::Scratch,
     }
 
     fn scoped(label: &str, actions: &[(&str, &str)]) -> Scoped {
@@ -3229,10 +3110,7 @@ mod scoped {
     }
 
     fn now() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
+        plexus_core::now_ms()
     }
 
     impl Scoped {
@@ -3727,10 +3605,7 @@ fn handle_unbind_after_authorization_stops_dispatch() {
         credential_provider: Some(Arc::new(Token)),
     }))
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let result = bot_request_scoped(
         &store,
         &engine,
@@ -3816,10 +3691,7 @@ fn close_after_a_transient_second_leg_with_generation_failure(
     .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
     let request =
         json!({"verb":"issue close","repository":"org/repo","number":"42","comment":"once"});
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = plexus_core::now_ms();
     let send = |owner: &str, at: i64| {
         bot_request_scoped(
             &store,
@@ -4094,7 +3966,7 @@ fn read_handle_store_failure_is_not_repository_unbound() {
 
 #[test]
 fn read_page_bound_is_distinct_from_invalid_response() {
-    let (_, _, engine, transport, _) =
+    let (_scratch, _, engine, transport, _) =
         setup("read-page-bound", &[("github.issue_comments.list", "read")]);
     transport.set_response(MockResponse::Success(json!((0..100)
         .map(|id| json!({"id":id}))
@@ -4109,8 +3981,8 @@ fn read_page_bound_is_distinct_from_invalid_response() {
     )
     .unwrap_err();
     assert_eq!(
-        format!("{error:?}"),
-        "PageBound",
+        error,
+        plexus_core::github::reads::ReadError::PageBound,
         "bounded reads must retain the page-bound failure"
     );
 }
@@ -4121,6 +3993,9 @@ fn measure_governance_manifest_parse_share() {
     let (_scratch, store, engine, _, _) =
         setup("manifest-parse-share", &[("github.issue.search", "read")]);
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog");
+    // Every shipped catalog is measured, however many there are: a fixed
+    // count failed the first time a catalog was added, unnoticed while this
+    // test is ignored.
     let mut count = 0;
     for entry in std::fs::read_dir(directory).unwrap() {
         let path = entry.unwrap().path();
@@ -4134,7 +4009,7 @@ fn measure_governance_manifest_parse_share() {
             .unwrap();
         count += 1;
     }
-    assert_eq!(count, 20, "measure the complete live-sized catalog");
+    assert!(count > 0, "measure the complete live-sized catalog");
     let document = store
         .manifest_json(plexus_core::CATALOG_PRINCIPAL, "github_rest")
         .unwrap()
@@ -4147,7 +4022,9 @@ fn measure_governance_manifest_parse_share() {
                 plexus_core::github::AFT_PRINCIPAL,
                 "conn-fixture",
                 "github.issue.search",
-                json!({"repositories":["org/repo"],"terms":"bug","q":"repo:org/repo bug"}),
+                // Agents send terms, never a raw `q`: governance refuses a
+                // caller-supplied query string.
+                json!({"repositories":["org/repo"],"terms":"bug"}),
             ))
             .unwrap();
     }

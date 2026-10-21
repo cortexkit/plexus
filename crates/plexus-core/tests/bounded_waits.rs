@@ -70,37 +70,20 @@ async fn assert_missing_reply_is_bounded(expected: &'static str) {
     assert!(failure.is_panic(), "the missing reply must panic by name");
 }
 
+// One receive path serves every caller; the label only names the reply in the
+// panic message, so one test covers them all.
 #[tokio::test]
-async fn missing_management_reply_fails_within_its_deadline() {
+async fn a_missing_reply_fails_within_its_deadline() {
     assert_missing_reply_is_bounded("management response").await;
 }
 
-#[tokio::test]
-async fn missing_route_reply_fails_within_its_deadline() {
-    assert_missing_reply_is_bounded("tool route response").await;
-}
-
-#[tokio::test]
-async fn missing_event_reply_fails_within_its_deadline() {
-    assert_missing_reply_is_bounded("event acknowledgement").await;
-}
-
 #[test]
 #[cfg(unix)]
 #[should_panic(expected = "did not finish within 50ms")]
-fn sleeping_diagnostic_child_is_killed_at_its_deadline() {
+fn a_sleeping_child_is_killed_at_its_deadline() {
     let mut command = Command::new("sh");
     command.args(["-c", "sleep 1"]);
     let _ = bounded::child_output(&mut command, Duration::from_millis(50), "diagnostic child");
-}
-
-#[test]
-#[cfg(unix)]
-#[should_panic(expected = "did not finish within 50ms")]
-fn sleeping_cli_child_is_killed_at_its_deadline() {
-    let mut command = Command::new("sh");
-    command.args(["-c", "sleep 1"]);
-    let _ = bounded::child_output(&mut command, Duration::from_millis(50), "CLI child");
 }
 
 #[test]
@@ -195,29 +178,16 @@ fn child_with_pipe_holding_descendant_is_killed_at_its_deadline() {
 
 #[test]
 fn a_worker_missing_completion_does_not_join_after_the_deadline() {
-    let worker = bounded::Task::spawn(|| std::thread::sleep(Duration::from_secs(1)));
+    // The worker outlives the elapsed bound by a wide margin, so the bound only
+    // fails when join waits for the worker, not when the host is slow.
+    let worker = bounded::Task::spawn(|| std::thread::sleep(Duration::from_secs(20)));
     let started = Instant::now();
     let error = worker
         .join_timeout(Duration::from_millis(50))
         .expect_err("the worker is still running");
     assert!(error.contains("test worker did not finish within 50ms"));
-    assert!(started.elapsed() < Duration::from_millis(500));
-}
-
-#[test]
-fn a_second_missing_worker_completion_is_bounded() {
-    let worker = bounded::Task::spawn(|| std::thread::sleep(Duration::from_secs(1)));
-    let error = worker
-        .join_timeout(Duration::from_millis(50))
-        .expect_err("the worker is still running");
-    assert!(error.contains("test worker did not finish within 50ms"));
-}
-
-#[test]
-fn a_third_missing_worker_completion_is_bounded() {
-    let worker = bounded::Task::spawn(|| std::thread::sleep(Duration::from_secs(1)));
-    let error = worker
-        .join_timeout(Duration::from_millis(50))
-        .expect_err("the worker is still running");
-    assert!(error.contains("test worker did not finish within 50ms"));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "join_timeout waited for the worker instead of its deadline"
+    );
 }

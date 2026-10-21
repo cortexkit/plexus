@@ -130,11 +130,19 @@ pub struct CredentialBinding {
     pub required: bool,
 }
 
+/// Argument keys a connection's operator filters constrain. Governance refuses a
+/// call with `MissingRequiredFilter` when a key it must carry is absent, null or
+/// empty, and with `ValueNotAllowed` when a present key falls outside the
+/// connection's `values` allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceFilters {
+    /// Keys every call must carry, reads and writes alike: each names the
+    /// resource the call targets, so omitting one would let the vendor choose
+    /// its own default scope.
     pub required: Vec<String>,
     pub optional: Vec<String>,
+    /// Keys writes must carry in addition to `required`. Reads ignore them.
     pub write_enabling: Vec<String>,
 }
 
@@ -1848,46 +1856,11 @@ mod tests {
             .join("../../catalog")
             .join(name);
         let source = fs::read_to_string(path).expect("catalog fixture must exist");
-        let normalized = strip_jsonc_for_test(&source);
-        serde_json::from_str(&normalized).expect("catalog fixture must be valid JSONC")
-    }
-
-    fn strip_jsonc_for_test(source: &str) -> String {
-        // The core tests deliberately use only the two catalog documents after
-        // their comments are removed. The module owns the production JSONC
-        // parser; this helper keeps the pure-core tests independent of subc.
-        let mut output = String::with_capacity(source.len());
-        let mut in_string = false;
-        let mut escaped = false;
-        let mut chars = source.chars().peekable();
-        while let Some(character) = chars.next() {
-            if in_string {
-                output.push(character);
-                if escaped {
-                    escaped = false;
-                } else if character == '\\' {
-                    escaped = true;
-                } else if character == '"' {
-                    in_string = false;
-                }
-                continue;
-            }
-            if character == '"' {
-                in_string = true;
-                output.push(character);
-            } else if character == '/' && chars.peek() == Some(&'/') {
-                let _ = chars.next();
-                for next in chars.by_ref() {
-                    if next == '\n' {
-                        output.push(next);
-                        break;
-                    }
-                }
-            } else {
-                output.push(character);
-            }
-        }
-        output.replace(",\n  }", "\n  }").replace(",\n}", "\n}")
+        // The same JSONC reader the module loads catalogs with, so a comment
+        // or trailing comma production accepts cannot break these fixtures.
+        let normalized =
+            subc_jsonc::jsonc_to_json(&source).expect("catalog fixture must be valid JSONC");
+        serde_json::from_str(&normalized).expect("catalog fixture must convert to JSON")
     }
 
     #[test]

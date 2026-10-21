@@ -81,35 +81,7 @@ impl InstallationReader for Installation {
 /// The shipped reviewed GitHub REST manifest, parsed from its JSONC source.
 fn github_manifest() -> plexus_core::IngestedManifest {
     let source = include_str!(concat!("../", "../../../catalog/github_rest.jsonc"));
-    let mut clean = String::new();
-    let mut chars = source.chars().peekable();
-    let mut quoted = false;
-    let mut escaped = false;
-    while let Some(ch) = chars.next() {
-        if quoted {
-            clean.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-        } else if ch == '"' {
-            quoted = true;
-            clean.push(ch);
-        } else if ch == '/' && chars.peek() == Some(&'/') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    clean.push(next);
-                    break;
-                }
-            }
-        } else {
-            clean.push(ch);
-        }
-    }
+    let clean = subc_jsonc::jsonc_to_json(source).expect("shipped catalog is valid JSONC");
     ingest_value(serde_json::from_str(&clean).unwrap()).unwrap()
 }
 
@@ -131,13 +103,15 @@ type Engine = GovernanceEngine<plexus_core::credentials::StubCredentialSource, M
 /// One stored catalog row: (schema_json, schema_hash, status, generation).
 type Row = (String, String, String, i64);
 
+// Fields drop in declaration order: the scratch guard is last so the store
+// and engine close before it removes their directory.
 struct Fixture {
-    _scratch: plexus_core::test_scratch::Scratch,
     store: Arc<PlexusStore>,
     engine: Engine,
     transport: Arc<MockTransport>,
     scope: CallScope,
     path: std::path::PathBuf,
+    _scratch: plexus_core::test_scratch::Scratch,
 }
 
 impl Fixture {
@@ -296,10 +270,7 @@ impl Fixture {
             nonce,
             nonce,
             "worker",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
+            plexus_core::now_ms(),
         )
     }
 

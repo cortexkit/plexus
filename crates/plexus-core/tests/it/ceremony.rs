@@ -2,38 +2,15 @@
 //! connection, connection bounds every grant. Each test here fails if its link
 //! stops narrowing.
 
-use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+use crate::scratch_store;
 use plexus_core::test_scratch::Scratch;
 use plexus_core::{
     ingest_value, Ceiling, CeremonyRefusal, GrantMintRequest, PlexusStore, PolicyInput, Risk,
 };
 use serde_json::{json, Value};
 
-fn test_store(label: &str) -> (PlexusStore, Scratch) {
-    // The macOS clock ticks in microseconds, so the counter prevents same-tick test nonce collisions.
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let unique = format!(
-        "{}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_nanos())
-            .unwrap_or(0),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    let path = Scratch::database(&format!("ceremony-{label}"));
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("{label}-{unique}"),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: path.to_string_lossy().into_owned(),
-        },
-    };
-    (
-        PlexusStore::open(&descriptor).expect("open test store"),
-        path,
-    )
+fn test_store(label: &str) -> (Scratch, PlexusStore) {
+    scratch_store::open(&format!("ceremony-{label}"))
 }
 
 /// A vendor declaring one read action and one write action.
@@ -96,7 +73,7 @@ fn install_manifest(store: &PlexusStore, actions: Value) {
 /// stays green.
 #[test]
 fn restoring_a_manifest_file_un_retires_it() {
-    let (store, path) = test_store("manifest-restoration");
+    let (_path, store) = test_store("manifest-restoration");
     install_manifest(&store, json!([{ "name": "read_item", "risk": "read" }]));
 
     store
@@ -124,8 +101,6 @@ fn restoring_a_manifest_file_un_retires_it() {
         .ceiling_within_manifest("mock", "read", &["read_item".to_string()])
         .expect("ceiling query")
         .expect("a restored vendor must be ticketable again");
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A manifest withdrawn from the catalog directory is retired, disappears from
@@ -148,7 +123,7 @@ fn restoring_a_manifest_file_un_retires_it() {
 /// check in `ceiling_within_manifest` fails the ticket assertion.
 #[test]
 fn a_manifest_absent_from_the_catalog_is_retired_and_cannot_be_ticketed() {
-    let (store, path) = test_store("manifest-retirement");
+    let (_path, store) = test_store("manifest-retirement");
     install_manifest(&store, json!([{ "name": "read_item", "risk": "read" }]));
     let public = ingest_value(credential_free_manifest()).expect("manifest ingests");
     store
@@ -189,8 +164,6 @@ fn a_manifest_absent_from_the_catalog_is_retired_and_cannot_be_ticketed() {
         .ceiling_within_manifest("public", "read", &["ask_question".to_string()])
         .expect("ceiling query")
         .expect("the surviving vendor must still be ticketable");
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// An empty reviewed set retires nothing.
@@ -206,7 +179,7 @@ fn a_manifest_absent_from_the_catalog_is_retired_and_cannot_be_ticketed() {
 /// and fails this.
 #[test]
 fn an_empty_reviewed_set_retires_nothing() {
-    let (store, path) = test_store("manifest-retirement-empty");
+    let (_path, store) = test_store("manifest-retirement-empty");
     install_manifest(&store, json!([{ "name": "read_item", "risk": "read" }]));
     let public = ingest_value(credential_free_manifest()).expect("manifest ingests");
     store
@@ -228,8 +201,6 @@ fn an_empty_reviewed_set_retires_nothing() {
         2,
         "both vendors must survive an unbelievable observation"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 /// A vendor that needs no credential at all (a public, unauthenticated MCP
@@ -306,7 +277,7 @@ fn enroll(store: &PlexusStore, risk: &str, selectors: &[&str]) -> String {
 /// one of them would stay green while the note silently became wrong.
 #[test]
 fn connect_is_the_inverse_of_pending() {
-    let (store, path) = test_store("pending-inverse");
+    let (_path, store) = test_store("pending-inverse");
     install_manifest(&store, two_action_manifest());
 
     let ceiling = store
@@ -353,13 +324,11 @@ fn connect_is_the_inverse_of_pending() {
         "connect must complete a pending connection, which is why no separate \
          clear_connection_pending exists"
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn ticket_ceiling_is_copied_onto_the_connection_when_consumed() {
-    let (store, path) = test_store("ticket-ceiling-copy");
+    let (_path, store) = test_store("ticket-ceiling-copy");
     install_manifest(&store, two_action_manifest());
     let connection = enroll(&store, "read", &["search"]);
     let ceiling = store
@@ -374,12 +343,11 @@ fn ticket_ceiling_is_copied_onto_the_connection_when_consumed() {
         },
         "consuming a ticket must record its ceiling on the connection"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn manifest_refuses_a_ticket_for_an_undeclared_action() {
-    let (store, path) = test_store("ticket-undeclared");
+    let (_path, store) = test_store("ticket-undeclared");
     install_manifest(&store, two_action_manifest());
     let refusal = store
         .ceiling_within_manifest("mock", "read", &["not_a_vendor_action".to_string()])
@@ -389,12 +357,11 @@ fn manifest_refuses_a_ticket_for_an_undeclared_action() {
         refusal,
         CeremonyRefusal::UndeclaredAction("not_a_vendor_action".to_string())
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn manifest_refuses_a_ticket_risk_above_what_the_vendor_declares() {
-    let (store, path) = test_store("ticket-risk");
+    let (_path, store) = test_store("ticket-risk");
     // A read-only vendor: nothing it declares can justify write authority.
     install_manifest(&store, json!([{ "name": "search", "risk": "read" }]));
     let refusal = store
@@ -402,14 +369,13 @@ fn manifest_refuses_a_ticket_risk_above_what_the_vendor_declares() {
         .expect("call succeeds")
         .expect_err("risk above the vendor's own actions must be refused");
     assert!(matches!(refusal, CeremonyRefusal::RiskAboveCeiling { .. }));
-    let _ = std::fs::remove_file(path);
 }
 
 /// Policy visibility includes the vendor a row belongs to and one store-derived
 /// state, so clients cannot disagree about whether an expiring policy is live.
 #[test]
 fn policies_list_with_vendor_and_derived_state() {
-    let (store, path) = test_store("list-policies");
+    let (_path, store) = test_store("list-policies");
     store
         .insert_connection("direct", "conn-mock", "mock", "active", &json!({}))
         .expect("create connection");
@@ -449,12 +415,11 @@ fn policies_list_with_vendor_and_derived_state() {
         assert_eq!(policy.effect, effect);
         assert_eq!(policy.state, state);
     }
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn grant_exceeding_the_connection_ceiling_is_refused_and_writes_nothing() {
-    let (store, path) = test_store("grant-over-ceiling");
+    let (_path, store) = test_store("grant-over-ceiling");
     install_manifest(&store, two_action_manifest());
     // Enrolled for reads only, so a write grant must not be mintable even though
     // the vendor itself declares a write action.
@@ -480,12 +445,11 @@ fn grant_exceeding_the_connection_ceiling_is_refused_and_writes_nothing() {
             .is_empty(),
         "a refused mint must not write a grant row"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn grant_naming_an_action_outside_the_connection_ceiling_is_refused() {
-    let (store, path) = test_store("grant-outside-selectors");
+    let (_path, store) = test_store("grant-outside-selectors");
     install_manifest(&store, two_action_manifest());
     let connection = enroll(&store, "write", &["search"]);
     let refusal = store
@@ -520,12 +484,11 @@ fn grant_naming_an_action_outside_the_connection_ceiling_is_refused() {
         "the message must name the ceiling and must not claim the vendor lacks \
          the action: {rendered}"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn grant_within_the_connection_ceiling_is_minted() {
-    let (store, path) = test_store("grant-within");
+    let (_path, store) = test_store("grant-within");
     install_manifest(&store, two_action_manifest());
     let connection = enroll(&store, "write", &["search", "write_item"]);
     let grant = store
@@ -542,12 +505,11 @@ fn grant_within_the_connection_ceiling_is_minted() {
         .expect("a narrowing grant must be minted");
     assert_eq!(grant.risk_ceiling, "read");
     assert_eq!(grant.action_selectors, vec!["search".to_string()]);
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn a_connection_without_a_recorded_ceiling_refuses_every_mint() {
-    let (store, path) = test_store("grant-no-ceiling");
+    let (_path, store) = test_store("grant-no-ceiling");
     install_manifest(&store, two_action_manifest());
     // insert_connection is the pre-ceiling path: it records no ceiling, exactly
     // like a connection created before the ceiling columns existed. Fail closed.
@@ -567,12 +529,11 @@ fn a_connection_without_a_recorded_ceiling_refuses_every_mint() {
         .expect("call succeeds")
         .expect_err("a ceiling-less connection must refuse mints");
     assert_eq!(refusal, CeremonyRefusal::CeilingAbsent);
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn wildcard_selectors_are_stored_expanded_so_manifest_growth_cannot_widen_authority() {
-    let (store, path) = test_store("wildcard-pinned");
+    let (_path, store) = test_store("wildcard-pinned");
     install_manifest(&store, two_action_manifest());
     let connection = enroll(&store, "write", &["*"]);
     let before = store
@@ -619,12 +580,11 @@ fn wildcard_selectors_are_stored_expanded_so_manifest_growth_cannot_widen_author
         refusal,
         CeremonyRefusal::RiskAboveCeiling { .. } | CeremonyRefusal::UndeclaredAction(_)
     ));
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn revoking_a_grant_is_idempotent() {
-    let (store, path) = test_store("revoke-idempotent");
+    let (_path, store) = test_store("revoke-idempotent");
     install_manifest(&store, two_action_manifest());
     let connection = enroll(&store, "read", &["search"]);
     let grant = store
@@ -648,7 +608,6 @@ fn revoking_a_grant_is_idempotent() {
             .expect("second revoke must not error"),
         "a retried revoke reports absence rather than failing"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A vendor declaring `auth.mode = none` enrolls with no handle at all, and the
@@ -657,7 +616,7 @@ fn revoking_a_grant_is_idempotent() {
 /// be listed in the catalog and never connected.
 #[test]
 fn a_credential_free_vendor_enrolls_without_a_handle() {
-    let (store, path) = test_store("ceremony-no-auth");
+    let (_path, store) = test_store("ceremony-no-auth");
     let ingested = ingest_value(credential_free_manifest()).expect("manifest ingests");
     store
         .upsert_manifest(plexus_core::CATALOG_PRINCIPAL, &ingested)
@@ -696,7 +655,6 @@ fn a_credential_free_vendor_enrolls_without_a_handle() {
         .expect("ceiling recorded");
     assert_eq!(stored.action_selectors, vec!["ask_question".to_string()]);
     assert_eq!(stored.risk, Risk::Read);
-    let _ = std::fs::remove_file(path);
 }
 
 /// The credential-free path must be reachable ONLY through the manifest. A
@@ -704,7 +662,7 @@ fn a_credential_free_vendor_enrolls_without_a_handle() {
 /// a way to create a connection with no credential custody at all.
 #[test]
 fn a_credentialed_vendor_refuses_a_handle_less_enrollment() {
-    let (store, path) = test_store("ceremony-no-auth-guard");
+    let (_path, store) = test_store("ceremony-no-auth-guard");
     install_manifest(&store, two_action_manifest());
     assert!(!store
         .manifest_requires_no_credential("mock")
@@ -732,7 +690,6 @@ fn a_credentialed_vendor_refuses_a_handle_less_enrollment() {
             &ceiling,
         )
         .is_err());
-    let _ = std::fs::remove_file(path);
 }
 
 /// An action the vendor exposes but the reviewed manifest never declared must
@@ -749,7 +706,7 @@ fn an_undeclared_discovered_action_is_quarantined_not_activated() {
     };
     use std::sync::Arc;
 
-    let (store, path) = test_store("reconcile-undeclared");
+    let (_path, store) = test_store("reconcile-undeclared");
     install_manifest(&store, two_action_manifest());
     let store = Arc::new(store);
     store
@@ -825,12 +782,11 @@ fn an_undeclared_discovered_action_is_quarantined_not_activated() {
             .any(|action| action.name == "delete_everything"),
         "a quarantined action must be invisible to catalog consumers"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn mint_refuses_empty_action_selectors_and_writes_nothing() {
-    let (store, path) = test_store("grant-empty-selectors");
+    let (_path, store) = test_store("grant-empty-selectors");
     install_manifest(&store, two_action_manifest());
     let connection = enroll(&store, "read", &["search"]);
     let refusal = store
@@ -850,12 +806,11 @@ fn mint_refuses_empty_action_selectors_and_writes_nothing() {
         .list_grants("direct", &connection)
         .expect("list grants")
         .is_empty());
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn mint_expands_a_wildcard_to_the_connection_ceiling() {
-    let (store, path) = test_store("grant-wildcard-expansion");
+    let (_path, store) = test_store("grant-wildcard-expansion");
     install_manifest(&store, two_action_manifest());
     let connection = enroll(&store, "read", &["search"]);
     let grant = store
@@ -878,12 +833,11 @@ fn mint_expands_a_wildcard_to_the_connection_ceiling() {
             .action_selectors,
         vec!["search".to_string()]
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
 fn mint_refuses_a_wildcard_expanding_to_no_actions() {
-    let (store, path) = test_store("grant-empty-expansion");
+    let (_path, store) = test_store("grant-empty-expansion");
     install_manifest(&store, two_action_manifest());
     let connection = enroll(&store, "read", &[]);
     let refusal = store
@@ -899,7 +853,6 @@ fn mint_refuses_a_wildcard_expanding_to_no_actions() {
         .expect("call succeeds")
         .expect_err("an empty wildcard expansion must be refused");
     assert_eq!(refusal, CeremonyRefusal::EmptyActionSelectors);
-    let _ = std::fs::remove_file(path);
 }
 
 fn ceiling(store: &PlexusStore, risk: &str, selectors: &[&str]) -> Ceiling {
@@ -941,7 +894,7 @@ fn status_of(store: &PlexusStore, connection_id: &str) -> String {
 /// marked issued cannot activate the revoked row.
 #[test]
 fn a_revoked_connection_stays_revoked_when_a_ticket_is_used() {
-    let (store, path) = test_store("ticket-revoked");
+    let (path, store) = test_store("ticket-revoked");
     install_manifest(&store, two_action_manifest());
     let read = ceiling(&store, "read", &["search"]);
     let outstanding = issue(&store, "conn-a", "mock", &read).expect("first ticket");
@@ -1012,13 +965,12 @@ fn a_revoked_connection_stays_revoked_when_a_ticket_is_used() {
         "a ticket still marked issued must not activate a revoked connection"
     );
     assert_eq!(status_of(&store, "conn-a"), "revoked");
-    let _ = std::fs::remove_file(path);
 }
 
 /// Revoking a connection expires every ticket still issued for it.
 #[test]
 fn revoking_a_connection_expires_its_outstanding_tickets() {
-    let (store, path) = test_store("ticket-expiry-on-revoke");
+    let (path, store) = test_store("ticket-expiry-on-revoke");
     install_manifest(&store, two_action_manifest());
     let read = ceiling(&store, "read", &["search"]);
     let pending = issue(&store, "conn-a", "mock", &read).expect("ticket");
@@ -1035,14 +987,13 @@ fn revoking_a_connection_expires_its_outstanding_tickets() {
         status, "expired",
         "revoking a connection must expire its issued tickets"
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// A ticket for app B naming an existing connection of app A is refused and
 /// changes nothing on A, because its ceiling was resolved against B's manifest.
 #[test]
 fn a_ticket_for_another_app_is_refused_against_an_existing_connection_id() {
-    let (store, path) = test_store("ticket-app-mismatch");
+    let (_path, store) = test_store("ticket-app-mismatch");
     install_manifest(&store, two_action_manifest());
     let public = ingest_value(credential_free_manifest()).expect("manifest ingests");
     store
@@ -1089,7 +1040,6 @@ fn a_ticket_for_another_app_is_refused_against_an_existing_connection_id() {
             .unwrap(),
         read
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// Re-enrollment used to rewrite a live credential before consumption, even
@@ -1097,7 +1047,7 @@ fn a_ticket_for_another_app_is_refused_against_an_existing_connection_id() {
 /// refuse every re-issue, and tickets issued while pending cannot re-enroll them.
 #[test]
 fn a_re_issued_ticket_never_widens_the_connection_ceiling() {
-    let (store, path) = test_store("ticket-no-widening");
+    let (_path, store) = test_store("ticket-no-widening");
     install_manifest(&store, two_action_manifest());
     let read = ceiling(&store, "read", &["search"]);
     let write = ceiling(&store, "write", &["search", "write_item"]);
@@ -1140,14 +1090,13 @@ fn a_re_issued_ticket_never_widens_the_connection_ceiling() {
             .unwrap(),
         read
     );
-    let _ = std::fs::remove_file(path);
 }
 
 /// The grant record a mint returns carries the generation it stored, so a
 /// caller comparing generations later is not off by one from the start.
 #[test]
 fn a_minted_grant_reports_the_generation_it_stored() {
-    let (store, path) = test_store("grant-generation");
+    let (_path, store) = test_store("grant-generation");
     install_manifest(&store, two_action_manifest());
     let connection = enroll(&store, "read", &["search"]);
     let minted = store
@@ -1169,14 +1118,13 @@ fn a_minted_grant_reports_the_generation_it_stored() {
         .find(|grant| grant.grant_id == minted.grant_id)
         .expect("the minted grant is stored");
     assert_eq!(minted.generation, stored.generation);
-    let _ = std::fs::remove_file(path);
 }
 
 /// A vendor's connection count covers connections that can still serve; a
 /// revoked one, which never becomes active again, is not counted.
 #[test]
 fn the_vendor_connection_count_leaves_out_revoked_connections() {
-    let (store, path) = test_store("connection-count");
+    let (_path, store) = test_store("connection-count");
     install_manifest(&store, two_action_manifest());
     let count = |store: &PlexusStore| {
         store
@@ -1191,5 +1139,4 @@ fn the_vendor_connection_count_leaves_out_revoked_connections() {
     assert_eq!(count(&store), 1);
     assert!(store.revoke_connection("direct", &connection).unwrap());
     assert_eq!(count(&store), 0, "a revoked connection must not be counted");
-    let _ = std::fs::remove_file(path);
 }

@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::credentials::StubCredentialSource;
 use plexus_core::governance::{
     compare_authority_baseline, facade_not_sent, pipeline_denial, AuthorityBaseline,
     AuthorizationRequest, CatalogDenial, Denial, FacadeNotSentCode, GovernanceEngine,
     GovernanceSeams, GrantDenial, PolicyDenial, RequestOrigin, ResolverDenial,
 };
-use plexus_core::storage::{CatalogAction, CatalogActionInput, GrantInput, PlexusStore};
+use plexus_core::storage::{CatalogAction, CatalogActionInput, GrantInput};
 use plexus_core::transport::MockTransport;
 
 fn baseline() -> AuthorityBaseline {
@@ -182,19 +181,11 @@ impl GovernanceSeams for TestSeams {
 fn engine(
     reject_repository: bool,
 ) -> (
-    GovernanceEngine<StubCredentialSource, MockTransport>,
     plexus_core::test_scratch::Scratch,
+    GovernanceEngine<StubCredentialSource, MockTransport>,
 ) {
-    let scratch = plexus_core::test_scratch::Scratch::database("governance-seams");
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".into(),
-        storage_namespace: scratch.path().to_string_lossy().into_owned(),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: scratch.path().to_string_lossy().into_owned(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).unwrap());
+    let (scratch, store) = crate::scratch_store::open("governance-seams");
+    let store = Arc::new(store);
     store
         .insert_connection(
             "direct",
@@ -234,13 +225,13 @@ fn engine(
         })
         .unwrap();
     (
+        scratch,
         GovernanceEngine::new(
             store,
             Arc::new(StubCredentialSource::default()),
             Arc::new(MockTransport::default()),
         )
         .with_governance_seams(Arc::new(TestSeams { reject_repository })),
-        scratch,
     )
 }
 
@@ -251,7 +242,7 @@ fn engine(
 /// that crate can construct a facade origin.
 #[test]
 fn ordinary_origin_cannot_be_promoted_by_caller_fields() {
-    let (engine, scratch) = engine(false);
+    let (scratch, engine) = engine(false);
     for principal in ["direct", "other"] {
         for args in [
             serde_json::json!({}),
@@ -289,7 +280,7 @@ fn ordinary_origin_cannot_be_promoted_by_caller_fields() {
 
 #[test]
 fn resolver_refuses_before_connection_or_grant_lookup() {
-    let (engine, scratch) = engine(true);
+    let (scratch, engine) = engine(true);
     let request =
         AuthorizationRequest::new("direct", "nonexistent", "write_item", serde_json::json!({}))
             .with_bound_agent("unverified", "caller-handle");
@@ -312,7 +303,7 @@ fn resolver_refuses_before_connection_or_grant_lookup() {
 
 #[test]
 fn resolver_rejects_second_repository_field_before_connection_load() {
-    let (engine, _scratch) = engine(false);
+    let (_scratch, engine) = engine(false);
     let request = AuthorizationRequest::new(
         "direct",
         "nonexistent",
