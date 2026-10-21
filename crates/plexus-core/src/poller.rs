@@ -4468,9 +4468,13 @@ mod tests {
     }
 
     #[test]
-    fn two_method_event_at_the_cap_boundary_refuses_the_33rd_call() {
-        let budget = CallBudget::new(ACTOR_ENRICHMENT_MAX_CALLS_PER_CYCLE);
-        for _ in 0..15 {
+    fn two_method_event_at_the_cap_boundary_refuses_the_call_past_the_cap() {
+        // Spend all but the last two calls on complete two-method events, so the
+        // final event reserves exactly the remaining slots whatever the cap is.
+        let cap = ACTOR_ENRICHMENT_MAX_CALLS_PER_CYCLE;
+        assert_eq!(cap % 2, 0, "this boundary is stated for an even cap");
+        let budget = CallBudget::new(cap);
+        for _ in 0..cap / 2 - 1 {
             let mut permit = budget.try_take(2).expect("complete two-method event fits");
             assert!(permit.take_one().is_some());
             assert!(permit.take_one().is_some());
@@ -4479,7 +4483,7 @@ mod tests {
         assert!(event.take_one().is_some());
         assert!(
             budget.try_take(1).is_none(),
-            "retry would be the 33rd call while the second method is still reserved"
+            "a retry would exceed the cap while the second method is still reserved"
         );
         assert!(event.take_one().is_some());
         assert!(budget.try_take(1).is_none());
