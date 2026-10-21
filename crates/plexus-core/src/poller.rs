@@ -1091,6 +1091,31 @@ fn ordered_window(state: &Value) -> Result<i64, CursorError> {
     Ok(read_i64_in(state, WINDOW_MS_KEY, 0..=MAX_WINDOW_MS)?.unwrap_or(INITIAL_WINDOW_MS))
 }
 
+/// The numeric fields of an ordered-timestamp cursor, validated together.
+struct OrderedCursorNumbers {
+    watermark_ms: Option<i64>,
+    window_ms: i64,
+}
+
+/// Read and range-check every number an ordered-timestamp cursor stores.
+///
+/// `build_args` and `derive` both read the cursor through this one function, so
+/// they refuse exactly the same states. When only `derive` refused a value, a
+/// corrupt cursor still got its governed vendor read (quota, audit row, rate
+/// budget) and was refused afterwards under a response-shape reason that blamed
+/// the vendor. Refusing in `build_args` suspends it before any vendor contact.
+fn ordered_cursor_numbers(state: &Value) -> Result<OrderedCursorNumbers, CursorError> {
+    let window_ms = ordered_window(state)?;
+    let watermark_ms = ordered_watermark(state)?;
+    // Read only to refuse a corrupt value; the change stamp itself is carried
+    // forward and interpreted by `settle_ordered_window`.
+    read_i64(state, WINDOW_CHANGED_MS_KEY)?;
+    Ok(OrderedCursorNumbers {
+        watermark_ms,
+        window_ms,
+    })
+}
+
 /// Double the overlap window after evidence it was too small, never past the
 /// ceiling and never below the initial window (a seeded window can be smaller).
 fn widened_window(window_ms: i64) -> i64 {
@@ -1148,6 +1173,9 @@ fn settle_ordered_window(prior_state: &Value, next_state: &mut Value, late_row: 
 
 impl CursorStrategy for OrderedTimestampStrategy {
     fn build_args(&self, cursor_state: &Value) -> Result<Value, CursorError> {
+        // Validated before the page-resume branch: a continuation page is still
+        // a vendor read, and `derive` refuses these values on every page.
+        let numbers = ordered_cursor_numbers(cursor_state)?;
         if let Some(resume) = cursor_state.get(PAGE_RESUME_KEY) {
             let valid = resume.as_object().is_some_and(|args| {
                 self.request_page_cursor_field
@@ -1171,10 +1199,10 @@ impl CursorStrategy for OrderedTimestampStrategy {
         // No watermark yet (first poll): request everything the vendor will give
         // by sending no filter argument, and derive the first watermark from
         // what comes back.
-        let Some(watermark_ms) = ordered_watermark(cursor_state)? else {
+        let Some(watermark_ms) = numbers.watermark_ms else {
             return Ok(json!({}));
         };
-        let window_ms = ordered_window(cursor_state)?;
+        let window_ms = numbers.window_ms;
         // Resume from the watermark minus the overlap window so late rows can
         // still arrive. Deduplication discards boundary rows already stored.
         // Range checks on both operands prevent subtraction overflow.
@@ -1215,10 +1243,10 @@ impl CursorStrategy for OrderedTimestampStrategy {
 
         // The adaptive window carries forward; it grows on evidence and decays
         // only through `settle_ordered_window`.
-        let prior_window_ms = ordered_window(cursor_state)?;
-        let prior_watermark_ms = ordered_watermark(cursor_state)?;
-        // Read only to refuse a corrupt value; the stamp itself is carried.
-        read_i64(cursor_state, WINDOW_CHANGED_MS_KEY)?;
+        let OrderedCursorNumbers {
+            watermark_ms: prior_watermark_ms,
+            window_ms: prior_window_ms,
+        } = ordered_cursor_numbers(cursor_state)?;
         // The resume point this poll used: watermark - window. A row below it is
         // direct evidence the window was too small. With no watermark (first
         // poll) there is no resume point and therefore no evidence to gather.
@@ -6463,7 +6491,24 @@ mod tests {
     #[test]
     fn ordered_timestamp_refuses_cursor_values_it_could_not_have_written() {
         let strategy = ordered_strategy();
+        // A paginated strategy accepts a stored page continuation, which takes
+        // a separate early-return branch in `build_args`.
+        let paginated = OrderedTimestampStrategy::new(Some(&PollShape {
+            pagination: Some(crate::manifest::PollPagination {
+                request_cursor_field: "after".to_string(),
+                response_cursor_pointer: "/next".to_string(),
+            }),
+            ..ordered_shape()
+        }))
+        .expect("paginated ordered strategy");
         let page = json!({"items": [{"id": "1", "updated_at": "2024-01-01T00:00:00Z"}]});
+        let resume = json!({"after": "vendor-cursor-2"});
+        assert!(
+            paginated
+                .build_args(&json!({"watermark_ms": 1_700_000_000_000_i64, "page_resume": resume}))
+                .is_ok(),
+            "a sound cursor with a page continuation must stay usable"
+        );
         for state in [
             json!({"watermark_ms": i64::MIN}),
             json!({"watermark_ms": i64::MAX}),
@@ -6474,12 +6519,23 @@ mod tests {
             json!({"watermark_ms": 1_700_000_000_000_i64, "window_ms": MAX_WINDOW_MS + 1}),
             json!({"watermark_ms": 1_700_000_000_000_i64, "window_changed_ms": "soon"}),
         ] {
+            // Refusing before the vendor read matters: a value only `derive`
+            // refuses has already spent a governed call by then.
             assert!(
                 matches!(
                     strategy.build_args(&state),
                     Err(CursorError::InvalidState(_))
-                ) || state.get("window_changed_ms").is_some(),
+                ),
                 "build_args accepted {state}"
+            );
+            let mut resuming = state.clone();
+            resuming["page_resume"] = resume.clone();
+            assert!(
+                matches!(
+                    paginated.build_args(&resuming),
+                    Err(CursorError::InvalidState(_))
+                ),
+                "build_args accepted {resuming} through its page continuation"
             );
             assert!(
                 matches!(

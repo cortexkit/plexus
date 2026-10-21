@@ -3870,6 +3870,54 @@ timeout_s = 120
 build_timeout_s = 3600
 
 [[control]]
+id = "ordered-cursor-window-stamp-before-dispatch"
+guards = "An ordered-timestamp cursor with a corrupt window change stamp is refused by build_args, before any vendor read, exactly as derive refuses it"
+file = "crates/plexus-core/src/poller.rs"
+old = "let numbers = ordered_cursor_numbers(cursor_state)?;\n        if let Some(resume)"
+new = "let numbers = OrderedCursorNumbers { watermark_ms: ordered_watermark(cursor_state)?, window_ms: ordered_window(cursor_state)? }; /* NON-VACUITY BREAK */\n        if let Some(resume)"
+test_file = "crates/plexus-core/src/poller.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::tests::ordered_timestamp_refuses_cursor_values_it_could_not_have_written"]
+expect_message = "build_args accepted"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "ordered-cursor-window-stamp-no-vendor-read"
+guards = "A poll of an ordered-timestamp cursor with a corrupt window change stamp suspends cursor_state_unusable without reaching the vendor"
+file = "crates/plexus-core/src/poller.rs"
+old = "let numbers = ordered_cursor_numbers(cursor_state)?;\n        if let Some(resume)"
+new = "let numbers = OrderedCursorNumbers { watermark_ms: ordered_watermark(cursor_state)?, window_ms: ordered_window(cursor_state)? }; /* NON-VACUITY BREAK */\n        if let Some(resume)"
+test_file = "crates/plexus-core/tests/poller.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test poller"
+select = "expected"
+expect_red = ["corrupt_ordered_window_stamp_suspends_before_any_vendor_read"]
+expect_message = "cursor_state_unusable"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "ordered-cursor-checked-before-page-resume"
+guards = "A stored page continuation does not let build_args skip the cursor checks derive applies on every page"
+file = "crates/plexus-core/src/poller.rs"
+old = "let numbers = ordered_cursor_numbers(cursor_state)?;\n        if let Some(resume)"
+new = "let numbers = ordered_cursor_numbers(if cursor_state.get(PAGE_RESUME_KEY).is_some() { &Value::Null } else { cursor_state })?; /* NON-VACUITY BREAK */\n        if let Some(resume)"
+test_file = "crates/plexus-core/src/poller.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["poller::tests::ordered_timestamp_refuses_cursor_values_it_could_not_have_written"]
+expect_message = "through its page continuation"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "ordered-window-range"
 guards = "A seeded ordered-timestamp window outside 0..=1h is refused instead of overflowing the resume point or moving it past the watermark"
 file = "crates/plexus-core/src/poller.rs"

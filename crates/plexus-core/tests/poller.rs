@@ -4450,6 +4450,53 @@ fn unusable_cursor_state_suspends_with_cursor_state_unusable() {
     let _ = std::fs::remove_file(path);
 }
 
+/// An ordered-timestamp cursor whose window change stamp is not a number is
+/// refused before the vendor read, not after it.
+///
+/// The stamp is only carried forward, never sent, so nothing about the request
+/// depends on it. It was once checked only when the response was folded into
+/// the cursor: the corrupt row then spent a governed vendor call and was
+/// suspended under `response_shape_invalid`, blaming the vendor for a fault in
+/// the stored cursor.
+#[test]
+fn corrupt_ordered_window_stamp_suspends_before_any_vendor_read() {
+    let (poller, engine, path, _id) = fixture("corrupt-window-stamp");
+    engine
+        .transport()
+        .set_response(MockResponse::Success(json!({
+            "items": [{"id": "a", "updated_at": "2024-01-15T10:00:00Z"}]
+        })));
+    let sub = engine
+        .store()
+        .subscribe_with_cursor_state(
+            PRINCIPAL,
+            CONNECTION,
+            TIMESTAMPED,
+            30,
+            &json!({"watermark_ms": 1_700_000_000_000_i64, "window_changed_ms": "soon"}),
+            &json!({}),
+        )
+        .expect("subscribe store")
+        .expect("subscription accepted");
+
+    let cycle = poller.poll_once(PRINCIPAL, &sub.subscription_id);
+    assert_eq!(
+        cycle,
+        PollCycle::Suspended {
+            reason: "cursor_state_unusable".to_string()
+        }
+    );
+    assert!(
+        engine.transport().requests().is_empty(),
+        "a cursor the strategy cannot use must not reach the vendor"
+    );
+    assert_eq!(
+        subscription(&engine, &sub.subscription_id).status,
+        "suspended"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
 /// A completed read whose body cannot be parsed into a cursor advance suspends
 /// rather than advancing past events it could not record.
 ///
