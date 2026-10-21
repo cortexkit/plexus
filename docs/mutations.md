@@ -85,9 +85,11 @@ named assertion with the other tests accounted for.
 [CI](../.github/workflows/ci.yml) validates the catalogue in the Linux Test job
 and replays selected controls in nonempty mutation shards. The planner
 (`scripts/mutation-plan.py`) sizes the shard count to the selection: one shard
-per 120 rows for a train replay, one per 80 rows for a broad replay, at most 16,
-so each shard finishes inside the job's 180-minute limit. Train pushes select
-changed rows with `--diff origin/main`. Main pushes replay nothing: a commit
+per 120 rows for a train replay, one per 80 rows for a broad replay, at most 16
+(past that cap shards grow beyond those sizes), so each shard finishes inside
+the job's 180-minute limit. Train pushes select changed rows with
+`--diff origin/main`, or every row when there is no `origin/main` to compare
+against. Main pushes replay nothing: a commit
 reaches main only after its train's run replayed every touched row on that
 exact commit, which the pre-push hook and `scripts/train.sh` enforce. The
 nightly schedule at 03:23 UTC and manual runs replay all rows with `--broad`,

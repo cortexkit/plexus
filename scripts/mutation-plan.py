@@ -6,7 +6,8 @@ changed controls or prebuilds, followed by sorted-ID modulo sharding.
 
 Which rows run depends on the event:
 
-- A train push replays the rows its diff against origin/main touches. A commit
+- A train push replays the rows its diff against origin/main touches; with no
+  origin/main to compare against, every row counts as touched. A commit
   reaches main only after its train's run went green on that exact commit (the
   pre-push hook and scripts/train.sh both enforce this), so every touched row
   has already been replayed by the time main moves.
@@ -17,8 +18,8 @@ Which rows run depends on the event:
   run catches interactions between changes that no single train's diff selects.
 - Pull requests replay nothing; the mutation job also excludes them.
 
-The shard count grows with the selection so each shard stays well inside the
-mutation job's 180-minute limit.
+The shard count grows with the selection, up to MAX_SHARDS, so each shard stays
+well inside the mutation job's 180-minute limit.
 """
 import argparse
 import json
@@ -26,7 +27,7 @@ import math
 import subprocess
 import tomllib
 
-# Rows one shard replays at most. A diff or --all replay runs only each row's
+# Rows one shard aims to replay. A diff or --all replay runs only each row's
 # named tests. A --broad replay runs every test target of the row's package, so
 # a row takes longer and a shard gets fewer of them. Measured on GitHub's hosted
 # runners, one shard of 292 broad rows took 166 minutes, and shards of about 246
@@ -34,7 +35,10 @@ import tomllib
 # shard roughly half its time to spare.
 ROWS_PER_SHARD = 120
 BROAD_ROWS_PER_SHARD = 80
-# Upper bound on runners one CI run allocates for mutation proofs.
+# Upper bound on runners one CI run allocates for mutation proofs. Past
+# 16 x 80 broad rows or 16 x 120 plain rows, shards grow beyond the sizes above;
+# the full broad catalogue of 1,369 rows gives about 86 rows per shard, still
+# far below the measured limit.
 MAX_SHARDS = 16
 
 

@@ -192,9 +192,10 @@ esac
         self.assertEqual(planner.selected_rows({**current, 'prebuild':['build']}, current, set()), rows)
         self.assertEqual(planner.selected_rows({'control':rows + [{'id':'new'}]}, current, set()), [{'id':'new'}])
 
-    # A shard holds at most 120 plain rows or 80 broad ones, so each finishes
-    # inside the mutation job's 180-minute limit; the matrix names every shard
-    # and the total each one passes to `ckdev-mutate run --shard i/n`.
+    # Below the 16-shard cap, a shard holds at most 120 plain rows or 80 broad
+    # ones, so each finishes inside the mutation job's 180-minute limit; the
+    # matrix names every shard and the total each passes to
+    # `ckdev-mutate run --shard i/n`.
     def test_mutation_shards_are_sized_to_the_selection(self):
         planner = load_script('mutation-plan')
         rows = lambda count: [{"id": str(i)} for i in range(count)]
