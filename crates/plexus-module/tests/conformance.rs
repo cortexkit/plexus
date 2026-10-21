@@ -10,8 +10,11 @@
 mod bounded;
 #[path = "support/operator_confirmation.rs"]
 mod operator_confirmation_peer;
+#[path = "support/shell.rs"]
+mod shell;
 
 use bounded::recv_within;
+use shell::single_quoted;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1131,13 +1134,7 @@ async fn start_live_daemon_with(
     let connection_file_path = directory.join("subc-connection.json");
     let confirmation_file = directory.join("confirmation-peer.json");
     let confirmation_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let binary = ckdev_binary(
-        std::env::var_os("CARGO_BIN_EXE_ck-plexus")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ck-plexus")
-            }),
-    );
+    let binary = ckdev_binary(env!("CARGO_BIN_EXE_ck-plexus"));
     assert_eq!(
         binary.file_name().and_then(|name| name.to_str()),
         Some("ckdev-plexus")
@@ -1146,10 +1143,7 @@ async fn start_live_daemon_with(
     // The supervisor appends module CLI flags; the Rust test runner does not
     // accept those flags, so this wrapper selects only the vault fixture test.
     let vault_launcher = directory.join("vault-fixture.sh");
-    let test_binary = std::env::current_exe()
-        .unwrap()
-        .to_string_lossy()
-        .replace('\'', "'\\\"'\\\"'");
+    let test_binary = single_quoted(std::env::current_exe().unwrap());
     // Empty, or the line that removes the environment copy of the nonce
     // before a launcher execs its module.
     let unset_nonce = match nonce_handoff {
@@ -1158,24 +1152,22 @@ async fn start_live_daemon_with(
     };
     fs::write(
         &vault_launcher,
-        format!("{unset_nonce}exec '{test_binary}' --exact vault_route_fixture --nocapture\n"),
+        format!("{unset_nonce}exec {test_binary} --exact vault_route_fixture --nocapture\n"),
     )
     .unwrap();
     let entorhinal_launcher = directory.join("entorhinal-fixture.sh");
     fs::write(
         &entorhinal_launcher,
-        format!("{unset_nonce}exec '{test_binary}' --exact vault_route_fixture --nocapture\n"),
+        format!("{unset_nonce}exec {test_binary} --exact vault_route_fixture --nocapture\n"),
     )
     .unwrap();
     // Only the module's supervisor connection uses the fake confirmation peer.
     // The daemon publishes its key before this harness can publish the peer's
     // connection file, so the launcher waits with a bounded startup deadline.
     let launcher = directory.join("plexus-confirmation-peer.sh");
-    let quoted_binary = binary_path.to_string_lossy().replace('\'', "'\\\"'\\\"'");
-    let quoted_connection = confirmation_file
-        .to_string_lossy()
-        .replace('\'', "'\\\"'\\\"'");
-    fs::write(&launcher, format!("{unset_nonce}attempts=0\nwhile [ ! -f '{quoted_connection}' ]; do\n  attempts=$((attempts + 1))\n  [ \"$attempts\" -lt 3000 ] || exit 1\n  sleep 0.01\ndone\nexec '{quoted_binary}' --subc '{quoted_connection}'\n")).unwrap();
+    let quoted_binary = single_quoted(&binary_path);
+    let quoted_connection = single_quoted(&confirmation_file);
+    fs::write(&launcher, format!("{unset_nonce}attempts=0\nwhile [ ! -f {quoted_connection} ]; do\n  attempts=$((attempts + 1))\n  [ \"$attempts\" -lt 3000 ] || exit 1\n  sleep 0.01\ndone\nexec {quoted_binary} --subc {quoted_connection}\n")).unwrap();
     let plexus_program = PathBuf::from("/bin/sh");
     let plexus_args = json!([launcher]);
     let daemon_config_path = directory.join("subc.jsonc");
@@ -1989,13 +1981,7 @@ async fn every_shipped_manifest_is_reachable_through_the_operator_ceremony() {
     open_management_route(&mut client).await;
     drop(client);
 
-    let admin_binary = ckdev_binary(
-        std::env::var_os("CARGO_BIN_EXE_ck-plexus-admin")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ck-plexus-admin")
-            }),
-    );
+    let admin_binary = ckdev_binary(env!("CARGO_BIN_EXE_ck-plexus-admin"));
     assert_eq!(
         admin_binary.file_name().and_then(|name| name.to_str()),
         Some("ckdev-plexus-admin")
@@ -2127,13 +2113,7 @@ async fn descriptor_nonce_reaches_hello_provenance_and_a_later_vault_read() {
     open_management_route(&mut client).await;
     drop(client);
 
-    let admin_binary = ckdev_binary(
-        std::env::var_os("CARGO_BIN_EXE_ck-plexus-admin")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ck-plexus-admin")
-            }),
-    );
+    let admin_binary = ckdev_binary(env!("CARGO_BIN_EXE_ck-plexus-admin"));
     assert_eq!(
         admin_binary.file_name().and_then(|name| name.to_str()),
         Some("ckdev-plexus-admin")

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::shell::single_quoted;
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::consent_card::*;
 use plexus_core::scope::{CallScope, ScopeDescription, ScopeReadError, ScopeReader, ScopeStatus};
@@ -74,12 +75,9 @@ impl Daemon {
         let connection = scratch.join("connection.json");
         let home = scratch.join("home");
         fs::create_dir_all(&home).unwrap();
-        let executable = std::env::current_exe()
-            .unwrap()
-            .to_string_lossy()
-            .replace('\'', "'\"'\"'");
+        let executable = single_quoted(std::env::current_exe().unwrap());
         let launcher = scratch.join("module.sh");
-        fs::write(&launcher, format!("exec '{executable}' --exact consent_requester::cingulate_module_fixture --nocapture\n")).unwrap();
+        fs::write(&launcher, format!("exec {executable} --exact consent_requester::cingulate_module_fixture --nocapture\n")).unwrap();
         let module = |id: &str| {
             json!({"program":"/bin/sh", "args":[launcher], "reserved":true,
             "env":{"HOME":home, "XDG_DATA_HOME":home, "CONSENT_FIXTURE_CONNECTION":connection, "CONSENT_FIXTURE_ROOT":scratch.path(), "CONSENT_FIXTURE_MODULE":id}})
