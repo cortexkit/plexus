@@ -623,8 +623,13 @@ pub enum Availability {
     NeedsRegistration,
 }
 
+/// Maximum age, in seconds, of an observed MCP catalog when a manifest does
+/// not declare `defaults.catalog_ttl_s`. The catalog reconciler's own default
+/// refresh policy is built from this same value, so the two cannot drift.
+pub const DEFAULT_CATALOG_TTL_S: u64 = 24 * 60 * 60;
+
 fn default_catalog_ttl_s() -> u64 {
-    24 * 60 * 60
+    DEFAULT_CATALOG_TTL_S
 }
 
 /// A manifest together with the normalized JSON and its ingest hash.

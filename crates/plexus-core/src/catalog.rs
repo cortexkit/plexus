@@ -43,7 +43,7 @@ pub enum Freshness {
     Refreshed,
 }
 
-const DEFAULT_CATALOG_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const DEFAULT_CATALOG_TTL: Duration = Duration::from_secs(crate::manifest::DEFAULT_CATALOG_TTL_S);
 const S3_WRITE_CEILING: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -741,6 +741,8 @@ impl CatalogReconciler {
     }
 
     fn staleness_bound(&self, manifest: &AppManifest, severity: Severity) -> Duration {
+        // A manifest that omits `catalog_ttl_s` already gets the default through
+        // serde, so the policy TTL only applies when a manifest declares 0.
         let manifest_ttl = Duration::from_secs(manifest.defaults.catalog_ttl_s);
         let ttl = if manifest_ttl.is_zero() {
             self.policy.ttl
@@ -830,6 +832,26 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_STORE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// A manifest that omits `catalog_ttl_s` and the reconciler's default policy
+    /// both mean one day, and a manifest declaring 0 falls back to the policy.
+    #[test]
+    fn omitted_manifest_ttl_and_default_policy_ttl_are_both_one_day() {
+        let one_day = Duration::from_secs(86_400);
+        let manifest = test_manifest();
+        assert_eq!(manifest.defaults.catalog_ttl_s, 86_400, "one day");
+        assert_eq!(CatalogRefreshPolicy::default().ttl, one_day, "one day");
+        let (store, _path) = test_store();
+        let reconciler = CatalogReconciler::new(
+            store,
+            Arc::new(McpRemoteTransport::default()),
+            Default::default(),
+        );
+        assert_eq!(reconciler.staleness_bound(&manifest, Severity::S1), one_day);
+        let mut zero = manifest;
+        zero.defaults.catalog_ttl_s = 0;
+        assert_eq!(reconciler.staleness_bound(&zero, Severity::S2), one_day);
+    }
 
     #[test]
     fn test_endpoint_override_survives_connection_reload() {
