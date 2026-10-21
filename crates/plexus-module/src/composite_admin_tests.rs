@@ -2,8 +2,9 @@
 //! one operator confirmation: `add_write_connection`, `add_poll_connection`,
 //! `widen_and_grant` and `onboard_github_bot`. Each applied run asks exactly
 //! once and writes the rows the manual commands write; a declined or
-//! unavailable confirmation writes nothing and sends nothing to a vendor; a
-//! rerun reuses what exists and refuses what does not match.
+//! unavailable confirmation writes nothing and sends no vendor request beyond
+//! the GitHub listing an onboarding reads while planning; a rerun reuses what
+//! exists and refuses what does not match.
 
 use super::web_search_provider_admin_tests::{
     count, install, request, rows, snapshot, sql, state_with_endpoint, CountingVendor, Fixture,

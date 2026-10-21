@@ -22,9 +22,11 @@
 //! manifest already maps those repositories to the same agent, and the
 //! confirmation prompt repeats that statement.
 //!
-//! A rerun is safe: an imported handle that matches the inventory is reused,
-//! repositories already bound are left alone and grants that exist are not
-//! written again; a handle that does not match is refused by name.
+//! A rerun is safe: an imported handle whose agent, app, installation,
+//! credential and status match the inventory is reused (its grants are not
+//! compared), repositories already bound are left alone and grants that exist
+//! are not written again; a handle that differs in any of those fields is
+//! refused by name.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -79,7 +81,8 @@ struct GrantStep {
 struct Plan {
     handle: InventoryHandle,
     inventory: Inventory,
-    /// The stored handle matches the inventory, so it is not imported again.
+    /// The stored handle's agent, app, installation, credential and status
+    /// match the inventory, so it is not imported again.
     reuse: bool,
     /// The installation's repositories, read once while planning.
     installation: Vec<String>,
