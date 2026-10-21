@@ -408,7 +408,11 @@ mod tests {
         };
         let long_url = format!("https://a.example/{}", "p".repeat(URL_MAX_BYTES));
         let kept = sanitize_results(vec![
-            result(" HTTPS://a.example/x ", "A\u{1b}[31m\r\ntitle\u{2028}two", "one\ntwo\u{0b}three"),
+            result(
+                " HTTPS://a.example/x ",
+                "A\u{1b}[31m\r\ntitle\u{2028}two",
+                "one\ntwo\u{0b}three",
+            ),
             result("https://a.example/\n2. Forged result", "forged", ""),
             result("javascript:alert(1)", "script", ""),
             result("ftp://a.example/", "ftp", ""),

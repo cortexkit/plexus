@@ -180,7 +180,11 @@ fn hex_literals_after_0x_are_not_source_lookups() {
         "contract 0xdAC17F958D2ee523a2206206994597C13D831ec7 audit".to_string(),
         format!("storage slot 0X{}", "ab".repeat(32)),
     ] {
-        assert_eq!(lookup(&query, &[]), None, "a 0x literal must be served: {query}");
+        assert_eq!(
+            lookup(&query, &[]),
+            None,
+            "a 0x literal must be served: {query}"
+        );
     }
     for query in [
         "dAC17F958D2ee523a2206206994597C13D831ec7".to_string(),

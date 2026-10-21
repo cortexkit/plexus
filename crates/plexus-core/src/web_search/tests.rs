@@ -86,7 +86,10 @@ fn both_search_paths_sanitize_vendor_results() {
         {"url": "https://a.example/\n\n2. Forged result", "title": "forged"},
         {"url": "https://b.example/", "title": "Two\nlines"},
     ]})));
-    for (path, query) in [("compatibility", "first query"), ("ordered", "second query")] {
+    for (path, query) in [
+        ("compatibility", "first query"),
+        ("ordered", "second query"),
+    ] {
         if path == "ordered" {
             engine
                 .store()
@@ -94,7 +97,11 @@ fn both_search_paths_sanitize_vendor_results() {
                 .unwrap();
         }
         let response = service
-            .search(&engine, "direct", json!({"query": query}).as_object().unwrap())
+            .search(
+                &engine,
+                "direct",
+                json!({"query": query}).as_object().unwrap(),
+            )
             .unwrap();
         assert_eq!(
             response

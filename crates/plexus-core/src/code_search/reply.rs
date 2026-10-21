@@ -391,10 +391,8 @@ pub(super) mod tests {
     #[test]
     fn header_shaped_code_lines_stay_code() {
         let text = "Repository: o/r\nPath: notes.md\n--- Snippet 1 (Line 1) ---\nintro\n--- Snippet 1 (Line 900) ---\n--- Snippet notes\nbody\n\n\n--- Snippet 2 (Line 50) ---\nlater";
-        let response =
-            parse_reply(&json!({"content":[{"type":"text","text":text}]})).expect(
-                "a header-shaped line in a public file must not fail the whole reply",
-            );
+        let response = parse_reply(&json!({"content":[{"type":"text","text":text}]}))
+            .expect("a header-shaped line in a public file must not fail the whole reply");
         assert_eq!(
             response.matches[0]
                 .lines

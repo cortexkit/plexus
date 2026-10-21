@@ -32,7 +32,9 @@ pub(super) fn classify(
                 None
             } else {
                 return match backend.map_reply(body, max_results, fetched_at_ms) {
-                    Ok(results) => Classified::Serve(crate::web_search::backend::sanitize_results(results)),
+                    Ok(results) => {
+                        Classified::Serve(crate::web_search::backend::sanitize_results(results))
+                    }
                     Err(_) => Classified::MoveOn {
                         reason: SkipReason::Unavailable,
                         cooldown_ms: UNAVAILABLE_COOLDOWN_MS,
