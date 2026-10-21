@@ -9015,7 +9015,7 @@ package = "plexus-module"
 target = "--lib"
 select = "expected"
 expect_red = ["consent_capacity_tests::newly_filed_consent_waits_yield_slots_for_search_and_bot_write", "consent_capacity_tests::recalled_consent_waits_yield_slots_for_search_and_bot_write"]
-expect_message = "unrelated work must complete while 32 approvals wait"
+expect_message = "unrelated work must complete while approvals wait"
 build_timeout_s = 3600
 
 [[control]]
