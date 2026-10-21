@@ -7644,13 +7644,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
-            "fixture {test} did not run exactly one test: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+        crate::test_support::assert_exactly_one_test_passed(test, &output);
         String::from_utf8(output.stderr).expect("UTF-8 stderr")
     }
 

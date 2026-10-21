@@ -1366,6 +1366,10 @@ pub mod tests {
                     "{}",
                     String::from_utf8_lossy(&output.stderr)
                 );
+                crate::test_support::assert_exactly_one_test_passed(
+                    "bus::tests::trace_loopback_never_logs_jwt",
+                    &output,
+                );
             }
             return;
         }

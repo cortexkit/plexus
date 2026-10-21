@@ -1570,6 +1570,10 @@ async fn relay_credential_never_appears_in_logs_even_with_transport_trace() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        crate::test_support::assert_exactly_one_test_passed(
+            "relay::tests::relay_credential_never_appears_in_logs_even_with_transport_trace",
+            &output,
+        );
         return;
     }
     let scratch = Scratch::database("relay-log");

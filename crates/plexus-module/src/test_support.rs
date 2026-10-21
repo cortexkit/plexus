@@ -139,3 +139,20 @@ fn loopback_proxy_detection_follows_the_client_rules() {
         None
     );
 }
+
+/// Fail unless `output`, from re-running this test binary with
+/// `--exact <test>`, shows that exactly one test ran and passed.
+///
+/// `--exact` with a name that matches nothing runs zero tests and exits 0. A
+/// parent whose own checks are only absences (no secret in the log) would then
+/// pass without its scenario ever running, for example after the test or its
+/// module is renamed.
+pub(crate) fn assert_exactly_one_test_passed(test: &str, output: &std::process::Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
+        "child run of {test} did not run exactly one test, or it did not pass: {stdout}"
+    );
+}
