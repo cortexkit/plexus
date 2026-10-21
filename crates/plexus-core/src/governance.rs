@@ -4937,17 +4937,19 @@ fn resource_denial(
         .unwrap_or_default();
     // A missing argument must not let vendor defaults escape an allowlist.
     // Dot-delimited paths use the same convention as manifest filter keys.
-    if is_write(&action.risk) {
-        if write_enabling.is_empty() {
-            return Some(ResourceDenial::WriteFiltersAbsent);
-        }
-        for key in required.iter().chain(write_enabling.iter()) {
-            let Some(value) = resource_path(args, key) else {
-                return Some(ResourceDenial::MissingRequiredFilter((*key).to_string()));
-            };
-            if value.is_null() || (value.as_str() == Some("")) {
-                return Some(ResourceDenial::MissingRequiredFilter((*key).to_string()));
-            }
+    // `required` names the resource every call must target, so it binds reads
+    // as well as writes; `write_enabling` keys gate writes only.
+    let write = is_write(&action.risk);
+    if write && write_enabling.is_empty() {
+        return Some(ResourceDenial::WriteFiltersAbsent);
+    }
+    let enabling: &[&str] = if write { &write_enabling } else { &[] };
+    for key in required.iter().chain(enabling.iter()) {
+        let Some(value) = resource_path(args, key) else {
+            return Some(ResourceDenial::MissingRequiredFilter((*key).to_string()));
+        };
+        if value.is_null() || (value.as_str() == Some("")) {
+            return Some(ResourceDenial::MissingRequiredFilter((*key).to_string()));
         }
     }
     if let Some(values) = filters

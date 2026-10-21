@@ -130,11 +130,19 @@ pub struct CredentialBinding {
     pub required: bool,
 }
 
+/// Argument keys a connection's operator filters constrain. Governance refuses a
+/// call with `MissingRequiredFilter` when a key it must carry is absent, null or
+/// empty, and with `ValueNotAllowed` when a present key falls outside the
+/// connection's `values` allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceFilters {
+    /// Keys every call must carry, reads and writes alike: each names the
+    /// resource the call targets, so omitting one would let the vendor choose
+    /// its own default scope.
     pub required: Vec<String>,
     pub optional: Vec<String>,
+    /// Keys writes must carry in addition to `required`. Reads ignore them.
     pub write_enabling: Vec<String>,
 }
 

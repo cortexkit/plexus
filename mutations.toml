@@ -11976,6 +11976,22 @@ build_timeout_s = 3600
 timeout_s = 120
 
 [[control]]
+id = "governance-read-required-key"
+guards = "A read omitting a connection's required filter key is refused rather than reaching the vendor's default scope; required binds reads as well as writes"
+file = "crates/plexus-core/src/governance.rs"
+old = "for key in required.iter().chain(enabling.iter()) {"
+new = "for key in required.iter().filter(|_| write).chain(enabling.iter()) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/governance.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test governance"
+select = "expected"
+expect_red = ["read_omitting_required_filter_key_is_refused"]
+expect_message = "must not reach the vendor's default scope"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "governance-consent-pending-backoff"
 guards = "An immediate pending consent reply cannot spin a held call's RPC loop"
 file = "crates/plexus-core/src/consent_card.rs"

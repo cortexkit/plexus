@@ -81,13 +81,15 @@ fn seed(
     let (store, path) = test_store(label);
     let principal = "direct";
     let connection = "conn-1";
+    // `team` gates writes only: `required` would bind reads too, and the read
+    // tests seeded here send no team. Writes still refuse a missing team.
     store
         .insert_connection(
             principal,
             connection,
             "mock",
             "pending",
-            &json!({"required": ["team"], "write_enabling": ["team"]}),
+            &json!({"required": [], "write_enabling": ["team"]}),
         )
         .expect("insert connection");
     let handle = b"test:canary-binding-handle";
@@ -2056,6 +2058,55 @@ fn read_omitting_allowlisted_filter_key_is_refused() {
     let _ = fs::remove_file(path);
 }
 
+/// A key the operator marked `required` names the resource every call must
+/// target, so a read that omits it, or sends it empty, is refused instead of
+/// letting the vendor pick a default scope. A `write_enabling` key still gates
+/// writes only: a read without it passes.
+#[test]
+fn read_omitting_required_filter_key_is_refused() {
+    let (engine, path) = seed("read-omit-required-key");
+    engine
+        .store()
+        .set_connection_filters(
+            "direct",
+            "conn-1",
+            &json!({
+                "required": ["workspace"],
+                "optional": [],
+                "write_enabling": ["team"],
+            }),
+        )
+        .expect("set filters");
+    add_action_with_policy(&engine, "list_events", "read", "allow", "read");
+    for args in [
+        json!({}),
+        json!({"workspace": null}),
+        json!({"workspace": ""}),
+    ] {
+        assert_eq!(
+            engine.authorize(AuthorizationRequest::new(
+                "direct",
+                "conn-1",
+                "list_events",
+                args.clone()
+            )),
+            Err(Denial::ResourceFilter(
+                ResourceDenial::MissingRequiredFilter("workspace".into())
+            )),
+            "a read sending {args} must not reach the vendor's default scope"
+        );
+    }
+    engine
+        .authorize(AuthorizationRequest::new(
+            "direct",
+            "conn-1",
+            "list_events",
+            json!({"workspace": "acme"}),
+        ))
+        .expect("a read naming its required resource, without the write-only key, passes");
+    let _ = fs::remove_file(path);
+}
+
 #[test]
 fn write_still_requires_required_and_write_enabling_filter_keys() {
     let (engine, path) = seed("write-filter-keys");
@@ -3127,7 +3178,7 @@ fn configure_refuses_a_key_it_does_not_read() {
         .resource_filters;
     assert_eq!(
         stored,
-        json!({"required": ["team"], "write_enabling": ["team"]}),
+        json!({"required": [], "write_enabling": ["team"]}),
         "a refused configure must leave the previous filters exactly as they were"
     );
 
