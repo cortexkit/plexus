@@ -4,8 +4,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-#[cfg(test)]
-use std::io::BufRead;
 use std::io::{BufReader, Read};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{
@@ -2335,57 +2333,44 @@ mod transport_integration_tests {
     #[test]
     fn sse_matching_answer_finishes_without_waiting_for_stream_eof() {
         use std::io::Write;
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
-        let (release, wait) = std::sync::mpsc::channel();
-        let worker = thread::spawn(move || {
-            for index in 0..3 {
-                let (mut socket, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(socket.try_clone().unwrap());
-                let mut length = 0;
-                loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        length = value.trim().parse().unwrap();
-                    }
-                    if line == "\r\n" {
-                        break;
-                    }
-                }
-                let mut bytes = vec![0; length];
-                reader.read_exact(&mut bytes).unwrap();
-                let body: Value = serde_json::from_slice(&bytes).unwrap();
-                if index == 1 {
-                    socket
-                        .write_all(notification_response().as_bytes())
-                        .unwrap();
-                    continue;
-                }
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        // The shared fixture bounds every accept and read, so a client that
+        // sends fewer than three requests fails at join instead of hanging.
+        let (base, server) = crate::test_http::FixedRequestServer::start_writing(
+            3,
+            "MCP SSE",
+            Duration::from_secs(6),
+            move |index, wire, socket| {
+                let body: Value =
+                    serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
                 if index == 0 {
-                    socket
-                        .write_all(
-                            response(200, &json!({"id":body["id"],"result":{}}).to_string(), "")
-                                .as_bytes(),
-                        )
-                        .unwrap();
-                    continue;
+                    let _ = socket.write_all(
+                        response(200, &json!({"id":body["id"],"result":{}}).to_string(), "")
+                            .as_bytes(),
+                    );
+                    return;
+                }
+                if index == 1 {
+                    let _ = socket.write_all(notification_response().as_bytes());
+                    return;
                 }
                 let event = format!("data: {{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}}\n\ndata: {}\n\n", json!({"id":body["id"],"result":{"ok":true}}));
-                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{event}\r\n", event.len()).as_bytes()).unwrap();
-                socket.flush().unwrap();
+                let _ = socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{event}\r\n", event.len()).as_bytes());
+                let _ = socket.flush();
+                // Hold the stream open, with no terminating chunk, until the
+                // client has its answer: a client that waited for end of
+                // stream would hit its request timeout first.
                 let _ = wait.recv_timeout(Duration::from_secs(3));
-            }
-        });
-        let mut cfg = config(endpoint);
+            },
+        );
+        let mut cfg = config(format!("{base}/mcp"));
         cfg.request_timeout = Duration::from_millis(500);
         let result = McpRemoteTransport::new(cfg).dispatch(
             request("stream", "read_tool"),
             &ResolvedCredential::anonymous(),
         );
         let _ = release.send(());
-        worker.join().unwrap();
+        server.join().unwrap();
         assert_eq!(
             result
                 .response

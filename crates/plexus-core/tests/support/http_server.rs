@@ -3,7 +3,7 @@
 use crate::bounded;
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +35,24 @@ impl FixedRequestServer {
     ) -> (String, Self)
     where
         F: Fn(usize, &str) -> String + Send + 'static,
+    {
+        Self::start_writing(expected, label, join_wait, move |index, request, socket| {
+            let _ = socket.write_all(handler(index, request).as_bytes());
+        })
+    }
+
+    /// Like [`Self::start_with_deadline`], but the handler writes its own
+    /// reply to the accepted socket. For replies that are not one complete
+    /// response, such as a stream the handler keeps open until the test lets
+    /// it go. The socket closes when the handler returns.
+    pub fn start_writing<F>(
+        expected: usize,
+        label: &'static str,
+        join_wait: Duration,
+        handler: F,
+    ) -> (String, Self)
+    where
+        F: Fn(usize, &str, &mut TcpStream) + Send + 'static,
     {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
         let address = listener.local_addr().unwrap();
@@ -105,8 +123,7 @@ impl FixedRequestServer {
                     request.push_str(&String::from_utf8_lossy(&body));
                     drop(reader);
                     received.fetch_add(1, Ordering::SeqCst);
-                    let response = handler(index, &request);
-                    let _ = socket.write_all(response.as_bytes());
+                    handler(index, &request, &mut socket);
                 }
                 Ok(())
             })
