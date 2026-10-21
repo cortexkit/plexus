@@ -343,10 +343,11 @@ impl WebSearchService {
         match outcome {
             // A cache hit writes no engine rows, so its search row is the only
             // record that the governed read happened. Served without it, the
-            // read would leave no audit trail, so it is withheld. Nothing was
-            // sent and nothing charged back; a retry once the store recovers
-            // serves the same entry. A dispatched search keeps the engine's
-            // own rows as its record and is still returned.
+            // read would leave no audit trail, so it is withheld. No vendor
+            // request was sent; the rate-limit charge for the call stands. A
+            // retry once the store recovers can serve the same entry, if it
+            // passes the checks and the rate limit again. A dispatched search
+            // keeps the engine's own rows as its record and is still returned.
             Ok(response) if response.cached && recorded.is_err() => {
                 eprintln!(error web_search:
                     "web_search cache hit for {} on {:?} withheld: its audit row could not be written",

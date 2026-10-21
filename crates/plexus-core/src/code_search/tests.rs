@@ -511,9 +511,9 @@ fn flow_without_a_grant_gets_a_typed_grant_refusal() {
     assert!(f.transport.requests().is_empty());
 }
 
-/// A quarantine governance meets while authorizing (the action was
-/// quarantined after the preflight read it) is reported as a quarantine, as
-/// an invoke would report it, not as an unavailable backend.
+/// A quarantine denial from authorization (reachable when the action is
+/// quarantined after the preflight read it) maps to the quarantine refusal,
+/// as an invoke would report it, not to an unavailable backend.
 #[test]
 fn quarantine_met_at_authorize_is_backend_quarantined() {
     let denial = crate::governance::Denial::Catalog(crate::governance::CatalogDenial::Quarantined);

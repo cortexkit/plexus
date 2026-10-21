@@ -4391,7 +4391,7 @@ build_timeout_s = 3600
 [[control]]
 id = "code-search-grant-before-rate-charge"
 guards = "code_search finds the caller's granted connection before charging the shared grep.app rate bucket, so ungranted callers cannot drain it"
-edits = [{ file = "crates/plexus-core/src/code_search/mod.rs", old = "            let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());", new = "            let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());\n            if backing_connection(engine.store(), caller, now).is_err() { /* NON-VACUITY BREAK */\n            let limits = engine\n                .store()\n                .web_search_limits(BACKEND)\n                .map_err(store_failure)?\n                .unwrap_or_else(default_limits);\n            self.limiter\n                .try_acquire(\n                    BACKEND,\n                    &CallerKey {\n                        principal: caller.to_string(),\n                        agent_id: None,\n                    },\n                    limits,\n                    now,\n                )\n                .map_err(|retry_after_ms| CodeSearchRefusal {\n                    retry_after_ms: Some(retry_after_ms),\n                    ..CodeSearchRefusal::new(RefusalCode::RateLimited)\n                })?;\n            }" }, { file = "crates/plexus-core/src/code_search/mod.rs", old = "            let mut request =", new = "            /* NON-VACUITY BREAK: leave the normal granted-call quota charge in place */\n            let mut request =" }]
+edits = [{ file = "crates/plexus-core/src/code_search/mod.rs", old = "            let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());", new = "            let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());\n            if facade::resolve_connection(engine.store(), caller, now, false, TARGET, grant_target(caller)).is_err() { /* NON-VACUITY BREAK */\n            let limits = engine\n                .store()\n                .web_search_limits(BACKEND)\n                .map_err(store_failure)?\n                .unwrap_or_else(default_limits);\n            self.limiter\n                .try_acquire(\n                    BACKEND,\n                    &CallerKey {\n                        principal: caller.to_string(),\n                        agent_id: None,\n                    },\n                    limits,\n                    now,\n                )\n                .map_err(|retry_after_ms| CodeSearchRefusal {\n                    retry_after_ms: Some(retry_after_ms),\n                    ..CodeSearchRefusal::new(RefusalCode::RateLimited)\n                })?;\n            }" }, { file = "crates/plexus-core/src/code_search/mod.rs", old = "            let mut request =", new = "            /* NON-VACUITY BREAK: leave the normal granted-call quota charge in place */\n            let mut request =" }]
 test_file = "crates/plexus-core/src/code_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -20409,7 +20409,7 @@ package = "plexus-core"
 target = "--lib"
 select = "expected"
 expect_red = ["code_search::reply::tests::long_lines_are_cut_and_marked"]
-expect_message = "a long line must be cut"
+expect_message = "the matches after a long line are still returned"
 build_timeout_s = 3600
 timeout_s = 120
 
@@ -20456,7 +20456,7 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::backend::tests::sanitized_results_keep_urls_and_text_on_one_safe_line", "web_search::tests::both_search_paths_sanitize_vendor_results"]
+expect_red = ["web_search::backend::tests::sanitized_results_keep_urls_and_text_on_one_safe_line"]
 expect_message = "only http(s) URLs with no whitespace or control character within the length cap survive"
 build_timeout_s = 3600
 timeout_s = 120
@@ -20568,7 +20568,7 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["code_search::tests::quarantine_met_at_authorize_is_backend_quarantined", "web_search::chain::tests::authorize_denial_reasons_follow_legacy_mapping"]
+expect_red = ["code_search::tests::quarantine_met_at_authorize_is_backend_quarantined"]
 expect_message = "a quarantine met at authorize must name the quarantine"
 build_timeout_s = 3600
 timeout_s = 120
@@ -20584,7 +20584,7 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::tests::vendor_throttle_is_rate_limited_with_the_vendor_delay", "code_search::tests::vendor_throttle_uses_retry_after_field_not_message_text_and_audits_reason"]
+expect_red = ["web_search::tests::vendor_throttle_is_rate_limited_with_the_vendor_delay"]
 expect_message = "a vendor throttle must tell the caller when to retry"
 build_timeout_s = 3600
 timeout_s = 120

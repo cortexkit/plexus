@@ -92,7 +92,7 @@ pub(crate) const DEFAULT_VENDOR_RETRY_AFTER_MS: u64 = 30_000;
 /// The one connection that backs a search for `caller`, with its catalog
 /// action. Candidates are resolved through `connection_for_invoke`, the same
 /// owner resolution the governance engine applies, so the connection checked
-/// here is the one `authorize` will load. A candidate counts only if the
+/// here is the one `authorize` will resolve (and reload, re-checking it). A candidate counts only if the
 /// caller's module grant on it admits the action. With no eligible candidate,
 /// a flow gets a typed grant refusal naming `grant_target` and the cause the
 /// last refused grant gave; any other caller gets `NotGranted`.

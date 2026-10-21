@@ -51,9 +51,10 @@ const TITLE_MAX_CHARS: usize = 300;
 
 /// Make vendor results safe to show a model, whichever backend mapped them.
 ///
-/// Titles, URLs and excerpts come from arbitrary web pages. A result is
-/// dropped unless its URL is http or https with no whitespace or control
-/// character and at most [`URL_MAX_BYTES`] long: the URL is rendered into the
+/// Titles, URLs and excerpts come from arbitrary web pages. After surrounding
+/// whitespace is trimmed, a result is dropped unless its URL is http or https
+/// with no remaining whitespace or control character and at most
+/// [`URL_MAX_BYTES`] long: the URL is rendered into the
 /// model's text as is, so a line break in it could forge extra results. Titles
 /// are put on one line (control and line-separator characters become spaces,
 /// runs of whitespace one space) and capped at [`TITLE_MAX_CHARS`]. Excerpts

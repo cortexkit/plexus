@@ -92,8 +92,9 @@ pub fn parse_reply(body: &Value) -> Result<CodeSearchResponse, &'static str> {
         'lines: for line in lines {
             // The format carries snippet headers in-band with public file
             // content, so a header counts only where grep.app puts one: before
-            // the first snippet, or right after a blank separator line.
-            // Anything else, malformed or not, is a line of code.
+            // the first snippet, or right after a blank separator line. Once a
+            // snippet has started, anything else, malformed or not, is a line
+            // of code; text before the first header is skipped.
             if number.is_none() || !pending.is_empty() {
                 if let Some(first) = snippet_header(line) {
                     pending.clear();
@@ -420,6 +421,11 @@ pub(super) mod tests {
             {"type":"text","text":"Repository: o/r\nPath: b.rs\n--- Snippet 1 (Line 7) ---\nfn b() {}"},
         ]});
         let response = parse_reply(&body).unwrap();
+        assert_eq!(
+            response.matches.len(),
+            2,
+            "the matches after a long line are still returned"
+        );
         let cut = &response.matches[0].lines[0].text;
         assert!(
             cut.len() <= MAX_LINE_BYTES && cut.ends_with(LINE_CUT_MARKER),
@@ -427,10 +433,5 @@ pub(super) mod tests {
             cut.len()
         );
         assert!(response.truncated, "a cut line marks the reply truncated");
-        assert_eq!(
-            response.matches.len(),
-            2,
-            "the matches after a long line are still returned"
-        );
     }
 }

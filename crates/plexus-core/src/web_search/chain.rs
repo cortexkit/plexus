@@ -168,8 +168,9 @@ impl WebSearchService {
 
     /// Checks 3-5: connection health, action status, then policy and per-call
     /// approval, in the order governance itself checks them. A cache hit must
-    /// pass these too; cooldown, allowance and the deadline only govern
-    /// contacting the vendor, so they are kept apart.
+    /// pass these too; cooldown, the monthly allowance and the deadline only
+    /// govern contacting the vendor, so they are kept apart. (The rate limiter
+    /// is separate: an eligible cache hit is still charged against it.)
     fn standing_checks(
         &self,
         store: &PlexusStore,
