@@ -933,6 +933,54 @@ pub struct Reservation {
     pub approval_scope: Option<ApprovalScope>,
 }
 
+impl AuditRecord {
+    /// An audit row about a reservation, with the fields every such row records
+    /// the same way: owner, caller, agent, connection, app key, action and
+    /// request id, plus the given decision, reason code and gate. The bound
+    /// handle is recorded as the app handle only for facade calls, where it is
+    /// the app's own identity; for other calls it is only the agent's handle.
+    /// Risk, severity, outcome and the remaining fields are left unset for the
+    /// caller to fill.
+    pub fn for_reservation(
+        reservation: &Reservation,
+        decision: &str,
+        reason_code: &str,
+        gate: &str,
+    ) -> Self {
+        Self {
+            principal: reservation.principal.clone(),
+            actor: reservation.actor.clone(),
+            acting_principal: reservation.acting_principal.clone(),
+            agent_id: reservation.attributed_agent_id.clone(),
+            app_handle_id: if reservation.origin == RequestOrigin::Facade {
+                reservation.bound_agent_handle.clone()
+            } else {
+                None
+            },
+            agent_handle: reservation.bound_agent_handle.clone(),
+            connection_id: Some(reservation.connection_id.clone()),
+            app_key: Some(reservation.app_key.clone()),
+            action: Some(reservation.action.clone()),
+            risk: None,
+            severity: None,
+            decision: decision.to_string(),
+            reason_code: reason_code.to_string(),
+            gate: Some(gate.to_string()),
+            args_redaction_summary: None,
+            outcome: None,
+            latency_ms: None,
+            request_id: Some(reservation.request_id.clone()),
+            credential_fingerprint: None,
+            provider_account_fingerprint: None,
+            attempt_no: None,
+            vendor_request_id: None,
+            idempotency_key_fingerprint: None,
+            response_class: None,
+            reconciliation_of: None,
+        }
+    }
+}
+
 /// A grant selector distinguishes module rows from agent-specific rows.
 /// An agent-specific grant never substitutes for a module grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1056,7 +1104,37 @@ pub struct AuthorityBaseline {
     pub policy_effect_hash: String,
 }
 
+/// Hash of the policy state an authority baseline pins: the module policy's
+/// stored effect (absent when no module policy row exists), the agent policy's
+/// effect, and the catalog action's ask_first flag. Facade receipts persist
+/// this value, so its inputs and their order must not change.
+pub fn policy_effect_hash(
+    module_effect: Option<&str>,
+    agent_effect: Option<&str>,
+    ask_first: bool,
+) -> Result<String, jcs::JcsError> {
+    jcs::jcs_sha256(&serde_json::json!([module_effect, agent_effect, ask_first]))
+}
+
+/// Each authority dimension's baseline field and the refusal it produces, in
+/// the order they are checked: the first changed dimension names the refusal.
+/// [`compare_authority_baseline`] checks these on typed values, and the GitHub
+/// facade checks them on the JSON baseline it persisted in a receipt.
+pub(crate) const AUTHORITY_DIMENSIONS: [(&str, &str); 7] = [
+    ("handle_enabled", "handle_disabled"),
+    ("repo_binding_generation", "repository_rebound"),
+    ("agent_grant_generation", "agent_grant_revoked"),
+    ("module_grant_generation", "module_grant_revoked"),
+    ("policy_effect_hash", "policy_changed"),
+    ("credential_generation", "credential_rotated"),
+    ("app_handle_generation", "handle_row_changed"),
+];
+
 /// The first changed dimension determines the refusal even when several move.
+///
+/// This compares live typed baselines and refuses a disabled handle whatever
+/// was captured; the facade's receipt check compares persisted JSON instead,
+/// where any difference, including a key the stored row lacks, refuses.
 pub fn compare_authority_baseline(
     original: &AuthorityBaseline,
     current: &AuthorityBaseline,
@@ -1550,11 +1628,11 @@ where
         let (agent_grant_generation, module_grant_generation) =
             seams.grant_generations(connection, &request.principal, agent_id, &request.action)?;
         let inputs = seams.policy_inputs(connection, agent_id, action)?;
-        let policy_effect_hash = jcs::jcs_sha256(&serde_json::json!([
-            inputs.module_effect,
-            inputs.agent_effect,
+        let policy_effect_hash = policy_effect_hash(
+            inputs.module_effect.as_deref(),
+            inputs.agent_effect.as_deref(),
             action.ask_first,
-        ]))
+        )
         .map_err(|_| Denial::StoreFailure)?;
         Ok(AuthorityBaseline {
             app_handle_generation: handle.app_handle_generation,
@@ -3521,35 +3599,28 @@ where
         let detail = last_error
             .map(|error| error.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        if let Err(error) = self.store.append_audit(&AuditRecord { principal: reservation.principal.clone(),
-        actor: reservation.actor.clone(),
-        acting_principal: reservation.acting_principal.clone(),
-        agent_id: reservation.attributed_agent_id.clone(), app_handle_id: if reservation.origin == RequestOrigin::Facade { reservation.bound_agent_handle.clone() } else { None }, agent_handle: reservation.bound_agent_handle.clone(), connection_id: Some(reservation.connection_id.clone()),
-        app_key: Some(reservation.app_key.clone()),
-        action: Some(reservation.action.clone()),
-        risk: Some(risk_str(reservation.risk).to_string()),
-        severity: Some(reservation.severity.as_str().to_string()),
-        decision: if matches!(report.terminal, OutcomeTerminal::Executed { .. } | OutcomeTerminal::OutcomeUnknown { .. }) { "allow" } else { "deny" }.to_string(),
-        reason_code: "outcome_report_failed".to_string(),
-        gate: Some("decision_plane".to_string()),
-        args_redaction_summary: Some(format!("decision_id:{decision_id}; detail:{detail}")),
-        outcome: Some("report_failed".to_string()),
-        latency_ms: None,
-        request_id: Some(reservation.request_id.clone()),
-        credential_fingerprint: Some(reservation.credential_fingerprint.clone()),
-        provider_account_fingerprint: None,
-        attempt_no: Some(attempts),
-        vendor_request_id: None,
-        idempotency_key_fingerprint: reservation.receipt.as_ref().and_then(|claim| {
-            self.store
-                .github_receipt(&claim.agent_id, &claim.request_nonce)
-                .inspect_err(|error| eprintln!(error governance: "receipt fingerprint unreadable: {error}"))
-                .ok()
-                .flatten()
-                .map(|row| row.request_fingerprint)
-        }),
-        response_class: None,
-        reconciliation_of: None, }) {
+        if let Err(error) = self.store.append_audit(&AuditRecord {
+            risk: Some(risk_str(reservation.risk).to_string()),
+            severity: Some(reservation.severity.as_str().to_string()),
+            args_redaction_summary: Some(format!("decision_id:{decision_id}; detail:{detail}")),
+            outcome: Some("report_failed".to_string()),
+            credential_fingerprint: Some(reservation.credential_fingerprint.clone()),
+            attempt_no: Some(attempts),
+            idempotency_key_fingerprint: self.receipt_request_fingerprint(reservation),
+            ..AuditRecord::for_reservation(
+                reservation,
+                if matches!(
+                    report.terminal,
+                    OutcomeTerminal::Executed { .. } | OutcomeTerminal::OutcomeUnknown { .. }
+                ) {
+                    "allow"
+                } else {
+                    "deny"
+                },
+                "outcome_report_failed",
+                "decision_plane",
+            )
+        }) {
             eprintln!(error governance: "audit append failed: outcome_report_failed principal={:?} actor={:?} request_id={:?}: {error}", reservation.principal, reservation.actor, reservation.request_id);
         }
         outcome
@@ -4501,24 +4572,8 @@ where
     ) {
         if let Err(error) = self.store.append_audit_relayed(
             &AuditRecord {
-                principal: reservation.principal.clone(),
-                actor: reservation.actor.clone(),
-                acting_principal: reservation.acting_principal.clone(),
-                agent_id: reservation.attributed_agent_id.clone(),
-                app_handle_id: if reservation.origin == RequestOrigin::Facade {
-                    reservation.bound_agent_handle.clone()
-                } else {
-                    None
-                },
-                agent_handle: reservation.bound_agent_handle.clone(),
-                connection_id: Some(reservation.connection_id.clone()),
-                app_key: Some(reservation.app_key.clone()),
-                action: Some(reservation.action.clone()),
                 risk: Some(risk_str(reservation.risk).to_string()),
                 severity: Some(reservation.severity.as_str().to_string()),
-                decision: "deny".to_string(),
-                reason_code: reason.to_string(),
-                gate: Some("dispatch".to_string()),
                 args_redaction_summary: Some(self.recipient_audit_summary(
                     &reservation.approved_args_hash,
                     Some(&reservation.app_key),
@@ -4526,15 +4581,9 @@ where
                     &reservation.approved_args,
                 )),
                 outcome: Some("not_sent".to_string()),
-                latency_ms: None,
-                request_id: Some(reservation.request_id.clone()),
                 credential_fingerprint: Some(credential_fingerprint.to_string()),
-                provider_account_fingerprint: None,
                 attempt_no: Some(1),
-                vendor_request_id: None,
-                idempotency_key_fingerprint: None,
-                response_class: None,
-                reconciliation_of: None,
+                ..AuditRecord::for_reservation(reservation, "deny", reason, "dispatch")
             },
             reservation.scope.as_ref(),
             reservation.relay_origin.as_ref(),
@@ -4565,6 +4614,22 @@ where
         )
     }
 
+    /// The request fingerprint of the GitHub receipt a reservation claimed, for
+    /// the audit row's idempotency column. An unreadable receipt is logged and
+    /// leaves the column empty rather than failing the audit write.
+    fn receipt_request_fingerprint(&self, reservation: &Reservation) -> Option<String> {
+        reservation.receipt.as_ref().and_then(|claim| {
+            self.store
+                .github_receipt(&claim.agent_id, &claim.request_nonce)
+                .inspect_err(
+                    |error| eprintln!(error governance: "receipt fingerprint unreadable: {error}"),
+                )
+                .ok()
+                .flatten()
+                .map(|row| row.request_fingerprint)
+        })
+    }
+
     fn audit_dispatch_result(&self, reservation: &Reservation, response: &TransportResponse) {
         let outcome = match response.transmission {
             TransmissionState::NotSent => "not_sent",
@@ -4578,40 +4643,23 @@ where
             TransmissionState::OutcomeUnknown => "unknown",
         };
         if let Err(error) = self.store.append_audit_relayed(
-            &AuditRecord { principal: reservation.principal.clone(),
-            actor: reservation.actor.clone(),
-            acting_principal: reservation.acting_principal.clone(),
-            agent_id: reservation.attributed_agent_id.clone(), app_handle_id: if reservation.origin == RequestOrigin::Facade { reservation.bound_agent_handle.clone() } else { None }, agent_handle: reservation.bound_agent_handle.clone(), connection_id: Some(reservation.connection_id.clone()),
-            app_key: Some(reservation.app_key.clone()),
-            action: Some(reservation.action.clone()),
-            risk: Some(risk_str(reservation.risk).to_string()),
-            severity: Some(reservation.severity.as_str().to_string()),
-            decision: "allow".to_string(),
-            reason_code: "dispatched".to_string(),
-            gate: Some("dispatch".to_string()),
-            args_redaction_summary: Some(self.recipient_audit_summary(
-                &reservation.approved_args_hash,
-                Some(&reservation.app_key),
-                &reservation.action,
-                &reservation.approved_args,
-            )),
-            outcome: Some(outcome.to_string()),
-            latency_ms: None,
-            request_id: Some(reservation.request_id.clone()),
-            credential_fingerprint: Some(reservation.credential_fingerprint.clone()),
-            provider_account_fingerprint: None,
-            attempt_no: Some(1),
-            vendor_request_id: response.vendor_request_id.clone(),
-            idempotency_key_fingerprint: reservation.receipt.as_ref().and_then(|claim| {
-                self.store
-                    .github_receipt(&claim.agent_id, &claim.request_nonce)
-                    .inspect_err(|error| eprintln!(error governance: "receipt fingerprint unreadable: {error}"))
-                    .ok()
-                    .flatten()
-                    .map(|row| row.request_fingerprint)
-            }),
-            response_class: response.error_code.clone(),
-            reconciliation_of: None, },
+            &AuditRecord {
+                risk: Some(risk_str(reservation.risk).to_string()),
+                severity: Some(reservation.severity.as_str().to_string()),
+                args_redaction_summary: Some(self.recipient_audit_summary(
+                    &reservation.approved_args_hash,
+                    Some(&reservation.app_key),
+                    &reservation.action,
+                    &reservation.approved_args,
+                )),
+                outcome: Some(outcome.to_string()),
+                credential_fingerprint: Some(reservation.credential_fingerprint.clone()),
+                attempt_no: Some(1),
+                vendor_request_id: response.vendor_request_id.clone(),
+                idempotency_key_fingerprint: self.receipt_request_fingerprint(reservation),
+                response_class: response.error_code.clone(),
+                ..AuditRecord::for_reservation(reservation, "allow", "dispatched", "dispatch")
+            },
             reservation.scope.as_ref(),
             reservation.relay_origin.as_ref(),
             reservation.on_behalf_of_agent.as_deref(),

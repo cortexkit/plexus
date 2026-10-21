@@ -57,15 +57,7 @@ fn stale(store: &PlexusStore, reply: &gates::GateReply, row: &Receipt) -> Result
         }
     })?;
     let original = &row.authority_baseline;
-    for (field, dimension) in [
-        ("handle_enabled", "handle_disabled"),
-        ("repo_binding_generation", "repository_rebound"),
-        ("agent_grant_generation", "agent_grant_revoked"),
-        ("module_grant_generation", "module_grant_revoked"),
-        ("policy_effect_hash", "policy_changed"),
-        ("credential_generation", "credential_rotated"),
-        ("app_handle_generation", "handle_row_changed"),
-    ] {
+    for (field, dimension) in crate::governance::AUTHORITY_DIMENSIONS {
         if original[field] != current.baseline[field] {
             return Err(format!("stale_authority{{dimension: {dimension}}}"));
         }

@@ -1410,11 +1410,11 @@ impl crate::github::facade::gates::GateStore for PlexusStore {
         let (agent_grant_generation, module_grant_generation) = seams
             .grant_generations(&connection, caller, agent, mapped.action)
             .map_err(|_| "store_failure")?;
-        let policy_effect_hash = crate::jcs::jcs_sha256(&serde_json::json!([
-            module_policy,
-            policies.agent_effect,
-            action.ask_first
-        ]))
+        let policy_effect_hash = crate::governance::policy_effect_hash(
+            module_policy.as_deref(),
+            policies.agent_effect.as_deref(),
+            action.ask_first,
+        )
         .map_err(|_| "store_failure")?;
         let baseline = serde_json::json!({
             "app_handle_id": handle.app_handle_id, "repository": repository,
