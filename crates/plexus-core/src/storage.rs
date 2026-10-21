@@ -7047,10 +7047,15 @@ impl PlexusStore {
     /// A withdrawn approval is `cancelled`, not `approved`, so the approval
     /// update below matches nothing and the claim fails: the withdrawal and
     /// the claim race on the same row, and only one of them can win.
+    ///
+    /// `now_ms` is the governance engine's clock. It is read inside the
+    /// transaction, the moment the claim is judged, so the claim and the
+    /// engine's own expiry checks use one clock.
     pub(crate) fn claim_reservation(
         &self,
         reservation: &ReservationRecord,
         attempt_request_id: &str,
+        now_ms: &dyn Fn() -> i64,
     ) -> Result<bool, StoreError> {
         self.inner.with_conn_fenced(|conn| {
             let claim_now = now_ms();

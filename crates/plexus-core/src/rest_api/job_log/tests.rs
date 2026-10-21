@@ -516,6 +516,7 @@ fn credentialed_download_leg_preserves_auth_throttle_and_gateway_failures() {
                 .build()
                 .unwrap(),
             &mut throttle,
+            &TransportClock::real(),
             &cfg,
             &operation,
             &tail,

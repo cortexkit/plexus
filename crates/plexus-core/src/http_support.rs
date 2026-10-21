@@ -8,6 +8,7 @@
 //! the module mid-request.
 
 use std::io::Read;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, LOCATION, RETRY_AFTER};
@@ -272,6 +273,62 @@ fn parse_retry_after(value: &str) -> Option<Duration> {
     date.duration_since(SystemTime::now())
         .ok()
         .map(|delay| delay.min(MAX_RECORDED_THROTTLE))
+}
+
+/// The time source for a transport's pool bookkeeping: when a pooled
+/// connection was last used, when a vendor throttle ends, and the wait for a
+/// short throttle to lapse. It reads awake time (`Instant`), as those checks
+/// always have.
+///
+/// Production uses [`TransportClock::real`], which is `Instant::now` and
+/// `thread::sleep` behind a shared function pointer: an indirect call, with no
+/// allocation or lock per reading. Tests swap in a clock they move
+/// themselves, so a throttle wait is checked without sleeping through it.
+///
+/// Request deadlines do not read this clock. They bound real socket I/O,
+/// which the HTTP client times on the real clock whatever this one says.
+#[derive(Clone)]
+pub(crate) struct TransportClock {
+    now: Arc<dyn Fn() -> Instant + Send + Sync>,
+    sleep: Arc<dyn Fn(Duration) + Send + Sync>,
+}
+
+impl TransportClock {
+    /// The real clock: `Instant::now`, and a sleep that blocks the thread.
+    pub(crate) fn real() -> Self {
+        Self {
+            now: Arc::new(Instant::now),
+            sleep: Arc::new(std::thread::sleep),
+        }
+    }
+
+    pub(crate) fn now(&self) -> Instant {
+        (self.now)()
+    }
+
+    /// Block for `duration`, as this clock measures it.
+    pub(crate) fn sleep(&self, duration: Duration) {
+        (self.sleep)(duration)
+    }
+
+    /// A clock that stands still until something sleeps on it: `sleep` moves
+    /// it forward by the requested time and returns at once. A test reads and
+    /// moves it through the same `now` and `sleep` a transport uses, so a
+    /// transport that waited on it shows up as time that passed.
+    #[cfg(test)]
+    pub(crate) fn manual() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let origin = Instant::now();
+        let elapsed_nanos = Arc::new(AtomicU64::new(0));
+        let read = Arc::clone(&elapsed_nanos);
+        Self {
+            now: Arc::new(move || origin + Duration::from_nanos(read.load(Ordering::SeqCst))),
+            sleep: Arc::new(move |duration: Duration| {
+                let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+                elapsed_nanos.fetch_add(nanos, Ordering::SeqCst);
+            }),
+        }
+    }
 }
 
 /// When a vendor throttle of `delay` ends, if it needs recording at all.
@@ -686,6 +743,38 @@ pub(crate) fn bounded_json_for_log(value: &serde_json::Value, limit: usize) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The production transport clock is the real one: its readings move
+    /// with `Instant::now`, and its sleep really blocks. A clock frozen at
+    /// construction, or a sleep that returns at once, would let every
+    /// throttle wait pass instantly in production while the tests that run on
+    /// a manual clock stayed green.
+    #[test]
+    fn the_real_transport_clock_reads_and_sleeps_on_real_time() {
+        let clock = TransportClock::real();
+        let before = Instant::now();
+        clock.sleep(Duration::from_millis(5));
+        let after_sleep = Instant::now();
+        assert!(
+            after_sleep.duration_since(before) >= Duration::from_millis(5),
+            "the real clock's sleep must block"
+        );
+        let read = clock.now();
+        assert!(
+            read >= after_sleep && read <= Instant::now(),
+            "the real clock must read the current instant"
+        );
+    }
+
+    /// A manual clock moves only when slept on, by exactly the time asked.
+    #[test]
+    fn the_manual_transport_clock_moves_only_when_slept_on() {
+        let clock = TransportClock::manual();
+        let start = clock.now();
+        assert_eq!(clock.now(), start);
+        clock.sleep(Duration::from_millis(1_500));
+        assert_eq!(clock.now() - start, Duration::from_millis(1_500));
+    }
 
     #[test]
     fn diagnostic_secret_screen_includes_every_input_secret_alias() {

@@ -28,9 +28,11 @@ pub(crate) fn safe_path(path: &[u8]) -> bool {
         && !path.split(|byte| *byte == b'/').any(|part| part == b"..")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn download(
     client: &Client,
     throttle_until: &mut Option<Instant>,
+    clock: &TransportClock,
     config: &RestConfig,
     operation: &HttpOperation,
     tail: &crate::manifest::CredentiallessTail,
@@ -62,6 +64,7 @@ pub(super) fn download(
     let url = match job_log::api_redirect(
         client,
         throttle_until,
+        clock,
         config,
         operation,
         tail,

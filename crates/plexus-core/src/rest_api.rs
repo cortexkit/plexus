@@ -16,7 +16,6 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, Response};
@@ -28,7 +27,7 @@ use crate::http_support::{
     build_headers, classify_reqwest_error, credentialed_redirect_policy, duration_ms,
     read_body_bounded, redacted_endpoint, redirect_location_for_log, reqwest_error_cause,
     response_throttle, throttle_deadline, throttle_gate, throttle_refusal, with_request_deadline,
-    BodyReadFailure, HttpAttemptFailure, ThrottleGate, DEFAULT_CONNECT_TIMEOUT,
+    BodyReadFailure, HttpAttemptFailure, ThrottleGate, TransportClock, DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_IDLE_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, MAX_RESPONSE_BODY_BYTES,
     POOLED_CONNECTION_IDLE_LIMIT,
 };
@@ -237,6 +236,9 @@ struct RestConnectionEntry {
     throttle_until: Option<Instant>,
     idle_timeout: Duration,
     settings: RestClientSettings,
+    /// The owning transport's clock, which `last_used` and `throttle_until`
+    /// are read on. A rebuilt entry keeps it.
+    clock: TransportClock,
     /// Makes the next dispatch panic just after its request is sent, so a
     /// test can reach the panic recovery without a real defect.
     #[cfg(test)]
@@ -244,7 +246,7 @@ struct RestConnectionEntry {
 }
 
 impl RestConnectionEntry {
-    fn build(config: &RestConfig) -> Result<Self, RestError> {
+    fn build(config: &RestConfig, clock: TransportClock) -> Result<Self, RestError> {
         let client = |follow_method_changing| {
             Client::builder()
                 .user_agent(crate::http_support::USER_AGENT)
@@ -259,10 +261,11 @@ impl RestConnectionEntry {
             download_client: None,
             client: client(true)?,
             write_client: client(false)?,
-            last_used: Instant::now(),
+            last_used: clock.now(),
             throttle_until: None,
             idle_timeout: config.idle_timeout,
             settings: RestClientSettings::of(config),
+            clock,
             #[cfg(test)]
             panic_after_send: false,
         })
@@ -307,6 +310,9 @@ pub struct RestTransport {
     /// How many times a panic was recovered from: a dispatch that panicked
     /// while holding its connection, or a poisoned entry the sweep evicted.
     panic_recoveries: Arc<AtomicU64>,
+    /// Reads idle and throttle time for every pooled entry; see
+    /// [`TransportClock`].
+    clock: TransportClock,
 }
 
 impl RestTransport {
@@ -316,7 +322,17 @@ impl RestTransport {
             configs: Arc::new(Mutex::new(HashMap::new())),
             entries: Arc::new(Mutex::new(HashMap::new())),
             panic_recoveries: Arc::new(AtomicU64::new(0)),
+            clock: TransportClock::real(),
         }
+    }
+
+    /// Run this transport's idle and throttle bookkeeping on `clock`. Each
+    /// pooled entry copies the clock when it is built, so set it before the
+    /// first call.
+    #[cfg(test)]
+    fn with_clock(mut self, clock: TransportClock) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn register_connection(&self, connection: RestConnection) {
@@ -398,7 +414,7 @@ impl RestTransport {
         let Ok(mut entries) = self.entries.lock() else {
             return 0;
         };
-        let now = Instant::now();
+        let now = self.clock.now();
         let mut removed = 0;
         entries.retain(|connection_id, entry| {
             if entry.is_poisoned() {
@@ -447,7 +463,10 @@ impl RestTransport {
                 return Ok(Arc::clone(entry));
             }
         }
-        let entry = Arc::new(Mutex::new(RestConnectionEntry::build(config)?));
+        let entry = Arc::new(Mutex::new(RestConnectionEntry::build(
+            config,
+            self.clock.clone(),
+        )?));
         let mut entries = self.entries.lock().map_err(|_| RestError::PoisonedLock)?;
         Ok(Arc::clone(
             entries
@@ -543,7 +562,7 @@ impl RestTransport {
                     request.connection_id
                 );
                 self.panic_recoveries.fetch_add(1, Ordering::Relaxed);
-                if let Ok(fresh) = RestConnectionEntry::build(&config) {
+                if let Ok(fresh) = RestConnectionEntry::build(&config, self.clock.clone()) {
                     *state = fresh;
                 }
                 TransportResponse::unknown_with_error("transport_panicked")
@@ -566,18 +585,18 @@ impl RestTransport {
         // clients (its timeouts and pool limit are baked into them) and loses the
         // old vendor's throttle.
         if state.settings != RestClientSettings::of(config) {
-            match RestConnectionEntry::build(config) {
+            match RestConnectionEntry::build(config, state.clock.clone()) {
                 Ok(fresh) => *state = fresh,
                 Err(_) => return local_not_sent(),
             }
         }
-        state.last_used = Instant::now();
+        state.last_used = state.clock.now();
         // Honor a vendor throttle recorded by an earlier call on this
         // connection, exactly as the MCP transport does: a short one is waited
         // out, a long one refuses locally rather than parking this thread.
-        match throttle_gate(&mut state.throttle_until, Instant::now()) {
+        match throttle_gate(&mut state.throttle_until, state.clock.now()) {
             ThrottleGate::Refuse(remaining) => return throttle_refusal("REST", remaining),
-            ThrottleGate::Wait(delay) => thread::sleep(delay),
+            ThrottleGate::Wait(delay) => state.clock.sleep(delay),
             ThrottleGate::Clear => {}
         }
         if let Some(shape) = crate::github::reads::bot::envelope_shape(&request.action)
@@ -590,6 +609,7 @@ impl RestTransport {
             return read_envelope::send(
                 &client,
                 &mut state.throttle_until,
+                &state.clock,
                 config,
                 operation,
                 shape,
@@ -606,6 +626,7 @@ impl RestTransport {
                 return artifact_file::download(
                     &client,
                     &mut state.throttle_until,
+                    &state.clock,
                     config,
                     operation,
                     tail,
@@ -616,6 +637,7 @@ impl RestTransport {
             return job_log::download(
                 &client,
                 &mut state.throttle_until,
+                &state.clock,
                 config,
                 operation,
                 tail,
@@ -686,6 +708,7 @@ impl RestTransport {
         classify_response_with_privacy(
             response,
             &mut state.throttle_until,
+            &state.clock,
             prepared_method,
             prepared_path,
             github_facade,
@@ -1151,6 +1174,7 @@ fn log_rest_error(
 fn classify_response(
     response: Response,
     throttle_until: &mut Option<Instant>,
+    clock: &TransportClock,
     method: &reqwest::Method,
     path: &str,
     github_facade: bool,
@@ -1158,6 +1182,7 @@ fn classify_response(
     classify_response_with_privacy(
         response,
         throttle_until,
+        clock,
         method,
         path,
         github_facade,
@@ -1166,9 +1191,13 @@ fn classify_response(
     )
 }
 
+/// `clock` is the connection's: a throttle the response asks for is recorded
+/// as ending that long after the clock's current reading.
+#[allow(clippy::too_many_arguments)]
 fn classify_response_with_privacy(
     response: Response,
     throttle_until: &mut Option<Instant>,
+    clock: &TransportClock,
     method: &reqwest::Method,
     path: &str,
     github_facade: bool,
@@ -1178,7 +1207,7 @@ fn classify_response_with_privacy(
     let status = response.status().as_u16();
     let retry_after = response_throttle(status, response.headers());
     if let Some(delay) = retry_after.filter(|_| signals.is_empty()) {
-        *throttle_until = throttle_deadline(Instant::now(), delay);
+        *throttle_until = throttle_deadline(clock.now(), delay);
         eprintln!(warn transport: "REST vendor throttle: status={status} retry_after_ms={}", duration_ms(delay));
         return crate::http_support::throttled_response("REST", delay);
     }
@@ -1227,7 +1256,7 @@ fn classify_response_with_privacy(
         None
     };
     if let Some(delay) = retry_after {
-        *throttle_until = throttle_deadline(Instant::now(), delay);
+        *throttle_until = throttle_deadline(clock.now(), delay);
         eprintln!(warn transport: "REST vendor throttle: status={status} retry_after_ms={}", duration_ms(delay));
         return crate::http_support::throttled_response("REST", delay).with_error_signal(signal);
     }
@@ -1349,6 +1378,7 @@ mod tests {
     pub(super) use crate::test_logging as logging;
     use serde_json::json;
     use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn unregister_rest_removes_configuration_and_pooled_entry() {
@@ -2172,6 +2202,12 @@ mod tests {
 
     #[test]
     fn throttle_is_returned_as_throttle_retryability_and_honored() {
+        // The transport waits on the manual clock, which moves only when
+        // slept on, and the vendor stamps each arrival with the same clock:
+        // the time between the second call starting and the vendor receiving
+        // it is the wait the transport made.
+        let clock = TransportClock::manual();
+        let vendor_clock = clock.clone();
         let (arrived, arrivals) = std::sync::mpsc::channel();
         let (endpoint, task) = start_server(2, move |index, _request| {
             if index == 0 {
@@ -2181,7 +2217,7 @@ mod tests {
                 );
             }
             arrived
-                .send(Instant::now())
+                .send(vendor_clock.now())
                 .expect("record next vendor send");
             http_response(200, r#"{"ok":true}"#)
         });
@@ -2191,7 +2227,8 @@ mod tests {
                 "get_issue",
                 http_op(HttpMethod::Get, "/v1/issues/{issue_id}"),
             )],
-        ));
+        ))
+        .with_clock(clock.clone());
         let credential = ResolvedCredential::new(b"token".to_vec(), None, 1);
         let first = transport.dispatch(
             request("rest", "get_issue", json!({"issue_id": "1"})),
@@ -2203,7 +2240,7 @@ mod tests {
             Some(1_000),
             "the vendor's delay reaches the caller as a number, not only as prose"
         );
-        let started = Instant::now();
+        let started = clock.now();
         let second = transport.dispatch(
             request("rest", "get_issue", json!({"issue_id": "1"})),
             &credential,
@@ -2217,6 +2254,20 @@ mod tests {
         );
         assert!(second.response.is_some());
         task.join().expect("server exits");
+    }
+
+    /// A transport built for production reads the real clock: a manual or
+    /// frozen one would make every throttle wait pass instantly.
+    #[test]
+    fn a_new_rest_transport_reads_the_real_clock() {
+        let transport = RestTransport::default();
+        let before = Instant::now();
+        thread::sleep(Duration::from_millis(5));
+        let read = transport.clock.now();
+        assert!(
+            read >= before + Duration::from_millis(5) && read <= Instant::now(),
+            "the transport clock must be the real one"
+        );
     }
 
     #[test]
@@ -3160,7 +3211,7 @@ mod allocation_tests {
             Arc::ptr_eq(&first, &second),
             "dispatch must share the operation schema instead of cloning the manifest"
         );
-        let entry = RestConnectionEntry::build(&cfg).unwrap();
+        let entry = RestConnectionEntry::build(&cfg, TransportClock::real()).unwrap();
         assert!(
             entry.download_client.is_none(),
             "ordinary REST connections must not allocate a download runtime"

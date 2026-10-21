@@ -428,7 +428,11 @@ fn missing_connection_or_action_invalidates_claim_without_store_error() {
             .unwrap();
         assert!(!engine
             .store()
-            .claim_reservation(&reservation_record(&reservation), "attempt")
+            .claim_reservation(
+                &reservation_record(&reservation),
+                "attempt",
+                &crate::storage::now_ms,
+            )
             .unwrap());
         assert_eq!(
             engine
@@ -485,7 +489,11 @@ fn claim_pins_policy_identity_not_only_generation() {
         .unwrap();
     assert!(!engine
         .store()
-        .claim_reservation(&reservation_record(&reservation), "attempt")
+        .claim_reservation(
+            &reservation_record(&reservation),
+            "attempt",
+            &crate::storage::now_ms,
+        )
         .unwrap());
     assert!(engine.transport().requests().is_empty());
 }
@@ -523,7 +531,7 @@ fn claim_rechecks_module_and_agent_expiry() {
         assert!(
             !engine
                 .store()
-                .claim_reservation(&record, "attempt")
+                .claim_reservation(&record, "attempt", &crate::storage::now_ms)
                 .unwrap(),
             "agent={agent}"
         );
@@ -2498,5 +2506,21 @@ fn reservation_audit_rows_record_the_app_handle_only_for_facade_calls() {
         AuditRecord::for_reservation(&reservation, "deny", "stale", "dispatch"),
         expected(None),
         "an ordinary call records no app handle"
+    );
+}
+
+/// An engine built for production judges expiry on the real wall clock. A
+/// clock frozen when the engine was built would keep every grant, policy and
+/// approval alive forever, while the tests that run on a clock they move
+/// would stay green.
+#[test]
+fn a_new_engine_reads_the_real_wall_clock() {
+    let engine = ordinary_test_engine();
+    let before = crate::storage::now_ms();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let read = engine.now_ms();
+    assert!(
+        read >= before + 5 && read <= crate::storage::now_ms(),
+        "the engine's clock must be the real wall clock: read {read}, before {before}"
     );
 }
