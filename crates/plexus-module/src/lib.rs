@@ -2851,7 +2851,7 @@ fn facade_tool_reply_inner(
             "use credential_id during issue_ticket enrollment, then connect with ticket_id",
         ));
     }
-    if contains_secret_input(arguments) {
+    if map_contains_secret_input(arguments) {
         return Ok(tool_error(
             "secret_input_rejected",
             "credential material may only enter through the binding-ticket ceremony",
@@ -4589,7 +4589,9 @@ fn retired_identity_refusal(field: &str) -> Value {
         "message":format!("argument_undeclared{{field: {field}}}"), "transmission":"not_sent"}})
 }
 
-fn contains_secret_input(value: &serde_json::Map<String, Value>) -> bool {
+/// The arguments map checked exactly as `secret_input::contains_secret_input`
+/// checks a JSON object, without first cloning the map into a `Value`.
+fn map_contains_secret_input(value: &serde_json::Map<String, Value>) -> bool {
     value
         .iter()
         .any(|(key, child)| plexus_core::secret_input::contains_secret_entry(key, child))

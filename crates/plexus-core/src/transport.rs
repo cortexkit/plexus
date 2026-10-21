@@ -9,12 +9,10 @@ use std::collections::{HashMap, VecDeque};
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::{Arc, Mutex};
 
-#[cfg(any(test, feature = "test-support"))]
-use serde_json::Map;
 use serde_json::Value;
 
 use crate::credentials::ResolvedCredential;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use crate::fingerprint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,7 +307,7 @@ impl Transport for MockTransport {
                 .unwrap_or_default()
                 .to_string(),
         );
-        request.args = redact_args(&request.args);
+        request.args = crate::http_support::redact_value(&request.args);
         if let Ok(mut requests) = self.requests.lock() {
             requests.push(request);
         }
@@ -415,26 +413,6 @@ fn sanitize_message(_message: &str) -> String {
     OPERATOR_DIAGNOSTIC_MESSAGE.to_string()
 }
 
-#[cfg(any(test, feature = "test-support"))]
-fn redact_args(value: &Value) -> Value {
-    match value {
-        Value::Object(object) => {
-            let mut redacted = Map::new();
-            for (key, value) in object {
-                if crate::http_support::is_secret_key(key) {
-                    let reference = serde_json::to_vec(value).unwrap_or_default();
-                    redacted.insert(key.clone(), Value::String(fingerprint(&reference)));
-                } else {
-                    redacted.insert(key.clone(), redact_args(value));
-                }
-            }
-            Value::Object(redacted)
-        }
-        Value::Array(values) => Value::Array(values.iter().map(redact_args).collect()),
-        other => other.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +451,38 @@ mod tests {
     }
 
     #[test]
+    fn mock_request_projection_is_the_diagnostic_redaction() {
+        let mock = MockTransport::default();
+        let credential = ResolvedCredential::new(b"CANARY".to_vec(), None, 1);
+        let args = serde_json::json!({
+            "query": "visible",
+            "token": "t",
+            "items": [{"password": {"x": 1}}, "plain"],
+        });
+        mock.dispatch(
+            TransportRequest {
+                request_id: "req".to_string(),
+                connection_id: "conn".to_string(),
+                action: "call".to_string(),
+                args: args.clone(),
+                credential_fingerprint: fingerprint(b"CANARY"),
+            },
+            &credential,
+        );
+        let expected = serde_json::json!({
+            "query": "visible",
+            "token": fingerprint(br#""t""#),
+            "items": [{"password": fingerprint(br#"{"x":1}"#)}, "plain"],
+        });
+        assert_eq!(
+            mock.requests()[0].args,
+            expected,
+            "the mock records the diagnostic redaction"
+        );
+        assert_eq!(crate::http_support::redact_value(&args), expected);
+    }
+
+    #[test]
     fn mock_request_projection_omits_credential_payload() {
         let mock = MockTransport::default();
         let credential = ResolvedCredential::new(b"CANARY".to_vec(), None, 1);
@@ -496,7 +506,7 @@ mod tests {
     /// leave ordinary arguments alone.
     ///
     /// The test above only ever places a secret at the top level, so removing
-    /// the recursive call in `redact_args` — leaving nested values verbatim —
+    /// the recursive call in the redaction walk — leaving nested values verbatim —
     /// passed the whole core suite. A caller who wraps a credential one level
     /// down, which is the ordinary shape for a structured argument, would have
     /// had it recorded in full.

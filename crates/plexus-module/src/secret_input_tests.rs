@@ -11,7 +11,7 @@ fn args(value: Value) -> serde_json::Map<String, Value> {
 /// buffers, and span attributes.
 ///
 /// This exists because the guard was previously provable only in the ALLOW
-/// direction: a constant-accept mutation making `contains_secret_input`
+/// direction: a constant-accept mutation making `map_contains_secret_input`
 /// always return false broke NO test, so nothing established that it ever
 /// refuses anything. A suite whose vectors all share one expected outcome
 /// cannot distinguish a real implementation from a constant returning it.
@@ -26,7 +26,7 @@ fn secret_shaped_keys_are_rejected_at_the_top_level() {
     ] {
         let value = args(json!({ "op": "connect", key: "ckh_pretend_secret" }));
         assert!(
-            contains_secret_input(&value),
+            map_contains_secret_input(&value),
             "argument key '{key}' must be refused as credential material"
         );
     }
@@ -41,7 +41,7 @@ fn secret_shaped_keys_are_rejected_when_nested() {
         "config": { "auth": { "token": "ckh_pretend_secret" } }
     }));
     assert!(
-        contains_secret_input(&nested),
+        map_contains_secret_input(&nested),
         "a secret nested inside an object must still be refused"
     );
 
@@ -50,12 +50,12 @@ fn secret_shaped_keys_are_rejected_when_nested() {
         "items": [ { "ok": 1 }, { "secret": "ckh_pretend_secret" } ]
     }));
     assert!(
-        contains_secret_input(&in_array),
+        map_contains_secret_input(&in_array),
         "a secret nested inside an array element must still be refused"
     );
 }
 
-/// The tests above prove `contains_secret_input` refuses secret-shaped
+/// The tests above prove `map_contains_secret_input` refuses secret-shaped
 /// keys. This one proves it also accepts ordinary arguments: an
 /// implementation that refused everything would pass every test above
 /// while making the facade unusable.
@@ -69,7 +69,7 @@ fn ordinary_arguments_are_not_flagged() {
         "ticket_id": "ticket_abc123"
     }));
     assert!(
-        !contains_secret_input(&ordinary),
+        !map_contains_secret_input(&ordinary),
         "a normal invoke must not be refused as credential material; \
              note ticket_id is deliberately NOT secret-shaped, since the \
              ceremony returns it precisely so the handle never travels"
