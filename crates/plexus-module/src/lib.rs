@@ -42,6 +42,14 @@ pub mod smoke;
 #[cfg(test)]
 #[path = "../../plexus-core/tests/support/http_server.rs"]
 mod test_http;
+/// The shared stderr-capture helpers, compiled once so every test module uses
+/// the same one-time logger initialization. plexus-core's support/audit.rs,
+/// which this crate also compiles, declares its own private copy that this
+/// crate cannot reach, hence the allowance.
+#[cfg(test)]
+#[allow(clippy::duplicate_mod)]
+#[path = "../../plexus-core/tests/support/logging.rs"]
+mod test_logging;
 #[cfg(test)]
 mod test_support;
 mod tool_provider;

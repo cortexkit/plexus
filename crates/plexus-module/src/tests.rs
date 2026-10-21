@@ -1907,9 +1907,7 @@ fn delete_connection_refuses_a_non_direct_caller() {
 }
 
 /// Capture the actual stderr of an isolated test process, not a formatting proxy.
-mod logging {
-    include!("../../plexus-core/tests/support/logging.rs");
-}
+use crate::test_logging as logging;
 
 /// Whether this process is the child a diagnostic parent test spawned,
 /// with its stderr logging set up. A `*_fixture` test exists to be run and

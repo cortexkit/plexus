@@ -11,9 +11,7 @@ use tokio_tungstenite::accept_async;
 
 include!("review_event_tests.rs");
 
-mod diagnostic_logging {
-    include!("../../plexus-core/tests/support/logging.rs");
-}
+use crate::test_logging as diagnostic_logging;
 
 struct ExpectedAuthorization(&'static [u8]);
 impl tungstenite::handshake::server::Callback for ExpectedAuthorization {

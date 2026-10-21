@@ -375,12 +375,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    mod diagnostic_logging {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../plexus-core/tests/support/logging.rs"
-        ));
-    }
+    use crate::test_logging as diagnostic_logging;
 
     #[test]
     fn catalog_matches_every_advertised_definition() {
