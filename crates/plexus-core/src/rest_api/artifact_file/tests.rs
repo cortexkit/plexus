@@ -1,4 +1,4 @@
-use super::super::job_log::tests::{response, Storage, CERT};
+use super::super::job_log::tests::{assert_reply_omits, response, Storage, CERT};
 use super::*;
 use crate::manifest::CredentiallessTail;
 use serde_json::json;
@@ -488,7 +488,7 @@ fn artifact_signed_url_never_appears_in_operator_diagnostics() {
             result.error_code.as_deref(),
             Some("artifact_download_failed")
         );
-        assert!(!format!("{result:?}").contains("SIGNED-URL-SECRET"));
+        assert_reply_omits(&result, "SIGNED-URL-SECRET");
         return;
     }
     let output = crate::test_http::bounded::child_test_output(

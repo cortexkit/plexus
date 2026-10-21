@@ -3987,8 +3987,8 @@ fn read_page_bound_is_distinct_from_invalid_response() {
     )
     .unwrap_err();
     assert_eq!(
-        format!("{error:?}"),
-        "PageBound",
+        error,
+        plexus_core::github::reads::ReadError::PageBound,
         "bounded reads must retain the page-bound failure"
     );
 }
