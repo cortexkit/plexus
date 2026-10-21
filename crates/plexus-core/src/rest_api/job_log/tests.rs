@@ -96,7 +96,19 @@ impl Storage {
 impl Drop for Storage {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.worker.take().unwrap().join().unwrap();
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        // While a failing test unwinds, neither wait for the worker nor
+        // re-raise its panic: a second panic in a destructor aborts the whole
+        // test binary and loses every other result. The worker is left
+        // detached and ends at its own accept deadline.
+        if std::thread::panicking() {
+            return;
+        }
+        if worker.join().is_err() {
+            panic!("the TLS storage fixture's worker panicked; its message is above");
+        }
     }
 }
 pub(in crate::rest_api) fn response(status: u16, headers: &str, body: &str) -> String {
