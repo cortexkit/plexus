@@ -5,28 +5,20 @@ const LEGACY_HASH: &str = "sha256:0c7b15c538e300d7538923c11a6c3bf905197b3d664986
 const CREDENTIAL: &[u8] = b"plexus:vault-reference:v1\0apikey:fixture";
 
 struct Fixture {
-    directory: TemporaryDirectory,
+    // Under the shared test scratch root, so a killed run's leftovers are swept
+    // by age like every other test's and never land in the source tree.
+    directory: crate::test_scratch::Scratch,
     from: PathBuf,
     to: PathBuf,
 }
 
 impl Fixture {
     fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let directory = std::env::current_dir()
-            .unwrap()
-            .join("target")
-            .join(format!(
-                "import-test-{}-{}-{}",
-                std::process::id(),
-                crate::storage::now_ms(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-        std::fs::create_dir_all(&directory).unwrap();
+        let directory = crate::test_scratch::Scratch::directory("import-store");
         let fixture = Self {
             from: directory.join("old.db"),
             to: directory.join("new.db"),
-            directory: TemporaryDirectory(directory),
+            directory,
         };
         let source = open_sqlite(&descriptor(&fixture.from).unwrap()).unwrap();
         source.migrate("plexus", &MIGRATIONS[..1]).unwrap();
@@ -513,7 +505,7 @@ fn production_v23_round_trip_dispositions_and_routing() {
     );
     assert_eq!(scalar::<i64>(&old, "SELECT count(*) FROM audit_journal"), 1);
     assert_eq!(
-        std::fs::read_dir(&f.directory.0)
+        std::fs::read_dir(f.directory.path())
             .unwrap()
             .filter(|e| e
                 .as_ref()
@@ -787,14 +779,14 @@ fn journal_malformed_import_leaves_target_untouched() {
         .unwrap();
     let before = std::fs::read(&f.from).unwrap();
     let journal = std::fs::read(journal_path(&f)).unwrap();
-    let entries_before = std::fs::read_dir(&f.directory.0).unwrap().count();
+    let entries_before = std::fs::read_dir(f.directory.path()).unwrap().count();
     let error = import_store(&f.from, &f.to).unwrap_err();
     assert!(error.contains("line 2"), "{error}");
     assert!(!f.to.exists(), "absent target must remain absent");
     assert_eq!(std::fs::read(&f.from).unwrap(), before);
     assert_eq!(std::fs::read(journal_path(&f)).unwrap(), journal);
     assert_eq!(
-        std::fs::read_dir(&f.directory.0).unwrap().count(),
+        std::fs::read_dir(f.directory.path()).unwrap().count(),
         entries_before
     );
 }
