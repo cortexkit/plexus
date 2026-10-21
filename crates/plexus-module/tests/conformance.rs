@@ -1665,8 +1665,6 @@ async fn send_tool_request(
         .expect("daemon connection remains open")
 }
 
-/// Every operation the HELLO manifest advertises must reach a dispatch arm.
-///
 /// Credential material in a tool argument must be REFUSED AT THE FACADE, and
 /// the refusal must happen before the argument reaches anything that acts on
 /// it.
@@ -1874,6 +1872,8 @@ async fn malformed_fixed_args_is_reported_with_all_missing_subscription_fields()
     daemon.stop();
 }
 
+/// Every operation the HELLO manifest advertises must reach a dispatch arm.
+///
 /// The failure this closes is not a crash: a tool advertises an op, the agent
 /// reads the manifest and calls it, and the module answers `invalid_operation`
 /// because no match arm was ever written for it. Nothing errors at boot,
