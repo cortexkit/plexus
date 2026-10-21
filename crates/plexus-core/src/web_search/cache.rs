@@ -80,6 +80,15 @@ pub struct ResultCache {
     entries: Mutex<HashMap<CacheKey, Entry>>,
 }
 
+/// Whether an entry stored at `stored_at_ms` may still be served at `now_ms`.
+/// The clock is the wall clock, which can step backwards. An entry that seems
+/// stored in the future is treated as expired: otherwise it would be served
+/// for the length of the step on top of its TTL.
+fn fresh(stored_at_ms: i64, now_ms: i64) -> bool {
+    let age = now_ms.saturating_sub(stored_at_ms);
+    (0..CACHE_TTL_MS).contains(&age)
+}
+
 impl ResultCache {
     /// The cached results for `key`, if stored less than the TTL ago. Each
     /// result keeps the `fetched_at` of the vendor reply it came from.
@@ -105,9 +114,7 @@ impl ResultCache {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match entries.get(key) {
-            Some(entry) if now_ms.saturating_sub(entry.stored_at_ms) < CACHE_TTL_MS => {
-                Some(read(entry))
-            }
+            Some(entry) if fresh(entry.stored_at_ms, now_ms) => Some(read(entry)),
             Some(_) => {
                 entries.remove(key);
                 None
@@ -162,7 +169,7 @@ impl ResultCache {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !entries.contains_key(&key) && entries.len() >= CACHE_CAPACITY {
-            entries.retain(|_, entry| now_ms.saturating_sub(entry.stored_at_ms) < CACHE_TTL_MS);
+            entries.retain(|_, entry| fresh(entry.stored_at_ms, now_ms));
             if entries.len() >= CACHE_CAPACITY {
                 if let Some(oldest) = entries
                     .iter()
@@ -272,6 +279,18 @@ mod tests {
         assert!(cache.get(&key, 1_000 + CACHE_TTL_MS - 1).is_some());
         assert!(cache.get(&key, 1_000 + CACHE_TTL_MS).is_none());
         assert_eq!(cache.len(), 0, "an expired entry is removed when read");
+    }
+
+    #[test]
+    fn a_backward_clock_step_expires_entries_instead_of_extending_them() {
+        let cache = ResultCache::default();
+        let key = CacheKey::new("exa", &query("q", 8));
+        let stored_at = 10 * CACHE_TTL_MS;
+        cache.put(key.clone(), vec![result("https://a.example/")], stored_at);
+        assert!(
+            cache.get(&key, stored_at - 1).is_none(),
+            "an entry stored after the current time must not be served"
+        );
     }
 
     #[test]

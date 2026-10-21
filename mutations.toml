@@ -20333,3 +20333,35 @@ expect_red = ["web_search::chain::tests::outcomes::signals::declared_rest_succes
 expect_message = "successful REST data must never carry an error signal"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "search-limiter-backward-step-reanchors"
+guards = "A backward wall-clock step re-anchors a search rate bucket, so refill resumes instead of freezing for the length of the step"
+file = "crates/plexus-core/src/web_search/limiter.rs"
+old = "        self.updated_ms = now_ms;"
+new = "        self.updated_ms = now_ms.max(self.updated_ms); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/limiter.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::limiter::tests::a_backward_clock_step_does_not_freeze_refill"]
+expect_message = "refill must resume from the stepped-back time"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-cache-backward-step-expires"
+guards = "A search cache entry that seems stored in the future (the wall clock stepped back) is a miss, not served for the step plus its TTL"
+file = "crates/plexus-core/src/web_search/cache.rs"
+old = "    (0..CACHE_TTL_MS).contains(&age)"
+new = "    age < CACHE_TTL_MS /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/cache.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::cache::tests::a_backward_clock_step_expires_entries_instead_of_extending_them"]
+expect_message = "an entry stored after the current time must not be served"
+build_timeout_s = 3600
+timeout_s = 120
