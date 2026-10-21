@@ -1,9 +1,9 @@
 //! Add one web search provider under a single operator confirmation.
 //!
-//! By hand, a provider takes four authority operations: issue a binding
-//! ticket, redeem it with `connections op=connect`, then one grant per caller.
-//! The supervisor asks for presence once per operation, so the operator would
-//! confirm four times for one decision. This ceremony plans all of it, asks
+//! By hand, a provider takes a binding ticket, its redemption with
+//! `connections op=connect`, then one grant per caller. The supervisor asks
+//! for presence once per ticket and once per grant, so with three callers the
+//! operator would confirm four times for one decision. This ceremony plans all of it, asks
 //! once with a summary naming every effect, and then runs the same code paths
 //! the manual commands use, so it writes the same rows and audit entries.
 //!

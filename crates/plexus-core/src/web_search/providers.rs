@@ -16,9 +16,10 @@ pub struct ProviderName {
     pub manifest: &'static str,
     pub action: &'static str,
     pub credential: VaultCredential,
-    /// The connection id `add-web-search-provider` creates or reuses for this
-    /// provider. Fixed here so a rerun finds the same connection instead of
-    /// creating a second candidate for the same provider.
+    /// The connection id `add-web-search-provider` uses when it creates this
+    /// provider's connection. Fixed here so every run names the same
+    /// connection; a connection for the provider that already exists under
+    /// another id is reused instead.
     pub connection_id: &'static str,
 }
 

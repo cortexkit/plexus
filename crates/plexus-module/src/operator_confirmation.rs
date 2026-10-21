@@ -47,7 +47,7 @@ pub fn may_need_confirmation(method: &str, params: &Value) -> bool {
 }
 
 pub(crate) fn summary(method: &str, params: &Value) -> Option<String> {
-    // Adding a web search provider names grantees read from the store, so its
+    // Adding a web search provider may take its grantees from the store, so its
     // handler builds the summary from its own plan and asks exactly once.
     if !may_need_confirmation(method, params)
         || method == manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP

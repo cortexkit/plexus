@@ -3306,9 +3306,9 @@ fn connect_time_catalog(
         // Not a store failure and deliberately not an error: connect SUCCEEDS
         // while reporting that discovery did not complete, because refusing
         // here would consume the single-use ticket and leave the operator with
-        // neither a connection nor a ticket. The cause is still logged, since a
-        // degraded discovery with no recorded reason is the same dead end this
-        // pass exists to close.
+        // neither a connection nor a ticket. The cause is still logged, so an
+        // operator can diagnose a degraded discovery whose reply gives no
+        // reason.
         Err(error) => {
             eprintln!(warn catalog: "discovery degraded during connect: {error}");
             ("degraded", None)

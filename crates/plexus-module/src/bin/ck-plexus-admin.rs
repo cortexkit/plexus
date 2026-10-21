@@ -1165,8 +1165,9 @@ fn set_web_search_allowance_request(flags: &Flags) -> Result<(&'static str, Valu
     ))
 }
 
-/// Only the provider, grantees, SearXNG instance and key choice come from the
-/// operator; the module reads everything else from its provider name table.
+/// The operator supplies the provider, optional grantees, the SearXNG instance
+/// and key choice, and whether to apply; the module's provider name table
+/// supplies the app key, action, credential name and connection id.
 fn add_web_search_provider_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
     let [provider] = flags.positionals.as_slice() else {
         return Err(Failure::usage(
