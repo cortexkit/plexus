@@ -1064,6 +1064,51 @@ runner = "cargo"
 build_timeout_s = 3600
 
 [[control]]
+id = "scheduler-pass-stamped"
+guards = "Every scheduler pass stamps its start, so a healthy scheduler never reports the pass age of a wedged one"
+file = "crates/plexus-module/src/lib.rs"
+old = '                    state.health.stamp_scheduler_pass();'
+new = '                    /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["pool_sweep_tests::the_spawned_scheduler_stamps_each_pass"]
+expect_message = "is not stamping its passes"
+build_timeout_s = 3600
+
+[[control]]
+id = "scheduler-sweeps-pools"
+guards = "The scheduler task runs the idle MCP pool sweep on its start-due pass"
+file = "crates/plexus-module/src/lib.rs"
+old = 'state.runtime.mcp_transport.sweep_idle();'
+new = '/* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["pool_sweep_tests::the_spawned_scheduler_sweeps_the_transport_pools"]
+expect_message = "the scheduler tick must sweep idle pooled connections"
+build_timeout_s = 3600
+
+[[control]]
+id = "scheduler-liveness-guard"
+guards = "The scheduler task holds the liveness guard whose drop reports it dead"
+file = "crates/plexus-module/src/lib.rs"
+old = 'let _liveness = health::SchedulerLiveness::new(Arc::clone(&state.health));'
+new = '/* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/lib.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["scheduler_liveness_tests::the_spawned_scheduler_holds_a_liveness_guard"]
+expect_message = "a stopped scheduler must report dead"
+build_timeout_s = 3600
+
+[[control]]
 id = "retired-agent-hourly-sweep"
 guards = "The retired-agent sweep runs at most once per hour of scheduler pass time"
 file = "crates/plexus-core/src/scheduler.rs"
