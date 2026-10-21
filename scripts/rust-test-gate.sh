@@ -680,3 +680,33 @@ run_phase "cargo test --workspace --locked --quiet" \
 # default test selection compiles examples but does not run their unit tests.
 run_phase "cargo test --workspace --examples --locked --quiet" \
   cargo test --workspace --examples --locked --quiet
+
+# Ignored measurement tests, run once so they cannot rot.
+#
+# plexus-core keeps its performance measurements as #[ignore]d tests: they
+# print timings rather than gate on them, so an ordinary run skips them. Never
+# running them let one go stale twice over (a fixed catalog count and a request
+# governance had since learned to refuse) with nothing turning red. Each one
+# asserts that it did real work, so running them here, without any timing
+# threshold, fails on that kind of rot. The search modules are skipped while
+# that area is reworked on another branch.
+run_ignored_measurements() {
+  local output targets
+  if ! output="$(cargo test --locked --quiet -p plexus-core --lib --test it -- \
+    --ignored --skip web_search:: --skip code_search:: 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+  # Positive control: both targets must report passing ignored tests. A filter
+  # or target that matched nothing would otherwise read as a clean run.
+  targets="$(grep -c 'test result: ok\. [1-9][0-9]* passed' <<<"$output" || true)"
+  if [ "$targets" -lt 2 ]; then
+    printf '%s\n' "$output" >&2
+    echo "refusing: expected ignored measurements to pass in both the lib and it targets" >&2
+    exit 1
+  fi
+  grep 'test result:' <<<"$output" | sed 's/^/    /'
+}
+
+run_phase "plexus-core ignored measurement tests (no timing thresholds)" \
+  run_ignored_measurements

@@ -3999,6 +3999,9 @@ fn measure_governance_manifest_parse_share() {
     let (_scratch, store, engine, _, _) =
         setup("manifest-parse-share", &[("github.issue.search", "read")]);
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog");
+    // Every shipped catalog is measured, however many there are: a fixed
+    // count failed the first time a catalog was added, unnoticed while this
+    // test is ignored.
     let mut count = 0;
     for entry in std::fs::read_dir(directory).unwrap() {
         let path = entry.unwrap().path();
@@ -4012,7 +4015,7 @@ fn measure_governance_manifest_parse_share() {
             .unwrap();
         count += 1;
     }
-    assert_eq!(count, 20, "measure the complete live-sized catalog");
+    assert!(count > 0, "measure the complete live-sized catalog");
     let document = store
         .manifest_json(plexus_core::CATALOG_PRINCIPAL, "github_rest")
         .unwrap()
@@ -4025,7 +4028,9 @@ fn measure_governance_manifest_parse_share() {
                 plexus_core::github::AFT_PRINCIPAL,
                 "conn-fixture",
                 "github.issue.search",
-                json!({"repositories":["org/repo"],"terms":"bug","q":"repo:org/repo bug"}),
+                // Agents send terms, never a raw `q`: governance refuses a
+                // caller-supplied query string.
+                json!({"repositories":["org/repo"],"terms":"bug"}),
             ))
             .unwrap();
     }

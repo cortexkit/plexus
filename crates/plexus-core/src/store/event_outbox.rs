@@ -2599,6 +2599,8 @@ mod tests {
         let removed = store
             .prune("direct", "a", 30 * AUDIT_MILLIS_PER_DAY, 1000)
             .unwrap();
+        // The batch must have pruned rows, or the timing measured an empty pass.
+        assert!(removed > 0, "the retention batch removed nothing");
         println!(
             "event retention: rows=10000 removed={removed} elapsed={}us",
             started.elapsed().as_micros()

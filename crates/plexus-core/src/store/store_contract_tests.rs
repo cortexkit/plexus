@@ -375,6 +375,8 @@ fn measure_writer_fence_read_contention() {
     });
     writer.join().unwrap();
     reader.join().unwrap();
+    // The fenced write the reader contended with must have committed.
+    assert_eq!(store.list_connections("owner").unwrap().len(), 1);
     println!(
         "writer-fence read wait={}us; rows={rows}; controlled hold=200ms",
         elapsed.as_micros()

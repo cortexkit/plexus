@@ -1288,6 +1288,11 @@ mod tests {
         f.add(waiting, jobs(500, f.now), false);
         let started = std::time::Instant::now();
         f.poll_checked(0);
+        // A measurement must have measured something: the attempt was polled.
+        assert!(
+            !f.requests().is_empty(),
+            "the 500-job attempt was not polled"
+        );
         println!(
             "waiting 500-job attempt: {} requests, {}ms, {} delivered jobs",
             f.requests().len(),
@@ -1337,6 +1342,7 @@ mod tests {
                     bk,
                 ))
         });
+        assert!(parses.get() > 0, "the comparator sort compared nothing");
         println!(
             "1000 open-attempt comparator sort: {}us, {} timestamp parses",
             started.elapsed().as_micros(),
