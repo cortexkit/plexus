@@ -496,6 +496,7 @@ impl WebSearchService {
         };
         let results = backend
             .map_reply(&body, usize::from(query.max_results), fetched_at_ms)
+            .map(backend::sanitize_results)
             .map_err(|error| {
                 eprintln!(warn web_search:
                     "web_search backend {} reply unreadable: {}",

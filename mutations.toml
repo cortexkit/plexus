@@ -20413,3 +20413,51 @@ expect_red = ["code_search::reply::tests::long_lines_are_cut_and_marked"]
 expect_message = "a long line must be cut"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-compat-results-sanitized"
+guards = "The compatibility web_search path passes vendor results through the shared sanitizer before serving or caching them"
+file = "crates/plexus-core/src/web_search/mod.rs"
+old = "            .map(backend::sanitize_results)"
+new = "            /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::both_search_paths_sanitize_vendor_results"]
+expect_message = "the compatibility path must sanitize vendor results"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-chain-results-sanitized"
+guards = "An ordered web_search provider walk passes every provider's results through the shared sanitizer before serving or caching them"
+file = "crates/plexus-core/src/web_search/chain/outcome.rs"
+old = "Classified::Serve(crate::web_search::backend::sanitize_results(results))"
+new = "Classified::Serve(results) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::both_search_paths_sanitize_vendor_results"]
+expect_message = "the ordered path must sanitize vendor results"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-result-url-line-breaks-dropped"
+guards = "A vendor result URL holding whitespace or a control character is dropped, so a page cannot forge extra results in the model's listing"
+file = "crates/plexus-core/src/web_search/backend.rs"
+old = "                || url.chars().any(|c| c.is_whitespace() || c.is_control())"
+new = "                || false /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/backend.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::backend::tests::sanitized_results_keep_urls_and_text_on_one_safe_line", "web_search::tests::both_search_paths_sanitize_vendor_results"]
+expect_message = "only http(s) URLs with no whitespace or control character within the length cap survive"
+build_timeout_s = 3600
+timeout_s = 120
