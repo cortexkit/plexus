@@ -172,38 +172,7 @@ async fn execute_tool_call(
         health: Arc::new(health::HealthState::new()),
         runtime: runtime_for_test(store),
     });
-    let bindings = Arc::new(RouteBindings::new());
-    bindings
-        .insert_scoped(10, 1, principal, scope)
-        .expect("bind route");
-    let (writer, mut responses) = mpsc::channel(1);
-    handle_tool_request(
-        Frame::build(
-            FrameType::Request,
-            subc_protocol::Flags::new(false, subc_protocol::Priority::Interactive, false),
-            10,
-            1,
-            1,
-            serde_json::to_vec(&json!({
-                "name": tool_name,
-                "arguments": arguments,
-            }))
-            .unwrap(),
-        )
-        .unwrap(),
-        &writer,
-        &state,
-        &bindings,
-    )
-    .await
-    .unwrap();
-    let frame = crate::bounded::recv_within(
-        responses.recv(),
-        std::time::Duration::from_secs(5),
-        "events tool response",
-    )
-    .await;
-    serde_json::from_slice(&frame.body).unwrap()
+    crate::test_support::send_tool_call(&state, principal, scope, None, tool_name, arguments).await
 }
 
 #[tokio::test]

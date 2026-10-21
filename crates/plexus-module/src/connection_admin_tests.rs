@@ -22,15 +22,10 @@ use subc_protocol::{BindIdentity, RouteTarget};
 #[tokio::test]
 async fn configure_and_revoke_take_effect_on_the_named_connection() {
     let (writer, mut responses) = mpsc::channel(8);
-    let descriptor = StorageDescriptor {
-        module_id: DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: format!("conn-admin-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "conn-admin-{}",
+        std::process::id()
+    )));
 
     // Configure validates the requested filters against the vendor's
     // declared selectors, so the manifest has to be in the catalog or the

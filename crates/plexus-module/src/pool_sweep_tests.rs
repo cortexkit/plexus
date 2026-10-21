@@ -26,15 +26,10 @@ use super::*;
 async fn the_spawned_scheduler_stamps_each_pass() {
     use subc_protocol::session::ModuleControlResponse;
 
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("pass-stamp-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "pass-stamp-{}",
+        std::process::id()
+    )));
     let state = Arc::new(ModuleState {
         health: Arc::new(health::HealthState::new()),
         runtime: runtime_for_test(Arc::clone(&store)),
@@ -90,15 +85,10 @@ async fn the_spawned_scheduler_stamps_each_pass() {
 async fn the_spawned_scheduler_sweeps_the_transport_pools() {
     use plexus_core::Transport as _;
 
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("pool-sweep-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "pool-sweep-{}",
+        std::process::id()
+    )));
 
     let mcp_transport = Arc::new(plexus_core::McpRemoteTransport::default());
     let state = Arc::new(ModuleState {

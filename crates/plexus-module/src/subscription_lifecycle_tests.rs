@@ -28,15 +28,10 @@ use subc_protocol::{BindIdentity, RouteTarget};
 #[tokio::test]
 async fn subscribe_resume_and_unsubscribe_take_effect_through_the_tool_surface() {
     let (writer, mut responses) = mpsc::channel(8);
-    let descriptor = StorageDescriptor {
-        module_id: DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: format!("sub-lifecycle-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "sub-lifecycle-{}",
+        std::process::id()
+    )));
 
     let manifest_source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/github.jsonc"),
@@ -436,15 +431,10 @@ async fn subscribe_resume_and_unsubscribe_take_effect_through_the_tool_surface()
 #[tokio::test]
 async fn subscription_bindings_persist_through_the_tool_surface() {
     let (writer, mut responses) = mpsc::channel(8);
-    let descriptor = StorageDescriptor {
-        module_id: DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: format!("set-project-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "set-project-{}",
+        std::process::id()
+    )));
 
     let manifest_source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/github.jsonc"),

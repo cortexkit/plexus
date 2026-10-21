@@ -347,3 +347,76 @@ pub(crate) fn test_write_manifest(key: &str, url: &str) -> plexus_core::Ingested
     }))
     .expect("ingest test write manifest")
 }
+
+/// Send one facade tool call, `{name, arguments}`, through `handle_tool_request`
+/// on a route bound to `principal`, and return the reply body.
+///
+/// `scope` is the daemon scope the bind carried. `mode` is the call mode the
+/// bind recorded; `None` derives it the way `RouteBindings::insert_scoped`
+/// does, from whether the scope names a flow.
+pub(crate) async fn send_tool_call(
+    state: &std::sync::Arc<crate::ModuleState>,
+    principal: subc_protocol::Principal,
+    scope: Option<plexus_core::scope::CallScope>,
+    mode: Option<subc_protocol::call_mode::CallMode>,
+    name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    const CHANNEL: u16 = 72;
+    const EPOCH: u32 = 1;
+    let routes = std::sync::Arc::new(crate::RouteBindings::new());
+    match mode {
+        Some(mode) => routes.insert_mode(CHANNEL, EPOCH, principal, scope, mode),
+        None => routes.insert_scoped(CHANNEL, EPOCH, principal, scope),
+    }
+    .expect("bind the calling route");
+    let frame = subc_protocol::Frame::build_with_version(
+        subc_protocol::PROTOCOL_VERSION,
+        subc_protocol::FrameType::Request,
+        subc_protocol::Flags::new(false, subc_protocol::Priority::Interactive, false),
+        CHANNEL,
+        EPOCH,
+        701,
+        serde_json::to_vec(&serde_json::json!({"name": name, "arguments": arguments}))
+            .expect("serialize tool request"),
+    )
+    .expect("build tool frame");
+    let (writer, mut responses) = tokio::sync::mpsc::channel(1);
+    crate::handle_tool_request(frame, &writer, state, &routes)
+        .await
+        .expect("tool request is handled");
+    let reply = crate::bounded::recv_within(
+        responses.recv(),
+        std::time::Duration::from_secs(5),
+        "tool call reply",
+    )
+    .await;
+    serde_json::from_slice(&reply.body).expect("tool reply JSON")
+}
+
+/// A migrated store in the SQLite database file at `path`, namespaced by that
+/// path, the way most fixtures open theirs.
+pub(crate) fn open_file_store(path: &std::path::Path) -> plexus_core::PlexusStore {
+    let location = path.to_string_lossy().into_owned();
+    plexus_core::PlexusStore::open(&cortexkit_store_types::StorageDescriptor {
+        module_id: crate::DEFAULT_MODULE_ID.to_string(),
+        storage_namespace: location.clone(),
+        isolation: cortexkit_store_types::Isolation::Module,
+        backend: cortexkit_store_types::StorageBackend::Sqlite { path: location },
+    })
+    .expect("open the test store file")
+}
+
+/// A migrated in-memory store. `namespace` keeps stores that are open at the
+/// same time apart.
+pub(crate) fn open_memory_store(namespace: impl Into<String>) -> plexus_core::PlexusStore {
+    plexus_core::PlexusStore::open(&cortexkit_store_types::StorageDescriptor {
+        module_id: crate::DEFAULT_MODULE_ID.to_string(),
+        storage_namespace: namespace.into(),
+        isolation: cortexkit_store_types::Isolation::Module,
+        backend: cortexkit_store_types::StorageBackend::Sqlite {
+            path: ":memory:".to_string(),
+        },
+    })
+    .expect("open the in-memory test store")
+}

@@ -20,15 +20,10 @@ use super::*;
 /// leaves this row degraded and fails this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_spawned_scheduler_probes_degraded_connections() {
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("probe-scope-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "probe-scope-{}",
+        std::process::id()
+    )));
 
     let manifest_source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa_rest.jsonc"),
@@ -115,15 +110,10 @@ async fn the_spawned_scheduler_probes_degraded_connections() {
 fn the_health_probe_publishes_the_connection_counts() {
     use subc_protocol::session::ModuleControlResponse;
 
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("probe-counts-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "probe-counts-{}",
+        std::process::id()
+    )));
 
     let manifest_source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa_rest.jsonc"),
@@ -219,15 +209,10 @@ fn the_health_probe_publishes_the_connection_counts() {
 /// what a restage is expected to fix.
 #[test]
 fn one_probe_clears_both_the_degraded_status_and_the_ask_first_default() {
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("probe-chain-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "probe-chain-{}",
+        std::process::id()
+    )));
 
     let manifest_source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa_rest.jsonc"),
@@ -346,15 +331,10 @@ fn one_probe_clears_both_the_degraded_status_and_the_ask_first_default() {
 async fn the_spawned_scheduler_gates_health_probes_to_their_interval() {
     use subc_protocol::session::ModuleControlResponse;
 
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("probe-interval-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "probe-interval-{}",
+        std::process::id()
+    )));
     let health = Arc::new(health::HealthState::new());
     let state = Arc::new(ModuleState {
         health: Arc::clone(&health),

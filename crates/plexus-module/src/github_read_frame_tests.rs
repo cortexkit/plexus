@@ -62,17 +62,7 @@ fn imported_runtime_with_provider(
     Scratch,
 ) {
     let scratch = Scratch::database("github-read-frame");
-    let store = Arc::new(
-        PlexusStore::open(&StorageDescriptor {
-            module_id: "plexus".into(),
-            storage_namespace: scratch.to_string_lossy().into_owned(),
-            isolation: cortexkit_store_types::Isolation::Module,
-            backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: scratch.to_string_lossy().into_owned(),
-            },
-        })
-        .unwrap(),
-    );
+    let store = Arc::new(crate::test_support::open_file_store(&scratch));
     store
         .upsert_manifest(CATALOG_PRINCIPAL, &github_manifest())
         .unwrap();
@@ -141,46 +131,17 @@ async fn send_facade_frame(
     module_id: &str,
     scope: Option<subc_protocol::scope::ScopeStamp>,
 ) -> Value {
-    let frame = Frame::build_with_version(
-        PROTOCOL_VERSION,
-        FrameType::Request,
-        Flags::new(false, Priority::Interactive, false),
-        72,
-        1,
-        701,
-        serde_json::to_vec(&json!({
-            "name": name,
-            "arguments": arguments
-        }))
-        .unwrap(),
+    crate::test_support::send_tool_call(
+        &runtime,
+        Principal::Reserved {
+            module_id: module_id.into(),
+        },
+        scope.as_ref().map(CallScope::from_stamp),
+        Some(derive_call_mode(scope.as_ref())),
+        name,
+        arguments,
     )
-    .unwrap();
-    let (writer, mut responses) = mpsc::channel(1);
-    let routes = Arc::new(RouteBindings::new());
-    routes
-        .insert_mode(
-            frame.header.channel,
-            frame.header.epoch,
-            Principal::Reserved {
-                module_id: module_id.into(),
-            },
-            scope.as_ref().map(CallScope::from_stamp),
-            derive_call_mode(scope.as_ref()),
-        )
-        .unwrap();
-    handle_tool_request(frame, &writer, &runtime, &routes)
-        .await
-        .unwrap();
-    serde_json::from_slice(
-        &recv_within(
-            responses.recv(),
-            std::time::Duration::from_secs(5),
-            "expected reply",
-        )
-        .await
-        .body,
-    )
-    .unwrap()
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -13,15 +13,10 @@ use super::*;
 async fn a_health_check_reports_without_probing_recoverable_connections() {
     use subc_protocol::session::{HealthStatus, ModuleControlResponse};
 
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("handler-without-probe-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "handler-without-probe-{}",
+        std::process::id()
+    )));
     let manifest_source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa_rest.jsonc"),
     )

@@ -59,47 +59,17 @@ async fn list_as_reserved_consumer(store: Arc<PlexusStore>) -> Value {
         health: Arc::new(health::HealthState::new()),
         runtime: runtime_for_test(store),
     });
-    let bindings = Arc::new(RouteBindings::new());
-    bindings
-        .insert(
-            4,
-            2,
-            Principal::Reserved {
-                module_id: "prefrontal-core".to_string(),
-            },
-        )
-        .expect("bind reserved consumer");
-    let (writer, mut responses) = mpsc::channel(1);
-    handle_tool_request(
-        Frame::build(
-            FrameType::Request,
-            subc_protocol::Flags::new(false, subc_protocol::Priority::Interactive, false),
-            4,
-            2,
-            9,
-            serde_json::to_vec(&json!({
-                "name": manifest::EVENTS_TOOL,
-                "arguments": {"op": "list"}
-            }))
-            .expect("serialize tool request"),
-        )
-        .expect("build tool frame"),
-        &writer,
+    crate::test_support::send_tool_call(
         &state,
-        &bindings,
+        Principal::Reserved {
+            module_id: "prefrontal-core".to_string(),
+        },
+        None,
+        None,
+        manifest::EVENTS_TOOL,
+        json!({"op": "list"}),
     )
     .await
-    .expect("tool request succeeds");
-    serde_json::from_slice(
-        &recv_within(
-            responses.recv(),
-            std::time::Duration::from_secs(5),
-            "events response",
-        )
-        .await
-        .body,
-    )
-    .expect("events response body")
 }
 
 #[tokio::test]
@@ -152,15 +122,10 @@ async fn live_consume_authority_is_visible_on_a_quiet_wire_list() {
 #[tokio::test]
 async fn a_reserved_consumer_sees_granted_events_only_through_the_wire() {
     let (writer, mut responses) = mpsc::channel(8);
-    let descriptor = StorageDescriptor {
-        module_id: DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: format!("events-consume-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "events-consume-{}",
+        std::process::id()
+    )));
 
     let manifest_source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/github.jsonc"),
@@ -604,15 +569,10 @@ async fn a_consumer_ack_respects_the_same_action_selectors_as_its_read() {
 /// A stored event must survive the facade's list and ack delivery path.
 async fn a_stored_event_is_delivered_through_the_tool_surface() {
     let (writer, mut responses) = mpsc::channel(8);
-    let descriptor = StorageDescriptor {
-        module_id: DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: format!("events-delivery-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "events-delivery-{}",
+        std::process::id()
+    )));
 
     // Built through the store's ordinary API, because each row is a real
     // precondition of the next: `insert_event` refuses an orphan, and

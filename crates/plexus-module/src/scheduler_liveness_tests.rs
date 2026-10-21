@@ -6,15 +6,10 @@ use super::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failing_scheduler_is_distinguishable_from_an_idle_one() {
     let health = Arc::new(health::HealthState::new());
-    let descriptor = StorageDescriptor {
-        module_id: DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: format!("sched-outcomes-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "sched-outcomes-{}",
+        std::process::id()
+    )));
 
     // A non-operator subscription with no audit history proves the spawned
     // tick discovers owners from live scheduler state. Its mock transport
@@ -208,15 +203,10 @@ async fn a_failing_scheduler_is_distinguishable_from_an_idle_one() {
 /// a standalone guard test would not prove that the task constructs a guard.
 async fn the_spawned_scheduler_holds_a_liveness_guard() {
     let health = Arc::new(health::HealthState::new());
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("sched-liveness-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "sched-liveness-{}",
+        std::process::id()
+    )));
     let state = Arc::new(ModuleState {
         health: Arc::clone(&health),
         runtime: runtime_for_test(store),

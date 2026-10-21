@@ -28,15 +28,10 @@ use subc_protocol::{BindIdentity, RouteTarget};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn approve_and_deny_act_on_the_request_the_caller_named() {
     let (writer, mut responses) = mpsc::channel(8);
-    let descriptor = StorageDescriptor {
-        module_id: DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: format!("approval-gate-{}", std::process::id()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "approval-gate-{}",
+        std::process::id()
+    )));
     // The approved write is checked for freshness before it is sent, which
     // loads the connection's manifest; its catalog row is fresh, so no
     // vendor is contacted. The manifest declares `held_write` on an S1

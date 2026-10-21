@@ -293,17 +293,7 @@ fn a_refused_launch_nonce_names_its_kind() {
 
 fn prepare_selection_fixture() -> Scratch {
     let path = Scratch::database("selection");
-    let _store = Arc::new(
-        PlexusStore::open(&StorageDescriptor {
-            module_id: "plexus".into(),
-            storage_namespace: path.to_string_lossy().into_owned(),
-            isolation: cortexkit_store_types::Isolation::Module,
-            backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: path.to_string_lossy().into_owned(),
-            },
-        })
-        .unwrap(),
-    );
+    let _store = Arc::new(crate::test_support::open_file_store(&path));
     let conn = rusqlite::Connection::open(&path).unwrap();
     let now = plexus_core::storage::now_ms();
     conn.execute("INSERT INTO trigger_subscriptions (subscription_id, principal, connection_id, action, cadence_s, cursor_kind, cursor_state, schema_hash, status, last_polled_at_ms, consecutive_vendor_failures, created_at_ms) VALUES ('watch', 'selection-owner', 'unused', 'read', 300, 'sync_token', '{}', 'hash', 'active', ?1, 4, 0)", [now - 301_000]).unwrap();
@@ -473,17 +463,7 @@ impl AsRef<Path> for DiagnosticStorePath {
 }
 
 fn open_diagnostic_store(path: &Path) -> Arc<PlexusStore> {
-    Arc::new(
-        PlexusStore::open(&StorageDescriptor {
-            module_id: "plexus".into(),
-            storage_namespace: path.to_string_lossy().into_owned(),
-            isolation: cortexkit_store_types::Isolation::Module,
-            backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: path.to_string_lossy().into_owned(),
-            },
-        })
-        .unwrap(),
-    )
+    Arc::new(crate::test_support::open_file_store(path))
 }
 
 fn diagnostic_store_path(prepare: fn() -> Scratch) -> DiagnosticStorePath {
@@ -636,15 +616,10 @@ fn failed_request_fixture() {
         .build()
         .expect("fixture runtime");
     runtime.block_on(async {
-        let descriptor = StorageDescriptor {
-            module_id: DEFAULT_MODULE_ID.to_string(),
-            storage_namespace: format!("failed-request-{}", plexus_core::now_ms()),
-            isolation: cortexkit_store_types::Isolation::Module,
-            backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: ":memory:".to_string(),
-            },
-        };
-        let store = Arc::new(PlexusStore::open(&descriptor).expect("open test store"));
+        let store = Arc::new(crate::test_support::open_memory_store(format!(
+            "failed-request-{}",
+            plexus_core::now_ms()
+        )));
         let state = Arc::new(ModuleState {
             health: Arc::new(health::HealthState::new()),
             runtime: runtime_for_test(store),
@@ -919,17 +894,7 @@ fn write_schema() -> Value {
 fn mcp_write_fixture(label: &str, url: &str, ask_first: bool, granted: bool) -> McpWriteFixture {
     crate::test_support::assert_loopback_is_not_proxied();
     let scratch = Scratch::database(label);
-    let store = Arc::new(
-        PlexusStore::open(&StorageDescriptor {
-            module_id: "plexus".into(),
-            storage_namespace: scratch.to_string_lossy().into_owned(),
-            isolation: cortexkit_store_types::Isolation::Module,
-            backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: scratch.to_string_lossy().into_owned(),
-            },
-        })
-        .unwrap(),
-    );
+    let store = Arc::new(crate::test_support::open_file_store(&scratch));
     store
         .upsert_manifest("system", &crate::test_mcp_manifest("stubmcp", url))
         .unwrap();
@@ -1177,17 +1142,7 @@ fn a_partial_ack_whose_unacked_read_fails_is_an_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_write_whose_freshness_check_cannot_run_is_not_sent() {
     let path = Scratch::database("freshness-check-failed");
-    let store = Arc::new(
-        PlexusStore::open(&StorageDescriptor {
-            module_id: "plexus".into(),
-            storage_namespace: path.to_string_lossy().into_owned(),
-            isolation: cortexkit_store_types::Isolation::Module,
-            backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: path.to_string_lossy().into_owned(),
-            },
-        })
-        .unwrap(),
-    );
+    let store = Arc::new(crate::test_support::open_file_store(&path));
     // Authorize `held_write` with an ordinary grant: the manifest's lowest
     // app tier makes this write too low-severity to need the separate
     // approval service. The pre-write catalog check then stops because the
@@ -1488,17 +1443,7 @@ fn two_connection_fixture_with_retire_status(
     retire_status: &str,
 ) -> (DiagnosticStorePath, Arc<PlexusStore>, Arc<ModuleState>) {
     let path = DiagnosticStorePath::new(label);
-    let store = Arc::new(
-        PlexusStore::open(&StorageDescriptor {
-            module_id: "plexus".into(),
-            storage_namespace: path.to_string_lossy().into_owned(),
-            isolation: cortexkit_store_types::Isolation::Module,
-            backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: path.to_string_lossy().into_owned(),
-            },
-        })
-        .unwrap(),
-    );
+    let store = Arc::new(crate::test_support::open_file_store(&path));
     if !path.is_prepared() {
         let source = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/exa_rest.jsonc"),
@@ -2306,15 +2251,10 @@ async fn untrusted_bind_is_default_denied() {
 #[tokio::test]
 async fn review_action_is_management_only_and_requires_a_direct_principal() {
     let (writer, mut responses) = mpsc::channel(4);
-    let descriptor = StorageDescriptor {
-        module_id: DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: format!("review-action-gate-{}", plexus_core::now_ms()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("open test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "review-action-gate-{}",
+        plexus_core::now_ms()
+    )));
     store
         .upsert_catalog_action(&plexus_core::CatalogActionInput {
             connection_id: "conn-review".to_string(),
@@ -2517,15 +2457,10 @@ async fn widen_ceiling_is_management_only_and_requires_a_direct_principal() {
 #[tokio::test]
 async fn handle_grant_is_a_direct_only_management_op_that_reaches_the_grant() {
     let (writer, mut responses) = mpsc::channel(4);
-    let descriptor = StorageDescriptor {
-        module_id: DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: format!("handle-grant-gate-{}", plexus_core::now_ms()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("open test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "handle-grant-gate-{}",
+        plexus_core::now_ms()
+    )));
     let state = Arc::new(ModuleState {
         health: Arc::new(health::HealthState::new()),
         runtime: runtime_for_test(Arc::clone(&store)),
@@ -2703,15 +2638,10 @@ impl plexus_core::github::credential::HandleCredentialProvider for AnyHandleToke
 #[tokio::test(flavor = "multi_thread")]
 async fn handle_bind_is_a_direct_only_management_op_that_reaches_the_bind() {
     let (writer, mut responses) = mpsc::channel(4);
-    let descriptor = StorageDescriptor {
-        module_id: DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: format!("handle-bind-gate-{}", plexus_core::now_ms()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("open test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "handle-bind-gate-{}",
+        plexus_core::now_ms()
+    )));
     let mut runtime = runtime_for_test(Arc::clone(&store));
     runtime.github_handle_credentials = Some(Arc::new(AnyHandleToken));
     let state = Arc::new(ModuleState {
@@ -2787,15 +2717,10 @@ async fn handle_bind_is_a_direct_only_management_op_that_reaches_the_bind() {
 /// handling without replying to the operator.
 #[tokio::test(flavor = "multi_thread")]
 async fn github_handle_ops_answer_from_an_async_worker() {
-    let descriptor = StorageDescriptor {
-        module_id: DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: format!("handle-ops-worker-{}", plexus_core::now_ms()),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
-        },
-    };
-    let store = Arc::new(PlexusStore::open(&descriptor).expect("open test store"));
+    let store = Arc::new(crate::test_support::open_memory_store(format!(
+        "handle-ops-worker-{}",
+        plexus_core::now_ms()
+    )));
     let mut runtime = runtime_for_test(Arc::clone(&store));
     runtime.github_handle_credentials = Some(Arc::new(AnyHandleToken));
     let state = Arc::new(ModuleState {
