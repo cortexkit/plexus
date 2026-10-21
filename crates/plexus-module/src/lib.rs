@@ -762,6 +762,18 @@ fn connector_gate_transition(gate: &Value) -> (Value, Value, Value) {
 
 fn spawn_trigger_scheduler(
     state: Arc<ModuleState>,
+    stop: mpsc::Receiver<()>,
+    audit_retention_window_ms: i64,
+) -> tokio::task::JoinHandle<()> {
+    spawn_trigger_scheduler_every(SCHEDULER_TICK, state, stop, audit_retention_window_ms)
+}
+
+/// `spawn_trigger_scheduler` with its tick interval named. The module always
+/// runs `SCHEDULER_TICK`; tests pass a short tick so that waiting for the
+/// scheduler's next pass takes milliseconds instead of a second.
+fn spawn_trigger_scheduler_every(
+    tick_interval: std::time::Duration,
+    state: Arc<ModuleState>,
     mut stop: mpsc::Receiver<()>,
     audit_retention_window_ms: i64,
 ) -> tokio::task::JoinHandle<()> {
@@ -779,7 +791,7 @@ fn spawn_trigger_scheduler(
         // report, so a module that has silently stopped polling stops claiming
         // to be ok.
         let _liveness = health::SchedulerLiveness::new(Arc::clone(&state.health));
-        let mut tick = tokio::time::interval(SCHEDULER_TICK);
+        let mut tick = tokio::time::interval(tick_interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Start due, so the first tick performs each periodic task rather than
         // waiting a full interval. That is the ordinary reading of "every 60
@@ -6039,20 +6051,25 @@ mod tests {
             runtime: runtime_for_test(Arc::clone(&store)),
         });
         let (shutdown, stop) = mpsc::channel(1);
-        let task = spawn_trigger_scheduler(
-            state,
-            stop,
-            DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY,
+        let task = crate::test_support::spawn_test_scheduler(state, stop);
+        assert!(
+            crate::test_support::scheduler_passes(&health, 2).await,
+            "the scheduler must run a pass over the selection fixture"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         if scenario == "recovery" {
             conn.execute("UPDATE trigger_subscriptions SET cursor_state = '{}'", [])
                 .unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            assert!(
+                crate::test_support::scheduler_passes(&health, 2).await,
+                "the scheduler must retry selection after the repair"
+            );
         } else if scenario == "empty" {
             conn.execute("DELETE FROM trigger_subscriptions", [])
                 .unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            assert!(
+                crate::test_support::scheduler_passes(&health, 2).await,
+                "the scheduler must select again after the watches are removed"
+            );
         }
         health.backdate_scheduler_success(health::scheduler_stall_threshold_ms_for_test(300) + 1);
         health.stamp_heartbeat();
@@ -12774,14 +12791,10 @@ mod pool_sweep_tests {
         });
 
         let (shutdown, stop) = mpsc::channel::<()>(1);
-        let task = spawn_trigger_scheduler(
-            Arc::clone(&state),
-            stop,
-            DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY,
-        );
-        // Long enough that an unstamped age is unambiguously larger than a
-        // stamped one, rather than a difference that could be scheduling noise.
-        tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+        let task = crate::test_support::spawn_test_scheduler(Arc::clone(&state), stop);
+        // An unstamped scheduler never moves the stamp, so this wait runs to
+        // its full bound and the age below is at least that long.
+        let stamped = crate::test_support::scheduler_passes(&state.health, 2).await;
 
         let ModuleControlResponse::HealthCheck { metrics, .. } = state.health.report() else {
             panic!("expected a health check response");
@@ -12792,7 +12805,7 @@ mod pool_sweep_tests {
             .and_then(serde_json::Value::as_u64)
             .expect("schedulerPassAgeMs present");
         assert!(
-            age < 1_500,
+            stamped && age < 1_500,
             "pass age {age}ms means the scheduler is not stamping its passes, so a \
              healthy scheduler reports the signature of a wedged one"
         );
@@ -12902,14 +12915,13 @@ mod pool_sweep_tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let (shutdown, stop) = mpsc::channel::<()>(1);
-        let task = spawn_trigger_scheduler(
-            Arc::clone(&state),
-            stop,
-            DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY,
-        );
-        // One tick is enough because the sweep starts due rather than waiting
+        let task = crate::test_support::spawn_test_scheduler(Arc::clone(&state), stop);
+        // One pass is enough because the sweep starts due rather than waiting
         // a full interval.
-        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        assert!(
+            crate::test_support::scheduler_passes(&state.health, 2).await,
+            "the scheduler must run a pass"
+        );
 
         assert_eq!(
             mcp_transport.connection_count(),
@@ -13002,14 +13014,13 @@ mod health_probe_scope_tests {
             runtime: runtime_for_test(Arc::clone(&store)),
         });
         let (shutdown, stop) = mpsc::channel::<()>(1);
-        let task = spawn_trigger_scheduler(
-            Arc::clone(&state),
-            stop,
-            DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY,
-        );
-        // The first probe is due immediately; wait one scheduler tick so the
+        let task = crate::test_support::spawn_test_scheduler(Arc::clone(&state), stop);
+        // The first probe is due immediately; wait for a whole pass so the
         // spawned task, rather than this test, performs the recovery.
-        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        assert!(
+            crate::test_support::scheduler_passes(&state.health, 2).await,
+            "the scheduler must run a pass"
+        );
         let status = store
             .connection("direct", "conn-rest")
             .expect("read")
@@ -13288,13 +13299,9 @@ mod health_probe_scope_tests {
             runtime: runtime_for_test(Arc::clone(&store)),
         });
         let (shutdown, stop) = mpsc::channel::<()>(1);
-        let task = spawn_trigger_scheduler(
-            state,
-            stop,
-            DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY,
-        );
+        let task = crate::test_support::spawn_test_scheduler(state, stop);
 
-        let initial_metrics = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let initial_metrics = tokio::time::timeout(std::time::Duration::from_secs(20), async {
             loop {
                 health.stamp_heartbeat();
                 let ModuleControlResponse::HealthCheck { metrics, .. } = health.report() else {
@@ -13324,9 +13331,12 @@ mod health_probe_scope_tests {
                 &json!({"required": [], "optional": [], "write_enabling": []}),
             )
             .expect("seed pending connection");
-        // Wait beyond one scheduler tick. An ungated probe would now publish the
+        // Wait for a whole later pass. An ungated probe would now publish the
         // pending row; a correctly gated probe keeps the initial observation.
-        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        assert!(
+            crate::test_support::scheduler_passes(&health, 2).await,
+            "the scheduler must keep running passes"
+        );
         health.stamp_heartbeat();
         let ModuleControlResponse::HealthCheck { metrics, .. } = health.report() else {
             unreachable!("HealthState always returns a health check response");
@@ -13338,7 +13348,7 @@ mod health_probe_scope_tests {
         assert_eq!(
             metrics["connections"],
             json!(0),
-            "the next one-second tick must not run another health probe"
+            "the next scheduler pass must not run another health probe"
         );
     }
 }
@@ -13599,15 +13609,13 @@ mod scheduler_liveness_tests {
             ),
         });
         let (shutdown, stop) = mpsc::channel::<()>(1);
-        let task = spawn_trigger_scheduler(
-            Arc::clone(&state),
-            stop,
-            DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY,
-        );
+        let task = crate::test_support::spawn_test_scheduler(Arc::clone(&state), stop);
 
-        // Long enough for at least one tick to select and attempt the
-        // subscription.
-        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        // A whole pass selects and attempts the subscription.
+        assert!(
+            crate::test_support::scheduler_passes(&health, 2).await,
+            "the scheduler must run a pass"
+        );
         // Cross the real stall threshold without making a scheduler wiring test
         // sleep for fifteen minutes. All other state below still comes from the
         // spawned production task.
@@ -13701,15 +13709,20 @@ mod scheduler_liveness_tests {
             DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY,
         );
 
-        // Let the task reach its loop and construct the guard.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        health.stamp_heartbeat();
-        let alive = match health.report() {
-            subc_protocol::session::ModuleControlResponse::HealthCheck { metrics, .. } => metrics
-                .and_then(|value| value["schedulerAlive"].as_bool())
-                .unwrap_or(false),
-            other => panic!("expected a health check, got {other:?}"),
-        };
+        // Wait, with a generous bound, for the task to reach its loop and
+        // construct the guard; a fixed short sleep assumed it is polled at once.
+        let alive = crate::test_support::eventually(std::time::Duration::from_secs(20), || {
+            health.stamp_heartbeat();
+            match health.report() {
+                subc_protocol::session::ModuleControlResponse::HealthCheck { metrics, .. } => {
+                    metrics
+                        .and_then(|value| value["schedulerAlive"].as_bool())
+                        .unwrap_or(false)
+                }
+                other => panic!("expected a health check, got {other:?}"),
+            }
+        })
+        .await;
         assert!(
             alive,
             "a running scheduler must report alive, or the second assertion \

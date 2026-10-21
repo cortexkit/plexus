@@ -156,3 +156,63 @@ pub(crate) fn assert_exactly_one_test_passed(test: &str, output: &std::process::
         "child run of {test} did not run exactly one test, or it did not pass: {stdout}"
     );
 }
+
+/// The scheduler tick unit tests run: short enough that waiting for a few
+/// passes takes milliseconds, where the module's one-second tick would make
+/// each wait a second.
+pub(crate) const TEST_SCHEDULER_TICK: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Generous on purpose: it only has to catch a scheduler that never runs, and
+/// a tight bound would fail on a loaded machine instead.
+const SCHEDULER_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The real scheduler task, ticking every `TEST_SCHEDULER_TICK`.
+pub(crate) fn spawn_test_scheduler(
+    state: std::sync::Arc<crate::ModuleState>,
+    stop: tokio::sync::mpsc::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    crate::spawn_trigger_scheduler_every(
+        TEST_SCHEDULER_TICK,
+        state,
+        stop,
+        crate::DEFAULT_AUDIT_RETENTION_DAYS * crate::AUDIT_MILLIS_PER_DAY,
+    )
+}
+
+/// Wait until the scheduler has begun `passes` more passes, and say whether
+/// it did within `SCHEDULER_WAIT`.
+///
+/// Passes never overlap (the next tick is taken only after a pass returns),
+/// so once two passes have begun after this call, the first of them has also
+/// finished: waiting for two means one whole pass ran after the call.
+pub(crate) async fn scheduler_passes(health: &crate::health::HealthState, passes: usize) -> bool {
+    let mut last = health.last_scheduler_pass_ms_for_test();
+    let mut seen = 0;
+    tokio::time::timeout(SCHEDULER_WAIT, async {
+        while seen < passes {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            let stamp = health.last_scheduler_pass_ms_for_test();
+            if stamp != last {
+                seen += 1;
+                last = stamp;
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// Poll `ready` every few milliseconds until it holds or `limit` passes, and
+/// say whether it held.
+pub(crate) async fn eventually(
+    limit: std::time::Duration,
+    mut ready: impl FnMut() -> bool,
+) -> bool {
+    tokio::time::timeout(limit, async {
+        while !ready() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok()
+}

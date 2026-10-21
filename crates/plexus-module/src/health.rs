@@ -459,6 +459,13 @@ impl HealthState {
         self.outbox_unpublishable.store(rows, Ordering::Relaxed);
     }
 
+    /// When the scheduler last began a pass, so a test can wait for passes
+    /// instead of sleeping for a guessed number of ticks.
+    #[cfg(test)]
+    pub(crate) fn last_scheduler_pass_ms_for_test(&self) -> u64 {
+        self.last_scheduler_pass_ms.load(Ordering::Relaxed)
+    }
+
     /// Move both scheduler last-success references into the past so tests can
     /// cross the cadence-derived stall threshold without sleeping.
     #[cfg(test)]
