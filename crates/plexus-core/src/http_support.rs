@@ -744,26 +744,17 @@ mod tests {
         );
     }
     use crate::transport::TransmissionState;
-    use std::io::Write;
-    use std::net::TcpListener;
 
     fn start_failure_server(
         requests: usize,
         response: &'static str,
-    ) -> (String, std::thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP failure server");
-        let address = listener.local_addr().expect("HTTP failure server address");
-        let task = std::thread::spawn(move || {
-            for _ in 0..requests {
-                let (mut stream, _) = listener.accept().expect("accept HTTP failure request");
-                crate::test_http::read_mock_request(&mut stream, "failure classifier")
-                    .expect("read HTTP failure request");
-                stream
-                    .write_all(response.as_bytes())
-                    .expect("write HTTP failure response");
-            }
-        });
-        (format!("http://{address}/loop"), task)
+    ) -> (String, crate::test_http::FixedRequestServer) {
+        let (base, server) = crate::test_http::FixedRequestServer::start(
+            requests,
+            "failure classifier",
+            move |_, _| response.to_string(),
+        );
+        (format!("{base}/loop"), server)
     }
 
     /// The production keep-alive limit stays below the shortest common vendor
