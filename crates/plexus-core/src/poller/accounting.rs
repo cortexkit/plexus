@@ -331,9 +331,7 @@ fn close_ledger(
 mod tests {
     use super::*;
 
-    mod logging {
-        include!("../../tests/support/logging.rs");
-    }
+    use crate::test_logging as logging;
 
     #[test]
     fn drop_ledger_violation_logs_without_panicking() {

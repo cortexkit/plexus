@@ -1269,10 +1269,7 @@ mod ckcred_wire_tests {
 #[cfg(test)]
 mod report_diagnostic_tests {
     use super::*;
-    #[allow(dead_code)]
-    mod logging {
-        include!("../tests/support/logging.rs");
-    }
+    use crate::test_logging as logging;
 
     #[test]
     fn vault_report_failures_are_logged_without_credential_material() {

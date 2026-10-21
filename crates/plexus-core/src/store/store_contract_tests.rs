@@ -1229,8 +1229,7 @@ fn migration_52_indexes_have_before_and_after_query_plan_evidence() {
 }
 
 use crate::bounded;
-#[path = "../../tests/support/logging.rs"]
-mod logging;
+use crate::test_logging as logging;
 
 #[test]
 fn reconciliation_warning_never_renders_sensitive_record_fragments() {

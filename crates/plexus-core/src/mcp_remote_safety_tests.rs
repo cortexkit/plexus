@@ -356,10 +356,7 @@ fn sse_body_failures_have_an_operator_cause_and_path() {
     const TEST: &str =
         "mcp_remote::safety_tests::sse_body_failures_have_an_operator_cause_and_path";
     if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
-        #[allow(dead_code)]
-        mod logging {
-            include!("../tests/support/logging.rs");
-        }
+        use crate::test_logging as logging;
         logging::init_child();
         let (endpoint, server) = crate::test_http::FixedRequestServer::start(
             3,

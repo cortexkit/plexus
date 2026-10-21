@@ -1361,12 +1361,9 @@ fn rest_poisoned_lock_response() -> TransportResponse {
 
 #[cfg(test)]
 mod tests {
-    #[allow(dead_code)]
-    pub(super) mod logging {
-        include!("../tests/support/logging.rs");
-    }
     use super::*;
     use crate::fingerprint;
+    pub(super) use crate::test_logging as logging;
     use serde_json::json;
     use std::net::TcpListener;
 

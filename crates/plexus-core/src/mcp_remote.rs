@@ -2208,10 +2208,7 @@ mod transport_integration_tests {
         const TEST: &str =
             "mcp_remote::transport_integration_tests::vendor_error_diagnostics_are_bounded";
         if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
-            #[allow(dead_code)]
-            mod logging {
-                include!("../tests/support/logging.rs");
-            }
+            use crate::test_logging as logging;
             logging::init_child();
             for tool in [false, true] {
                 let (endpoint, task) = start_server(3, move |index, _| match index {
@@ -3198,10 +3195,7 @@ mod transport_integration_tests {
         const TEST: &str =
             "mcp_remote::transport_integration_tests::mcp_http_failure_writes_mcp_operator_diagnostic";
         if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
-            #[allow(dead_code)]
-            mod logging {
-                include!("../tests/support/logging.rs");
-            }
+            use crate::test_logging as logging;
             logging::init_child();
             let (endpoint, task) = start_server(3, |_index, request| {
                 if request.contains("notifications/initialized") {
@@ -3300,10 +3294,7 @@ mod transport_integration_tests {
         const TEST: &str =
             "mcp_remote::transport_integration_tests::a_transport_failure_logs_its_cause_without_the_url";
         if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
-            #[allow(dead_code)]
-            mod logging {
-                include!("../tests/support/logging.rs");
-            }
+            use crate::test_logging as logging;
             logging::init_child();
             let endpoint = dispatch_against_hang_up("");
             // Hand the endpoint to the parent so it knows which port to look
@@ -3345,10 +3336,7 @@ mod transport_integration_tests {
         const TEST: &str =
             "mcp_remote::transport_integration_tests::a_transport_failure_never_logs_a_query_credential";
         if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
-            #[allow(dead_code)]
-            mod logging {
-                include!("../tests/support/logging.rs");
-            }
+            use crate::test_logging as logging;
             logging::init_child();
             // A vendor-specific parameter name on purpose. The fleet renderer
             // already masks the value of well-known names such as `token`, so
@@ -3704,10 +3692,7 @@ mod transport_integration_tests {
     fn a_connection_reused_past_the_vendor_keep_alive_fails_as_production_did() {
         const TEST: &str = "mcp_remote::transport_integration_tests::a_connection_reused_past_the_vendor_keep_alive_fails_as_production_did";
         if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
-            #[allow(dead_code)]
-            mod logging {
-                include!("../tests/support/logging.rs");
-            }
+            use crate::test_logging as logging;
             logging::init_child();
             let (first, second, before, after) =
                 two_calls_across_an_idle_gap(Duration::from_secs(60));
