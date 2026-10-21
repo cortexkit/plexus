@@ -209,7 +209,7 @@ mod tests {
         assert_eq!(revocations["writer_interaction"], "none");
         // The journal must be captured after store.db, so a revocation that
         // lands mid-backup is in the journal whenever it is in the store. A
-        // store restored with an older journal could otherwise re-arm it.
+        // store restored with an older journal could otherwise bring the revoked grant back.
         assert_eq!(revocations["capture"], "after_databases");
 
         let leases = entries
