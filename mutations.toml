@@ -20588,3 +20588,19 @@ expect_red = ["web_search::tests::vendor_throttle_is_rate_limited_with_the_vendo
 expect_message = "a vendor throttle must tell the caller when to retry"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "search-block-policy-named"
+guards = "A block policy on the backing connection is refused as policy_blocked by both search tools, as governance names it, not as a missing grant"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "        return Err(SearchDenial::Blocked);"
+new = "        return Err(SearchDenial::NotGranted); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::blocked_searches_keep_the_rate_budget", "code_search::tests::blocked_searches_keep_the_code_search_rate_budget"]
+expect_message = "must not consume quota"
+build_timeout_s = 3600
+timeout_s = 120

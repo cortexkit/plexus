@@ -705,7 +705,7 @@ async fn a_block_policy_refuses_a_cached_query() {
     let second = fixture
         .search(Principal::Direct, json!({"query": "policy me"}))
         .await;
-    assert_eq!(code(&second), "web_search_not_granted", "{second}");
+    assert_eq!(code(&second), "policy_blocked", "{second}");
     assert_eq!(fixture.requests(), 1, "the refused hit sent nothing");
 }
 

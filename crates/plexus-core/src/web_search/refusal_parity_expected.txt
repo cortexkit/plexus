@@ -26,10 +26,10 @@ ask_first Web reply | {"error":{"code":"policy_ask_first","message":"Searches ca
 ask_first Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | policy_ask_first | not_sent | web_search query recorded in query_text; assertion and other arguments omitted | pub fn with_capacity | - | - | -
 ask_first Code reply | {"error":{"code":"policy_ask_first","message":"Searches cannot be approved per call; set the search policy to allow or block."}}
 ask_first Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | policy_ask_first | not_sent | code_search query recorded in query_text; other arguments omitted | pub fn with_capacity | - | - | -
-block Web reply | {"error":{"code":"web_search_not_granted","message":"no web search backend is granted to this caller"}}
-block Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | web_search_not_granted | not_sent | web_search query recorded in query_text; assertion and other arguments omitted | pub fn with_capacity | - | - | -
-block Code reply | {"error":{"code":"code_search_not_granted","message":"no code search backend is granted to this caller"}}
-block Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | code_search_not_granted | not_sent | code_search query recorded in query_text; other arguments omitted | pub fn with_capacity | - | - | -
+block Web reply | {"error":{"code":"policy_blocked","message":"a policy blocks web search on the granted backend; an operator must change that policy"}}
+block Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | policy_blocked | not_sent | web_search query recorded in query_text; assertion and other arguments omitted | pub fn with_capacity | - | - | -
+block Code reply | {"error":{"code":"policy_blocked","message":"a policy blocks code search on the granted backend; an operator must change that policy"}}
+block Code audit | direct | direct | grep | grep_app | searchGitHub | read | S1 | deny | policy_blocked | not_sent | code_search query recorded in query_text; other arguments omitted | pub fn with_capacity | - | - | -
 quarantined Web reply | {"error":{"backend":"exa","code":"backend_quarantined","message":"the web search backend action is quarantined pending operator review"}}
 quarantined Web audit | direct | direct | exa | exa_rest | search | read | S1 | deny | backend_quarantined | not_sent | web_search query recorded in query_text; assertion and other arguments omitted | pub fn with_capacity | - | - | -
 quarantined Code reply | {"error":{"code":"backend_quarantined","message":"the code search backend action is quarantined pending operator review"}}

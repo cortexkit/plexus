@@ -258,7 +258,7 @@ fn blocked_searches_keep_the_code_search_rate_budget() {
     for _ in 0..200 {
         assert_eq!(
             f.search("direct", None).unwrap_err().to_wire()["error"]["code"],
-            "code_search_not_granted",
+            "policy_blocked",
             "blocked code searches must not consume quota"
         );
     }

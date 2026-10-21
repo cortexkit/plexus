@@ -66,6 +66,8 @@ pub enum WebSearchRefusal {
     /// the search action to this caller.
     NotGranted,
     Grant(crate::grant_refusal::GrantRefusal),
+    /// A policy blocks the search action on the connection that would serve.
+    PolicyBlocked,
     RateLimited {
         retry_after_ms: u64,
     },
@@ -106,6 +108,7 @@ impl WebSearchRefusal {
         match self {
             Self::NotGranted => "web_search_not_granted",
             Self::Grant(refusal) => refusal.code(),
+            Self::PolicyBlocked => "policy_blocked",
             Self::RateLimited { .. } => "rate_limited",
             Self::BackendUnavailable { .. } => "backend_unavailable",
             Self::RequestRejected { .. } => "web_search_request_rejected",
@@ -122,6 +125,9 @@ impl WebSearchRefusal {
     fn message(&self) -> &'static str {
         match self {
             Self::NotGranted | Self::Grant(_) => "no web search backend is granted to this caller",
+            Self::PolicyBlocked => {
+                "a policy blocks web search on the granted backend; an operator must change that policy"
+            }
             Self::RateLimited { .. } => "web search rate limit reached; retry after retry_after_ms",
             Self::BackendUnavailable { .. } => crate::transport::OPERATOR_DIAGNOSTIC_MESSAGE,
             Self::RequestRejected { .. } => "the web search provider rejected the request",
@@ -155,6 +161,7 @@ impl WebSearchRefusal {
             Self::InvalidQuery { field } => error["field"] = json!(field),
             Self::WebSearchUnavailable { providers } => error["detail"] = json!(providers),
             Self::NotGranted
+            | Self::PolicyBlocked
             | Self::BackendAmbiguous
             | Self::CodeLookup
             | Self::PerCallApprovalUnsupported => {}
@@ -535,7 +542,7 @@ impl WebSearchService {
             "web_search cache hit refused by policy ({effect}) on {}",
             connection.connection_id
         );
-        Err(WebSearchRefusal::NotGranted)
+        Err(WebSearchRefusal::PolicyBlocked)
     }
 
     pub fn grant_target(caller: &str) -> crate::grant_refusal::GrantTarget {
@@ -589,7 +596,8 @@ impl WebSearchService {
     fn refusal_from(&self, denial: facade::SearchDenial) -> WebSearchRefusal {
         use facade::SearchDenial;
         match denial {
-            SearchDenial::NotGranted | SearchDenial::Blocked => WebSearchRefusal::NotGranted,
+            SearchDenial::NotGranted => WebSearchRefusal::NotGranted,
+            SearchDenial::Blocked => WebSearchRefusal::PolicyBlocked,
             SearchDenial::Grant(refusal) => WebSearchRefusal::Grant(refusal),
             SearchDenial::Ambiguous => WebSearchRefusal::BackendAmbiguous,
             SearchDenial::AskFirst => WebSearchRefusal::PerCallApprovalUnsupported,

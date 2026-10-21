@@ -157,7 +157,7 @@ fn blocked_searches_keep_the_rate_budget() {
     for _ in 0..200 {
         assert_eq!(
             service.search(&engine, "direct", args.as_object().unwrap()),
-            Err(WebSearchRefusal::NotGranted),
+            Err(WebSearchRefusal::PolicyBlocked),
             "blocked searches must not consume quota"
         );
     }

@@ -555,7 +555,7 @@ fn compatibility_refusals_survive_set_then_clear() {
                     .store()
                     .set_policy("direct", "exa", "search", "block", None)
                     .unwrap();
-                WebSearchRefusal::NotGranted
+                WebSearchRefusal::PolicyBlocked
             }
             "unusable" => {
                 engine

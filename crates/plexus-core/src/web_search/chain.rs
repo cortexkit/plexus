@@ -128,7 +128,9 @@ impl SkipReason {
         match refusal {
             WebSearchRefusal::NotGranted | WebSearchRefusal::Grant(_) => Self::NotGranted,
             WebSearchRefusal::BackendAmbiguous => Self::Ambiguous,
-            WebSearchRefusal::PerCallApprovalUnsupported => Self::Policy,
+            WebSearchRefusal::PerCallApprovalUnsupported | WebSearchRefusal::PolicyBlocked => {
+                Self::Policy
+            }
             WebSearchRefusal::BackendQuarantined { .. } => Self::Quarantined,
             _ => Self::Unavailable,
         }

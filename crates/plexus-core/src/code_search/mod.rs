@@ -34,6 +34,7 @@ enum RefusalCode {
     NotGranted,
     /// A flow's typed grant refusal at the named layer.
     GrantAbsent(Layer),
+    PolicyBlocked,
     RateLimited,
     InvalidQuery,
     ConsentUnavailable,
@@ -49,6 +50,7 @@ impl RefusalCode {
             Self::NotGranted => "code_search_not_granted",
             Self::GrantAbsent(Layer::Module) => "module_grant_absent",
             Self::GrantAbsent(Layer::Agent) => "agent_grant_absent",
+            Self::PolicyBlocked => "policy_blocked",
             Self::RateLimited => "rate_limited",
             Self::InvalidQuery => "invalid_query",
             Self::ConsentUnavailable => "consent_unavailable",
@@ -106,6 +108,9 @@ impl CodeSearchRefusal {
         let message = match self.code {
             RefusalCode::NotGranted | RefusalCode::GrantAbsent(_) => {
                 "no code search backend is granted to this caller"
+            }
+            RefusalCode::PolicyBlocked => {
+                "a policy blocks code search on the granted backend; an operator must change that policy"
             }
             RefusalCode::RateLimited => {
                 "code search rate limit reached; retry after retry_after_ms"
@@ -294,9 +299,8 @@ fn grant_target(caller: &str) -> GrantTarget {
 /// Name a shared search denial in code_search's refusal set.
 fn refusal_from(denial: SearchDenial) -> CodeSearchRefusal {
     match denial {
-        SearchDenial::NotGranted | SearchDenial::Blocked => {
-            CodeSearchRefusal::new(RefusalCode::NotGranted)
-        }
+        SearchDenial::NotGranted => CodeSearchRefusal::new(RefusalCode::NotGranted),
+        SearchDenial::Blocked => CodeSearchRefusal::new(RefusalCode::PolicyBlocked),
         SearchDenial::Grant(refusal) => CodeSearchRefusal::grant(refusal),
         SearchDenial::Ambiguous => CodeSearchRefusal::new(RefusalCode::BackendAmbiguous),
         SearchDenial::AskFirst => CodeSearchRefusal::new(RefusalCode::AskFirst),
