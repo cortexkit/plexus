@@ -16,6 +16,10 @@ pub struct ProviderName {
     pub manifest: &'static str,
     pub action: &'static str,
     pub credential: VaultCredential,
+    /// The connection id `add-web-search-provider` creates or reuses for this
+    /// provider. Fixed here so a rerun finds the same connection instead of
+    /// creating a second candidate for the same provider.
+    pub connection_id: &'static str,
 }
 
 macro_rules! rest_provider {
@@ -26,6 +30,7 @@ macro_rules! rest_provider {
             manifest: concat!("catalog/", $name, "_rest.jsonc"),
             action: "search",
             credential: VaultCredential::Required(concat!("apikey:", $name)),
+            connection_id: concat!("conn-web-search-", $name),
         }
     };
 }
@@ -33,9 +38,13 @@ macro_rules! rest_provider {
 /// Recognized names do not imply an installed manifest or backend. REST search
 /// uses `*_rest` app keys, distinct from the existing `tavily` and `firecrawl`
 /// MCP app keys, so those MCP connections cannot be selected for REST search.
-/// Exa keeps its existing credential reference, `apikey:exa`.
+/// Exa keeps its existing credential reference, `apikey:exa`, and its existing
+/// deployed connection, `conn-exa-rest`.
 pub const PROVIDER_NAMES: &[ProviderName] = &[
-    rest_provider!("exa"),
+    ProviderName {
+        connection_id: "conn-exa-rest",
+        ..rest_provider!("exa")
+    },
     rest_provider!("tavily"),
     rest_provider!("brave"),
     rest_provider!("deepseek"),
@@ -68,6 +77,7 @@ pub const PROVIDER_NAMES: &[ProviderName] = &[
         // https://docs.z.ai/devpack/mcp/search-mcp-server#supported-tools
         action: "web_search_prime",
         credential: VaultCredential::Required("apikey:zai"),
+        connection_id: "conn-web-search-zai",
     },
 ];
 
@@ -133,6 +143,12 @@ mod tests {
                 }
             }
             assert_eq!(provider_named(provider.name), Some(provider));
+            let connection = if provider.name == "exa" {
+                "conn-exa-rest".to_string()
+            } else {
+                format!("conn-web-search-{}", provider.name)
+            };
+            assert_eq!(provider.connection_id, connection);
         }
         let exa = provider_named(ExaRestBackend.name()).unwrap();
         assert_eq!(exa.app_key, ExaRestBackend.app_key());
@@ -146,6 +162,7 @@ mod tests {
                 manifest: "catalog/zai.jsonc",
                 action: "web_search_prime",
                 credential: VaultCredential::Required("apikey:zai"),
+                connection_id: "conn-web-search-zai",
             })
         );
         for unknown in ["", "EXA", "exa_rest", "tavily_rest", "google", "public"] {

@@ -120,6 +120,9 @@ commands:
                  delete a connection that has no live grants left
   set-web-search-limit
                  set a web search backend's calls per minute
+  add-web-search-provider
+                 connect a web search provider and grant its callers under one
+                 confirmation (preview by default)
 
 import-store --from <old.db> --to <new.db>
     Stop the module first; the source lease enforces this. The destination must
@@ -281,6 +284,23 @@ set-web-search-allowance <name> --clear [--apply]
     --clear removes only that provider's allowance, retaining usage counts.
     Allowances are stored without an order but apply only in an order.
     Without --apply, previews only. There is no clear-all.
+
+add-web-search-provider <name> [--grantee <principal>]... [--instance-url <url>]
+                        [--with-key] [--apply]
+    Does what issue-ticket, connections op=connect and one grant per caller do,
+    with one Touch ID confirmation instead of one per step. The app, action,
+    vault credential name and connection id come from the provider name table;
+    the connection gets a read ceiling on the search action only, and each
+    grantee an invoke grant at read risk on that action. Repeat --grantee per
+    caller; without it, the grantees are the callers that already hold a live
+    search grant on your web search provider connections. Wildcards are
+    refused. SearXNG requires --instance-url and is anonymous unless
+    --with-key binds apikey:searxng; other providers refuse --with-key.
+    Without --apply this previews and writes nothing. With --apply, grants
+    are minted together only after the connection is active and discovery
+    completed; rerunning reuses a matching connection and skips grants that
+    already exist, and refuses a connection bound to another app, credential
+    or instance. It never sets the order or allowances.
 ";
 
 fn run(arguments: &[String]) -> Result<(), Failure> {
@@ -334,7 +354,7 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         .collect();
     let flags = if matches!(
         command.as_str(),
-        "set-web-search-order" | "set-web-search-allowance"
+        "set-web-search-order" | "set-web-search-allowance" | "add-web-search-provider"
     ) {
         Flags::parse_positionals(&flag_arguments, true)?
     } else {
@@ -385,7 +405,7 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         return Ok(());
     }
     if let Some(accepted) = accepted_flags(command) {
-        flags.refuse_unknown(accepted)?;
+        flags.refuse_unknown(accepted, repeatable_flags(command))?;
     }
     if command == "issue-ticket" {
         validate_ticket_flags(&flags)?;
@@ -418,6 +438,7 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         "set-web-search-limit" => set_web_search_limit_request(&flags)?,
         "set-web-search-order" => set_web_search_order_request(&flags)?,
         "set-web-search-allowance" => set_web_search_allowance_request(&flags)?,
+        "add-web-search-provider" => add_web_search_provider_request(&flags)?,
         "recipients-add" | "recipients-remove" | "recipients-list" => {
             recipients_request(command, &flags)?
         }
@@ -505,6 +526,7 @@ fn accepted_flags(command: &str) -> Option<&'static [&'static str]> {
         "rebind-credential" => &["--connection", "--credential-id", "--apply"],
         "set-web-search-limit" => &["--backend", "--per-caller", "--per-backend", "--apply"],
         "set-web-search-order" | "set-web-search-allowance" => &["--clear", "--apply"],
+        "add-web-search-provider" => &["--grantee", "--instance-url", "--with-key", "--apply"],
         "recipients-add" | "recipients-remove" => {
             &["--connection", "--agent", "--recipient", "--apply"]
         }
@@ -516,7 +538,15 @@ fn accepted_flags(command: &str) -> Option<&'static [&'static str]> {
 /// Parsed command line: flags with values, plus bare `--help`.
 /// Flags that take no value. An allowlist, so a mistyped value-taking flag
 /// still refuses rather than being read as a boolean.
-const BARE_FLAGS: &[&str] = &["--all", "--all-handles", "--apply", "--clear"];
+const BARE_FLAGS: &[&str] = &["--all", "--all-handles", "--apply", "--clear", "--with-key"];
+
+/// Flags a command may give more than once, each occurrence adding a value.
+fn repeatable_flags(command: &str) -> &'static [&'static str] {
+    match command {
+        "add-web-search-provider" => &["--grantee"],
+        _ => &[],
+    }
+}
 
 struct Flags {
     values: Vec<(String, String)>,
@@ -586,7 +616,9 @@ impl Flags {
     /// Refuse any flag outside `accepted` and [`COMMON_FLAGS`], and any flag
     /// given twice. Both would otherwise be dropped silently: an unknown flag
     /// is never read, and `value` reads only the first of a repeated one.
-    fn refuse_unknown(&self, accepted: &[&str]) -> Result<(), Failure> {
+    /// Flags in `repeatable` may be given more than once; [`Self::values`]
+    /// reads every occurrence of them.
+    fn refuse_unknown(&self, accepted: &[&str], repeatable: &[&str]) -> Result<(), Failure> {
         let names = self
             .values
             .iter()
@@ -599,7 +631,7 @@ impl Flags {
                     "unknown flag {flag} for this command; see --help"
                 )));
             }
-            if !seen.insert(flag.as_str()) {
+            if !seen.insert(flag.as_str()) && !repeatable.contains(&flag.as_str()) {
                 return Err(Failure::usage(format!("duplicate flag {flag}")));
             }
         }
@@ -611,6 +643,14 @@ impl Flags {
             .iter()
             .find(|(flag, _)| flag == name)
             .map(|(_, value)| value.as_str())
+    }
+
+    fn values(&self, name: &str) -> Vec<&str> {
+        self.values
+            .iter()
+            .filter(|(flag, _)| flag == name)
+            .map(|(_, value)| value.as_str())
+            .collect()
     }
 
     fn required(&self, name: &str) -> Result<&str, Failure> {
@@ -1125,6 +1165,92 @@ fn set_web_search_allowance_request(flags: &Flags) -> Result<(&'static str, Valu
     ))
 }
 
+/// Only the provider, grantees, SearXNG instance and key choice come from the
+/// operator; the module reads everything else from its provider name table.
+fn add_web_search_provider_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
+    let [provider] = flags.positionals.as_slice() else {
+        return Err(Failure::usage(
+            "add-web-search-provider requires exactly one provider name",
+        ));
+    };
+    let mut params = json!({
+        "provider": provider,
+        "with_key": flags.has("--with-key"),
+        "dry_run": !flags.has("--apply"),
+    });
+    let grantees = flags.values("--grantee");
+    if !grantees.is_empty() {
+        params["grantees"] = json!(grantees);
+    }
+    if let Some(instance) = flags.value("--instance-url") {
+        // Checked here so a malformed address fails before any daemon contact;
+        // the message is fixed and never repeats the address.
+        plexus_core::instance_url::InstanceUrl::parse(instance).map_err(Failure::usage)?;
+        params["instance_url"] = json!(instance);
+    }
+    Ok((
+        plexus_module::manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP,
+        params,
+    ))
+}
+
+fn add_web_search_provider_lines(result: &Value) -> Vec<String> {
+    let mut lines = vec![
+        format!("provider:   {}", text(&result["provider"])),
+        format!(
+            "connection: {} ({})",
+            text(&result["connection_id"]),
+            text(&result["connection"])
+        ),
+        format!("app:        {}", text(&result["app_key"])),
+        format!(
+            "credential: {}",
+            result["credential"].as_str().unwrap_or("none (anonymous)")
+        ),
+    ];
+    if result.get("instance_url").is_some() {
+        lines.push("instance:   supplied (not shown)".into());
+    }
+    let mut ceiling = format!(
+        "ceiling:    risk={} actions={}",
+        text(&result["ceiling"]["risk"]),
+        list(&result["ceiling"]["action_selectors"])
+    );
+    if let Some(note) = result["ceiling_note"].as_str() {
+        ceiling.push_str(&format!(" ({note})"));
+    }
+    lines.push(ceiling);
+    lines.push(format!(
+        "grantees:   {}",
+        if result["grantees_source"] == "explicit" {
+            "as named"
+        } else {
+            "callers holding a live search grant on your web search connections"
+        }
+    ));
+    for grant in result["grants"].as_array().into_iter().flatten() {
+        let mut line = format!(
+            "grant:      {} {} {} {} {}",
+            text(&grant["grantee"]),
+            text(&grant["authority_kind"]),
+            text(&grant["risk_ceiling"]),
+            list(&grant["action_selectors"]),
+            text(&grant["status"])
+        );
+        if let Some(id) = grant["grant_id"].as_str() {
+            line.push_str(&format!(" {id}"));
+        }
+        lines.push(line);
+    }
+    if result["applied"] == true {
+        lines.push(format!("discovery:  {}", text(&result["discovery"])));
+        lines.push("applied".into());
+    } else {
+        lines.push("preview only; pass --apply to confirm once and apply".into());
+    }
+    lines
+}
+
 fn catalog_app_requirements(
     connection_file: &Path,
     module_id: &str,
@@ -1442,6 +1568,11 @@ fn report(command: &str, response: &Value, flags: &Flags) -> Result<(), Failure>
         }
         "set-web-search-order" | "set-web-search-allowance" => {
             for line in web_search_change_lines(result) {
+                println!("{line}");
+            }
+        }
+        "add-web-search-provider" => {
+            for line in add_web_search_provider_lines(result) {
                 println!("{line}");
             }
         }
@@ -2675,7 +2806,7 @@ mod tests {
             "get_job, get_run",
         ]);
         preview
-            .refuse_unknown(accepted_flags("widen-ceiling").unwrap())
+            .refuse_unknown(accepted_flags("widen-ceiling").unwrap(), &[])
             .unwrap();
         let (method, params) = widen_ceiling_request(&preview).unwrap();
         assert_eq!(method, "plexus.admin.widen_ceiling");
@@ -3101,7 +3232,7 @@ mod web_search_chain_cli_tests {
                 }
                 let flags = parsed(&items);
                 flags
-                    .refuse_unknown(accepted_flags("set-web-search-order").unwrap())
+                    .refuse_unknown(accepted_flags("set-web-search-order").unwrap(), &[])
                     .unwrap();
                 let (method, params) = set_web_search_order_request(&flags).unwrap();
                 assert_eq!(
@@ -3203,7 +3334,7 @@ mod web_search_chain_cli_tests {
             ] {
                 let flags = parsed(&items);
                 assert!(flags
-                    .refuse_unknown(accepted_flags(command).unwrap())
+                    .refuse_unknown(accepted_flags(command).unwrap(), &[])
                     .is_err());
             }
         }
@@ -3214,6 +3345,86 @@ mod web_search_chain_cli_tests {
             .contains("unknown flag --clear"));
         assert!(USAGE.contains("set-web-search-order <name>..."));
         assert!(USAGE.contains("set-web-search-allowance <name> --clear"));
+    }
+
+    fn add_request(items: &[&str]) -> Result<Value, Failure> {
+        let flags = parsed(items);
+        flags.refuse_unknown(
+            accepted_flags("add-web-search-provider").unwrap(),
+            repeatable_flags("add-web-search-provider"),
+        )?;
+        let (method, params) = add_web_search_provider_request(&flags)?;
+        assert_eq!(
+            method,
+            plexus_module::manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP
+        );
+        Ok(params)
+    }
+
+    #[test]
+    fn add_provider_cli_previews_by_default_and_repeats_only_grantee() {
+        assert_eq!(
+            add_request(&["tavily"]).unwrap(),
+            json!({"provider": "tavily", "with_key": false, "dry_run": true})
+        );
+        assert_eq!(
+            add_request(&[
+                "tavily",
+                "--grantee",
+                "reserved:broca",
+                "--grantee",
+                "reserved:basal",
+                "--apply"
+            ])
+            .unwrap(),
+            json!({"provider": "tavily", "with_key": false, "dry_run": false,
+                "grantees": ["reserved:broca", "reserved:basal"]})
+        );
+        let address = "https://private-searx-canary.invalid/path";
+        assert_eq!(
+            add_request(&["searxng", "--instance-url", address, "--with-key"]).unwrap(),
+            json!({"provider": "searxng", "with_key": true, "dry_run": true,
+                "instance_url": address})
+        );
+        for items in [
+            vec![],
+            vec!["tavily", "exa"],
+            vec!["tavily", "--apply", "--apply"],
+            vec!["tavily", "--instance-url", "a", "--instance-url", "b"],
+            vec!["tavily", "--credential-id", "apikey:tavily"],
+            vec!["tavily", "--connection", "conn-other"],
+            vec!["searxng", "--instance-url", "http://public.invalid"],
+        ] {
+            let refused = add_request(&items).unwrap_err();
+            assert_eq!(refused.code, EXIT_USAGE, "{items:?}");
+            assert!(!refused.message.contains("public.invalid"), "{items:?}");
+        }
+        assert!(USAGE.contains("add-web-search-provider <name> [--grantee <principal>]..."));
+    }
+
+    #[test]
+    fn add_provider_lines_name_every_effect_without_the_instance_address() {
+        let preview = json!({
+            "provider": "searxng", "app_key": "searxng_rest",
+            "connection_id": "conn-web-search-searxng", "connection": "create",
+            "credential": null, "auth": "anonymous", "instance_url": "supplied (not shown)",
+            "ceiling": {"risk": "read", "action_selectors": ["search"]},
+            "grantees_source": "existing_search_grants",
+            "grants": [{"grantee": "reserved:basal", "authority_kind": "invoke",
+                "risk_ceiling": "read", "action_selectors": ["search"], "status": "to_mint"}],
+            "dry_run": true, "applied": false,
+        });
+        let lines = add_web_search_provider_lines(&preview).join("\n");
+        for expected in [
+            "connection: conn-web-search-searxng (create)",
+            "credential: none (anonymous)",
+            "instance:   supplied (not shown)",
+            "ceiling:    risk=read actions=search",
+            "grant:      reserved:basal invoke read search to_mint",
+            "preview only",
+        ] {
+            assert!(lines.contains(expected), "{expected} missing from {lines}");
+        }
     }
 }
 
@@ -3242,7 +3453,7 @@ mod bot_read_grant_cli_tests {
             }
             let preview = flags(&args);
             preview
-                .refuse_unknown(accepted_flags("handle-grant").unwrap())
+                .refuse_unknown(accepted_flags("handle-grant").unwrap(), &[])
                 .unwrap();
             let (method, plan) = handle_grant_request(&preview).unwrap();
             assert_eq!(method, plexus_module::manifest::GITHUB_GRANT_OP);

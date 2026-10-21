@@ -233,12 +233,62 @@ so **no per-key vault grant step is needed**. This
 existing vault permission is separate from each caller's Plexus invoke grants.
 Do not print, export, copy into a manifest, or retrieve a raw key for a probe.
 
-The exact credential-binding command is the ticket command below. Repeat for
-every inventory row, substituting its name, app and credential. All REST rows
-use `<name>_rest` and `search`; Z.AI uses `zai` and `web_search_prime`. The example
-values are Tavily. Keep existing Exa if it resolves uniquely; inspect before
-creating a second eligible connection. The same applies to retries after a
-consumed ticket.
+Steps 3 and 4 are one command per provider, `add-web-search-provider`, with
+one Touch ID confirmation. It reads the app, action, vault credential name and
+connection id from the provider name table (`conn-web-search-<name>`; Exa keeps
+`conn-exa-rest`), places the credential reference and issues the ticket,
+connects with discovery, then mints every caller's invoke grant at read risk on
+exactly the search action, in one transaction, only after discovery completed.
+It never sets the order or allowances. Preview first; the preview writes
+nothing and contacts no vendor. Without `--grantee`, the grantees are the
+callers that already hold a live search grant on your web search provider
+connections (today Exa's `reserved:broca`, `reserved:prefrontal-core` and
+`reserved:basal`). The step-5 probe runs as `direct`, so the apply below names
+those callers and `direct` explicitly; any `--grantee` replaces the default.
+The example values are Tavily.
+
+<!-- provider-add -->
+```sh
+export PROVIDER=tavily
+export ACTION=search
+export CONNECTION_ID=conn-web-search-tavily
+"$FACADE_CALL" "$SUBC" '{"name":"connections","arguments":{"op":"list"}}' > "$EVIDENCE/connections-before.json"
+"$ADMIN" add-web-search-provider "$PROVIDER" --subc "$SUBC" \
+  > "$EVIDENCE/$PROVIDER-add-preview.txt"
+"$ADMIN" add-web-search-provider "$PROVIDER" --subc "$SUBC" \
+  --grantee direct --grantee reserved:broca --grantee reserved:prefrontal-core \
+  --grantee reserved:basal --apply > "$EVIDENCE/$PROVIDER-add.txt"
+```
+
+**Pass:** the preview names the intended connection, app and inventory
+credential name (never key bytes), a `read` ceiling on exactly the search action
+(`web_search_prime` for Z.AI) and one invoke grant per caller. The apply asks
+for exactly one confirmation, whose prompt names the provider, connection,
+ceiling and every grantee, and prints `discovery:  complete` with each grant
+`minted` (or `already_present` on a rerun). Set `CONNECTION_ID` to the printed
+connection for step 5. A connection for the provider that already exists with
+the same app and credential, under any id, is reused; one bound to another app,
+credential or instance is refused by name and nothing is changed. If discovery
+does not complete (`discovery_incomplete`), the connection stays active and no
+grant is minted: fix the cause below, then rerun the same command, which
+finishes under one new confirmation without duplicating anything. A declined
+or unavailable confirmation writes nothing but its refusal audit row.
+
+For **SearXNG**, add `--instance-url "$SEARXNG_INSTANCE"` (see below). It is
+anonymous unless `--with-key` binds `apikey:searxng`; every other provider
+refuses `--with-key`. The address is stored on the connection and is never
+printed, logged or shown in the confirmation prompt.
+
+### Manual fallback: ticket and connect
+
+Use the manual sequence when the command is unavailable or refuses a
+connection it does not manage. The exact credential-binding command is the
+ticket command below. Repeat for every inventory row, substituting its name,
+app and credential. All REST rows use `<name>_rest` and `search`; Z.AI uses
+`zai` and `web_search_prime`. Keep existing Exa if it resolves uniquely;
+inspect before creating a second eligible connection. The same applies to
+retries after a consumed ticket. This sequence asks for one confirmation per
+ticket and per grant.
 
 ```sh
 export PROVIDER=tavily
@@ -306,6 +356,11 @@ probe only after resolving the failure. A schema quarantine is not a key error.
 
 ## 4. Caller grants and reviewed schema (pending: run at deploy)
 
+After `add-web-search-provider`, the grants already exist; only the listing and
+schema review below remain. Mint a grant by hand only on the manual fallback
+path, or for a caller added later; the `grant` line is that fallback and asks
+for one confirmation per caller.
+
 ```sh
 export CALLER=direct
 "$ADMIN" grant --subc "$SUBC" --connection "$CONNECTION_ID" \
@@ -317,11 +372,11 @@ export CALLER=direct
   > "$EVIDENCE/$PROVIDER-action-review.txt"
 ```
 
-**Pass:** the caller has an unexpired invoke grant for exactly the reviewed
+**Pass:** each caller has an unexpired invoke grant for exactly the reviewed
 search action within the connection's read ceiling, not a wildcard grant or a
 grant on the old Tavily/Firecrawl MCP app. `grant` applies immediately; it has no
 `--apply` flag. The action is active with its reviewed schema. Record grant IDs
-for rollback. Repeat the grant for each actual caller principal; a successful
+for rollback. A successful
 `direct` probe proves only `direct`'s authority, not an agent's or module's.
 
 For Z.AI, compare the discovered tool schema with the pinned query/count field
@@ -345,7 +400,8 @@ mapping differ; fixture success cannot waive this live prerequisite.
 For **each of the 15 providers**, select a temporary one-provider order, then
 make a unique ordinary web query with no domains or recency filter. This avoids
 capability skips and prevents failover/cache hits from hiding a broken key.
-Use the same `PROVIDER` and uniquely resolved `CONNECTION_ID` from steps 3–4.
+Use the same `PROVIDER` and the `CONNECTION_ID` that `add-web-search-provider`
+printed in step 3 (or the manual fallback's connection).
 `facade_call` is an unscoped `direct` client; actual caller probes must use their
 authenticated route rather than forging a principal field.
 
@@ -456,7 +512,7 @@ deploy); **pass:** that exact grant is revoked and unrelated grants remain.
 
 ## Offline runbook contract tests
 
-These four documentation tests inspect the actual command blocks and provider
+These five documentation tests inspect the actual command blocks and provider
 inventory above. They do not execute shell blocks or prove live deployment.
 Run from the repository root on Linux; mutation replay uses the same entry point
 with a single test name. `--list <pattern>` prints a JSON array of selected names for the mutation
@@ -534,6 +590,18 @@ class RolloutContract(unittest.TestCase):
                     tests = (root / f"backend/{name}/tests.rs").read_text()
                 for test in re.findall(r"`(\w+)`", row[3]):
                     self.assertIn("fn " + test + "(", tests)
+
+    def test_provider_add_is_one_command_before_the_manual_fallback(self):
+        block = shell_block("provider-add")
+        preview = '"$ADMIN" add-web-search-provider "$PROVIDER" --subc "$SUBC" \\\n  >'
+        self.assertIn(preview, block, "preview must precede apply")
+        self.assertIn("--apply", block)
+        self.assertLess(block.index(preview), block.index("--apply"))
+        self.assertNotIn("issue-ticket", block)
+        self.assertNotIn("*", block, "the command never names a wildcard grantee")
+        self.assertIn("--grantee direct", block, "the step-5 probe runs as direct")
+        self.assertLess(TEXT.index("<!-- provider-add -->"),
+                        TEXT.index("### Manual fallback: ticket and connect"))
 
     def test_live_steps_remain_pending_and_governed(self):
         headings = re.findall(r"^## [0-7]\. .+$", TEXT, re.MULTILINE)

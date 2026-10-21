@@ -580,8 +580,8 @@ build_timeout_s = 3600
 id = "grant-mint-empty-selectors"
 guards = "Minting an empty selector list writes no grant"
 file = "crates/plexus-core/src/storage.rs"
-old = "if selectors.is_empty() {\n                return Ok(Err(CeremonyRefusal::EmptyActionSelectors));"
-new = "if false { /* NON-VACUITY BREAK */\n            return Ok(Err(CeremonyRefusal::EmptyActionSelectors));"
+old = "if selectors.is_empty() {\n        return Ok(Err(CeremonyRefusal::EmptyActionSelectors));"
+new = "if false { /* NON-VACUITY BREAK */\n        return Ok(Err(CeremonyRefusal::EmptyActionSelectors));"
 test_file = "crates/plexus-core/tests/it/ceremony.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -5518,8 +5518,8 @@ timeout_s = 60
 id = "connect-seed-failure-reported"
 guards = "A connect whose catalog seed fails reports degraded discovery with a reason, never complete"
 file = "crates/plexus-module/src/lib.rs"
-old = "                    &connection.app_key,\n                ) {\n                    eprintln!(warn catalog:\n                        \"catalog seed failed during connect"
-new = "                    &connection.app_key,\n                ).or(Ok::<usize, String>(0)) /* NON-VACUITY BREAK */ {\n                    eprintln!(warn catalog:\n                        \"catalog seed failed during connect"
+old = "            .seed_catalog_from_manifest(principal_key, connection_id, app_key)\n    {\n        eprintln!(warn catalog:\n            \"catalog seed failed during connect"
+new = "            .seed_catalog_from_manifest(principal_key, connection_id, app_key)\n            .or(Ok::<usize, String>(0)) /* NON-VACUITY BREAK */\n    {\n        eprintln!(warn catalog:\n            \"catalog seed failed during connect"
 test_file = "crates/plexus-module/src/tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -6395,8 +6395,8 @@ timeout_s = 120
 id = "grant-mint-atomic"
 guards = "Grant ceiling and revocation are checked in the insert transaction"
 file = "crates/plexus-core/src/storage.rs"
-old = "race_point(\"grant_insert\");\n        self.inner.with_conn_fenced(|conn| {\n            let ceiling = match grant_ceiling_on_conn(conn, principal, connection_id)? {"
-new = "let stale = self.inner.with_read(|conn| grant_ceiling_on_conn(conn, principal, connection_id))?; /* NON-VACUITY BREAK */\n        race_point(\"grant_insert\");\n        self.inner.with_conn_fenced(|conn| {\n            let ceiling = match stale {"
+old = "race_point(\"grant_insert\");\n        self.inner.with_conn_fenced(|conn| {\n            // The ceiling is read inside the insert transaction for every\n            // request, so a revocation or narrowing committed before this\n            // transaction cannot be outrun by a ceiling read earlier.\n            let mut checked = Vec::with_capacity(requests.len());\n            for request in requests {\n                match bounded_grant_on_conn(conn, request)? {"
+new = "let stale = requests.iter().map(|request| self.inner.with_read(|conn| bounded_grant_on_conn(conn, request))).collect::<Result<Vec<_>, _>>()?; /* NON-VACUITY BREAK */\n        race_point(\"grant_insert\");\n        self.inner.with_conn_fenced(|conn| {\n            let mut checked = Vec::with_capacity(requests.len());\n            for stale in stale {\n                match stale {"
 test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -20885,5 +20885,69 @@ target = "--lib"
 select = "expected"
 expect_red = ["code_search::tests::credential_shaped_query_words_are_not_stored"]
 expect_message = "no search row may hold the token"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-provider-add-asks-once"
+guards = "Adding a web search provider asks for exactly one operator confirmation per applied run"
+file = "crates/plexus-module/src/web_search_provider_admin.rs"
+old = "    if let Err(refusal) = operator_confirmation::confirm(\n        &plan.summary(),"
+new = "    let _ = operator_confirmation::confirm(&plan.summary(), route, writer, &route_bindings.control_replies).await; /* NON-VACUITY BREAK */\n    if let Err(refusal) = operator_confirmation::confirm(\n        &plan.summary(),"
+test_file = "crates/plexus-module/src/web_search_provider_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::web_search_provider_admin_tests::an_applied_add_asks_once_and_writes_what_the_manual_commands_write"]
+expect_message = "one applied add must ask exactly once"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-provider-add-no-grants-without-discovery"
+guards = "Adding a web search provider mints no grant when connect-time discovery did not complete"
+file = "crates/plexus-module/src/web_search_provider_admin.rs"
+old = "    if discovery != \"complete\" {\n        return json!({\"error\": {\n            \"code\": \"discovery_incomplete\","
+new = "    if false { /* NON-VACUITY BREAK */\n        return json!({\"error\": {\n            \"code\": \"discovery_incomplete\","
+test_file = "crates/plexus-module/src/web_search_provider_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::web_search_provider_admin_tests::a_failed_discovery_mints_no_grant_and_a_rerun_finishes"]
+expect_message = "no grant may be minted when discovery fails"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-provider-add-reuses-connection"
+guards = "Adding a web search provider again reuses the provider's existing connection instead of creating a second one"
+file = "crates/plexus-module/src/web_search_provider_admin.rs"
+old = "            connection.app_key == provider.app_key && connection.status != \"revoked\""
+new = "            false && connection.status != \"revoked\" /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_provider_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::web_search_provider_admin_tests::a_rerun_reuses_the_providers_connection_instead_of_duplicating_it"]
+expect_message = "a second tavily connection was created"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "web-search-provider-add-no-wildcard-default-grantee"
+guards = "The default grantees of a new web search provider never include a wildcard grantee"
+file = "crates/plexus-module/src/web_search_provider_admin.rs"
+old = "            && !grant.grantee_principal.contains('*')"
+new = "            /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_provider_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::web_search_provider_admin_tests::default_grantees_are_the_live_search_callers_and_never_a_wildcard"]
+expect_message = "the default grantees are exactly the live search callers, never a wildcard"
 build_timeout_s = 3600
 timeout_s = 120

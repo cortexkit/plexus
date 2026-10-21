@@ -40,13 +40,18 @@ pub fn may_need_confirmation(method: &str, params: &Value) -> bool {
         | manifest::ADMIN_RECIPIENTS_ADD_OP
         | manifest::GITHUB_BIND_OP
         | manifest::GITHUB_GRANT_OP
-        | manifest::GITHUB_IMPORT_OP => params["dry_run"] == false,
+        | manifest::GITHUB_IMPORT_OP
+        | manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP => params["dry_run"] == false,
         _ => false,
     }
 }
 
 pub(crate) fn summary(method: &str, params: &Value) -> Option<String> {
-    if !may_need_confirmation(method, params) {
+    // Adding a web search provider names grantees read from the store, so its
+    // handler builds the summary from its own plan and asks exactly once.
+    if !may_need_confirmation(method, params)
+        || method == manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP
+    {
         return None;
     }
     // Only authority identifiers are included, never credential IDs, inventory
