@@ -3,11 +3,11 @@
 
 #[path = "support/bounded.rs"]
 mod bounded;
+#[path = "support/scratch_store.rs"]
+mod scratch_store;
 
-use std::fs;
 use std::sync::Arc;
 
-use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::test_scratch::Scratch;
 use plexus_core::{
     compute_grant_hash, jcs_sha256, AuthorizationRequest, CatalogActionInput, DecisionPlane,
@@ -17,42 +17,19 @@ use plexus_core::{
 };
 use serde_json::json;
 
-fn test_store(label: &str) -> (PlexusStore, Scratch) {
-    // The macOS clock ticks in microseconds, so the counter prevents same-tick test nonce collisions.
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let unique = format!(
-        "{}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_nanos())
-            .unwrap_or(0),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    let path = Scratch::database(&format!("decision-{label}"));
-    let descriptor = StorageDescriptor {
-        module_id: "plexus".to_string(),
-        storage_namespace: format!("{label}-{unique}"),
-        isolation: Isolation::Module,
-        backend: StorageBackend::Sqlite {
-            path: path.to_string_lossy().into_owned(),
-        },
-    };
-    (
-        PlexusStore::open(&descriptor).expect("open test store"),
-        path,
-    )
+fn test_store(label: &str) -> (Scratch, PlexusStore) {
+    scratch_store::open(&format!("decision-{label}"))
 }
 
 fn seed_s3(
     label: &str,
     plane: Arc<StubDecisionPlane>,
 ) -> (
-    GovernanceEngine<StubCredentialSource, MockTransport>,
     Scratch,
+    GovernanceEngine<StubCredentialSource, MockTransport>,
     Arc<StubDecisionPlane>,
 ) {
-    let (store, path) = test_store(label);
+    let (path, store) = test_store(label);
     let principal = "direct";
     let connection = "conn-1";
     store
@@ -149,7 +126,7 @@ fn seed_s3(
     let transport = MockTransport::default();
     let engine = GovernanceEngine::new(Arc::new(store), Arc::new(credentials), Arc::new(transport))
         .with_decision_plane(plane.clone() as Arc<dyn DecisionPlane>);
-    (engine, path, plane)
+    (path, engine, plane)
 }
 
 fn write_args() -> serde_json::Value {
@@ -163,7 +140,7 @@ fn write_request() -> AuthorizationRequest {
 #[test]
 fn local_resource_refusal_precedes_the_decision_plane() {
     let plane = Arc::new(StubDecisionPlane::new());
-    let (engine, _path, plane) = seed_s3("local-resource-before-plane", plane);
+    let (_path, engine, plane) = seed_s3("local-resource-before-plane", plane);
     let result = engine.authorize(AuthorizationRequest::new(
         "direct",
         "conn-1",
@@ -183,7 +160,7 @@ fn local_resource_refusal_precedes_the_decision_plane() {
 #[test]
 fn reservation_failure_reports_refusal_after_plane_approval() {
     let plane = Arc::new(StubDecisionPlane::new());
-    let (engine, path, plane) = seed_s3("reservation-failure-report", plane);
+    let (path, engine, plane) = seed_s3("reservation-failure-report", plane);
     rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE TRIGGER reject_reservation BEFORE INSERT ON reservations BEGIN SELECT RAISE(ABORT, 'reservation write failed'); END;").unwrap();
     assert_eq!(
         engine.authorize(write_request()),
@@ -203,7 +180,7 @@ fn reservation_failure_reports_refusal_after_plane_approval() {
 #[test]
 fn intent_id_stable_across_transient_reattempt_and_fresh_for_new_write() {
     let plane = Arc::new(StubDecisionPlane::new());
-    let (engine, path, plane) = seed_s3("intent-stable", plane);
+    let (path, engine, plane) = seed_s3("intent-stable", plane);
 
     let first = engine.authorize(write_request()).expect("first allow");
     let intent_a = first.intent_id.clone().expect("intent on reservation");
@@ -240,8 +217,6 @@ fn intent_id_stable_across_transient_reattempt_and_fresh_for_new_write() {
     let third = engine.authorize(other).expect("new write");
     let intent_c = third.intent_id.expect("new intent");
     assert_ne!(intent_a, intent_c);
-
-    let _ = fs::remove_file(path);
 }
 
 #[test]
@@ -250,7 +225,7 @@ fn grant_hash_mismatch_on_verdict_is_rejected() {
     plane.force_next_grant_hash(
         "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     );
-    let (engine, path, _) = seed_s3("grant-mismatch", plane);
+    let (_path, engine, _) = seed_s3("grant-mismatch", plane);
 
     let err = engine.authorize(write_request()).expect_err("must reject");
     assert_eq!(err.reason_code(), "grant_hash_mismatch");
@@ -260,13 +235,12 @@ fn grant_hash_mismatch_on_verdict_is_rejected() {
         .expect("audit")
         .iter()
         .any(|row| row.reason_code == "grant_hash_mismatch"));
-    let _ = fs::remove_file(path);
 }
 
 #[test]
 fn decision_authorized_dispatch_reports_every_terminal() {
     let plane = Arc::new(StubDecisionPlane::new());
-    let (engine, path, plane) = seed_s3("reports", plane);
+    let (_path, engine, plane) = seed_s3("reports", plane);
 
     let reservation = engine.authorize(write_request()).expect("allow");
     let decision_id = reservation.decision_id.clone().expect("decision_id");
@@ -340,14 +314,12 @@ fn decision_authorized_dispatch_reports_every_terminal() {
     assert!(requests.iter().any(|row| {
         row.request_id == unknown_intent && row.reconciliation_status.as_deref() == Some("pending")
     }));
-
-    let _ = fs::remove_file(path);
 }
 
 #[test]
 fn grant_hash_pins_args_bidirectionally_at_dispatch() {
     let plane = Arc::new(StubDecisionPlane::new());
-    let (engine, path, _) = seed_s3("dispatch-grant", plane);
+    let (_path, engine, _) = seed_s3("dispatch-grant", plane);
     let mut reservation = engine.authorize(write_request()).expect("allow");
     reservation.args = json!({"team": "core", "title": "TAMPERED"});
     reservation.approved_args_hash =
@@ -367,7 +339,6 @@ fn grant_hash_pins_args_bidirectionally_at_dispatch() {
         matches!(outcome.outcome, TransportOutcome::NotSent { ref code, .. } if code == "aborted_stale_authorization")
     );
     assert!(engine.transport().requests().is_empty());
-    let _ = fs::remove_file(path);
 }
 
 #[test]
@@ -379,7 +350,7 @@ fn needs_quorum_surfaces_pending_action_request_with_stable_intent() {
     plane.push_verdict(Verdict::NeedsQuorum {
         decision_id: "dec_org_quorum2".to_string(),
     });
-    let (engine, path, plane) = seed_s3("quorum", plane);
+    let (_path, engine, plane) = seed_s3("quorum", plane);
 
     let Err(Denial::ActionRequestCreated { request_id: first }) = engine.authorize(write_request())
     else {
@@ -394,7 +365,6 @@ fn needs_quorum_surfaces_pending_action_request_with_stable_intent() {
     let envelopes = plane.envelopes();
     assert_eq!(envelopes[0].intent_id, first);
     assert_eq!(envelopes[1].intent_id, first);
-    let _ = fs::remove_file(path);
 }
 
 #[test]
@@ -416,7 +386,7 @@ fn compute_grant_hash_matches_envelope_fields() {
 #[test]
 fn reconciliation_confirmed_not_found_ambiguous_and_denied_on_revoke() {
     let plane = Arc::new(StubDecisionPlane::new());
-    let (engine, path, _) = seed_s3("reconcile", plane);
+    let (_path, engine, _) = seed_s3("reconcile", plane);
 
     let reservation = engine
         .authorize(write_request())
@@ -498,8 +468,6 @@ fn reconciliation_confirmed_not_found_ambiguous_and_denied_on_revoke() {
     assert!(requests
         .iter()
         .any(|row| row.request_id == intent_id && row.reconciliation_status.is_some()));
-
-    let _ = fs::remove_file(path);
 }
 
 /// A report-back that keeps failing is RETRIED and then AUDITED, never dropped.
@@ -528,7 +496,7 @@ fn an_explicit_deny_is_terminal_and_its_intent_row_confers_no_authority() {
         reason: "policy_impossible".to_string(),
     });
     let plane_handle = Arc::clone(&plane);
-    let (engine, path, _) = seed_s3("decision-deny", plane);
+    let (_path, engine, _) = seed_s3("decision-deny", plane);
 
     let err = engine
         .authorize(write_request())
@@ -574,13 +542,11 @@ fn an_explicit_deny_is_terminal_and_its_intent_row_confers_no_authority() {
         1,
         "a settled denial must not re-enter the decision plane"
     );
-
-    let _ = fs::remove_file(path);
 }
 
 #[test]
 fn an_allowed_intent_is_consumed_and_cannot_send_twice() {
-    let (engine, path, _) = seed_s3("allow-consumes-intent", Arc::new(StubDecisionPlane::new()));
+    let (_path, engine, _) = seed_s3("allow-consumes-intent", Arc::new(StubDecisionPlane::new()));
     engine
         .store()
         .insert_grant(&plexus_core::storage::GrantInput {
@@ -623,7 +589,6 @@ fn an_allowed_intent_is_consumed_and_cannot_send_twice() {
         1,
         "operator approval sent twice"
     );
-    let _ = fs::remove_file(path);
 }
 
 #[test]
@@ -632,7 +597,7 @@ fn quorum_intents_preserve_call_key_and_attribution_only_scope() {
     plane.push_verdict(Verdict::NeedsQuorum {
         decision_id: String::new(),
     });
-    let (engine, path, _) = seed_s3("quorum-scope", plane);
+    let (_path, engine, _) = seed_s3("quorum-scope", plane);
     let scope = plexus_core::scope::CallScope {
         owner: "direct".into(),
         scope_ref: "scope-ref".into(),
@@ -687,13 +652,12 @@ fn quorum_intents_preserve_call_key_and_attribution_only_scope() {
             .status,
         "cancelled"
     );
-    let _ = fs::remove_file(path);
 }
 
 #[test]
 fn a_new_quorum_verdict_invalidates_an_earlier_unclaimed_allow() {
     let plane = Arc::new(StubDecisionPlane::new());
-    let (engine, path, plane) = seed_s3("allow-then-quorum", plane);
+    let (_path, engine, plane) = seed_s3("allow-then-quorum", plane);
     let first = engine.authorize(write_request()).unwrap();
     let intent = first.intent_id.as_deref().unwrap();
     plane.push_verdict(Verdict::NeedsQuorum {
@@ -719,12 +683,11 @@ fn a_new_quorum_verdict_invalidates_an_earlier_unclaimed_allow() {
         TransportOutcome::NotSent { .. }
     ));
     assert!(engine.transport().requests().is_empty());
-    let _ = fs::remove_file(path);
 }
 
 #[test]
 fn a_failed_allow_verdict_write_refuses_before_reservation_or_dispatch() {
-    let (engine, path, plane) = seed_s3(
+    let (path, engine, plane) = seed_s3(
         "plane-verdict-store-failure",
         Arc::new(StubDecisionPlane::new()),
     );
@@ -751,7 +714,6 @@ fn a_failed_allow_verdict_write_refuses_before_reservation_or_dispatch() {
         matches!(plane.reports().as_slice(), [plexus_core::decision_plane::OutcomeReport { terminal: plexus_core::decision_plane::OutcomeTerminal::Refused { reason }, .. }] if reason == "store_failure"),
         "a valid allow refused by persistence must be reported unsent"
     );
-    let _ = fs::remove_file(path);
 }
 
 /// An S3 write must be REFUSED when the decision plane cannot be reached.
@@ -775,7 +737,7 @@ fn a_failed_allow_verdict_write_refuses_before_reservation_or_dispatch() {
 fn an_unreachable_decision_plane_refuses_the_write_without_dispatching() {
     let plane = Arc::new(StubDecisionPlane::new());
     plane.push_error(DecisionPlaneError::Peer("route unavailable".to_string()));
-    let (engine, path, _) = seed_s3("plane-unreachable", plane);
+    let (_path, engine, _) = seed_s3("plane-unreachable", plane);
 
     let err = engine
         .authorize(write_request())
@@ -797,14 +759,12 @@ fn an_unreachable_decision_plane_refuses_the_write_without_dispatching() {
             .any(|row| row.reason_code == "decision_plane_failure"),
         "the refusal must be auditable, or an outage leaves no trace"
     );
-
-    let _ = fs::remove_file(path);
 }
 
 #[test]
 fn a_failing_outcome_report_is_retried_then_audited() {
     let plane = Arc::new(StubDecisionPlane::new());
-    let (engine, path, plane) = seed_s3("report-failure", plane);
+    let (_path, engine, plane) = seed_s3("report-failure", plane);
 
     // Fail more times than the engine will attempt, so every attempt is spent
     // and the exhausted path runs. Derived from the engine's own constant so
@@ -848,8 +808,6 @@ fn a_failing_outcome_report_is_retried_then_audited() {
          two sides can be reconciled: {:?}",
         row.args_redaction_summary
     );
-
-    let _ = fs::remove_file(path);
 }
 
 fn reconciliation_record(action: &str) -> OutcomeUnknownRecord {
@@ -870,7 +828,7 @@ fn reconciliation_record(action: &str) -> OutcomeUnknownRecord {
 
 #[test]
 fn reconciliation_target_becomes_write_is_refused_without_dispatch() {
-    let (engine, path, _) = seed_s3("reconcile-risk-drift", Arc::new(StubDecisionPlane::new()));
+    let (_path, engine, _) = seed_s3("reconcile-risk-drift", Arc::new(StubDecisionPlane::new()));
     // The stored manifest remains read while the live catalog changes. A static
     // manifest lookup at dispatch must not stand in for current classification.
     let manifest = plexus_core::ingest_value(json!({
@@ -933,12 +891,11 @@ fn reconciliation_target_becomes_write_is_refused_without_dispatch() {
         .iter()
         .any(|row| row.reason_code == "reconciliation_target_not_read"
             && row.reconciliation_of.as_deref() == Some("unknown-write")));
-    let _ = fs::remove_file(path);
 }
 
 #[test]
 fn reconciliation_non_read_preflight_refuses_before_authorization() {
-    let (engine, path, _) = seed_s3("reconcile-preflight", Arc::new(StubDecisionPlane::new()));
+    let (path, engine, _) = seed_s3("reconcile-preflight", Arc::new(StubDecisionPlane::new()));
     engine.transport().set_response(MockResponse::Success(
         json!([{"team":"core","title":"different"}]),
     ));
@@ -1031,7 +988,7 @@ fn reconciliation_authorization_snapshot_refuses_risk_changed_after_preflight() 
         }
     }
 
-    let (engine, path, _) = seed_s3("reconcile-snapshot", Arc::new(StubDecisionPlane::new()));
+    let (path, engine, _) = seed_s3("reconcile-snapshot", Arc::new(StubDecisionPlane::new()));
     engine.transport().set_response(MockResponse::Success(
         json!([{"team":"core","title":"different"}]),
     ));
@@ -1086,7 +1043,7 @@ fn reconciliation_authorization_snapshot_refuses_risk_changed_after_preflight() 
 
 #[test]
 fn reconciliation_self_target_is_refused_without_dispatch() {
-    let (engine, path, _) = seed_s3("reconcile-self", Arc::new(StubDecisionPlane::new()));
+    let (_path, engine, _) = seed_s3("reconcile-self", Arc::new(StubDecisionPlane::new()));
     let schema = json!({"type": "object"});
     engine
         .store()
@@ -1119,7 +1076,6 @@ fn reconciliation_self_target_is_refused_without_dispatch() {
         .unwrap()
         .iter()
         .any(|row| row.reason_code == "reconciliation_self_target"));
-    let _ = fs::remove_file(path);
 }
 
 fn reconciliation_statuses(
@@ -1155,7 +1111,7 @@ const THIRTY_DAYS_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// audit retention, not a fixed default.
 #[test]
 fn settled_reconciliation_results_follow_the_configured_retention() {
-    let (engine, path, _) = seed_s3("reconcile-retention", Arc::new(StubDecisionPlane::new()));
+    let (path, engine, _) = seed_s3("reconcile-retention", Arc::new(StubDecisionPlane::new()));
     let day = 24 * 60 * 60 * 1000;
     let now = plexus_core::now_ms();
     rusqlite::Connection::open(path.path())
@@ -1186,7 +1142,7 @@ fn settled_reconciliation_results_follow_the_configured_retention() {
 /// every other write: it settles as ambiguous on its own and the rest proceed.
 #[test]
 fn an_undecodable_queued_reconciliation_does_not_stop_the_sweep() {
-    let (engine, path, _) = seed_s3("reconcile-undecodable", Arc::new(StubDecisionPlane::new()));
+    let (path, engine, _) = seed_s3("reconcile-undecodable", Arc::new(StubDecisionPlane::new()));
     let record = reconciliation_record("destroy_item");
     engine
         .store()
@@ -1227,7 +1183,7 @@ fn an_undecodable_queued_reconciliation_does_not_stop_the_sweep() {
 /// stays queued and the next sweep reads back again.
 #[test]
 fn a_failed_read_back_keeps_the_write_queued_for_the_next_sweep() {
-    let (engine, path, _) = seed_s3("reconcile-retry", Arc::new(StubDecisionPlane::new()));
+    let (path, engine, _) = seed_s3("reconcile-retry", Arc::new(StubDecisionPlane::new()));
     let record = reconciliation_record("destroy_item");
     engine
         .store()
@@ -1271,7 +1227,7 @@ fn outcome_report_audit_failure_is_loud_and_preserves_completion() {
         return;
     }
     for fail in [false, true] {
-        let (engine, path, plane) =
+        let (path, engine, plane) =
             seed_s3("report-audit-failure", Arc::new(StubDecisionPlane::new()));
         plane.fail_next_reports(plexus_core::OUTCOME_REPORT_ATTEMPTS + 1);
         let reservation = engine.authorize(write_request()).unwrap();
@@ -1298,13 +1254,12 @@ fn outcome_report_audit_failure_is_loud_and_preserves_completion() {
             if fail { 2 } else { 3 }
         );
         drop(engine);
-        fs::remove_file(path).unwrap();
     }
 }
 
 #[test]
 fn empty_read_back_retries_until_deadline_then_stays_unknown() {
-    let (engine, _path, _) = seed_s3("reconcile-empty", Arc::new(StubDecisionPlane::new()));
+    let (_path, engine, _) = seed_s3("reconcile-empty", Arc::new(StubDecisionPlane::new()));
     let mut record = reconciliation_record("destroy_item");
     engine
         .transport()
@@ -1329,7 +1284,7 @@ fn empty_read_back_retries_until_deadline_then_stays_unknown() {
 }
 #[test]
 fn transient_original_catalog_read_keeps_reconciliation_queued() {
-    let (engine, path, _) = seed_s3(
+    let (path, engine, _) = seed_s3(
         "reconcile-catalog-outage",
         Arc::new(StubDecisionPlane::new()),
     );
@@ -1351,7 +1306,7 @@ fn transient_original_catalog_read_keeps_reconciliation_queued() {
 
 #[test]
 fn reconciliation_owner_change_abandons_the_unused_reservation() {
-    let (engine, path, _) = seed_s3("reconcile-owner-change", Arc::new(StubDecisionPlane::new()));
+    let (path, engine, _) = seed_s3("reconcile-owner-change", Arc::new(StubDecisionPlane::new()));
     let connection = engine
         .store()
         .connection("direct", "conn-1")

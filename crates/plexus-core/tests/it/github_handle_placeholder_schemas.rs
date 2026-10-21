@@ -103,13 +103,15 @@ type Engine = GovernanceEngine<plexus_core::credentials::StubCredentialSource, M
 /// One stored catalog row: (schema_json, schema_hash, status, generation).
 type Row = (String, String, String, i64);
 
+// Fields drop in declaration order: the scratch guard is last so the store
+// and engine close before it removes their directory.
 struct Fixture {
-    _scratch: plexus_core::test_scratch::Scratch,
     store: Arc<PlexusStore>,
     engine: Engine,
     transport: Arc<MockTransport>,
     scope: CallScope,
     path: std::path::PathBuf,
+    _scratch: plexus_core::test_scratch::Scratch,
 }
 
 impl Fixture {

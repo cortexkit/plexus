@@ -93,12 +93,14 @@ fn inventory(writes: &[&str]) -> Inventory {
     }
 }
 
+// Fields drop in declaration order: the scratch guard is last so the store
+// and engine close before it removes their directory.
 struct Imported {
-    _scratch: plexus_core::test_scratch::Scratch,
     store: Arc<PlexusStore>,
     engine: GovernanceEngine<plexus_core::credentials::StubCredentialSource, MockTransport>,
     transport: Arc<MockTransport>,
     scope: CallScope,
+    _scratch: plexus_core::test_scratch::Scratch,
 }
 
 /// Imports `writes` for the fixture agent through the real import, proves the

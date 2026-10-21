@@ -47,7 +47,7 @@ fn completed_label_only_edit_recovers_its_projection_without_another_read() {
 
 #[test]
 fn own_issue_author_login_is_case_insensitive() {
-    let (_, store, engine, transport, scope) = setup(
+    let (_scratch, store, engine, transport, scope) = setup(
         "login-case",
         &[("github.issue.get", "read"), ("edit_issue", "write")],
     );
@@ -161,7 +161,8 @@ fn transient_governance_denial_between_legs_keeps_nonce_retryable() {
 
 #[test]
 fn receipt_updates_use_transition_time_instead_of_admission_time() {
-    let (_, store, engine, _, scope) = setup("transition-time", &[("add_reaction", "write")]);
+    let (_scratch, store, engine, _, scope) =
+        setup("transition-time", &[("add_reaction", "write")]);
     let before = plexus_core::storage::now_ms();
     let reply = bot_request_scoped(
         &store,
@@ -230,7 +231,7 @@ fn close_does_not_require_an_unused_issue_read() {
 
 #[test]
 fn transient_transport_between_legs_resumes_without_reposting_comment() {
-    let (_, store, engine, transport, scope) = setup(
+    let (_scratch, store, engine, transport, scope) = setup(
         "retry-not-sent",
         &[
             ("github.issue.get", "read"),
@@ -291,7 +292,7 @@ fn transient_transport_between_legs_resumes_without_reposting_comment() {
 
 #[test]
 fn later_permanent_refusal_reports_durable_legs() {
-    let (_, store, engine, transport, scope) = setup(
+    let (_scratch, store, engine, transport, scope) = setup(
         "refused-legs",
         &[
             ("github.issue.get", "read"),
@@ -329,7 +330,8 @@ fn later_permanent_refusal_reports_durable_legs() {
 
 #[test]
 fn ordinary_search_refuses_raw_query_and_builds_bound_query() {
-    let (_, _, engine, transport, _) = setup("bound-search", &[("github.issue.search", "read")]);
+    let (_scratch, _, engine, transport, _) =
+        setup("bound-search", &[("github.issue.search", "read")]);
     for field in ["q", "query"] {
         let mut args = json!({"repositories":["org/repo"],"terms":"bug"});
         args[field] = json!("repo:elsewhere/private");
@@ -357,7 +359,8 @@ fn ordinary_search_refuses_raw_query_and_builds_bound_query() {
 
 #[test]
 fn search_boolean_scope_escape_is_refused_and_counts_are_filtered() {
-    let (_, _, engine, transport, _) = setup("search-count", &[("github.issue.search", "read")]);
+    let (_scratch, _, engine, transport, _) =
+        setup("search-count", &[("github.issue.search", "read")]);
     for terms in [
         "foo OR bar",
         "NOT foo",
@@ -424,7 +427,7 @@ fn completed_effects_replay_before_disabled_handle_and_live_claim() {
 
 #[test]
 fn malformed_mutation_fields_never_dispatch() {
-    let (_, store, engine, transport, scope) = setup(
+    let (_scratch, store, engine, transport, scope) = setup(
         "field-types",
         &[
             ("github.issue.get", "read"),

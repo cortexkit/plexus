@@ -2189,10 +2189,16 @@ fn result_actions() -> Vec<(&'static str, &'static str)> {
     actions
 }
 
+// Fields drop in declaration order, so the store and engine close before the
+// scratch guard removes the directory holding their database.
 struct ResultRun {
-    setup: Setup,
+    store: Arc<PlexusStore>,
+    engine: GovernanceEngine<plexus_core::credentials::StubCredentialSource, MockTransport>,
+    transport: Arc<MockTransport>,
+    scope: CallScope,
     request: Value,
     now: i64,
+    _scratch: plexus_core::test_scratch::Scratch,
 }
 
 impl ResultRun {
@@ -2201,11 +2207,15 @@ impl ResultRun {
     fn new(label: &str, request: Value, adjust: impl FnOnce(&MockTransport)) -> Self {
         let mut request = request;
         request["repository"] = json!("org/repo");
-        let setup = setup(label, &result_actions());
-        github_bodies(&setup.3);
-        adjust(&setup.3);
+        let (scratch, store, engine, transport, scope) = setup(label, &result_actions());
+        github_bodies(&transport);
+        adjust(&transport);
         Self {
-            setup,
+            store,
+            engine,
+            transport,
+            scope,
+            _scratch: scratch,
             request,
             now: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2215,12 +2225,11 @@ impl ResultRun {
     }
 
     fn call(&self, nonce: &str, request_id: &str, owner: &str, offset: i64) -> Value {
-        let (_, store, engine, _, scope) = &self.setup;
         bot_request_scoped(
-            store,
-            engine,
+            &self.store,
+            &self.engine,
             plexus_core::github::AFT_PRINCIPAL,
-            Some(scope),
+            Some(&self.scope),
             &self.request,
             nonce,
             request_id,
@@ -2230,7 +2239,7 @@ impl ResultRun {
     }
 
     fn sent(&self) -> usize {
-        self.setup.3.requests().len()
+        self.transport.requests().len()
     }
 }
 
@@ -2455,8 +2464,7 @@ fn every_facade_leg_sends_only_its_actions_declared_arguments() {
         let reply = run.call("legs-nonce", "legs-id", "worker", 0);
         assert_eq!(reply["result"]["status"], "completed", "{label}: {reply}");
         let sent: Vec<(String, BTreeSet<String>)> = run
-            .setup
-            .3
+            .transport
             .requests()
             .into_iter()
             .map(|request| {
@@ -2639,7 +2647,7 @@ fn pr_create_sends_one_post_with_only_the_allowlisted_fields_and_replays_the_rec
         json!({"status":"completed","result":projection}),
         "{first}"
     );
-    let requests = run.setup.3.requests();
+    let requests = run.transport.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].action, "create_pull_request");
     assert_eq!(
@@ -2650,8 +2658,7 @@ fn pr_create_sends_one_post_with_only_the_allowlisted_fields_and_replays_the_rec
     // The receipt stores the completed reply, so the retry below is answered
     // from it without a second POST.
     let receipt = run
-        .setup
-        .1
+        .store
         .github_receipt("agent-fixture", "pr-create-nonce")
         .unwrap()
         .unwrap();
@@ -3179,12 +3186,13 @@ mod scoped {
         Err(ScopeReadError("scope.describe timed out".into()))
     }
 
+    // The scratch guard is declared last so it drops after the store it holds.
     struct Scoped {
-        scratch: plexus_core::test_scratch::Scratch,
         store: Arc<PlexusStore>,
         engine: GovernanceEngine<plexus_core::credentials::StubCredentialSource, MockTransport>,
         transport: Arc<MockTransport>,
         reader: Arc<ScriptedScope>,
+        scratch: plexus_core::test_scratch::Scratch,
     }
 
     fn scoped(label: &str, actions: &[(&str, &str)]) -> Scoped {

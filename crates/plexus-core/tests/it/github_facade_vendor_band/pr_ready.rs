@@ -41,13 +41,15 @@ fn mutation(undo: bool, draft: bool) -> Value {
         "body":"not projected"}}}})
 }
 
+// Fields drop in declaration order: the scratch guard is last so the store
+// and engine close before it removes their directory.
 struct ReadyRun {
-    _scratch: plexus_core::test_scratch::Scratch,
     store: Arc<PlexusStore>,
     engine: GovernanceEngine<plexus_core::credentials::StubCredentialSource, RestTransport>,
     scope: CallScope,
     sent: Arc<Mutex<Vec<String>>>,
     server: validation_http::FixedRequestServer,
+    _scratch: plexus_core::test_scratch::Scratch,
 }
 
 impl ReadyRun {

@@ -3183,7 +3183,6 @@ mod transport_integration_tests {
             }
         }
         task.join().expect("HTTP e2e server");
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
