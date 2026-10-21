@@ -2248,7 +2248,7 @@ async fn untrusted_bind_is_default_denied() {
 /// other ceremony operations. A facade response alone would not prove either
 /// boundary: this drives the management handler's denied and allowed arms,
 /// then proves a facade-shaped call cannot name the operation.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_action_is_management_only_and_requires_a_direct_principal() {
     let (writer, mut responses) = mpsc::channel(4);
     let store = Arc::new(crate::test_support::open_memory_store(format!(
@@ -2358,7 +2358,7 @@ async fn review_action_is_management_only_and_requires_a_direct_principal() {
     assert_eq!(refused["error"]["code"], "unknown_method");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn widen_ceiling_is_management_only_and_requires_a_direct_principal() {
     let (writer, mut responses) = mpsc::channel(4);
     let store = Arc::new(
@@ -2551,7 +2551,7 @@ fn handle_poll_grant_unknown_handle_has_a_bare_code_and_detail() {
     assert_eq!(reply["error"]["detail"]["app_handle_id"], "app-unknown");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handle_unbind_is_direct_only_and_needs_no_credentials() {
     let (writer, mut responses) = mpsc::channel(4);
     let descriptor = StorageDescriptor {
@@ -2635,7 +2635,7 @@ impl plexus_core::github::credential::HandleCredentialProvider for AnyHandleToke
 /// unknown handle comes back as the bind's own named refusal. The
 /// parameters are the shape `ck-plexus-admin handle-bind` sends. Multi
 /// threaded because the bind runs inside `block_in_place`.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handle_bind_is_a_direct_only_management_op_that_reaches_the_bind() {
     let (writer, mut responses) = mpsc::channel(4);
     let store = Arc::new(crate::test_support::open_memory_store(format!(
@@ -2715,7 +2715,7 @@ async fn handle_bind_is_a_direct_only_management_op_that_reaches_the_bind() {
 /// section, not in an async runtime context. Reqwest can panic there,
 /// especially when dropping the client's internal runtime, and end request
 /// handling without replying to the operator.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn github_handle_ops_answer_from_an_async_worker() {
     let store = Arc::new(crate::test_support::open_memory_store(format!(
         "handle-ops-worker-{}",

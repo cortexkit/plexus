@@ -19,7 +19,7 @@ use subc_protocol::{BindIdentity, RouteTarget};
 ///
 /// Both assertions inspect STORED STATE rather than the response, so a
 /// handler that answers successfully while writing nothing still fails.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configure_and_revoke_take_effect_on_the_named_connection() {
     let (writer, mut responses) = mpsc::channel(8);
     let store = Arc::new(crate::test_support::open_memory_store(format!(

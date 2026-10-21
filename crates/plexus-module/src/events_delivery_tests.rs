@@ -72,7 +72,7 @@ async fn list_as_reserved_consumer(store: Arc<PlexusStore>) -> Value {
     .await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expired_consume_authority_is_visible_on_an_empty_wire_list() {
     let store = consume_authority_store("expired");
     let deadline = plexus_core::now_ms() - 1;
@@ -88,7 +88,7 @@ async fn expired_consume_authority_is_visible_on_an_empty_wire_list() {
     assert_eq!(grants[0]["authority_expires_at_ms"], deadline);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn absent_consume_authority_is_visible_on_an_empty_wire_list() {
     let body = list_as_reserved_consumer(consume_authority_store("absent")).await;
 
@@ -100,7 +100,7 @@ async fn absent_consume_authority_is_visible_on_an_empty_wire_list() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_consume_authority_is_visible_on_a_quiet_wire_list() {
     let store = consume_authority_store("live-empty");
     let deadline = i64::MAX / 2;
@@ -119,7 +119,7 @@ async fn live_consume_authority_is_visible_on_a_quiet_wire_list() {
 /// A reserved consumer sees another principal's stored events only through
 /// live consume authority. Check both denied and granted reads on the wire
 /// so neither an always-empty response nor an unscoped read can pass.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reserved_consumer_sees_granted_events_only_through_the_wire() {
     let (writer, mut responses) = mpsc::channel(8);
     let store = Arc::new(crate::test_support::open_memory_store(format!(
@@ -381,7 +381,7 @@ async fn a_reserved_consumer_sees_granted_events_only_through_the_wire() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_consumer_ack_respects_the_same_action_selectors_as_its_read() {
     let (writer, mut responses) = mpsc::channel(2);
     let store = consume_authority_store("ack-action-selectors");
@@ -565,7 +565,7 @@ async fn a_consumer_ack_respects_the_same_action_selectors_as_its_read() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 /// A stored event must survive the facade's list and ack delivery path.
 async fn a_stored_event_is_delivered_through_the_tool_surface() {
     let (writer, mut responses) = mpsc::channel(8);

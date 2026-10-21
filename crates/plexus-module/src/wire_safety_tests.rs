@@ -633,7 +633,7 @@ fn oversized_would_ask_batch_is_refused_before_evaluation() {
     assert_eq!(reply["error"]["code"], "invalid_request");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn management_refuses_non_classic_direct_routes() {
     let routes = Arc::new(RouteBindings::new());
     routes
@@ -1027,7 +1027,7 @@ async fn oversized_frames_do_not_take_admission() {
     assert_eq!(body["error"]["code"], "invalid_request");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn management_refuses_classic_agent_scopes() {
     let routes = Arc::new(RouteBindings::new());
     let scope = CallScope::from_stamp(&crate::consent_test_support::worker_stamp("worker", 1));
@@ -1058,7 +1058,7 @@ async fn management_refuses_classic_agent_scopes() {
     assert_eq!(body["error"]["code"], "operator_authority_required");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inspect_returns_only_the_named_request_and_action() {
     let fixture = crate::withdraw_tests::Fixture::new("targeted-inspect");
     let state = Arc::new(ModuleState {

@@ -25,7 +25,7 @@ use subc_protocol::{BindIdentity, RouteTarget};
 /// Asserted on STORE STATE rather than on the response, in both halves. A
 /// handler can report success while doing nothing, and that is exactly the
 /// mutation this has to catch.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subscribe_resume_and_unsubscribe_take_effect_through_the_tool_surface() {
     let (writer, mut responses) = mpsc::channel(8);
     let store = Arc::new(crate::test_support::open_memory_store(format!(
@@ -428,7 +428,7 @@ async fn subscribe_resume_and_unsubscribe_take_effect_through_the_tool_surface()
 /// response body alone. A handler that echoed its own argument back would
 /// satisfy a response check while writing nothing -- the echo is the caller's
 /// input, not evidence about persistence.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subscription_bindings_persist_through_the_tool_surface() {
     let (writer, mut responses) = mpsc::channel(8);
     let store = Arc::new(crate::test_support::open_memory_store(format!(

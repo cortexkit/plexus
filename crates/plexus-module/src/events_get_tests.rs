@@ -175,7 +175,7 @@ async fn execute_tool_call(
     crate::test_support::send_tool_call(&state, principal, scope, None, tool_name, arguments).await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn event_pages_preserve_full_listing_and_stable_ties() {
     let (_scratch, store, path) = test_store("event_pages");
     seed_test_events(&path, &store);
@@ -259,7 +259,7 @@ fn basal_flow_scope(agent_id: Option<&str>) -> CallScope {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_carrier_and_flow_scope_checks() {
     let (_scratch, store, path) = test_store("events_get_carrier_checks");
     let (issue_key, _) = seed_test_events(&path, &store);
@@ -481,7 +481,7 @@ async fn events_get_tool_matches_legacy_refusals() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_tool_rejects_non_basal_flow_carrier() {
     let (_scratch, store, _) = test_store("get_tool_carrier");
     let reply = execute_tool_call(
@@ -498,7 +498,7 @@ async fn events_get_tool_rejects_non_basal_flow_carrier() {
     assert_eq!(reply["error"]["transmission"], "not_sent");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_tool_requires_basal_flow_scope() {
     let (_scratch, store, _) = test_store("get_tool_scope");
     let mut non_flow_scope = basal_flow_scope(Some("agent-a"));
@@ -519,7 +519,7 @@ async fn events_get_tool_requires_basal_flow_scope() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_tool_rejects_extra_arguments() {
     let (_scratch, store, path) = test_store("get_tool_extra");
     let (issue_key, _) = seed_test_events(&path, &store);
@@ -544,7 +544,7 @@ async fn events_get_tool_rejects_extra_arguments() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_version_one_is_the_default_and_version_two_never_falls_back() {
     let (_scratch, store, path) = test_store("get_tool_version");
     let (issue_key, _) = seed_test_events(&path, &store);
@@ -596,7 +596,7 @@ async fn events_get_version_one_is_the_default_and_version_two_never_falls_back(
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v2_fetch_preserves_pre_workflow_name_ci_job_envelope_and_digest() {
     use sha2::Digest;
 
@@ -699,7 +699,7 @@ async fn v2_fetch_preserves_pre_workflow_name_ci_job_envelope_and_digest() {
     assert_eq!(result["result"]["digest"], digest);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v2_fetch_returns_stored_bytes_and_digest_without_recomputation() {
     use sha2::Digest;
     let (_scratch, store, path) = test_store("v2-stored-fetch");
@@ -817,7 +817,7 @@ async fn events_get_tool_matches_legacy_argument_validation() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_validates_request_fields() {
     let (_scratch, store, path) = test_store("events_get_val");
     let (issue_key, _) = seed_test_events(&path, &store);
@@ -865,7 +865,7 @@ async fn events_get_validates_request_fields() {
     assert_eq!(res["error"]["field"], "event_name");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_refusals_and_mismatches() {
     let (_scratch, store, path) = test_store("events_get_refusals");
     let (issue_key, _) = seed_test_events(&path, &store);
@@ -900,7 +900,7 @@ async fn events_get_refusals_and_mismatches() {
     assert_eq!(res["error"]["code"], "event_name_mismatch");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_agent_owned_flow_and_unbind() {
     let (_scratch, store, path) = test_store("events_get_agent_flow");
     let (issue_key, _) = seed_test_events(&path, &store);
@@ -959,7 +959,7 @@ async fn events_get_agent_owned_flow_and_unbind() {
     assert_eq!(res_after_unbind["error"]["code"], "event_not_visible");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_events_get_enforces_live_agent_repository_binding() {
     use plexus_core::storage::relay::{Event, Hello};
     let (_scratch, store, path) = test_store("review-event-visibility");
@@ -1043,7 +1043,7 @@ async fn review_events_get_enforces_live_agent_repository_binding() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_global_flow_and_core_grants() {
     let (_scratch, store, path) = test_store("events_get_global_core");
     let (issue_key, ci_key) = seed_test_events(&path, &store);
@@ -1115,7 +1115,7 @@ async fn events_get_global_flow_and_core_grants() {
     assert_eq!(res_ci["error"]["code"], "event_not_visible");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scoped_core_requires_own_consume_grant() {
     let (_scratch, store, path) = test_store("scoped_core_grant");
     let (_, ci_key) = seed_test_events(&path, &store);
@@ -1200,7 +1200,7 @@ fn hostile_argument_agent_id_never_overrides_stamp() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_body_matches_independent_sqlite_payload_bytes() {
     use sha2::Digest;
     let (_scratch, store, path) = test_store("verbatim_event_body");
@@ -1249,7 +1249,7 @@ async fn events_get_body_matches_independent_sqlite_payload_bytes() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_read_only_and_survives_ack() {
     let (_scratch, store, path) = test_store("events_get_ack");
     let (issue_key, _) = seed_test_events(&path, &store);

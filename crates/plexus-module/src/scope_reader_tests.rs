@@ -15,7 +15,7 @@ fn reply(ty: FrameType, correlation: u64, body: Vec<u8>) -> Frame {
     .expect("frame")
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_sends_one_request_and_reads_the_matching_reply() {
     let (writer, mut outbound) = mpsc::channel::<Frame>(4);
     let pending = std::sync::Arc::new(PendingControlReplies::default());
@@ -236,7 +236,7 @@ fn assert_unanswered(result: Result<ScopeDescription, ScopeReadError>, case: &st
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_describe_nobody_answers_times_out_as_unverifiable_never_live() {
     let result = describe_against(Answer::Silence, false).await;
     assert!(
@@ -282,7 +282,7 @@ fn a_full_send_queue_is_bounded_by_the_describe_deadline() {
     assert_unanswered(result, "full send queue");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_describe_on_a_closed_connection_is_unverifiable() {
     assert_unanswered(
         describe_against(Answer::Silence, true).await,
@@ -290,7 +290,7 @@ async fn a_describe_on_a_closed_connection_is_unverifiable() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreadable_or_mismatched_reply_is_unverifiable() {
     assert_unanswered(
         describe_against(
@@ -311,7 +311,7 @@ async fn an_unreadable_or_mismatched_reply_is_unverifiable() {
 /// A daemon that does not know `scope.describe` refuses the frame, and one
 /// that does refuses a module it has not registered. Either refusal leaves
 /// the scope unconfirmed.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_describe_is_unverifiable() {
     for code in [
         "unsupported_control_frame",
@@ -331,7 +331,7 @@ async fn a_refused_describe_is_unverifiable() {
 /// it holds, so once it has synced, a ref it left out is gone. Only modules
 /// in the daemon's roster may sync at all, so under an owner outside the
 /// roster the ref can never be confirmed.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unknown_scope_is_ended_under_a_synced_owner_and_unverifiable_under_an_unconfigured_one()
 {
     use plexus_core::scope::{recheck_call_scope, SCOPE_ENDED, SCOPE_UNVERIFIABLE};
@@ -365,7 +365,7 @@ async fn an_unknown_scope_is_ended_under_a_synced_owner_and_unverifiable_under_a
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_owner_that_has_not_synced_yields_the_retryable_not_synced() {
     use plexus_core::scope::{
         approval_scope_verdict, recheck_call_scope, ApprovalScopeVerdict, SCOPE_NOT_SYNCED,
