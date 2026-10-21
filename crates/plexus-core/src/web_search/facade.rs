@@ -339,9 +339,15 @@ pub(crate) struct SearchAudit {
     pub connection_id: Option<String>,
     pub risk: Option<String>,
     pub severity: Option<String>,
+    /// The query as stored: credential-shaped words are replaced.
     pub query_text: Option<String>,
-    /// The search filters the caller set, recorded in the row's summary.
+    /// Whether any word of the query was replaced before storing.
+    pub query_redacted: bool,
+    /// The search filters the caller set, recorded in the row's summary,
+    /// with credential-shaped words replaced in their text.
     pub filters: serde_json::Map<String, Value>,
+    /// Whether any word of a filter was replaced before storing.
+    pub filters_redacted: bool,
     /// The engine's request id once `authorize` admitted the call, so this
     /// row can be joined to the engine's own authorization and dispatch rows.
     pub request_id: Option<String>,
@@ -380,7 +386,9 @@ impl SearchAudit {
             risk: None,
             severity: None,
             query_text: None,
+            query_redacted: false,
             filters: serde_json::Map::new(),
+            filters_redacted: false,
             request_id: None,
             transmission: None,
             scope: scope.cloned(),
@@ -396,13 +404,53 @@ impl SearchAudit {
         self.severity = Some(action.severity.clone());
     }
 
+    /// Record the query the row stores. Agents paste tokens into searches
+    /// (to check whether a key leaked, or inside an error message), so each
+    /// word shaped like a known credential format is replaced before the
+    /// text is kept. The vendor still receives the query as written.
+    pub(crate) fn record_query(&mut self, query: &str) {
+        let (text, redacted) = crate::secret_input::redact_secret_shaped_words(query);
+        self.query_text = Some(text);
+        self.query_redacted = redacted;
+    }
+
+    /// Record the filters the caller set, with credential-shaped words in
+    /// their text replaced as in the query.
+    pub(crate) fn record_filters(&mut self, mut filters: serde_json::Map<String, Value>) {
+        fn redact(value: &mut Value, any: &mut bool) {
+            match value {
+                Value::String(text) => {
+                    let (redacted, replaced) =
+                        crate::secret_input::redact_secret_shaped_words(text);
+                    *text = redacted;
+                    *any |= replaced;
+                }
+                Value::Array(values) => values.iter_mut().for_each(|value| redact(value, any)),
+                _ => {}
+            }
+        }
+        let mut any = false;
+        filters
+            .values_mut()
+            .for_each(|value| redact(value, &mut any));
+        self.filters = filters;
+        self.filters_redacted = any;
+    }
+
     /// The row's argument summary: a JSON object naming the filters the
-    /// caller set (omitted when none), plus any `extra` keys the tool adds.
-    /// The query itself is in the row's query_text.
+    /// caller set (omitted when none) and whether words were redacted from
+    /// the stored query or filters, plus any `extra` keys the tool adds. The
+    /// query itself is in the row's query_text.
     pub(crate) fn summary(&self, extra: serde_json::Map<String, Value>) -> String {
         let mut summary = serde_json::Map::new();
         if !self.filters.is_empty() {
             summary.insert("filters".into(), Value::Object(self.filters.clone()));
+        }
+        if self.query_redacted {
+            summary.insert("query_redacted".into(), true.into());
+        }
+        if self.filters_redacted {
+            summary.insert("filters_redacted".into(), true.into());
         }
         summary.extend(extra);
         Value::Object(summary).to_string()

@@ -20700,3 +20700,35 @@ expect_red = ["web_search::tests::the_search_row_records_the_filters", "code_sea
 expect_message = "search row must record the filters"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "search-query-credential-words-redacted"
+guards = "A credential-shaped word in a web or code search query is replaced before the query is stored in the audit journal"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "        self.query_text = Some(text);"
+new = "        let _ = text; self.query_text = Some(query.to_string()); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::credential_shaped_query_words_are_not_stored", "code_search::tests::credential_shaped_query_words_are_not_stored"]
+expect_message = "a credential-shaped query word must not be stored"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-filter-credential-words-redacted"
+guards = "A credential-shaped word in a code search filter is replaced before the filters are stored in the audit row"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "                    *text = redacted;"
+new = "                    let _ = redacted; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::credential_shaped_query_words_are_not_stored"]
+expect_message = "no search row may hold the token"
+build_timeout_s = 3600
+timeout_s = 120

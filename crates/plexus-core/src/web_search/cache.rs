@@ -22,11 +22,13 @@ const MAX_ENTRY_TEXT_BYTES: usize = 64 * 1024;
 
 /// Everything that changes what the vendor would return. The query is trimmed
 /// and case-folded, the domains are already sorted, and `max_results` is the
-/// effective value, so the default and an explicit 8 share one entry.
+/// effective value, so the default and an explicit 8 share one entry. The
+/// query is held only as a SHA-256 digest: a query can carry a pasted
+/// credential, and the cache has no need to keep its text.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     backend: String,
-    query: String,
+    query_digest: [u8; 32],
     include_domains: Vec<String>,
     max_results: u8,
     recency: Option<Recency>,
@@ -42,7 +44,10 @@ impl CacheKey {
     pub fn new(backend: &str, query: &WebSearchQuery) -> Self {
         Self {
             backend: backend.to_string(),
-            query: query.query.trim().to_lowercase(),
+            query_digest: {
+                use sha2::{Digest, Sha256};
+                Sha256::digest(query.query.trim().to_lowercase().as_bytes()).into()
+            },
             include_domains: query.include_domains.clone(),
             max_results: query.max_results,
             recency: query.recency,
@@ -268,6 +273,21 @@ mod tests {
         assert_ne!(
             CacheKey::new("exa", &query("rust", 8)),
             CacheKey::new("other", &query("rust", 8))
+        );
+    }
+
+    #[test]
+    fn the_key_never_holds_the_query_text() {
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let key = CacheKey::new("exa", &query(&format!("is {secret} leaked"), 8));
+        assert!(
+            !format!("{key:?}").contains("ghp_abcdefghij"),
+            "the cache key must not hold the query text"
+        );
+        assert_eq!(
+            key,
+            CacheKey::new("exa", &query(&format!("IS {secret} LEAKED "), 8)),
+            "an identical query must still hit"
         );
     }
 

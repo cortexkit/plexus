@@ -372,8 +372,8 @@ impl WebSearchService {
         let backend = self.backend.as_ref();
         let caller = audit.search.caller.clone();
         let query = WebSearchQuery::parse(arguments)?;
-        audit.search.query_text = Some(query.query.clone());
-        audit.search.filters = query.audited_filters();
+        audit.search.record_query(&query.query);
+        audit.search.record_filters(query.audited_filters());
 
         let agent = resolve_call_agent(audit.search.scope.as_ref());
         audit.search.agent_id = agent.attributed.clone();
@@ -648,10 +648,11 @@ impl WebSearchService {
         });
         // DELIBERATE EXCEPTION to the hash-only argument policy: every other
         // audit row records arguments only as hashes, but a web search is
-        // unreviewable without the words searched for, and search terms are
-        // not credentials. The query is kept as text for the journal's normal
-        // retention window (30 days by default) and ages out with the row.
-        // Nothing credential-derived is written here.
+        // unreviewable without the words searched for. The search terms are
+        // recorded as text, with every word shaped like a known credential
+        // format removed (the summary says when one was), for the journal's
+        // normal retention window (30 days by default), and age out with the
+        // row.
         audit.search.append(store, app_key, action, summary, row)
     }
 }

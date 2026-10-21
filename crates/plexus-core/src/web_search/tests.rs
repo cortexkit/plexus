@@ -548,3 +548,62 @@ fn the_search_row_records_the_filters() {
         );
     }
 }
+
+/// A credential pasted into a web search is sent to the vendor but never
+/// stored in the search row, on the compatibility path and an ordered walk;
+/// the identical query still hits the cache.
+#[test]
+fn credential_shaped_query_words_are_not_stored() {
+    let (engine, transport, path) = granted_exa_engine_with_path("web-redacted-query");
+    let service =
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000));
+    transport.set_response(crate::MockResponse::Success(json!({"results": []})));
+    let token = "AKIAABCDEFGHIJKLMNOP";
+    for path in ["compatibility", "ordered"] {
+        if path == "ordered" {
+            engine
+                .store()
+                .set_web_search_order(&["exa".to_string()])
+                .unwrap();
+        }
+        let args = json!({"query": format!("{path} error {token} denied")});
+        for expect_cached in [false, true] {
+            assert_eq!(
+                service
+                    .search(&engine, "direct", args.as_object().unwrap())
+                    .unwrap()
+                    .cached,
+                expect_cached
+            );
+        }
+        let rows = engine.store().list_audit("direct").unwrap();
+        let row = rows
+            .iter()
+            .filter(|row| row.gate.as_deref() == Some("web_search"))
+            .last()
+            .unwrap();
+        let summary: Value =
+            serde_json::from_str(row.args_redaction_summary.as_deref().unwrap()).unwrap();
+        assert_eq!(summary["query_redacted"], true, "{path}");
+    }
+    let db = rusqlite::Connection::open(&*path).unwrap();
+    let stored: Vec<String> = db
+        .prepare("SELECT query_text FROM audit_journal WHERE gate = 'web_search'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(stored.len(), 4);
+    assert!(
+        stored
+            .iter()
+            .all(|text| text.ends_with("error [redacted] denied")),
+        "a credential-shaped query word must not be stored: {stored:?}"
+    );
+    assert_eq!(transport.requests().len(), 2);
+    assert!(transport.requests()[0].args["query"]
+        .as_str()
+        .unwrap()
+        .contains(token));
+}

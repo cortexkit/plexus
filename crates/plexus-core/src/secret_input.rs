@@ -185,6 +185,33 @@ fn key_words(key: &str) -> Vec<String> {
     words
 }
 
+/// `text` with each whitespace-separated word that has the shape of a known
+/// credential format replaced by `[redacted]`, and whether any was. The
+/// whitespace between words is kept as it was. Used where free text a caller
+/// wrote is stored, such as a search query in the audit journal.
+pub(crate) fn redact_secret_shaped_words(text: &str) -> (String, bool) {
+    let mut redacted = String::with_capacity(text.len());
+    let mut any = false;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let word_start = rest
+            .find(|ch: char| !ch.is_whitespace())
+            .unwrap_or(rest.len());
+        redacted.push_str(&rest[..word_start]);
+        rest = &rest[word_start..];
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..word_end];
+        if looks_like_secret(word) {
+            redacted.push_str("[redacted]");
+            any = true;
+        } else {
+            redacted.push_str(word);
+        }
+        rest = &rest[word_end..];
+    }
+    (redacted, any)
+}
+
 /// True when `word` has the shape of a known credential format.
 fn looks_like_secret(word: &str) -> bool {
     const PREFIXES: &[&str] = &[
@@ -365,5 +392,18 @@ mod tests {
         ] {
             assert!(!withhold_from_preview("note", &plain), "{plain} is shown");
         }
+    }
+
+    #[test]
+    fn free_text_redaction_replaces_only_credential_shaped_words() {
+        assert_eq!(
+            redact_secret_shaped_words("is  ghp_abcdefghijklmnop leaked?\tAKIAABCDEFGHIJKLMNOP"),
+            ("is  [redacted] leaked?\t[redacted]".to_string(), true),
+            "credential-shaped words are replaced and spacing is kept"
+        );
+        assert_eq!(
+            redact_secret_shaped_words("rust async book"),
+            ("rust async book".to_string(), false)
+        );
     }
 }

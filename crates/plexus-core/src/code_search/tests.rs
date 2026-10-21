@@ -629,3 +629,50 @@ fn the_search_row_records_the_filters() {
         "the search row must record the filters"
     );
 }
+
+/// A credential pasted into a code search (to check whether it leaked) is
+/// sent to the vendor but never stored: the audit row keeps the other words
+/// and says a word was redacted. Filters get the same treatment.
+#[test]
+fn credential_shaped_query_words_are_not_stored() {
+    let f = Fixture::new();
+    f.grant("direct");
+    let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    f.service
+        .search_scoped(
+            &f.engine,
+            "direct",
+            json!({"query": format!("\"{token}\" leaked"), "repo": token})
+                .as_object()
+                .unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        f.transport.requests()[0].args["query"],
+        format!("\"{token}\" leaked"),
+        "the vendor still receives the query as written"
+    );
+    let db = rusqlite::Connection::open(f.path.path()).unwrap();
+    let (query_text, summary): (String, String) = db
+        .query_row(
+            "SELECT query_text, args_redaction_summary FROM audit_journal WHERE gate = 'code_search'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        query_text, "[redacted] leaked",
+        "a credential-shaped query word must not be stored"
+    );
+    let summary: Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(summary["query_redacted"], true);
+    assert_eq!(summary["filters_redacted"], true);
+    assert!(
+        !db.query_row("SELECT group_concat(coalesce(query_text,'') || coalesce(args_redaction_summary,''), ' ') FROM audit_journal", [], |row| row.get::<_, String>(0))
+            .unwrap()
+            .contains("ghp_abcdefghij"),
+        "no search row may hold the token"
+    );
+}
