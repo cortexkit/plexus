@@ -216,3 +216,134 @@ pub(crate) async fn eventually(
     .await
     .is_ok()
 }
+
+// Test-only entry points and fixtures for the crate root's private machinery.
+// They live here rather than beside the production code they call, and lib.rs
+// re-exports them to its test modules.
+
+/// The route-binding shortcuts tests use to seat a principal on a channel.
+impl crate::RouteBindings {
+    pub(crate) fn insert(
+        &self,
+        channel: u16,
+        epoch: u32,
+        principal: subc_protocol::Principal,
+    ) -> Result<(), crate::ModuleError> {
+        self.insert_scoped(channel, epoch, principal, None)
+    }
+
+    pub(crate) fn insert_scoped(
+        &self,
+        channel: u16,
+        epoch: u32,
+        principal: subc_protocol::Principal,
+        scope: Option<plexus_core::scope::CallScope>,
+    ) -> Result<(), crate::ModuleError> {
+        let mode = if scope.as_ref().is_some_and(|scope| scope.flow_id.is_some()) {
+            subc_protocol::call_mode::CallMode::Flow
+        } else {
+            subc_protocol::call_mode::CallMode::Classic
+        };
+        self.insert_mode(channel, epoch, principal, scope, mode)
+    }
+
+    pub(crate) fn get(
+        &self,
+        channel: u16,
+        epoch: u32,
+    ) -> Result<Option<subc_protocol::Principal>, crate::ModuleError> {
+        self.binding(channel, epoch)
+            .map(|binding| binding.map(|binding| binding.principal))
+    }
+}
+
+/// `facade_tool_reply_with_budget` with a fresh request budget.
+pub(crate) fn facade_tool_reply(
+    frame: &subc_protocol::Frame,
+    object: &serde_json::Map<String, serde_json::Value>,
+    state: &std::sync::Arc<crate::ModuleState>,
+    route_bindings: &std::sync::Arc<crate::RouteBindings>,
+) -> Result<serde_json::Value, crate::ModuleError> {
+    crate::facade_tool_reply_with_budget(
+        frame,
+        object,
+        state,
+        route_bindings,
+        crate::request_execution::RequestBudget::new(),
+    )
+}
+
+/// One health-probe pass over every principal the scheduler would probe.
+pub(crate) fn run_health_probes(state: &crate::ModuleState) {
+    crate::run_health_probes_for(state, &crate::health_probe_principals(state));
+}
+
+/// `with_call_tool_result_with_repo` for a reply that names no repository.
+pub(crate) fn with_call_tool_result(
+    tool: Option<&str>,
+    reply: serde_json::Value,
+) -> serde_json::Value {
+    crate::with_call_tool_result_with_repo(tool, reply, None)
+}
+
+/// Fail unless `frame` accepts a `route.bind`.
+pub(crate) fn assert_bind_ack(frame: &subc_protocol::Frame) {
+    assert_eq!(
+        frame.header.ty,
+        subc_protocol::FrameType::Response,
+        "bind must be accepted"
+    );
+    let reply: serde_json::Value = serde_json::from_slice(&frame.body).expect("bind ACK JSON");
+    assert!(
+        reply.get("error").is_none(),
+        "bind must not carry an error: {reply}"
+    );
+}
+
+/// Create a credential-free MCP manifest by replacing the shipped DeepWiki
+/// manifest's key and endpoint with `key` and `url`. Tests can store it so the
+/// pre-write catalog check can load the connection's manifest without needing
+/// credentials. Creating the manifest alone does not establish catalog freshness.
+pub(crate) fn test_mcp_manifest(key: &str, url: &str) -> plexus_core::IngestedManifest {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/deepwiki.jsonc"),
+    )
+    .expect("read the shipped deepwiki manifest");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&subc_jsonc::jsonc_to_json(&source).expect("normalize manifest"))
+            .expect("parse manifest");
+    value["key"] = serde_json::json!(key);
+    value["transport"]["url"] = serde_json::json!(url);
+    plexus_core::ingest_value(value).expect("ingest test manifest")
+}
+
+/// Create an MCP manifest under `key` at `url` with the fixture write
+/// `held_write`, restricted by the `team` filter. The app declares S1, the
+/// lowest severity tier, making its write S2. Only S3 and S4 require the separate
+/// approval service, so an ordinary grant can authorize this write. Require an
+/// `api_key` credential; the pre-write catalog check must resolve the connection's
+/// bound credential before refreshing the catalog.
+pub(crate) fn test_write_manifest(key: &str, url: &str) -> plexus_core::IngestedManifest {
+    plexus_core::ingest_value(serde_json::json!({
+        "schema_version": 1,
+        "key": key,
+        "name": key,
+        "description": "test vendor with one write",
+        "reuse_path": "mcp_direct",
+        "reuse_rationale": "test fixture",
+        "tier": "S1",
+        "transport": {"kind": "mcp_remote", "url": url},
+        "auth": {"mode": "api_key"},
+        "credential_bindings": [{
+            "ref_role": "api_key", "placement": "header", "key": "Authorization",
+            "prefix": "Bearer ", "required": true
+        }],
+        "resource_filters": {"required": [], "optional": ["team"], "write_enabling": ["team"]},
+        "actions_baseline": [{"name": "held_write", "risk": "write", "input_schema":{
+            "type":"object", "properties":{"team":{"type":"string"}}
+        }}],
+        "defaults": {"ask_first_risk": ["write", "destructive"], "rate_limit": {"calls_per_min": 30}},
+        "availability": "ga"
+    }))
+    .expect("ingest test write manifest")
+}

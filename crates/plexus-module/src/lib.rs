@@ -52,6 +52,11 @@ mod test_http;
 mod test_logging;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+use test_support::{
+    assert_bind_ack, facade_tool_reply, run_health_probes, test_mcp_manifest, test_write_manifest,
+    with_call_tool_result,
+};
 mod tool_provider;
 mod web_search_health;
 pub mod wire;
@@ -189,27 +194,6 @@ impl RouteBindings {
         Self::default()
     }
 
-    #[cfg(test)]
-    fn insert(&self, channel: u16, epoch: u32, principal: Principal) -> Result<(), ModuleError> {
-        self.insert_scoped(channel, epoch, principal, None)
-    }
-
-    #[cfg(test)]
-    fn insert_scoped(
-        &self,
-        channel: u16,
-        epoch: u32,
-        principal: Principal,
-        scope: Option<CallScope>,
-    ) -> Result<(), ModuleError> {
-        let mode = if scope.as_ref().is_some_and(|scope| scope.flow_id.is_some()) {
-            CallMode::Flow
-        } else {
-            CallMode::Classic
-        };
-        self.insert_mode(channel, epoch, principal, scope, mode)
-    }
-
     fn insert_mode(
         &self,
         channel: u16,
@@ -282,12 +266,6 @@ impl RouteBindings {
         }
         *last = Some(now);
         true
-    }
-
-    #[cfg(test)]
-    fn get(&self, channel: u16, epoch: u32) -> Result<Option<Principal>, ModuleError> {
-        self.binding(channel, epoch)
-            .map(|binding| binding.map(|binding| binding.principal))
     }
 
     /// The whole binding on `(channel, epoch)`: principal, daemon scope and
@@ -2508,22 +2486,6 @@ const ADMITTED_FLOW_CARRIERS: &[&str] = &[principal::BASAL_PRINCIPAL];
 /// `{"result": ...}` or `{"error": ...}`. The caller sends it, adding the MCP
 /// `CallToolResult` fields in one place, so every early refusal below returns
 /// its body rather than sending a frame of its own.
-#[cfg(test)]
-fn facade_tool_reply(
-    frame: &Frame,
-    object: &serde_json::Map<String, Value>,
-    state: &Arc<ModuleState>,
-    route_bindings: &Arc<RouteBindings>,
-) -> Result<Value, ModuleError> {
-    facade_tool_reply_with_budget(
-        frame,
-        object,
-        state,
-        route_bindings,
-        request_execution::RequestBudget::new(),
-    )
-}
-
 fn facade_tool_reply_with_budget(
     frame: &Frame,
     object: &serde_json::Map<String, Value>,
@@ -4508,11 +4470,6 @@ fn effective_ci_cadence_from_store(
     stored_cadence
 }
 
-#[cfg(test)]
-fn run_health_probes(state: &ModuleState) {
-    run_health_probes_for(state, &health_probe_principals(state));
-}
-
 fn run_health_probes_for(state: &ModuleState, principals: &[String]) {
     let mut total = 0_u64;
     let mut degraded = 0_u64;
@@ -5258,11 +5215,6 @@ fn json_fits(value: &Value, limit: usize) -> bool {
     serde_json::to_writer(BoundedSize(limit), value).is_ok()
 }
 
-#[cfg(test)]
-fn with_call_tool_result(tool: Option<&str>, reply: Value) -> Value {
-    with_call_tool_result_with_repo(tool, reply, None)
-}
-
 fn search_content_result(tool: &str, mut legacy: Value, code_search_repo: Option<&str>) -> Value {
     use cortexkit_role_tool_provider::result::{validate, ContentPart, ToolResult};
     let mut result = if let Some(error) = legacy.get("error") {
@@ -5510,20 +5462,6 @@ pub enum ModuleError {
     Json(serde_json::Error),
 }
 
-#[cfg(test)]
-fn assert_bind_ack(frame: &Frame) {
-    assert_eq!(
-        frame.header.ty,
-        FrameType::Response,
-        "bind must be accepted"
-    );
-    let reply: Value = serde_json::from_slice(&frame.body).expect("bind ACK JSON");
-    assert!(
-        reply.get("error").is_none(),
-        "bind must not carry an error: {reply}"
-    );
-}
-
 impl std::fmt::Display for ModuleError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -5546,56 +5484,6 @@ pub fn runtime_for_test(store: Arc<PlexusStore>) -> ModuleRuntime {
         )),
         Arc::new(MockTransport::default()),
     )
-}
-
-/// Create a credential-free MCP manifest by replacing the shipped DeepWiki
-/// manifest's key and endpoint with `key` and `url`. Tests can store it so the
-/// pre-write catalog check can load the connection's manifest without needing
-/// credentials. Creating the manifest alone does not establish catalog freshness.
-#[cfg(test)]
-pub(crate) fn test_mcp_manifest(key: &str, url: &str) -> plexus_core::IngestedManifest {
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/deepwiki.jsonc"),
-    )
-    .expect("read the shipped deepwiki manifest");
-    let mut value: Value =
-        serde_json::from_str(&subc_jsonc::jsonc_to_json(&source).expect("normalize manifest"))
-            .expect("parse manifest");
-    value["key"] = json!(key);
-    value["transport"]["url"] = json!(url);
-    plexus_core::ingest_value(value).expect("ingest test manifest")
-}
-
-/// Create an MCP manifest under `key` at `url` with the fixture write
-/// `held_write`, restricted by the `team` filter. The app declares S1, the
-/// lowest severity tier, making its write S2. Only S3 and S4 require the separate
-/// approval service, so an ordinary grant can authorize this write. Require an
-/// `api_key` credential; the pre-write catalog check must resolve the connection's
-/// bound credential before refreshing the catalog.
-#[cfg(test)]
-pub(crate) fn test_write_manifest(key: &str, url: &str) -> plexus_core::IngestedManifest {
-    plexus_core::ingest_value(json!({
-        "schema_version": 1,
-        "key": key,
-        "name": key,
-        "description": "test vendor with one write",
-        "reuse_path": "mcp_direct",
-        "reuse_rationale": "test fixture",
-        "tier": "S1",
-        "transport": {"kind": "mcp_remote", "url": url},
-        "auth": {"mode": "api_key"},
-        "credential_bindings": [{
-            "ref_role": "api_key", "placement": "header", "key": "Authorization",
-            "prefix": "Bearer ", "required": true
-        }],
-        "resource_filters": {"required": [], "optional": ["team"], "write_enabling": ["team"]},
-        "actions_baseline": [{"name": "held_write", "risk": "write", "input_schema":{
-            "type":"object", "properties":{"team":{"type":"string"}}
-        }}],
-        "defaults": {"ask_first_risk": ["write", "destructive"], "rate_limit": {"calls_per_min": 30}},
-        "availability": "ga"
-    }))
-    .expect("ingest test write manifest")
 }
 
 /// Exercise route.bind and health handlers without opening a daemon socket.
