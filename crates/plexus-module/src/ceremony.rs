@@ -921,7 +921,8 @@ pub(crate) fn delete_connection(
 /// budget; it exists so a typo cannot store a number that disables limiting.
 const MAX_WEB_SEARCH_LIMIT: u64 = 100_000;
 
-/// Set one web search backend's per-caller and per-backend calls per minute.
+/// Set one search backend's per-caller and per-backend calls per minute: a
+/// web search provider, or `grep_app`, the backend code_search charges.
 ///
 /// Dry run unless `dry_run` is exactly `false`, matching the other operator
 /// ops: the dry run reports the current and proposed limits and writes
@@ -935,7 +936,7 @@ pub(crate) fn set_web_search_limit(
     let Some(backend) = params.get("backend").and_then(Value::as_str) else {
         return json!({"error": {"code": "invalid_request", "message": "set_web_search_limit requires backend"}});
     };
-    if let Err(error) = known_web_search_provider(backend) {
+    if let Err(error) = known_search_limit_backend(backend) {
         return error;
     }
     let limit = |field: &str| {
@@ -970,21 +971,22 @@ pub(crate) fn set_web_search_limit(
             "per_backend_per_minute": limits.per_backend_per_minute,
         })
     };
-    let current = match state.store().web_search_limits(backend) {
-        Ok(current) => current,
-        Err(error) => {
-            return crate::wire::store_failure(
-                "web search limits read",
-                "web search limits could not be read",
-                &error,
-            )
-        }
-    };
-    let (current, current_source) = match current {
-        Some(current) => (current, "set"),
+    let with_source = |limits: Option<WebSearchLimits>| match limits {
+        Some(limits) => (limits, "set"),
         None => (plexus_core::web_search::default_limits(), "default"),
     };
     if dry_run {
+        let current = match state.store().web_search_limits(backend) {
+            Ok(current) => current,
+            Err(error) => {
+                return crate::wire::store_failure(
+                    "web search limits read",
+                    "web search limits could not be read",
+                    &error,
+                )
+            }
+        };
+        let (current, current_source) = with_source(current);
         return json!({"result": {
             "backend": backend,
             "outcome": "would_set",
@@ -994,13 +996,20 @@ pub(crate) fn set_web_search_limit(
             "dry_run": true,
         }});
     }
-    if let Err(error) = state.store().set_web_search_limits(backend, proposed) {
-        return crate::wire::store_failure(
-            "web search limits set",
-            "web search limits could not be set",
-            &error,
-        );
-    }
+    // The store returns the row this write replaced, read in the same
+    // transaction. A separate earlier read could report a value that a
+    // concurrent change had already replaced.
+    let previous = match state.store().set_web_search_limits(backend, proposed) {
+        Ok(previous) => previous,
+        Err(error) => {
+            return crate::wire::store_failure(
+                "web search limits set",
+                "web search limits could not be set",
+                &error,
+            );
+        }
+    };
+    let (previous, previous_source) = with_source(previous);
     let mut record = AuditRecord::ceremony(
         principal_key,
         None,
@@ -1010,8 +1019,8 @@ pub(crate) fn set_web_search_limit(
         None,
     );
     record.args_redaction_summary = Some(format!(
-        "backend={backend} per_caller_per_minute {} -> {per_caller}, per_backend_per_minute {} -> {per_backend} (previous values were {current_source})",
-        current.per_caller_per_minute, current.per_backend_per_minute
+        "backend={backend} per_caller_per_minute {} -> {per_caller}, per_backend_per_minute {} -> {per_backend} (previous values were {previous_source})",
+        previous.per_caller_per_minute, previous.per_backend_per_minute
     ));
     if let Err(error) = state.store().append_audit(&record) {
         eprintln!(error governance: "audit append failed: ceremony set_web_search_limit principal={principal_key:?} backend={backend:?}: {error}");
@@ -1019,11 +1028,27 @@ pub(crate) fn set_web_search_limit(
     json!({"result": {
         "backend": backend,
         "outcome": "set",
-        "previous": limits_json(current),
-        "previous_source": current_source,
+        "previous": limits_json(previous),
+        "previous_source": previous_source,
         "current": limits_json(proposed),
         "dry_run": false,
     }})
+}
+
+/// A backend whose rate limits an operator may set: a web search provider, or
+/// grep.app, which code_search charges against the same limits table.
+fn known_search_limit_backend(name: &str) -> Result<(), Value> {
+    if name == plexus_core::code_search::BACKEND {
+        return Ok(());
+    }
+    known_web_search_provider(name).map_err(|_| {
+        json!({"error": {
+            "code": "unknown_backend",
+            "message": format!("'{name}' is not a search backend; known: {}, {} (code_search)",
+                PROVIDER_NAMES.iter().map(|provider| provider.name).collect::<Vec<_>>().join(", "),
+                plexus_core::code_search::BACKEND),
+        }})
+    })
 }
 
 fn known_web_search_provider(name: &str) -> Result<(), Value> {

@@ -264,7 +264,8 @@ delete-connection --connection <id> [--apply]
 set-web-search-limit --backend <name> --per-caller <n> --per-backend <n> [--apply]
     Sets how many web_search calls one caller (a principal, plus its agent
     when the call carries one) and all callers together may make per minute
-    through a backend from the provider name table. Without a stored row the limits
+    through a backend from the provider name table. --backend grep_app sets
+    the same limits for code_search calls. Without a stored row the limits
     are 30 per caller and 120 per backend. Takes effect on the next search.
     Without --apply this is a dry run that prints the current and proposed
     limits and writes nothing.
