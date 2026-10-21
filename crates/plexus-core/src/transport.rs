@@ -109,13 +109,16 @@ impl TransportResponse {
         response
     }
 
-    pub fn vendor_error(code: &str, message: &str) -> Self {
+    /// A vendor refusal carrying `code`. Its caller-facing message is always
+    /// the fixed [`OPERATOR_DIAGNOSTIC_MESSAGE`]: vendor text never crosses to
+    /// the caller, so a cause worth keeping belongs in the operator log.
+    pub fn vendor_error(code: &str) -> Self {
         Self {
             transmission: TransmissionState::Sent,
             retryability: Retryability::Terminal,
             response: None,
             error_code: Some(code.to_string()),
-            error_message: Some(sanitize_message(message)),
+            error_message: Some(OPERATOR_DIAGNOSTIC_MESSAGE.to_string()),
             vendor_request_id: None,
             served_from: None,
             observed_at_ms: None,
@@ -125,16 +128,18 @@ impl TransportResponse {
     }
 
     pub fn unknown() -> Self {
-        Self::unknown_with_error("outcome_unknown", "vendor response was not definitive")
+        Self::unknown_with_error("outcome_unknown")
     }
 
-    pub fn unknown_with_error(code: &str, message: &str) -> Self {
+    /// An uncertain outcome carrying `code`, with the fixed caller-facing
+    /// message described on [`Self::vendor_error`].
+    pub fn unknown_with_error(code: &str) -> Self {
         Self {
             transmission: TransmissionState::OutcomeUnknown,
             retryability: Retryability::Terminal,
             response: None,
             error_code: Some(code.to_string()),
-            error_message: Some(sanitize_message(message)),
+            error_message: Some(OPERATOR_DIAGNOSTIC_MESSAGE.to_string()),
             vendor_request_id: None,
             served_from: None,
             observed_at_ms: None,
@@ -143,13 +148,15 @@ impl TransportResponse {
         }
     }
 
-    pub fn transient_not_sent(message: &str) -> Self {
+    /// A local failure before anything was sent, worth retrying, with the
+    /// fixed caller-facing message described on [`Self::vendor_error`].
+    pub fn transient_not_sent() -> Self {
         Self {
             transmission: TransmissionState::NotSent,
             retryability: Retryability::AutoRetryable,
             response: None,
             error_code: Some("transport_transient".to_string()),
-            error_message: Some(sanitize_message(message)),
+            error_message: Some(OPERATOR_DIAGNOSTIC_MESSAGE.to_string()),
             vendor_request_id: None,
             served_from: None,
             observed_at_ms: None,
@@ -362,9 +369,7 @@ impl Transport for MockTransport {
                 retry_after_ms: None,
                 error_signal: None,
             },
-            MockResponse::VendorError { code, message } => {
-                TransportResponse::vendor_error(&code, &message)
-            }
+            MockResponse::VendorError { code, .. } => TransportResponse::vendor_error(&code),
             MockResponse::Throttled {
                 retry_after_ms,
                 message,
@@ -381,20 +386,15 @@ impl Transport for MockTransport {
                 error_signal: None,
             },
             MockResponse::OutcomeUnknown => TransportResponse::unknown(),
-            MockResponse::TransientNotSent { message } => {
-                TransportResponse::transient_not_sent(&message)
-            }
+            MockResponse::TransientNotSent { .. } => TransportResponse::transient_not_sent(),
         }
     }
 }
 
-/// Replace a vendor's own words with a fixed phrase on the CALLER-FACING reply.
-///
-/// THE ARGUMENT IS DELIBERATELY IGNORED, and this comment exists because nothing
-/// said so. `vendor_error(code, message)` reads as though the message is
-/// delivered, so every call site writes a careful explanation that reaches
-/// nobody, a trap that is easy to walk into even while auditing for exactly
-/// this class.
+/// The fixed phrase that stands in for a vendor's own words on the
+/// CALLER-FACING reply. The constructors that report a failure take only a
+/// code, so no call site can write an explanation that would silently reach
+/// nobody.
 ///
 /// The substitution is correct: this reply crosses the facade to an AGENT, and a
 /// vendor error body is attacker-influenced text that can carry payload content
@@ -410,10 +410,6 @@ impl Transport for MockTransport {
 /// If a call site has something an operator needs, LOG IT; do not route it here.
 pub(crate) const OPERATOR_DIAGNOSTIC_MESSAGE: &str =
     "vendor request failed; plexus logged the full diagnostic (see `ck module logs plexus`)";
-
-fn sanitize_message(_message: &str) -> String {
-    OPERATOR_DIAGNOSTIC_MESSAGE.to_string()
-}
 
 #[cfg(any(test, feature = "test-support"))]
 fn redact_args(value: &Value) -> Value {

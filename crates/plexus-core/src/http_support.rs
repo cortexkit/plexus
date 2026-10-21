@@ -144,52 +144,27 @@ pub(crate) enum HttpAttemptFailure {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HttpFailureDiagnostic {
-    pub code: &'static str,
-    pub message: &'static str,
-}
-
 impl HttpAttemptFailure {
-    pub(crate) fn outcome_unknown_diagnostic(self) -> Option<HttpFailureDiagnostic> {
-        let diagnostic = match self {
+    /// The caller-facing code for a failure whose outcome is uncertain. Each
+    /// caller logs the failure class to the operator before building the reply,
+    /// with its cause unless the endpoint is private, so the reply carries only
+    /// this code and the fixed operator message.
+    fn outcome_unknown_code(self) -> Option<&'static str> {
+        Some(match self {
             Self::Timeout | Self::Connect => return None,
-            Self::Build => HttpFailureDiagnostic {
-                code: "http_request_invalid",
-                message: "HTTP request was invalid; inspect the configured endpoint or redirect target",
-            },
-            Self::Redirect => HttpFailureDiagnostic {
-                code: "http_redirect_failed",
-                message: "HTTP redirect failed; inspect the endpoint redirect chain",
-            },
-            Self::Request | Self::Body => HttpFailureDiagnostic {
-                code: "http_request_failed",
-                message: "HTTP request failed after connection; retry reads or reconcile writes before retrying",
-            },
-            Self::Decode => HttpFailureDiagnostic {
-                code: "http_response_decode_failed",
-                message: "HTTP response decoding failed; inspect the vendor response format",
-            },
-            Self::Status => HttpFailureDiagnostic {
-                code: "http_status_failed",
-                message: "HTTP status was converted to an error; inspect the vendor response status",
-            },
-            Self::Upgrade => HttpFailureDiagnostic {
-                code: "http_upgrade_failed",
-                message: "HTTP protocol upgrade failed; inspect vendor and proxy upgrade support",
-            },
-            Self::Unknown => HttpFailureDiagnostic {
-                code: "outcome_unknown",
-                message: "vendor response was not definitive",
-            },
-        };
-        Some(diagnostic)
+            Self::Build => "http_request_invalid",
+            Self::Redirect => "http_redirect_failed",
+            Self::Request | Self::Body => "http_request_failed",
+            Self::Decode => "http_response_decode_failed",
+            Self::Status => "http_status_failed",
+            Self::Upgrade => "http_upgrade_failed",
+            Self::Unknown => "outcome_unknown",
+        })
     }
 
     pub(crate) fn outcome_unknown_response(self) -> Option<TransportResponse> {
-        self.outcome_unknown_diagnostic().map(|diagnostic| {
-            let mut response =
-                TransportResponse::unknown_with_error(diagnostic.code, diagnostic.message);
+        self.outcome_unknown_code().map(|code| {
+            let mut response = TransportResponse::unknown_with_error(code);
             if self == Self::Build {
                 response.transmission = TransmissionState::NotSent;
             }
@@ -279,7 +254,7 @@ fn error_chain_text(error: &dyn std::error::Error) -> String {
 /// connection stayed dead until restart. An hour is long enough to respect any
 /// real quota window between retries, and short enough that a mistaken value
 /// heals without a restart.
-pub(crate) const MAX_RECORDED_THROTTLE: Duration = Duration::from_secs(60 * 60);
+const MAX_RECORDED_THROTTLE: Duration = Duration::from_secs(60 * 60);
 
 /// Longest a request waits, holding its connection's lock, for an earlier
 /// vendor throttle to lapse before it is sent.
@@ -288,12 +263,12 @@ pub(crate) const MAX_RECORDED_THROTTLE: Duration = Duration::from_secs(60 * 60);
 /// only a short throttle is waited out. A longer one makes the request refuse
 /// locally (not sent, retryable after `retry_after_ms`), which hands the delay
 /// to the caller instead of parking a blocking thread for up to an hour.
-pub(crate) const MAX_THROTTLE_WAIT: Duration = Duration::from_secs(5);
+const MAX_THROTTLE_WAIT: Duration = Duration::from_secs(5);
 
 /// Parse a `Retry-After` header given either as delay-seconds or as an HTTP
 /// date, for the throttle discipline the MCP and REST transports share. The
 /// result never exceeds `MAX_RECORDED_THROTTLE`.
-pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
+fn parse_retry_after(value: &str) -> Option<Duration> {
     if let Ok(seconds) = value.trim().parse::<u64>() {
         return Some(Duration::from_secs(seconds).min(MAX_RECORDED_THROTTLE));
     }
@@ -372,7 +347,7 @@ pub(crate) fn throttle_refusal(transport: &str, remaining: Duration) -> Transpor
 }
 
 /// Read a `Retry-After` duration off a response header set.
-pub(crate) fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
+fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
     headers
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
@@ -380,7 +355,7 @@ pub(crate) fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> 
 }
 
 /// A quota reply without a usable delay must still back off rather than spin.
-pub(crate) const DEFAULT_THROTTLE_DELAY: Duration = Duration::from_secs(60);
+const DEFAULT_THROTTLE_DELAY: Duration = Duration::from_secs(60);
 
 pub(crate) fn response_throttle(status: u16, headers: &HeaderMap) -> Option<Duration> {
     let retry_after = retry_after_from_headers(headers);
@@ -549,7 +524,7 @@ pub(crate) fn body_io_error_cause(error: std::io::Error) -> String {
 
 /// Most redirects a credentialed request follows before the redirect itself is
 /// returned as the answer.
-pub(crate) const MAX_REDIRECT_HOPS: usize = 3;
+const MAX_REDIRECT_HOPS: usize = 3;
 
 /// The redirect policy for clients that carry a connection's credential.
 ///

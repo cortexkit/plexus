@@ -985,29 +985,20 @@ impl Transport for McpRemoteTransport {
                 if state.rebuild(&config).is_err() {
                     reset_session(&mut state);
                 }
-                return TransportResponse::unknown_with_error(
-                    "transport_panicked",
-                    "MCP transport failed mid-request; the outcome is unknown",
-                );
+                return TransportResponse::unknown_with_error("transport_panicked");
             }
         };
         match outcome {
             Ok((response, signal)) => {
                 let Ok(result) = tool_result_from_response(response) else {
                     eprintln!(warn transport: "MCP vendor response was invalid");
-                    return TransportResponse::unknown_with_error(
-                        "mcp_protocol_error",
-                        "MCP response was invalid",
-                    );
+                    return TransportResponse::unknown_with_error("mcp_protocol_error");
                 };
                 if result
                     .get("isError")
                     .is_some_and(|value| !value.is_boolean())
                 {
-                    return TransportResponse::unknown_with_error(
-                        "mcp_protocol_error",
-                        "MCP isError must be boolean",
-                    );
+                    return TransportResponse::unknown_with_error("mcp_protocol_error");
                 }
                 if result
                     .get("isError")
@@ -1041,11 +1032,8 @@ impl Transport for McpRemoteTransport {
                         request.action,
                         crate::http_support::bounded_text_for_log(&error_text, 4096)
                     );
-                    return TransportResponse::vendor_error(
-                        "mcp_tool_error",
-                        "MCP vendor request failed",
-                    )
-                    .with_error_signal(signal);
+                    return TransportResponse::vendor_error("mcp_tool_error")
+                        .with_error_signal(signal);
                 }
                 // Delivered verbatim. This body previously passed through
                 // `redact_value`, which fingerprints any field whose NAME
@@ -1092,14 +1080,9 @@ fn call_error_response(error: McpCallError) -> TransportResponse {
         }
         error => match error.into_remote() {
             McpRemoteError::Timeout => TransportResponse::timeout("MCP"),
-            McpRemoteError::Connection => TransportResponse::transient_not_sent(
-                "MCP connection failed before the request was sent",
-            ),
+            McpRemoteError::Connection => TransportResponse::transient_not_sent(),
             McpRemoteError::PoisonedLock => poisoned_lock_response(),
-            McpRemoteError::Protocol => TransportResponse::unknown_with_error(
-                "mcp_protocol_error",
-                "MCP response was invalid",
-            ),
+            McpRemoteError::Protocol => TransportResponse::unknown_with_error("mcp_protocol_error"),
             McpRemoteError::OutcomeUnknown => TransportResponse::unknown(),
             McpRemoteError::AuthRejected => TransportResponse {
                 transmission: TransmissionState::Sent,
@@ -1114,29 +1097,23 @@ fn call_error_response(error: McpCallError) -> TransportResponse {
                 error_signal: None,
             },
             McpRemoteError::VendorStatus(status) if status >= 500 => {
-                TransportResponse::unknown_with_error(
-                    &format!("http_{status}"),
-                    "MCP gateway response was not definitive",
-                )
+                TransportResponse::unknown_with_error(&format!("http_{status}"))
             }
-            McpRemoteError::VendorStatus(status) => TransportResponse::vendor_error(
-                &format!("http_{status}"),
-                "MCP vendor request failed",
-            ),
+            McpRemoteError::VendorStatus(status) => {
+                TransportResponse::vendor_error(&format!("http_{status}"))
+            }
             McpRemoteError::Configuration => local_error_response(McpRemoteError::Configuration),
-            McpRemoteError::UnsupportedProtocol => TransportResponse::vendor_error(
-                "mcp_unsupported_protocol_version",
-                "MCP negotiated an unsupported protocol version",
-            ),
+            McpRemoteError::UnsupportedProtocol => {
+                TransportResponse::vendor_error("mcp_unsupported_protocol_version")
+            }
             McpRemoteError::Throttled(delay) => throttled_response(delay),
             McpRemoteError::ThrottleInEffect(remaining) => throttle_refusal("MCP", remaining),
-            McpRemoteError::ResponseTooLarge => TransportResponse::unknown_with_error(
-                "response_too_large",
-                "MCP vendor response exceeded the size limit",
-            ),
+            McpRemoteError::ResponseTooLarge => {
+                TransportResponse::unknown_with_error("response_too_large")
+            }
             _ => {
                 eprintln!(warn transport: "MCP vendor request failed without a usable reply");
-                TransportResponse::vendor_error("mcp_request_failed", "MCP vendor request failed")
+                TransportResponse::vendor_error("mcp_request_failed")
             }
         },
     }

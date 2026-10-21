@@ -147,14 +147,13 @@ impl CallScope {
     }
 }
 
-/// Who a call is attributed to, and who (if anyone) it acts as.
+/// Who a call is attributed to. Whether the call also acts as that agent, and
+/// so must hold the agent's own grants, is decided by
+/// [`CallScope::acting_agent`] where authority is checked, not here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallAgent {
     /// The agent written on the audit row and used as the rate key.
     pub attributed: Option<String>,
-    /// The agent whose own grants the call must also hold. `None` means the
-    /// call is judged on the carrying module's grants alone.
-    pub acting_as: Option<String>,
 }
 
 /// Only Basal's agent-stamped flows use bot repository visibility. An agent
@@ -218,7 +217,6 @@ pub fn resolve_call_agent(scope: Option<&CallScope>) -> CallAgent {
     };
     CallAgent {
         attributed: scope.agent_id.clone(),
-        acting_as: scope.acting_agent().map(str::to_owned),
     }
 }
 
@@ -428,7 +426,7 @@ mod tests {
         let stamped = scope(Some("agent-a"), true, true);
         let agent = resolve_call_agent(Some(&stamped));
         assert_eq!(agent.attributed.as_deref(), Some("agent-a"));
-        assert_eq!(agent.acting_as.as_deref(), Some("agent-a"));
+        assert_eq!(stamped.acting_agent(), Some("agent-a"));
     }
 
     #[test]
@@ -441,7 +439,7 @@ mod tests {
         let stamped = scope(Some("agent-a"), false, true);
         let agent = resolve_call_agent(Some(&stamped));
         assert_eq!(agent.attributed.as_deref(), Some("agent-a"));
-        assert_eq!(agent.acting_as, None);
+        assert_eq!(stamped.acting_agent(), None);
     }
 
     #[test]

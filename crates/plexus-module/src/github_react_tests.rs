@@ -7,8 +7,9 @@ use super::*;
 use plexus_core::credentials::CredentialSource;
 use plexus_core::governance::GovernanceEngine;
 use plexus_core::storage::github_store::{GithubGovernanceSeams, GithubHandle};
+use plexus_core::storage::GrantInput;
 use plexus_core::transport::Transport;
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use subc_protocol::scope::{ScopeAttributes, ScopeKind, ScopeStamp};
 
 const AGENT: &str = "agent-fixture";
@@ -40,8 +41,8 @@ fn stamp(delegates: bool, flow: bool) -> ScopeStamp {
 
 /// A runtime whose agent has a bot bound to `org/repo`, and whose carrier
 /// module and agent each hold a grant for `add_reaction` and
-/// `add_issue_comment`, so a refused comment is refused by github_react
-/// itself rather than by a missing grant.
+/// `add_issue_comment` under an `allow` policy, so a refused comment is
+/// refused by github_react itself rather than by a missing grant or a card.
 fn runtime(label: &str, carrier: &str) -> (Arc<ModuleState>, Arc<MockTransport>, Scratch) {
     let path = Scratch::database(&format!("github-react-{label}"));
     let store = Arc::new(
@@ -55,6 +56,20 @@ fn runtime(label: &str, carrier: &str) -> (Arc<ModuleState>, Arc<MockTransport>,
         })
         .unwrap(),
     );
+    // Seeded the way an operator's setup reaches the store: the shipped
+    // reviewed manifest is ingested, the connection's catalog is seeded from
+    // it, and the grants go through the store's own grant writer.
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/github_rest.jsonc"),
+    )
+    .unwrap();
+    let ingested = plexus_core::ingest_value(
+        serde_json::from_str(&subc_jsonc::jsonc_to_json(&source).unwrap()).unwrap(),
+    )
+    .unwrap();
+    store
+        .upsert_manifest(plexus_core::storage::CATALOG_PRINCIPAL, &ingested)
+        .unwrap();
     store
         .insert_connection(
             "operator",
@@ -64,6 +79,13 @@ fn runtime(label: &str, carrier: &str) -> (Arc<ModuleState>, Arc<MockTransport>,
             &json!({}),
         )
         .unwrap();
+    assert!(
+        store
+            .seed_catalog_from_manifest("operator", "conn-react", "github_rest")
+            .unwrap()
+            > 0,
+        "the reviewed manifest seeded no catalog actions"
+    );
     store
         .put_github_handle(&GithubHandle {
             app_handle_id: "app-fixture".into(),
@@ -79,29 +101,34 @@ fn runtime(label: &str, carrier: &str) -> (Arc<ModuleState>, Arc<MockTransport>,
         })
         .unwrap();
     store.bind_github_repo("org/repo", "app-fixture").unwrap();
-    let db = Connection::open(path.as_ref() as &Path).unwrap();
+    let grant = |grant_id: &str| GrantInput {
+        grant_id: grant_id.into(),
+        principal: "operator".into(),
+        connection_id: "conn-react".into(),
+        grantee_principal: format!("reserved:{carrier}"),
+        risk_ceiling: "write".into(),
+        action_selectors: vec!["add_reaction".into(), "add_issue_comment".into()],
+        authority_kind: "invoke".into(),
+        expires_at: None,
+    };
+    store.insert_grant(&grant("module")).unwrap();
+    store
+        .insert_agent_grant_for_test(&grant("agent"), AGENT)
+        .unwrap();
+    // The reviewed catalog makes every write ask first. An operator lets the
+    // bot write without a card by setting an `allow` policy on the connection,
+    // as a GitHub handle import does for the actions it grants.
     for action in ["add_reaction", "add_issue_comment"] {
-        db.execute("INSERT INTO catalog_actions (connection_id,principal,name,schema_json,schema_hash,risk,severity,status,first_seen_at_ms,last_seen_at_ms,ask_first)
-            VALUES ('conn-react','operator',?1,'{}','schema','write','S1','active',1,1,0)", params![action]).unwrap();
-    }
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog/github_rest.jsonc"),
-    )
-    .unwrap();
-    let ingested = plexus_core::ingest_value(
-        serde_json::from_str(&subc_jsonc::jsonc_to_json(&source).unwrap()).unwrap(),
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO app_manifests (principal,key,schema_version,content_hash,manifest_json,ingested_at_ms)
-         VALUES ('system','github_rest',1,'fixture',?1,1)",
-        params![serde_json::to_string(&ingested.manifest).unwrap()],
-    )
-    .unwrap();
-    for (id, agent) in [("module", None), ("agent", Some(AGENT))] {
-        db.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,authority_kind,created_at_ms,action_selectors,agent_id)
-            VALUES (?1,'operator','conn-react',?2,'write','invoke',1,'[\"add_reaction\",\"add_issue_comment\"]',?3)",
-            params![id, format!("reserved:{carrier}"), agent]).unwrap();
+        store
+            .insert_policy(&plexus_core::PolicyInput {
+                policy_id: format!("allow-{action}"),
+                principal: "operator".into(),
+                connection_id: "conn-react".into(),
+                action_selector: action.into(),
+                effect: "allow".into(),
+                expires_at: None,
+            })
+            .unwrap();
     }
     let transport = Arc::new(MockTransport::default());
     let mut runtime = ModuleRuntime::with_stub_credentials_and_mock_transport(

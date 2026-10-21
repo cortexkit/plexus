@@ -546,10 +546,7 @@ impl RestTransport {
                 if let Ok(fresh) = RestConnectionEntry::build(&config) {
                     *state = fresh;
                 }
-                TransportResponse::unknown_with_error(
-                    "transport_panicked",
-                    "REST transport failed mid-request; the outcome is unknown",
-                )
+                TransportResponse::unknown_with_error("transport_panicked")
             }
         }
     }
@@ -728,9 +725,7 @@ fn request_failure_response(
     eprintln!(warn transport: "REST transport failed on {method} {}: {failure:?}: {cause}", path.split('?').next().unwrap_or(path));
     match failure {
         HttpAttemptFailure::Timeout => timeout_response(),
-        HttpAttemptFailure::Connect => TransportResponse::transient_not_sent(
-            "REST connection failed before the request was sent",
-        ),
+        HttpAttemptFailure::Connect => TransportResponse::transient_not_sent(),
         failure => failure
             .outcome_unknown_response()
             .unwrap_or_else(TransportResponse::unknown),
@@ -1220,10 +1215,7 @@ fn classify_response_with_privacy(
         // memory, so what it said cannot be delivered: for a write it may well
         // have succeeded.
         eprintln!(warn transport: "REST response on {} {} exceeded {MAX_RESPONSE_BODY_BYTES} bytes: status={status}", method, path.split('?').next().unwrap_or(path));
-        return TransportResponse::unknown_with_error(
-            "response_too_large",
-            "REST vendor response exceeded the size limit",
-        );
+        return TransportResponse::unknown_with_error("response_too_large");
     }
     let text = body.text;
     let signal = if !(200..300).contains(&status) {
@@ -1266,18 +1258,12 @@ fn classify_response_with_privacy(
     }
     if !(200..300).contains(&status) {
         if github_facade && (300..400).contains(&status) {
-            return TransportResponse::vendor_error(
-                "repository_redirected",
-                "Repository moved or redirected; update its binding before retrying",
-            )
-            .with_error_signal(signal);
+            return TransportResponse::vendor_error("repository_redirected")
+                .with_error_signal(signal);
         }
         if status >= 500 {
-            return TransportResponse::unknown_with_error(
-                &format!("http_{status}"),
-                "REST gateway response was not definitive",
-            )
-            .with_error_signal(signal);
+            return TransportResponse::unknown_with_error(&format!("http_{status}"))
+                .with_error_signal(signal);
         }
         // Without a reviewed credential signal, treat 403 as a permission refusal
         // rather than evidence that the credential itself was rejected.
@@ -1288,10 +1274,7 @@ fn classify_response_with_privacy(
         // a dead credential active costs only one more failed call before a 401.
         // Do not infer revocation from response text: that vendor-specific guess
         // would make this credential-health boundary unreliable.
-        let mut result = TransportResponse::vendor_error(
-            &format!("http_{status}"),
-            "REST vendor request failed",
-        );
+        let mut result = TransportResponse::vendor_error(&format!("http_{status}"));
         if github_facade && status == 422 {
             let errors = crate::github::facade::validation::errors(&text);
             if !errors.is_empty() {

@@ -5,13 +5,13 @@ use serde_json::{Map, Value};
 use super::WebSearchRefusal;
 
 /// Longest query accepted, in characters after trimming.
-pub const MAX_QUERY_CHARS: usize = 500;
+pub(crate) const MAX_QUERY_CHARS: usize = 500;
 /// Result count used when the caller names none.
-pub const DEFAULT_MAX_RESULTS: u8 = 8;
+const DEFAULT_MAX_RESULTS: u8 = 8;
 /// Largest result count a caller may ask for.
-pub const MAX_RESULTS_LIMIT: u8 = 20;
+pub(crate) const MAX_RESULTS_LIMIT: u8 = 20;
 /// Most domains one call may restrict the search to.
-pub const MAX_INCLUDE_DOMAINS: usize = 20;
+pub(crate) const MAX_INCLUDE_DOMAINS: usize = 20;
 
 /// The argument names the tool accepts. Anything else is refused by name.
 const KNOWN_FIELDS: &[&str] = &["query", "max_results", "include_domains", "recency"];

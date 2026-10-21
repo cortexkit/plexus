@@ -38,6 +38,20 @@ pub enum ReusePath {
     DeepWrapper,
 }
 
+impl ReusePath {
+    /// How the catalog listing (`catalog apps`) spells this value. These are
+    /// the variant names the listing has always shown, written out so renaming
+    /// a variant cannot silently change what its readers match on. They are
+    /// not the manifest's own spellings.
+    pub fn catalog_label(self) -> &'static str {
+        match self {
+            Self::McpDirect => "McpDirect",
+            Self::OpenapiShim => "OpenapiShim",
+            Self::DeepWrapper => "DeepWrapper",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
@@ -49,6 +63,21 @@ pub enum Tier {
     S3,
     #[serde(rename = "S4")]
     S4,
+}
+
+impl Tier {
+    /// How the catalog listing (`catalog apps`) spells this value. These are
+    /// the variant names the listing has always shown, written out so renaming
+    /// a variant cannot silently change what its readers match on. They are
+    /// not the manifest's own spellings.
+    pub fn catalog_label(self) -> &'static str {
+        match self {
+            Self::S1 => "S1",
+            Self::S2 => "S2",
+            Self::S3 => "S3",
+            Self::S4 => "S4",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,6 +135,22 @@ pub enum AuthMode {
     OptionalApiKey,
     AppInstall,
     None,
+}
+
+impl AuthMode {
+    /// How the catalog listing (`catalog apps`) spells this value. These are
+    /// the variant names the listing has always shown, written out so renaming
+    /// a variant cannot silently change what its readers match on. They are
+    /// not the manifest's own spellings.
+    pub fn catalog_label(self) -> &'static str {
+        match self {
+            Self::Oauth => "Oauth",
+            Self::ApiKey => "ApiKey",
+            Self::OptionalApiKey => "OptionalApiKey",
+            Self::AppInstall => "AppInstall",
+            Self::None => "None",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -599,7 +644,7 @@ pub struct ManifestDefaults {
 /// `reversibility_class` with the external decision plane: manifest data is
 /// untrusted advisory input, plexus re-derives, and the stricter of the two
 /// wins.
-pub const ASK_FIRST_FLOOR: &[Risk] = &[Risk::Write, Risk::Destructive];
+const ASK_FIRST_FLOOR: &[Risk] = &[Risk::Write, Risk::Destructive];
 
 /// Whether an action of `risk` must ask first on the default branch, given a
 /// manifest's declared `defaults.ask_first_risk`. The effective set is the
@@ -621,6 +666,20 @@ pub enum Availability {
     Ga,
     Gated,
     NeedsRegistration,
+}
+
+impl Availability {
+    /// How the catalog listing (`catalog apps`) spells this value. These are
+    /// the variant names the listing has always shown, written out so renaming
+    /// a variant cannot silently change what its readers match on. They are
+    /// not the manifest's own spellings.
+    pub fn catalog_label(self) -> &'static str {
+        match self {
+            Self::Ga => "Ga",
+            Self::Gated => "Gated",
+            Self::NeedsRegistration => "NeedsRegistration",
+        }
+    }
 }
 
 fn default_catalog_ttl_s() -> u64 {
@@ -1474,7 +1533,7 @@ fn has_header_control_bytes(value: &str) -> bool {
 
 /// The `{placeholder}` names in a path template, in order of first appearance.
 /// An unterminated placeholder makes the template malformed.
-pub(crate) fn path_placeholders(path: &str) -> Result<Vec<String>, ManifestError> {
+fn path_placeholders(path: &str) -> Result<Vec<String>, ManifestError> {
     let mut names = Vec::new();
     let mut rest = path;
     while let Some(open) = rest.find('{') {
@@ -1848,6 +1907,41 @@ mod tests {
     }
 
     use super::*;
+
+    /// The catalog listing's spelling of every variant, pinned. Readers of
+    /// `catalog apps` (including the admin's credential-free check on
+    /// `auth_mode`) match on these exact strings.
+    #[test]
+    fn catalog_labels_keep_the_listing_spelling_of_every_variant() {
+        let tiers = [Tier::S1, Tier::S2, Tier::S3, Tier::S4].map(Tier::catalog_label);
+        assert_eq!(tiers, ["S1", "S2", "S3", "S4"]);
+        let paths = [
+            ReusePath::McpDirect,
+            ReusePath::OpenapiShim,
+            ReusePath::DeepWrapper,
+        ]
+        .map(ReusePath::catalog_label);
+        assert_eq!(paths, ["McpDirect", "OpenapiShim", "DeepWrapper"]);
+        let modes = [
+            AuthMode::Oauth,
+            AuthMode::ApiKey,
+            AuthMode::OptionalApiKey,
+            AuthMode::AppInstall,
+            AuthMode::None,
+        ]
+        .map(AuthMode::catalog_label);
+        assert_eq!(
+            modes,
+            ["Oauth", "ApiKey", "OptionalApiKey", "AppInstall", "None"]
+        );
+        let availability = [
+            Availability::Ga,
+            Availability::Gated,
+            Availability::NeedsRegistration,
+        ]
+        .map(Availability::catalog_label);
+        assert_eq!(availability, ["Ga", "Gated", "NeedsRegistration"]);
+    }
     use std::fs;
     use std::path::Path;
 

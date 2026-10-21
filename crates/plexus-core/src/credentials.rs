@@ -1,8 +1,9 @@
 //! Credential custody seam used by governance and the in-process harness.
 //!
-//! The trait resolves bearer handles or vault references into a zeroizing payload. The
-//! stub keys responses by a fingerprint, so its configuration and diagnostics
-//! never need to retain the raw handle.
+//! The trait resolves a connection's vault credential id into a zeroizing
+//! payload; bindings hold only that reference, never a bearer secret. The stub
+//! keys responses by a fingerprint of the id, so its configuration and
+//! diagnostics never need to retain the raw value.
 
 #[cfg(any(test, feature = "test-support"))]
 use std::collections::HashMap;

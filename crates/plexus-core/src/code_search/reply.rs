@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const MAX_MATCHES: usize = 20;
-pub const MAX_LINES_PER_MATCH: usize = 100;
+const MAX_MATCHES: usize = 20;
+const MAX_LINES_PER_MATCH: usize = 100;
 pub const MAX_TEXT_BYTES: usize = 32 * 1024;
 const PARSED_TEXT_BUDGET: usize = 24 * 1024;
 /// Longest code line returned, in bytes. grep.app often matches minified

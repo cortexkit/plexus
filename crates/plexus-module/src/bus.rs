@@ -329,7 +329,7 @@ fn credential_result(value: Value) -> Result<Value, String> {
         .ok_or_else(|| "ckbus_missing_result".into())
 }
 
-pub fn fresh_required(error: &str) -> bool {
+fn fresh_required(error: &str) -> bool {
     error.contains("ckbus_credential_superseded")
         || error.contains("ckbus_credential_revoked")
         || error.contains("ckbus_generation_not_live")

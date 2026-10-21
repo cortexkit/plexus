@@ -149,7 +149,7 @@ pub fn reconcile(
 
 /// [`reconcile`], asking about repositories in order starting just after
 /// `resume_after` (the repository a previous pass stopped at).
-pub fn reconcile_from(
+fn reconcile_from(
     store: &PlexusStore,
     registry: &dyn RepositoryRegistry,
     now_ms: i64,

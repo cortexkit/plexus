@@ -491,8 +491,9 @@ pub enum PollAuthorizationRefusal {
     StoreFailure,
 }
 
-/// Legacy envelope retained for callers that still match on the unconfigured
-/// decision-plane denial. Prefer [`DecisionEnvelope`] when a plane is wired.
+/// The call carried by [`Denial::NeedsDecisionPlane`]. No decision plane is
+/// configured in production, so every S3/S4 call is refused with this
+/// envelope; [`DecisionEnvelope`] is what a configured plane would be sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionPlaneEnvelope {
     pub request_id: String,
@@ -679,7 +680,7 @@ pub struct AuthorityEvaluation {
     pub policy_effect: &'static str,
 }
 
-pub(crate) fn grant_denial(
+fn grant_denial(
     request: &AuthorizationRequest,
     layer: crate::grant_refusal::Layer,
     reason: GrantDenial,
@@ -1432,7 +1433,7 @@ where
     /// still current. A failed check refuses the call as not sent, audited
     /// like every other pre-dispatch refusal. Used by facade invokes and by
     /// approved requests, which may run long after they were raised.
-    pub fn dispatch_checked(&self, reservation: &Reservation) -> DispatchOutcome {
+    fn dispatch_checked(&self, reservation: &Reservation) -> DispatchOutcome {
         if let Some(check) = &self.freshness_check {
             if let Err((code, message)) = check(reservation) {
                 return self.refuse_before_transmit(reservation, &code, &message);
@@ -1706,7 +1707,7 @@ where
     }
 
     /// Pure grant and policy evaluation shared by dispatch and restoration checks.
-    pub fn evaluate_authority(
+    fn evaluate_authority(
         &self,
         request: &AuthorizationRequest,
         connection: &ConnectionRecord,
@@ -2993,7 +2994,7 @@ where
     /// Refuse an authorized reservation before anything is transmitted, with
     /// `code` and `message`, audited like every other pre-dispatch refusal.
     /// For checks the caller runs between authorization and dispatch.
-    pub fn refuse_before_transmit(
+    fn refuse_before_transmit(
         &self,
         reservation: &Reservation,
         code: &str,
@@ -4462,7 +4463,6 @@ where
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn audit_denial(
         &self,
         request: &AuthorizationRequest,

@@ -1677,11 +1677,9 @@ mod tests {
                 // `local_outcome_unknown` simulates an unknown request outcome.
                 // Neither represents a definitive vendor failure.
                 return match code.as_str() {
-                    "local_not_sent" => {
-                        TransportResponse::transient_not_sent("injected local refusal")
-                    }
+                    "local_not_sent" => TransportResponse::transient_not_sent(),
                     "local_outcome_unknown" => TransportResponse::unknown(),
-                    code => TransportResponse::vendor_error(code, "injected read failure"),
+                    code => TransportResponse::vendor_error(code),
                 };
             }
             let body = match action.as_str() {

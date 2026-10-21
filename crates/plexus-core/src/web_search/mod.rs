@@ -318,7 +318,6 @@ impl WebSearchService {
     ///
     /// `relay_origin` is the call a relayed search came from. It is written on
     /// every audit row the search makes, for attribution only.
-    #[allow(clippy::too_many_arguments)]
     pub fn search_scoped<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         &self,
         engine: &GovernanceEngine<C, T>,
@@ -513,7 +512,6 @@ impl WebSearchService {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn backing_connection_for(
         &self,
         store: &PlexusStore,

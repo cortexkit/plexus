@@ -41,7 +41,7 @@ pub const CAPABILITY: &str = "permissions/v1";
 pub const LIST_METHOD: &str = "permissions.list";
 pub const REVOKE_METHOD: &str = "permissions.revoke";
 /// The module id rows carry, so the page can address a revoke back here.
-pub const MODULE: &str = "plexus";
+const MODULE: &str = "plexus";
 
 /// The selectors with a row of their own. Every other selector is speech.
 const CREATE_ISSUE: &str = "create_issue";
@@ -192,7 +192,7 @@ impl PermissionRow {
     }
 
     /// What the row covers, for display.
-    pub fn subject_label(&self) -> String {
+    fn subject_label(&self) -> String {
         let login = self.login();
         match self.capability {
             Capability::Speak if self.repositories.is_empty() => format!("Speak as {login}"),
@@ -204,7 +204,7 @@ impl PermissionRow {
 
     /// One plain sentence that tells the operator what the row lets the agent
     /// do.
-    pub fn scope_label(&self) -> String {
+    fn scope_label(&self) -> String {
         let login = self.login();
         let what = match self.capability {
             Capability::Speak => {

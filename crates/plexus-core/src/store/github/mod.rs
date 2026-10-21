@@ -84,6 +84,7 @@ impl PlexusStore {
 
     /// Insert or update the handle in a fenced transaction. SQL uniqueness
     /// rejects an agent or credential assigned to two different handles.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn put_github_handle(&self, handle: &GithubHandle) -> Result<(), StoreError> {
         self.inner.with_conn_fenced(|conn| {
             conn.execute(
@@ -119,6 +120,7 @@ impl PlexusStore {
     /// Replace one repository binding and rewrite both affected connections'
     /// allowlists in the same transaction. A failed rewrite rolls back the
     /// binding and its global generation increment as well.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn bind_github_repo(
         &self,
         repository: &str,
@@ -309,8 +311,8 @@ impl PlexusStore {
     /// agent) naming the exact grantee, plus every row keyed to the agent.
     ///
     /// Module rows belong to the calling module. Agent rows state what the agent
-    /// may do, so they apply whichever module carries the agent's assertion and
-    /// are not filtered by grantee. Callers pick the module and agent layers
+    /// may do, so they apply whichever module carries a call for that agent (as
+    /// named by the route's scope stamp) and are not filtered by grantee. Callers pick the module and agent layers
     /// out of the result with `governance::scoped_grant`.
     pub(crate) fn scoped_invoke_grant_rows(
         &self,
@@ -943,7 +945,7 @@ impl PlexusStore {
     /// which blocks `release_github_claim` and makes a lease takeover record
     /// `outcome_unknown` for a request that never left plexus. Only the
     /// current owner can clear it, and only for the request that set it.
-    pub fn clear_github_dispatch(
+    pub(crate) fn clear_github_dispatch(
         &self,
         agent: &str,
         nonce: &str,
@@ -1101,7 +1103,7 @@ impl PlexusStore {
 
     /// Retry and sweep use the same durable transition for an expired attempted
     /// receipt. If another update changes it first, do not record a second disposition.
-    pub fn expire_github_attempted_receipt(
+    fn expire_github_attempted_receipt(
         &self,
         agent: &str,
         nonce: &str,
@@ -1719,6 +1721,7 @@ impl PlexusStore {
 
     /// An import is all-or-nothing, including connection filters and grants.
     /// Existing handles must be explicitly retired rather than silently replaced.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn import_github_handles(&self, rows: &[GithubImportRow]) -> Result<(), StoreError> {
         self.import_github_handles_checked(rows, false)?
             .map_err(StoreError::Backend)

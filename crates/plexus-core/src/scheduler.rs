@@ -364,6 +364,7 @@ where
     /// breaker-tripped subscriptions or advance any cursor — so a test can ask
     /// "what is due right now" without mutating state. A breaker-tripped
     /// subscription is excluded here (a pass would suspend it, not poll it).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn due_now(&self, principals: &[String], now_ms: i64) -> Vec<TriggerSubscription> {
         let mut due = Vec::new();
         let mut cadences = self.polling_cadences();
@@ -388,6 +389,7 @@ where
 
     /// Test-facing shorthand for [`Self::run_pass_report`] returning only poll
     /// outcomes. Production also consumes the report's selection-failure count.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn run_pass(&self, principals: &[String], now_ms: i64) -> Vec<PassOutcome> {
         self.run_pass_report(principals, now_ms).outcomes
     }

@@ -1211,6 +1211,10 @@ fn a_failed_read_back_keeps_the_write_queued_for_the_next_sweep() {
 
 #[path = "support/audit.rs"]
 mod audit_test;
+// The audit fixture reports through the same stderr-capture helpers the other
+// suites use, under the name every including crate gives them.
+#[path = "support/logging.rs"]
+mod test_logging;
 
 #[test]
 fn outcome_report_audit_failure_is_loud_and_preserves_completion() {

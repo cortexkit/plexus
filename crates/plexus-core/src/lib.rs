@@ -249,13 +249,6 @@ pub use decision_plane::{
 };
 pub use event_key::{derive_event_key, EventKeyError};
 pub use fingerprint::fingerprint;
-#[cfg(any(test, feature = "test-support"))]
-pub use github_identity::{
-    resolve_github_identity_reply, FailClosedGithubIdentitySource, GithubIdentity,
-    GithubIdentityRefusal, GithubIdentityResolver, GithubIdentitySource, GithubIdentitySourceError,
-    PrefrontalGithubIdentitySource, ResolvedGithubIdentity, StubGithubIdentityResponse,
-    StubGithubIdentitySource, AGENT_GITHUB_IDENTITY_OPERATION,
-};
 pub use github_identity::{PrefrontalRouteError, PrefrontalRoutePeer, SubcPrefrontalRoutePeer};
 pub use governance::{
     AuthorizationRequest, CatalogDenial, ConnectionDenial, CredentialDenial, DecisionPlaneEnvelope,
@@ -290,8 +283,10 @@ pub use storage::event_outbox::{
     RepoIdCacheEntry, RepoIdUpdate, RepoResolutionAdmission,
 };
 pub use storage::now_ms;
+#[cfg(any(test, feature = "test-support"))]
+pub use storage::AuditRow;
 pub use storage::{
-    ActionRequestRecord, ActorSource, AuditRecord, AuditRow, BindingTicket, CatalogAction,
+    ActionRequestRecord, ActorSource, AuditRecord, BindingTicket, CatalogAction,
     CatalogActionInput, CatalogActionReview, Ceiling, CeremonyRefusal, ConfigureOutcome,
     ConnectionAdminRevokeOutcome, ConnectionRecord, ConnectionSummary, ConsentSettlement,
     DeleteConnectionOutcome, EventsConsumeAuthority, EventsIncludingGranted, GrantInput,

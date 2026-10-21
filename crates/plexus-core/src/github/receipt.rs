@@ -37,9 +37,13 @@ pub enum Claim {
     PendingApproval(Receipt),
 }
 
-/// The GitHub request shim may retry a nonce up to 20 seconds after the first
-/// write. A 60-second floor prevents takeover while those retries are active.
+/// How long a claim on a nonce is held when the caller does not ask for a
+/// different lease.
 pub const DEFAULT_CLAIM_LEASE_SECONDS: i64 = 120;
+/// The GitHub request shim may retry a nonce up to 20 seconds after the first
+/// write. A lease is never shorter than this 60-second floor and never ends
+/// sooner than 60 seconds after the nonce's first claim, so another owner
+/// cannot take over while those retries are active.
 pub const MIN_CLAIM_LEASE_SECONDS: i64 = 60;
 pub const RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 

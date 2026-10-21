@@ -160,10 +160,9 @@ fn credential_cooldown_and_vault_reporting_exclude_forbidden() {
         let engine = GovernanceEngine::new(
             fixture.store().clone(),
             credentials.clone(),
-            Arc::new(FixedTransport(TransportResponse::vendor_error(
-                &format!("http_{status}"),
-                "permission denied",
-            ))),
+            Arc::new(FixedTransport(TransportResponse::vendor_error(&format!(
+                "http_{status}"
+            )))),
         );
         let now = Arc::new(AtomicI64::new(NOW));
         let service = clocked_service(&now);

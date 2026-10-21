@@ -55,6 +55,7 @@ pub struct SweepResume(std::sync::Mutex<Option<String>>);
 
 /// Resolve every agent that holds a grant and revoke all grants of each agent
 /// the registry reports retired, in agent id order.
+#[cfg(any(test, feature = "test-support"))]
 pub fn sweep_retired_agents(
     store: &PlexusStore,
     registry: &dyn AgentRegistry,
@@ -70,7 +71,7 @@ pub fn sweep_retired_agents(
 /// transaction snapshots the row into `grant_revocations` and deletes it. Each
 /// revoked grant then gets its own audit row. A failure on one grant is logged
 /// and counted rather than aborting, so one bad row cannot shield the rest.
-pub fn sweep_retired_agents_from(
+fn sweep_retired_agents_from(
     store: &PlexusStore,
     registry: &dyn AgentRegistry,
     resume_after: Option<&str>,

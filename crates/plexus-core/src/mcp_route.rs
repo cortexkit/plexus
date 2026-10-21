@@ -189,16 +189,11 @@ impl<P: McpRoutePeer> McpRouteTransport<P> {
         );
         match self.peer.call(frame) {
             Ok(response) => adapter_response(response),
-            Err(McpRouteError::NotSent) => {
-                TransportResponse::transient_not_sent("local MCP adapter was unreachable")
-            }
+            Err(McpRouteError::NotSent) => TransportResponse::transient_not_sent(),
             Err(McpRouteError::OutcomeUnknown) => TransportResponse::unknown(),
             Err(McpRouteError::Transport) => {
                 eprintln!(warn transport: "local MCP adapter request failed");
-                TransportResponse::unknown_with_error(
-                    "mcp_route_transport_error",
-                    "local MCP adapter request failed",
-                )
+                TransportResponse::unknown_with_error("mcp_route_transport_error")
             }
         }
     }
@@ -212,11 +207,7 @@ impl<P: McpRoutePeer> Transport for McpRouteTransport<P> {
     ) -> TransportResponse {
         let Ok(server) = self.server_for(&request.connection_id) else {
             eprintln!(warn transport: "local MCP adapter connection is not configured");
-            return TransportResponse::vendor_error(
-                "mcp_route_transport_error",
-                "local MCP adapter connection is not configured",
-            )
-            .not_sent();
+            return TransportResponse::vendor_error("mcp_route_transport_error").not_sent();
         };
         self.dispatch_for_server(request, server)
     }
@@ -249,10 +240,7 @@ fn adapter_response(frame: McpRouteFrame) -> TransportResponse {
             let Ok(result) = tool_result_from_response(payload) else {
                 eprintln!(warn transport: "local MCP adapter returned an invalid tool response");
                 return with_provenance(
-                    TransportResponse::unknown_with_error(
-                        "mcp_protocol_error",
-                        "MCP response was invalid",
-                    ),
+                    TransportResponse::unknown_with_error("mcp_protocol_error"),
                     served_from,
                     observed_at_ms,
                 );
@@ -262,10 +250,7 @@ fn adapter_response(frame: McpRouteFrame) -> TransportResponse {
                 .is_some_and(|value| !value.is_boolean())
             {
                 return with_provenance(
-                    TransportResponse::unknown_with_error(
-                        "mcp_protocol_error",
-                        "MCP isError must be boolean",
-                    ),
+                    TransportResponse::unknown_with_error("mcp_protocol_error"),
                     served_from,
                     observed_at_ms,
                 );
@@ -278,7 +263,7 @@ fn adapter_response(frame: McpRouteFrame) -> TransportResponse {
                 let detail = crate::http_support::bounded_json_for_log(&result, 4096);
                 eprintln!(warn transport: "local MCP adapter vendor tool error: {}", detail);
                 return with_provenance(
-                    TransportResponse::vendor_error("mcp_tool_error", "MCP vendor request failed"),
+                    TransportResponse::vendor_error("mcp_tool_error"),
                     served_from,
                     observed_at_ms,
                 );
@@ -342,10 +327,7 @@ fn adapter_refusal_response(
         // adapter may still explain itself.
         _ => {
             eprintln!(warn transport: "{}", unknown_code_log_line(&code, &message));
-            return TransportResponse::unknown_with_error(
-                "mcp_route_protocol_error",
-                "local MCP adapter sent an unknown refusal code",
-            );
+            return TransportResponse::unknown_with_error("mcp_route_protocol_error");
         }
     };
     let retry_after_ms = (code == "spawn_failed")

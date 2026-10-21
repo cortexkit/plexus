@@ -1,9 +1,10 @@
 use std::path::Path;
 
 use crate::bounded;
-
-#[path = "logging.rs"]
-mod logging;
+// Every crate that compiles this file also declares the shared stderr-capture
+// helpers at its root as `test_logging`, so the one-time logger initialization
+// is shared rather than duplicated here.
+use crate::test_logging as logging;
 
 pub fn reject_inserts(path: &Path) {
     rusqlite::Connection::open(path)

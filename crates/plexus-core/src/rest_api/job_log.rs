@@ -8,7 +8,7 @@ pub(super) const LOG_DEADLINE: Duration = Duration::from_secs(30);
 
 pub(super) fn refused(code: &str) -> TransportResponse {
     eprintln!(warn transport: "REST log download refused: {code}");
-    TransportResponse::vendor_error(code, "GitHub Actions download could not be read")
+    TransportResponse::vendor_error(code)
 }
 
 pub(super) fn storage_failure(status: u16, _url: &reqwest::Url) -> TransportResponse {

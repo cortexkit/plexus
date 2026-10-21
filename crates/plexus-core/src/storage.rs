@@ -45,7 +45,7 @@ pub const AUDIT_DELETE_FLOOR_DAYS: i64 = 7;
 /// Safe deployment-wide retention policy when no environment override is stated.
 pub const DEFAULT_AUDIT_RETENTION_DAYS: i64 = 30;
 /// Maximum audit rows removed by one scheduler pass.
-pub const AUDIT_RETENTION_BATCH_ROWS: usize = 1_000;
+const AUDIT_RETENTION_BATCH_ROWS: usize = 1_000;
 /// Terminal reservations remain inspectable for one day after their short fence.
 pub(crate) const RESERVATION_RETENTION_MS: i64 = AUDIT_MILLIS_PER_DAY;
 /// Reservation pruning shares the audit pass's transaction-size bound.
@@ -73,6 +73,11 @@ const EVENT_ACK_AUTHORITY: &str = "(principal=?1 OR EXISTS (
 /// generation markers, not a count of steps in the current binary. Stores that
 /// completed the fresh-schema cutover already record generation 23.
 pub const MIGRATIONS: &[Migration] = &[
+    // `policies.rate_limit_json` and `policies.trust_rule_json` below are
+    // reserved columns: no policy write sets them, policy evaluation never
+    // reads them, and plexus enforces no per-policy rate limit or trust rule.
+    // The store importer still copies them so an older store's values survive
+    // an import unchanged.
     Migration {
         version: 23,
         statements: r#"
@@ -720,8 +725,11 @@ ALTER TABLE action_requests ADD COLUMN origin_call_key TEXT;
     //
     // - `action_requests.elicitation_id`: the id Prefrontal core returned when
     //   the request's card was filed. NULL for a request with no card (stored
-    //   before migration version 39, or its filing failed). The partial index
-    //   finds the request an answered card belongs to.
+    //   before migration version 39, or its filing failed). The card's answer
+    //   is awaited with the id read from the request row. No query looks a
+    //   request up by a particular id (one only checks that the column is not
+    //   NULL), so the partial index below speeds up nothing. It stays because
+    //   migrations are append-only; a later migration may drop it.
     // - `elicitation_answers_cursor`: one row, the position in Prefrontal
     //   core's answer feed up to which every answer has been acted on. It is
     //   written in the same transaction as those answers' outcomes, so a
@@ -1347,7 +1355,7 @@ pub struct ManifestWriteOutcome {
 /// reviewed argument schema on it. Governance's undeclared-argument check
 /// treats a schema without `properties` as open, so a row holding this refuses
 /// no argument at all.
-pub(crate) fn placeholder_catalog_schema() -> Value {
+fn placeholder_catalog_schema() -> Value {
     serde_json::json!({"type": "object", "additionalProperties": true})
 }
 
@@ -2634,6 +2642,7 @@ impl RequestScope {
 
 /// A fully read-back audit row. It intentionally mirrors only redacted columns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct AuditRow {
     pub journal_id: i64,
     pub app_handle_id: Option<String>,
@@ -4114,6 +4123,7 @@ impl PlexusStore {
             .map(|properties| properties.keys().cloned().collect()))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn subscribe(
         &self,
         principal: &str,
@@ -4633,7 +4643,7 @@ impl PlexusStore {
     /// and the grant's action selectors, with expiry enforced here so a lapsed
     /// grant cannot authorize a registration through a path that forgot to
     /// check it.
-    pub(crate) fn poll_connections(
+    fn poll_connections(
         &self,
         grantee: &str,
         now_ms: i64,
@@ -5472,6 +5482,7 @@ impl PlexusStore {
     /// rolls the transaction back so no events are orphaned under a cursor that
     /// did not move.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn commit_poll_success(
         &self,
         principal: &str,
@@ -6911,10 +6922,7 @@ impl PlexusStore {
 
     /// Settle only still-pending requests. A decline after the approval's own
     /// deadline records expiry, never a usable decision.
-    pub fn settle_consent_requests(
-        &self,
-        settlements: &[ConsentSettlement],
-    ) -> Result<(), StoreError> {
+    fn settle_consent_requests(&self, settlements: &[ConsentSettlement]) -> Result<(), StoreError> {
         let now = now_ms();
         self.inner.with_conn_fenced(|conn| {
             for settlement in settlements {
@@ -8046,8 +8054,8 @@ impl PlexusStore {
 
     /// Test-only: insert a grant and attribute it to an agent, the shape a
     /// GitHub handle import or handle grant writes.
-    #[cfg(test)]
-    pub(crate) fn insert_agent_grant_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn insert_agent_grant_for_test(
         &self,
         input: &GrantInput,
         agent_id: &str,
@@ -8587,10 +8595,10 @@ impl PlexusStore {
                     key,
                     name: manifest.name,
                     description: manifest.description,
-                    tier: format!("{:?}", manifest.tier),
-                    reuse_path: format!("{:?}", manifest.reuse_path),
-                    auth_mode: format!("{:?}", manifest.auth.mode),
-                    availability: format!("{:?}", manifest.availability),
+                    tier: manifest.tier.catalog_label().to_string(),
+                    reuse_path: manifest.reuse_path.catalog_label().to_string(),
+                    auth_mode: manifest.auth.mode.catalog_label().to_string(),
+                    availability: manifest.availability.catalog_label().to_string(),
                     action_count: manifest.actions_baseline.len(),
                     required_filters: manifest.resource_filters.required.clone(),
                     schema_version,

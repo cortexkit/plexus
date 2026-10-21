@@ -38,7 +38,7 @@ pub fn withhold_from_preview(key: &str, child: &Value) -> bool {
 
 /// True when any string anywhere inside `value` contains a word shaped like
 /// a known credential format.
-pub fn contains_secret_shaped_value(value: &Value) -> bool {
+fn contains_secret_shaped_value(value: &Value) -> bool {
     match value {
         Value::String(text) => text.split_whitespace().any(looks_like_secret),
         Value::Object(object) => object.values().any(contains_secret_shaped_value),

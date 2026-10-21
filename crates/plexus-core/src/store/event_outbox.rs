@@ -7,15 +7,15 @@
 
 use super::*;
 
-pub const EVENT_BODY_FLOOR_MS: i64 = 7 * AUDIT_MILLIS_PER_DAY;
-pub const QUOTA_WINDOW_MS: i64 = 3_600_000;
+const EVENT_BODY_FLOOR_MS: i64 = 7 * AUDIT_MILLIS_PER_DAY;
+const QUOTA_WINDOW_MS: i64 = 3_600_000;
 // Ordered timestamp polling can widen its lookback to one hour. Retention
 // must preserve the full ceiling, not only the currently selected window.
-pub const RETENTION_MAX_WINDOW_MS: i64 = 3_600_000;
+pub(crate) const RETENTION_MAX_WINDOW_MS: i64 = 3_600_000;
 /// Payloads in this vendor-time window are needed for sorted-head replay dedupe.
-pub const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 60_000;
-pub const REPO_RETRY_MS: i64 = 3_600_000;
-pub const REPO_REFRESH_MS: i64 = 24 * REPO_RETRY_MS;
+pub(crate) const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 60_000;
+const REPO_RETRY_MS: i64 = 3_600_000;
+const REPO_REFRESH_MS: i64 = 24 * REPO_RETRY_MS;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventHeaders {
@@ -416,6 +416,7 @@ impl PlexusStore {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn event_by_key(
         &self,
         key: &str,
@@ -958,7 +959,7 @@ fn require_active(
 /// CI polling is held to a small share of it. A cycle that would go over is
 /// deferred, which delays CI failure reports rather than losing them. Webhooks
 /// will replace most of this polling.
-pub(crate) const GITHUB_ACTIONS_HOURLY_REQUESTS: i64 = 600;
+const GITHUB_ACTIONS_HOURLY_REQUESTS: i64 = 600;
 
 /// Requests one CI polling cycle reserves against that hourly limit.
 pub(crate) const CI_CYCLE_REQUESTS: i64 = 8;

@@ -1293,8 +1293,8 @@ build_timeout_s = 3600
 id = "body-floor"
 guards = "The seven-day body floor overrides the count cap for CI rows"
 file = "crates/plexus-core/src/store/event_outbox.rs"
-old = "pub const EVENT_BODY_FLOOR_MS: i64 = 7 * AUDIT_MILLIS_PER_DAY;"
-new = "pub const EVENT_BODY_FLOOR_MS: i64 = 0 * AUDIT_MILLIS_PER_DAY; // NON-VACUITY BREAK"
+old = "const EVENT_BODY_FLOOR_MS: i64 = 7 * AUDIT_MILLIS_PER_DAY;"
+new = "const EVENT_BODY_FLOOR_MS: i64 = 0 * AUDIT_MILLIS_PER_DAY; // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/store/event_outbox.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -1320,8 +1320,8 @@ build_timeout_s = 3600
 id = "full-resume-window"
 guards = "Ordered timestamp retention preserves the full possible one-hour resume window"
 file = "crates/plexus-core/src/store/event_outbox.rs"
-old = "pub const RETENTION_MAX_WINDOW_MS: i64 = 3_600_000;"
-new = "pub const RETENTION_MAX_WINDOW_MS: i64 = 0; // NON-VACUITY BREAK"
+old = "pub(crate) const RETENTION_MAX_WINDOW_MS: i64 = 3_600_000;"
+new = "pub(crate) const RETENTION_MAX_WINDOW_MS: i64 = 0; // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/store/event_outbox.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -1376,8 +1376,8 @@ build_timeout_s = 3600
 id = "quota-hour-expiry"
 guards = "Reservations older than one hour expire so admission can progress"
 file = "crates/plexus-core/src/store/event_outbox.rs"
-old = "pub const QUOTA_WINDOW_MS: i64 = 3_600_000;"
-new = "pub const QUOTA_WINDOW_MS: i64 = 7_200_000; // NON-VACUITY BREAK"
+old = "const QUOTA_WINDOW_MS: i64 = 3_600_000;"
+new = "const QUOTA_WINDOW_MS: i64 = 7_200_000; // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/store/event_outbox.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -1390,8 +1390,8 @@ build_timeout_s = 3600
 id = "repo-hourly-claim"
 guards = "A lowercased repository name has only one resolution claim per hour across watches"
 file = "crates/plexus-core/src/store/event_outbox.rs"
-old = "pub const REPO_RETRY_MS: i64 = 3_600_000;"
-new = "pub const REPO_RETRY_MS: i64 = 0; // NON-VACUITY BREAK"
+old = "const REPO_RETRY_MS: i64 = 3_600_000;"
+new = "const REPO_RETRY_MS: i64 = 0; // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/store/event_outbox.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -1404,8 +1404,8 @@ build_timeout_s = 3600
 id = "repo-daily-refresh"
 guards = "A resolved repository identity is refreshed no sooner than 24 hours"
 file = "crates/plexus-core/src/store/event_outbox.rs"
-old = "pub const REPO_REFRESH_MS: i64 = 24 * REPO_RETRY_MS;"
-new = "pub const REPO_REFRESH_MS: i64 = REPO_RETRY_MS; // NON-VACUITY BREAK"
+old = "const REPO_REFRESH_MS: i64 = 24 * REPO_RETRY_MS;"
+new = "const REPO_REFRESH_MS: i64 = REPO_RETRY_MS; // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/src/store/event_outbox.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -7374,7 +7374,7 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["consent_card::credential_handle_values_are_redacted_under_ordinary_argument_names"]
+expect_red = ["consent_card::tests::credential_handle_values_are_redacted_under_ordinary_argument_names"]
 expect_message = "preview exposed a vault handle"
 timeout_s = 120
 build_timeout_s = 3600
@@ -14735,7 +14735,7 @@ id = "transport-live-header-failure"
 guards = "A local credential rendering failure stays not sent on initialized sessions"
 file = "crates/plexus-core/src/mcp_remote.rs"
 old = "McpRemoteError::Configuration => local_error_response(McpRemoteError::Configuration),"
-new = "McpRemoteError::Configuration => TransportResponse::vendor_error(\"mcp_request_failed\", \"invalid credential\"), /* NON-VACUITY BREAK */"
+new = "McpRemoteError::Configuration => TransportResponse::vendor_error(\"mcp_request_failed\"), /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/mcp_remote_safety_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -14916,8 +14916,8 @@ expect_red = ["credentials::report_diagnostic_tests::vault_report_failures_are_l
 id = "transport-route-unknown-outcome"
 guards = "An unknown adapter refusal code cannot establish that an executed write failed"
 file = "crates/plexus-core/src/mcp_route.rs"
-old = "return TransportResponse::unknown_with_error(\n                \"mcp_route_protocol_error\","
-new = "return TransportResponse::vendor_error( /* NON-VACUITY BREAK */\n                \"mcp_route_protocol_error\","
+old = "return TransportResponse::unknown_with_error(\"mcp_route_protocol_error\");"
+new = "return TransportResponse::vendor_error(\"mcp_route_protocol_error\"); /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/mcp_route.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -14994,8 +14994,8 @@ expect_red = ["poller::ci_runs::tests::fresh_watch_rescan_drops_preexisting_atte
 id = "sorted-head-late-visibility"
 guards = "Unseen rows in the replay window are delivered while stored payloads and a disappearing newest row stay quiet"
 file = "crates/plexus-core/src/store/event_outbox.rs"
-old = "pub const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 60_000;"
-new = "pub const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 0; // NON-VACUITY BREAK"
+old = "pub(crate) const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 60_000;"
+new = "pub(crate) const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 0; // NON-VACUITY BREAK"
 test_file = "crates/plexus-core/tests/poller.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -17252,8 +17252,8 @@ timeout_s = 120
 id = "github-bot-read-403-not-a-credential-failure"
 guards = "A 403 on a bot read keeps its status and is never reported as a credential failure"
 file = "crates/plexus-core/src/rest_api/read_envelope.rs"
-old = "TransportResponse::vendor_error(&format!(\"http_{status}\"), \"\");"
-new = "TransportResponse::vendor_error(&format!(\"http_{}\", if status == 403 { 401 } else { status }), \"\"); /* NON-VACUITY BREAK */"
+old = "TransportResponse::vendor_error(&format!(\"http_{status}\"));"
+new = "TransportResponse::vendor_error(&format!(\"http_{}\", if status == 403 { 401 } else { status })); /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/rest_api/read_envelope_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -20288,14 +20288,10 @@ timeout_s = 120
 id = "error-signals-mcp-tool"
 guards = "All three fixed signals survive MCP tool-error diagnostic stripping"
 file = "crates/plexus-core/src/mcp_remote.rs"
-old = '''"mcp_tool_error",
-                        "MCP vendor request failed",
-                    )
-                    .with_error_signal(signal);'''
-new = '''"mcp_tool_error",
-                        "MCP vendor request failed",
-                    )
-                    .with_error_signal(None); /* NON-VACUITY BREAK */'''
+old = '''TransportResponse::vendor_error("mcp_tool_error")
+                        .with_error_signal(signal);'''
+new = '''TransportResponse::vendor_error("mcp_tool_error")
+                        .with_error_signal(None); /* NON-VACUITY BREAK */'''
 test_file = "crates/plexus-core/src/mcp_remote_signal_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -20885,5 +20881,21 @@ target = "--lib"
 select = "expected"
 expect_red = ["code_search::tests::credential_shaped_query_words_are_not_stored"]
 expect_message = "no search row may hold the token"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "catalog-label-listing-spelling"
+guards = "The catalog apps listing keeps the spelling its readers match on for every manifest enum value"
+file = "crates/plexus-core/src/manifest.rs"
+old = "Self::OptionalApiKey => \"OptionalApiKey\","
+new = "Self::OptionalApiKey => \"optional_api_key\", /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/manifest.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::catalog_labels_keep_the_listing_spelling_of_every_variant"]
+expect_message = "OptionalApiKey"
 build_timeout_s = 3600
 timeout_s = 120
