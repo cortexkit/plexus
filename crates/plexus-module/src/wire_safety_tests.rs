@@ -60,7 +60,7 @@ async fn request_capacity_includes_waiting_and_held_calls_but_not_controls() {
         .await
         .unwrap();
     let (writer, mut rx) = mpsc::channel(512);
-    for corr in 0..256u64 {
+    for corr in 0..MAX_IN_FLIGHT_REQUESTS as u64 {
         handle_frame(
             frame(
                 FrameType::Request,
@@ -133,7 +133,7 @@ async fn request_capacity_includes_waiting_and_held_calls_but_not_controls() {
         "health must bypass request admission"
     );
     drop(blocked);
-    for _ in 0..256 {
+    for _ in 0..MAX_IN_FLIGHT_REQUESTS {
         recv_within(
             rx.recv(),
             Duration::from_secs(10),
@@ -143,28 +143,58 @@ async fn request_capacity_includes_waiting_and_held_calls_but_not_controls() {
     }
 }
 
-#[tokio::test]
-async fn thirty_third_blocking_job_waits_without_refusal() {
-    let routes = RouteBindings::new();
+/// A request that finds every blocking slot taken waits for one instead of
+/// being refused: it is answered only after a slot frees, and the answer is
+/// the request's own reply rather than a capacity error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_beyond_blocking_capacity_waits_for_a_slot() {
+    let state = state();
+    let routes = Arc::new(RouteBindings::new());
+    routes
+        .insert(
+            1,
+            1,
+            Principal::Reserved {
+                module_id: "caller".into(),
+            },
+        )
+        .unwrap();
     let slots = routes
         .blocking
         .clone()
-        .acquire_many_owned(32)
+        .acquire_many_owned(MAX_BLOCKING_REQUESTS as u32)
         .await
         .unwrap();
-    let waiting = routes.blocking.clone().acquire_owned();
-    tokio::pin!(waiting);
+    let (writer, mut rx) = mpsc::channel(4);
+    handle_frame(
+        frame(
+            FrameType::Request,
+            1,
+            7,
+            json!({"name":"connections","arguments":{"op":"list"}}),
+        ),
+        &writer,
+        &state,
+        &routes,
+    )
+    .await
+    .unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+        tokio::time::timeout(Duration::from_millis(300), rx.recv())
             .await
             .is_err(),
-        "33rd blocking job must wait"
+        "a request must wait while every blocking slot is taken, not be answered"
     );
     drop(slots);
-    assert!(tokio::time::timeout(Duration::from_secs(1), waiting)
-        .await
-        .unwrap()
-        .is_ok());
+    let reply = recv_within(rx.recv(), Duration::from_secs(10), "queued request reply").await;
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.header.corr, 7);
+    assert_eq!(
+        reply.header.ty,
+        FrameType::Response,
+        "the queued request must be served once a slot frees: {body}"
+    );
+    assert!(body["error"].is_null(), "{body}");
 }
 
 #[tokio::test]
@@ -354,7 +384,7 @@ async fn scope_describe_control_reply_bypasses_full_request_budget() {
     let _held = routes
         .in_flight
         .clone()
-        .acquire_many_owned(256)
+        .acquire_many_owned(MAX_IN_FLIGHT_REQUESTS as u32)
         .await
         .unwrap();
     let (writer, mut outbound) = mpsc::channel(4);

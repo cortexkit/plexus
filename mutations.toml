@@ -8542,8 +8542,8 @@ build_timeout_s = 3600
 id = "module-inflight-budget"
 guards = "Waiting and held route calls retain admission slots and overload is retryable without blocking controls"
 file = "crates/plexus-module/src/lib.rs"
-old = "MAX_IN_FLIGHT_REQUESTS: usize = 256;"
-new = "MAX_IN_FLIGHT_REQUESTS: usize = 257; /* NON-VACUITY BREAK */"
+old = "let _permit = permit;"
+new = "drop(permit); /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/wire_safety_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -8555,17 +8555,17 @@ build_timeout_s = 3600
 
 [[control]]
 id = "module-blocking-budget"
-guards = "The 33rd blocking job waits inside its bounded request task"
+guards = "A request that finds every blocking slot taken waits inside its bounded request task for one"
 file = "crates/plexus-module/src/lib.rs"
-old = "MAX_BLOCKING_REQUESTS: usize = 32;"
-new = "MAX_BLOCKING_REQUESTS: usize = 33; /* NON-VACUITY BREAK */"
+old = "route_bindings.blocking.clone().acquire_owned(),"
+new = "Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned(), /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-module/src/wire_safety_tests.rs"
 runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["wire_safety_tests::thirty_third_blocking_job_waits_without_refusal"]
-expect_message = "33rd blocking job must wait"
+expect_red = ["wire_safety_tests::a_request_beyond_blocking_capacity_waits_for_a_slot"]
+expect_message = "a request must wait while every blocking slot is taken"
 build_timeout_s = 3600
 
 [[control]]

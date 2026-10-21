@@ -125,7 +125,7 @@ fn held_body(index: usize) -> Value {
     }})
 }
 async fn wait_until(label: &str, mut ready: impl FnMut() -> bool) {
-    // Filling 32 consent slots includes serialized durable writes. This is a
+    // Filling every consent slot includes serialized durable writes. This is a
     // fixture rendezvous, not the execution-capacity property checked below.
     tokio::time::timeout(Duration::from_secs(60), async {
         while !ready() {
@@ -180,6 +180,10 @@ impl plexus_core::github::credential::HandleCredentialProvider for BotToken {
     }
     fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
 }
+
+/// As many approval waits as there are blocking slots, so a parked wait that
+/// kept its blocking slot would leave no room for the unrelated work below.
+const PARKED: usize = MAX_BLOCKING_REQUESTS;
 
 async fn parked_calls_do_not_starve_work(recalled: bool) {
     use subc_protocol::scope::{ScopeAttributes, ScopeKind, ScopeStamp};
@@ -283,7 +287,7 @@ async fn parked_calls_do_not_starve_work(recalled: bool) {
         .unwrap();
     let (writer, mut replies) = mpsc::channel(64);
     if recalled {
-        for index in 0..32 {
+        for index in 0..PARKED as u64 {
             handle_tool_request(
                 request(1, index, held_body(index as usize)),
                 &writer,
@@ -300,10 +304,10 @@ async fn parked_calls_do_not_starve_work(recalled: bool) {
                 "{body}"
             );
         }
-        assert_eq!(cards.records.lock().unwrap().len(), 32);
+        assert_eq!(cards.records.lock().unwrap().len(), PARKED);
     }
     cards.parking.store(true, Ordering::SeqCst);
-    for index in 0..32 {
+    for index in 0..PARKED as u64 {
         handle_frame(
             request(1, index, held_body(index as usize)),
             &writer,
@@ -313,18 +317,18 @@ async fn parked_calls_do_not_starve_work(recalled: bool) {
         .await
         .unwrap();
     }
-    wait_until("32 calls must reach the consent wait", || {
-        cards.waiting.load(Ordering::SeqCst) == 32
+    wait_until("every parked call must reach the consent wait", || {
+        cards.waiting.load(Ordering::SeqCst) == PARKED
     })
     .await;
     assert_eq!(
         routes.in_flight.available_permits(),
-        224,
+        MAX_IN_FLIGHT_REQUESTS - PARKED,
         "parked consent retains admission"
     );
     assert_eq!(
         cards.records.lock().unwrap().len(),
-        32,
+        PARKED,
         "recalling must not file duplicate cards"
     );
     handle_frame(
@@ -346,13 +350,13 @@ async fn parked_calls_do_not_starve_work(recalled: bool) {
         let reply = recv_within(
             replies.recv(),
             Duration::from_secs(20),
-            "unrelated work must complete while 32 approvals wait",
+            "unrelated work must complete while approvals wait",
         )
         .await;
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
         assert!(
             body["error"].is_null(),
-            "unrelated work must complete while 32 approvals wait: {body}"
+            "unrelated work must complete while approvals wait: {body}"
         );
         match reply.header.corr {
             100 => assert_eq!(body["isError"], false, "search must succeed: {body}"),
@@ -363,19 +367,22 @@ async fn parked_calls_do_not_starve_work(recalled: bool) {
             other => panic!("parked request {other} answered before the user"),
         }
     }
-    assert_eq!(cards.waiting.load(Ordering::SeqCst), 32);
+    assert_eq!(cards.waiting.load(Ordering::SeqCst), PARKED);
     assert_eq!(
         fixture.transport.requests().len(),
         2,
         "only search and bot write may contact transport before consent"
     );
     wait_until("completed work releases admission", || {
-        routes.in_flight.available_permits() == 224
+        routes.in_flight.available_permits() == MAX_IN_FLIGHT_REQUESTS - PARKED
     })
     .await;
     let blocked = tokio::time::timeout(
         Duration::from_secs(3),
-        routes.blocking.clone().acquire_many_owned(32),
+        routes
+            .blocking
+            .clone()
+            .acquire_many_owned(MAX_BLOCKING_REQUESTS as u32),
     )
     .await
     .expect("parked approvals must release all blocking slots")
@@ -401,7 +408,7 @@ async fn parked_calls_do_not_starve_work(recalled: bool) {
         Err(mpsc::error::TryRecvError::Empty)
     ));
     drop(blocked);
-    for _ in 0..32 {
+    for _ in 0..PARKED {
         let reply = recv_within(
             replies.recv(),
             Duration::from_secs(20),
@@ -412,11 +419,11 @@ async fn parked_calls_do_not_starve_work(recalled: bool) {
         assert_eq!(body["result"]["transmission"], "completed", "{body}");
     }
     wait_until("all requests release admission", || {
-        routes.in_flight.available_permits() == 256
+        routes.in_flight.available_permits() == MAX_IN_FLIGHT_REQUESTS
     })
     .await;
-    assert_eq!(fixture.transport.requests().len(), 34);
-    assert!(scopes.rechecks_after_answer.load(Ordering::SeqCst) >= 32);
+    assert_eq!(fixture.transport.requests().len(), PARKED + 2);
+    assert!(scopes.rechecks_after_answer.load(Ordering::SeqCst) >= PARKED);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
