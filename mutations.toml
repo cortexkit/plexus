@@ -2433,6 +2433,21 @@ expect_message = "stub or binding must queue reconcile before ack"
 build_timeout_s = 3600
 
 [[control]]
+id = "relay-overflow-gap-warning"
+guards = "A relay overflow marker logs one operator-visible gap warning before reconciling"
+file = "crates/plexus-core/src/store/relay.rs"
+old = 'diag!(warn relay: "relay overflow gap at seq={} installation={}; full reconcile queued", event.seq, event.installation_id);'
+new = 'let _ = event.installation_id; /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::overflow_stub_logs_gap_and_reconciles"]
+expect_message = "an overflow must log one gap warning"
+build_timeout_s = 3600
+
+[[control]]
 id = "relay-bound-list-reconcile"
 guards = "An installation-bound repository list queues matching repository watches before ack"
 file = "crates/plexus-core/src/store/relay.rs"
