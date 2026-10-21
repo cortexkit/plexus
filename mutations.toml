@@ -6395,8 +6395,8 @@ timeout_s = 120
 id = "grant-mint-atomic"
 guards = "Grant ceiling and revocation are checked in the insert transaction"
 file = "crates/plexus-core/src/storage.rs"
-old = "race_point(\"grant_insert\");\n        self.inner.with_conn_fenced(|conn| {\n            // The ceiling is read inside the insert transaction for every\n            // request, so a revocation or narrowing committed before this\n            // transaction cannot be outrun by a ceiling read earlier.\n            let mut checked = Vec::with_capacity(requests.len());\n            for request in requests {\n                match bounded_grant_on_conn(conn, request)? {"
-new = "let stale = requests.iter().map(|request| self.inner.with_read(|conn| bounded_grant_on_conn(conn, request))).collect::<Result<Vec<_>, _>>()?; /* NON-VACUITY BREAK */\n        race_point(\"grant_insert\");\n        self.inner.with_conn_fenced(|conn| {\n            let mut checked = Vec::with_capacity(requests.len());\n            for stale in stale {\n                match stale {"
+old = "race_point(\"grant_insert\");\n        self.inner\n            .with_conn_fenced(|conn| mint_grants_bounded_on_conn(conn, requests, audit))"
+new = "let stale = requests.iter().map(|request| self.inner.with_read(|conn| bounded_grant_on_conn(conn, request))).collect::<Result<Vec<_>, _>>()?; /* NON-VACUITY BREAK */\n        race_point(\"grant_insert\");\n        self.inner.with_conn_fenced(|conn| {\n            let mut checked = Vec::with_capacity(requests.len());\n            for stale in stale {\n                match stale {\n                    Ok(input) => checked.push(input),\n                    Err(refusal) => return Ok(Err(refusal)),\n                }\n            }\n            let now = now_ms();\n            let mut minted = Vec::with_capacity(checked.len());\n            for input in checked {\n                insert_grant_on_conn(conn, &input)?;\n                let record = GrantRecord { state: grant_state(input.expires_at, None, now).to_string(), grant_id: input.grant_id, principal: input.principal, connection_id: input.connection_id, grantee_principal: input.grantee_principal, risk_ceiling: input.risk_ceiling, action_selectors: input.action_selectors, authority_kind: input.authority_kind, expires_at: input.expires_at, generation: 1, revoked_at_ms: None, revoked_by: None };\n                append_audit_for(conn, audit, &record)?;\n                minted.push(record);\n            }\n            Ok(Ok(minted))\n        })"
 test_file = "crates/plexus-core/src/store/store_contract_tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -21141,9 +21141,9 @@ timeout_s = 120
 [[control]]
 id = "web-search-provider-add-asks-once"
 guards = "Adding a web search provider asks for exactly one operator confirmation per applied run"
-file = "crates/plexus-module/src/web_search_provider_admin.rs"
+file = "crates/plexus-module/src/composite_admin.rs"
 old = "    if let Err(refusal) = operator_confirmation::confirm(\n        &plan.summary(),"
-new = "    let _ = operator_confirmation::confirm(&plan.summary(), route, writer, &route_bindings.control_replies).await; /* NON-VACUITY BREAK */\n    if let Err(refusal) = operator_confirmation::confirm(\n        &plan.summary(),"
+new = "    let _ = operator_confirmation::confirm(&plan.summary(), caller.route, caller.writer, &caller.route_bindings.control_replies).await; /* NON-VACUITY BREAK */\n    if let Err(refusal) = operator_confirmation::confirm(\n        &plan.summary(),"
 test_file = "crates/plexus-module/src/web_search_provider_admin_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -21158,8 +21158,8 @@ timeout_s = 120
 id = "web-search-provider-add-no-grants-without-discovery"
 guards = "Adding a web search provider mints no grant when connect-time discovery did not complete"
 file = "crates/plexus-module/src/web_search_provider_admin.rs"
-old = "    if discovery != \"complete\" {\n        return json!({\"error\": {\n            \"code\": \"discovery_incomplete\","
-new = "    if false { /* NON-VACUITY BREAK */\n        return json!({\"error\": {\n            \"code\": \"discovery_incomplete\","
+old = "    if discovery.outcome != \"complete\" {\n        return composite_admin::discovery_incomplete("
+new = "    if false { /* NON-VACUITY BREAK */\n        return composite_admin::discovery_incomplete("
 test_file = "crates/plexus-module/src/web_search_provider_admin_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -21205,8 +21205,8 @@ timeout_s = 120
 [[control]]
 id = "web-search-provider-add-requires-connector-home"
 guards = "Without the connector home role, an applied web search provider add is refused before any confirmation, write or vendor request"
-file = "crates/plexus-module/src/web_search_provider_admin.rs"
-old = "    if let Some(refusal) = state.runtime.connector_home.refusal() {\n        return Ok(refusal);\n    }\n"
+file = "crates/plexus-module/src/composite_admin.rs"
+old = "    if home == ConnectorHome::BeforeApplying {\n        if let Some(refusal) = state.runtime.connector_home.refusal() {\n            return Ok(refusal);\n        }\n    }\n"
 new = "    /* NON-VACUITY BREAK: connector home check removed */\n"
 test_file = "crates/plexus-module/src/web_search_provider_admin_tests.rs"
 runner = "cargo"
@@ -21215,5 +21215,117 @@ target = "--lib"
 select = "expected"
 expect_red = ["tests::web_search_provider_admin_tests::an_applied_add_without_the_connector_home_role_is_refused_before_asking"]
 expect_message = "an applied add without the connector home role must not ask"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "composite-admin-asks-once"
+guards = "Each composite admin command asks for exactly one operator confirmation per applied run"
+file = "crates/plexus-module/src/composite_admin.rs"
+old = "    if let Err(refusal) = operator_confirmation::confirm(\n        &plan.summary(),"
+new = "    if let Err(refusal) = operator_confirmation::confirm(&plan.summary(), caller.route, caller.writer, &caller.route_bindings.control_replies).await { /* NON-VACUITY BREAK: a second confirmation */\n        return Ok(operator_confirmation::audit_refusal(state, caller.method, &refusal));\n    }\n    if let Err(refusal) = operator_confirmation::confirm(\n        &plan.summary(),"
+test_file = "crates/plexus-module/src/composite_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::composite_admin_tests::an_applied_write_connection_asks_once_and_writes_what_the_manual_commands_write", "tests::composite_admin_tests::an_applied_poll_connection_asks_once_and_writes_what_the_manual_commands_write", "tests::composite_admin_tests::an_applied_widen_and_grant_asks_once_and_writes_what_the_manual_commands_write", "tests::composite_admin_tests::an_applied_onboarding_asks_once_and_writes_what_the_manual_commands_write"]
+expect_message = "must ask exactly once"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "composite-admin-connector-home-before-applying"
+guards = "Without the connector home role, an applied write or poll connection enrollment is refused before any confirmation, write or vendor request"
+file = "crates/plexus-module/src/composite_admin.rs"
+old = "    if home == ConnectorHome::BeforeApplying {\n        if let Some(refusal) = state.runtime.connector_home.refusal() {\n            return Ok(refusal);\n        }\n    }\n"
+new = "    /* NON-VACUITY BREAK: connector home check before applying removed */\n"
+test_file = "crates/plexus-module/src/composite_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::composite_admin_tests::an_applied_write_connection_without_the_connector_home_role_is_refused_before_asking", "tests::composite_admin_tests::an_applied_poll_connection_without_the_connector_home_role_is_refused_before_asking"]
+expect_message = "without the connector home role must not ask"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "composite-admin-connector-home-before-planning"
+guards = "Without the connector home role, a GitHub bot onboarding is refused before it reads GitHub, even as a preview"
+file = "crates/plexus-module/src/composite_admin.rs"
+old = "    if home == ConnectorHome::BeforePlanning {\n        if let Some(refusal) = state.runtime.connector_home.refusal() {\n            return Ok(refusal);\n        }\n    }\n"
+new = "    /* NON-VACUITY BREAK: connector home check before planning removed */\n"
+test_file = "crates/plexus-module/src/composite_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::composite_admin_tests::an_onboarding_without_the_connector_home_role_reads_and_asks_nothing"]
+expect_message = "must be refused, even as a preview"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "write-connection-rerun-reuses-grants"
+guards = "A rerun of add-write-connection reuses the grants an earlier run minted instead of minting them again"
+file = "crates/plexus-module/src/connection_enrollment_admin.rs"
+old = "composite_admin::grant_covers(grant, connection_id, grantee, kind, risk, actions)"
+new = "false /* NON-VACUITY BREAK */ && composite_admin::grant_covers(grant, connection_id, grantee, kind, risk, actions)"
+test_file = "crates/plexus-module/src/composite_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::composite_admin_tests::a_rerun_reuses_the_write_connection_and_refuses_a_mismatch"]
+expect_message = "a rerun must reuse every step"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "poll-connection-rerun-reuses-connection"
+guards = "A rerun of add-poll-connection reuses the active connection whose ceiling covers the request"
+file = "crates/plexus-module/src/connection_enrollment_admin.rs"
+old = "        (_, Ok(ceiling)) if covers(&ceiling) => {"
+new = "        (_, Ok(ceiling)) if false && covers(&ceiling) => { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/composite_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::composite_admin_tests::a_rerun_reuses_the_poll_connection_and_its_grants"]
+expect_message = "a rerun must reuse the poll connection"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "widen-and-grant-preview-rolls-back"
+guards = "A widen-and-grant preview runs the widening and the grants and rolls them back, writing nothing"
+file = "crates/plexus-core/src/store/ceiling.rs"
+old = "                Ok(applied) if !dry_run => Ok(applied),"
+new = "                Ok(applied) => Ok(applied), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/composite_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::composite_admin_tests::a_declined_or_refused_widen_and_grant_writes_nothing"]
+expect_message = "a preview runs the change and rolls it back"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "onboard-github-bot-requires-shim-statement"
+guards = "An applied GitHub bot onboarding that binds a repository is refused before asking unless the operator states the gh shim manifest maps it"
+file = "crates/plexus-module/src/github_bot_admin.rs"
+old = "&& !request.shim_manifest_maps_repo {"
+new = "&& false { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/composite_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::composite_admin_tests::a_declined_onboarding_writes_nothing_and_reads_github_only_while_planning"]
+expect_message = "an applied bind without the shim statement must be refused before asking"
 build_timeout_s = 3600
 timeout_s = 120

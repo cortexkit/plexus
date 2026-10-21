@@ -322,10 +322,10 @@ add-write-connection --app <key> --actions a,b --grantee <principal>...
                      [--connection <id>] [--credential-id <id>]
                      [--risk write|destructive] [--invoke-actions a,b]
                      [--resource-filters <json>] [--allow a,b] [--apply]
-    Does what issue-ticket, connections op=connect, grant --kind
-    connection_admin --grantee direct, connections op=configure, one invoke
-    grant per --grantee and set-policy --effect allow per --allow action do,
-    with one Touch ID confirmation instead of one per step. --actions sets the
+    Does what issue-ticket, connections op=connect, a connection_admin grant
+    to direct, connections op=configure, one invoke grant per --grantee and
+    an allow policy (set-policy) per --allow action do, with one Touch ID
+    confirmation instead of one per step. --actions sets the
     connection ceiling at --risk (default write); each grantee gets an invoke
     grant at that risk on --invoke-actions (default: every action).
     --resource-filters is the JSON configure takes, for example
@@ -341,9 +341,9 @@ add-write-connection --app <key> --actions a,b --grantee <principal>...
 add-poll-connection --app <key> --actions a,b [--connection <id>]
                     [--credential-id <id>] [--consumer <principal>]...
                     [--consume-actions a,b] [--apply]
-    Does what issue-ticket --risk read, connections op=connect, grant --kind
-    poll --grantee direct on --actions and one grant --kind events_consume per
-    --consumer on --consume-actions do, with one Touch ID confirmation.
+    Does what issue-ticket at read risk, connections op=connect, a poll grant
+    to direct on --actions and one events_consume grant per --consumer on
+    --consume-actions do, with one Touch ID confirmation.
     Preview, discovery, failure and rerun rules are add-write-connection's.
 
 widen-and-grant --connection <id> --actions a,b --grantee <principal>...
@@ -360,8 +360,8 @@ onboard-github-bot --inventory <file> --actions a,b --carrier <principal>
                    [--read-actions a,b] [--poll-actions a,b]
                    [--shim-manifest-maps-repo] [--apply]
     Does what github.handle.import, github.handle.probe, handle-bind
-    --repositories and handle-grant (the writes, then --kind read and --kind
-    poll when named) do, with one Touch ID confirmation. --inventory is a
+    --repositories and handle-grant (the writes, then its read and poll forms
+    for --read-actions and --poll-actions) do, with one Touch ID confirmation. --inventory is a
     github-grant-import.v1 JSON file holding exactly the one handle. The
     handle's installation is listed on GitHub once, while planning, even for
     a preview; nothing is sent to GitHub after the confirmation. Binding a
@@ -3862,5 +3862,223 @@ mod bot_read_grant_cli_tests {
         assert!(lines.contains("app-x"));
         assert!(lines.contains("catalog additions (reviewed, AddMissing): github.repo.get"));
         assert!(USAGE.contains("--all-handles) --kind read"));
+    }
+}
+
+#[cfg(test)]
+mod composite_cli_tests {
+    use super::*;
+
+    /// Parse `items` as `command` would be parsed and shape its request.
+    fn shaped(command: &str, items: &[&str]) -> Result<(&'static str, Value), Failure> {
+        let flags = Flags::parse(
+            &items
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect::<Vec<_>>(),
+        )?;
+        flags.refuse_unknown(accepted_flags(command).unwrap(), repeatable_flags(command))?;
+        match command {
+            "add-write-connection" => add_write_connection_request(&flags),
+            "add-poll-connection" => add_poll_connection_request(&flags),
+            "widen-and-grant" => widen_and_grant_request(&flags),
+            "onboard-github-bot" => onboard_github_bot_request(&flags),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn composite_commands_preview_by_default_and_send_what_was_named() {
+        let (method, params) = shaped(
+            "add-write-connection",
+            &[
+                "--app",
+                "linear",
+                "--actions",
+                "create_issue",
+                "--grantee",
+                "reserved:a",
+                "--grantee",
+                "reserved:b",
+                "--credential-id",
+                "apikey:linear",
+                "--resource-filters",
+                r#"{"write_enabling":["team"]}"#,
+                "--allow",
+                "create_issue",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            method,
+            plexus_module::manifest::ADMIN_ADD_WRITE_CONNECTION_OP
+        );
+        assert_eq!(
+            params,
+            json!({"app_key": "linear", "actions": ["create_issue"], "dry_run": true,
+                "credential_id": "apikey:linear", "grantees": ["reserved:a", "reserved:b"],
+                "allow_actions": ["create_issue"],
+                "resource_filters": {"write_enabling": ["team"]}})
+        );
+        let (method, params) = shaped(
+            "add-poll-connection",
+            &[
+                "--app",
+                "github_actions",
+                "--actions",
+                "a,b",
+                "--consumer",
+                "reserved:basal",
+                "--consume-actions",
+                "a",
+                "--apply",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            method,
+            plexus_module::manifest::ADMIN_ADD_POLL_CONNECTION_OP
+        );
+        assert_eq!(
+            params,
+            json!({"app_key": "github_actions", "actions": ["a", "b"], "dry_run": false,
+                "consumers": ["reserved:basal"], "consume_actions": ["a"]})
+        );
+        let (method, params) = shaped(
+            "widen-and-grant",
+            &[
+                "--connection",
+                "conn-ci",
+                "--actions",
+                "a,b",
+                "--grantee",
+                "reserved:basal",
+            ],
+        )
+        .unwrap();
+        assert_eq!(method, plexus_module::manifest::ADMIN_WIDEN_AND_GRANT_OP);
+        assert_eq!(
+            params,
+            json!({"connection_id": "conn-ci", "actions": ["a", "b"],
+                "grantees": ["reserved:basal"], "dry_run": true})
+        );
+        for (command, items) in [
+            ("add-write-connection", vec!["--app", "x", "--actions", "a"]),
+            (
+                "add-write-connection",
+                vec![
+                    "--app",
+                    "x",
+                    "--actions",
+                    "a",
+                    "--grantee",
+                    "p",
+                    "--resource-filters",
+                    "[]",
+                ],
+            ),
+            (
+                "widen-and-grant",
+                vec!["--connection", "c", "--actions", "*", "--grantee", "p"],
+            ),
+            (
+                "widen-and-grant",
+                vec!["--connection", "c", "--actions", "a"],
+            ),
+            (
+                "add-poll-connection",
+                vec!["--app", "x", "--actions", "a", "--grantee", "p"],
+            ),
+            (
+                "onboard-github-bot",
+                vec![
+                    "--inventory",
+                    "/nonexistent/inventory.json",
+                    "--actions",
+                    "a",
+                    "--carrier",
+                    "reserved:aft",
+                    "--effect",
+                    "allow",
+                ],
+            ),
+        ] {
+            let refused = shaped(command, &items).unwrap_err();
+            assert_eq!(refused.code, EXIT_USAGE, "{command} {items:?}");
+        }
+        for command in [
+            "add-write-connection",
+            "add-poll-connection",
+            "widen-and-grant",
+            "onboard-github-bot",
+        ] {
+            assert!(
+                USAGE.contains(&format!("\n{command} --")),
+                "{command} usage missing"
+            );
+        }
+    }
+
+    #[test]
+    fn onboard_cli_reads_the_inventory_file_and_requires_an_explicit_shim_statement() {
+        let path =
+            std::env::temp_dir().join(format!("onboard-inventory-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"version":"github-grant-import.v1","handles":[]}"#,
+        )
+        .unwrap();
+        let file = path.to_str().unwrap();
+        let base = [
+            "--inventory",
+            file,
+            "--actions",
+            "add_issue_comment",
+            "--carrier",
+            "reserved:aft",
+            "--effect",
+            "allow",
+            "--repositories",
+            "org/two",
+        ];
+        let (method, params) = shaped("onboard-github-bot", &base).unwrap();
+        assert_eq!(method, plexus_module::manifest::ADMIN_ONBOARD_GITHUB_BOT_OP);
+        assert_eq!(params["inventory"]["version"], "github-grant-import.v1");
+        assert_eq!(params["repositories"], json!(["org/two"]));
+        assert_eq!(params["shim_manifest_maps_repo"], false);
+        assert_eq!(params["dry_run"], true);
+        let mut attested = base.to_vec();
+        attested.extend(["--shim-manifest-maps-repo", "--apply"]);
+        let (_, params) = shaped("onboard-github-bot", &attested).unwrap();
+        assert_eq!(
+            (&params["shim_manifest_maps_repo"], &params["dry_run"]),
+            (&json!(true), &json!(false))
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn composite_lines_show_every_step_and_the_prompt() {
+        let preview = json!({
+            "operation": "add_poll_connection", "connection_id": "conn-ci",
+            "connection": "create",
+            "ceiling": {"risk": "read", "action_selectors": ["a", "b"]},
+            "steps": [{"step": "grant", "grantee": "direct", "authority_kind": "poll",
+                "risk_ceiling": "read", "action_selectors": ["a", "b"], "status": "to_mint"}],
+            "summary": "add poll connection conn-ci: connect for github_actions",
+            "dry_run": true, "applied": false,
+        });
+        let lines = composite_lines(&preview).join("\n");
+        for expected in [
+            "connection: conn-ci (create)",
+            "ceiling:    risk=read actions=a,b",
+            "step:       grant to_mint",
+            "action_selectors=a,b",
+            "grantee=direct",
+            "will ask:   add poll connection conn-ci",
+            "preview only",
+        ] {
+            assert!(lines.contains(expected), "{expected} missing from {lines}");
+        }
     }
 }

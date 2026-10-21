@@ -371,6 +371,72 @@ mod tests {
     }
 
     #[test]
+    fn widen_and_mint_commit_together_or_not_at_all() {
+        let store = fixture();
+        let get_job = vec!["get_job".to_string()];
+        let grant = |risk: &'static str| GrantMintRequest {
+            principal: "direct",
+            connection_id: "ci",
+            grantee_principal: "reserved:basal",
+            authority_kind: "invoke",
+            requested_risk: risk,
+            requested_selectors: &get_job,
+            expires_at: None,
+        };
+        let audit = |minted: &GrantRecord| {
+            AuditRecord::ceremony(
+                "direct",
+                None,
+                Some("ci"),
+                "grant",
+                &minted.risk_ceiling,
+                None,
+            )
+        };
+        let run = |grants: &[GrantMintRequest], dry_run: bool| {
+            store
+                .widen_ceiling_and_mint_grants(
+                    "direct",
+                    "ci",
+                    &["get_job".to_string()],
+                    grants,
+                    &audit,
+                    dry_run,
+                )
+                .unwrap()
+        };
+        let before = snapshot(&store);
+        // A grant the widened ceiling cannot hold rolls the widening back.
+        assert_eq!(
+            run(&[grant("write")], false).unwrap_err(),
+            CeremonyRefusal::RiskAboveCeiling {
+                requested: "write".into(),
+                ceiling: "read".into()
+            }
+        );
+        assert_eq!(
+            snapshot(&store),
+            before,
+            "a refused grant must not leave the widening behind"
+        );
+        // A preview checks the grant against the widened ceiling and writes
+        // nothing.
+        let (plan, minted) = run(&[grant("read")], true).unwrap();
+        assert_eq!(
+            (&plan["added_actions"], &plan["applied"], minted.len()),
+            (&json!(["get_job"]), &json!(false), 1)
+        );
+        assert_eq!(snapshot(&store), before, "a preview must roll back");
+        let (plan, minted) = run(&[grant("read")], false).unwrap();
+        assert_eq!(plan["applied"], true);
+        let after = snapshot(&store);
+        assert_eq!(after.0, r#"["poll","get_job"]"#);
+        // One widening audit row and one grant audit row, one grant.
+        assert_eq!((after.3, after.4), (before.3 + 2, before.4 + 1));
+        assert_eq!(minted[0].action_selectors, vec!["get_job"]);
+    }
+
+    #[test]
     fn widen_ceiling_requires_active_reviewed_actions() {
         let store = fixture();
         for action in ["unknown", "quarantined", "disabled", "quarantine_reason"] {

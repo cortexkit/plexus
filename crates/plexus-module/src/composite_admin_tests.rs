@@ -592,12 +592,12 @@ async fn a_rerun_reuses_the_poll_connection_and_its_grants() {
     let first = call(&fixture.state, &fixture.path, POLL, poll_params(false)).await;
     assert_eq!(first.reply["result"]["applied"], true, "{}", first.reply);
     let rerun = call(&fixture.state, &fixture.path, POLL, poll_params(false)).await;
-    assert_eq!(rerun.prompts.len(), 1);
     assert_eq!(
         rerun.reply["result"]["connection"], "reuse",
-        "{}",
+        "a rerun must reuse the poll connection: {}",
         rerun.reply
     );
+    assert_eq!(rerun.prompts.len(), 1);
     assert_eq!(
         statuses(&rerun.reply),
         ["already_present", "already_present"]
@@ -1034,7 +1034,7 @@ async fn a_declined_onboarding_writes_nothing_and_reads_github_only_while_planni
     let refused = call(&fixture.state, &fixture.path, ONBOARD, unattested).await;
     assert_eq!(
         refused.reply["error"]["code"], "shim_manifest_unconfirmed",
-        "{}",
+        "an applied bind without the shim statement must be refused before asking: {}",
         refused.reply
     );
     assert!(refused.prompts.is_empty());
@@ -1134,7 +1134,7 @@ async fn an_onboarding_without_the_connector_home_role_reads_and_asks_nothing() 
         let refused = call(&state, &fixture.path, ONBOARD, onboard_params(dry_run)).await;
         assert_eq!(
             refused.reply["error"]["code"], "connector_home_not_held",
-            "{}",
+            "an onboarding without the connector home role must be refused, even as a preview: {}",
             refused.reply
         );
         assert!(
