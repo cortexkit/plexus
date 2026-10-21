@@ -268,10 +268,7 @@ pub(super) fn granted_exa_engine_with_path(
 fn policy_lookup_errors_keep_operator_diagnostics() {
     const TEST: &str = "web_search::tests::policy_lookup_errors_keep_operator_diagnostics";
     if std::env::var_os("PLEXUS_WEB_SEARCH_DIAGNOSTIC_CHILD").is_some() {
-        #[allow(dead_code)]
-        mod logging {
-            include!("../../tests/support/logging.rs");
-        }
+        use crate::test_logging as logging;
         logging::init_child();
         let (engine, _, path) = granted_exa_engine_with_path("web-policy-diagnostic");
         let sql = rusqlite::Connection::open(&*path).unwrap();
@@ -281,15 +278,15 @@ fn policy_lookup_errors_keep_operator_diagnostics() {
         assert!(service.would_ask(engine.store(), "direct").is_err());
         return;
     }
-    let output = crate::test_http::bounded::child_output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
-            .env("PLEXUS_WEB_SEARCH_DIAGNOSTIC_CHILD", "1")
-            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+    let output = crate::test_http::bounded::child_test_output(
+        TEST,
+        &[
+            ("PLEXUS_WEB_SEARCH_DIAGNOSTIC_CHILD", "1"),
+            ("PLEXUS_LOG_STDERR_CHILD", "1"),
+        ],
         std::time::Duration::from_secs(30),
         "web search diagnostic child",
-    )
-    .unwrap();
+    );
     assert!(output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(

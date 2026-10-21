@@ -52,15 +52,15 @@ fn undeclared_count_is_omitted_for_both_query_variants() {
 fn missing_reviewed_query_fields_skip_and_log_only_once_per_connection() {
     const TEST: &str = "web_search::backend::zai::tests::missing_reviewed_query_fields_skip_and_log_only_once_per_connection";
     if std::env::var_os("PLEXUS_ZAI_LOG_CHILD").is_none() {
-        let output = crate::bounded::child_output(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST, "--nocapture"])
-                .env("PLEXUS_ZAI_LOG_CHILD", "1")
-                .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+        let output = crate::bounded::child_test_output(
+            TEST,
+            &[
+                ("PLEXUS_ZAI_LOG_CHILD", "1"),
+                ("PLEXUS_LOG_STDERR_CHILD", "1"),
+            ],
             std::time::Duration::from_secs(30),
             "ZAI unsupported schema log child",
-        )
-        .unwrap();
+        );
         assert!(
             output.status.success(),
             "{}",
@@ -76,10 +76,7 @@ fn missing_reviewed_query_fields_skip_and_log_only_once_per_connection() {
         );
         return;
     }
-    #[allow(dead_code)]
-    mod logging {
-        include!("../../../../tests/support/logging.rs");
-    }
+    use crate::test_logging as logging;
     logging::init_child();
     let backend = ZaiMcpBackend::default();
     for (connection, schema) in [

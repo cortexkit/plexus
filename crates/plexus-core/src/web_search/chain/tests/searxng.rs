@@ -540,10 +540,7 @@ fn local_outcomes_move_on_and_release_only_unsent_allowance() {
 fn private_endpoint_diagnostics_never_print_instance_or_reflected_vendor_text() {
     const TEST: &str = "web_search::chain::tests::searxng::private_endpoint_diagnostics_never_print_instance_or_reflected_vendor_text";
     if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
-        #[allow(dead_code)]
-        mod logging {
-            include!("../../../../tests/support/logging.rs");
-        }
+        use crate::test_logging as logging;
         logging::init_child();
         let (endpoint, server) = crate::test_http::FixedRequestServer::start_with_deadline(
             2,
@@ -575,14 +572,12 @@ fn private_endpoint_diagnostics_never_print_instance_or_reflected_vendor_text() 
         crate::diag!(warn transport: "private diagnostic fixture finished");
         return;
     }
-    let output = crate::test_http::bounded::child_output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
-            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+    let output = crate::test_http::bounded::child_test_output(
+        TEST,
+        &[("PLEXUS_LOG_STDERR_CHILD", "1")],
         std::time::Duration::from_secs(45),
         "SearXNG diagnostic child",
-    )
-    .unwrap();
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout} {stderr}");

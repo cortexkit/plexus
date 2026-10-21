@@ -11,10 +11,7 @@ use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 fn store_and_reply_errors_keep_operator_diagnostics() {
     const TEST: &str = "code_search::tests::store_and_reply_errors_keep_operator_diagnostics";
     if std::env::var_os("PLEXUS_SEARCH_DIAGNOSTIC_CHILD").is_some() {
-        #[allow(dead_code)]
-        mod logging {
-            include!("../../tests/support/logging.rs");
-        }
+        use crate::test_logging as logging;
         logging::init_child();
         let f = Fixture::new();
         f.grant("direct");
@@ -33,15 +30,15 @@ fn store_and_reply_errors_keep_operator_diagnostics() {
         );
         return;
     }
-    let output = crate::test_http::bounded::child_output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
-            .env("PLEXUS_SEARCH_DIAGNOSTIC_CHILD", "1")
-            .env("PLEXUS_LOG_STDERR_CHILD", "1"),
+    let output = crate::test_http::bounded::child_test_output(
+        TEST,
+        &[
+            ("PLEXUS_SEARCH_DIAGNOSTIC_CHILD", "1"),
+            ("PLEXUS_LOG_STDERR_CHILD", "1"),
+        ],
         std::time::Duration::from_secs(30),
         "search diagnostics child",
-    )
-    .unwrap();
+    );
     assert!(output.status.success(), "diagnostic fixture must complete");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
@@ -76,12 +73,8 @@ impl Fixture {
             })
             .unwrap(),
         );
-        let source = include_str!("../../../../catalog/grep_app.jsonc");
-        let source = source
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let source =
+            subc_jsonc::jsonc_to_json(include_str!("../../../../catalog/grep_app.jsonc")).unwrap();
         let manifest = crate::ingest_value(serde_json::from_str(&source).unwrap()).unwrap();
         store.upsert_manifest(CATALOG_PRINCIPAL, &manifest).unwrap();
         store
