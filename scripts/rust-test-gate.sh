@@ -688,8 +688,10 @@ run_phase "cargo test --workspace --examples --locked --quiet" \
 # running them let one go stale twice over (a fixed catalog count and a request
 # governance had since learned to refuse) with nothing turning red. Each one
 # asserts that it did real work, so running them here, without any timing
-# threshold, fails on that kind of rot. The search modules are skipped while
-# that area is reworked on another branch.
+# threshold, fails on that kind of rot. The web_search and code_search
+# measurements are skipped for now because those modules are owned and changed
+# separately; drop the two --skip filters once their measurements are kept
+# runnable the same way.
 run_ignored_measurements() {
   local output targets
   if ! output="$(cargo test --locked --quiet -p plexus-core --lib --test it -- \
