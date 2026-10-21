@@ -243,8 +243,9 @@ impl CodeSearchService {
             let reservation = engine.authorize(request).map_err(|denial| {
                 refusal_from(facade::denial_for(&denial, grant_target(caller)))
             })?;
+            audit.request_id = Some(reservation.request_id.clone());
             let dispatched = engine.revalidate_and_dispatch(&reservation);
-            audit.dispatched = true;
+            audit.transmission = Some(dispatched.transmission);
             let body = facade::vendor_body(
                 SearchTool::Code,
                 BACKEND,

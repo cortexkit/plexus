@@ -389,3 +389,36 @@ fn engine_grant_refusals_name_the_calling_module() {
         "the refusal must name the calling module as the grantee"
     );
 }
+
+/// The web_search row carries the engine's request id, so a reviewer can join
+/// the query to the engine's authorization and dispatch rows for the call.
+#[test]
+fn the_search_row_joins_the_engine_rows_by_request_id() {
+    let (engine, transport, path) = granted_exa_engine_with_path("web-request-id");
+    let service =
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000));
+    transport.set_response(crate::MockResponse::Success(json!({"results": []})));
+    service
+        .search(
+            &engine,
+            "direct",
+            json!({"query": "joined"}).as_object().unwrap(),
+        )
+        .unwrap();
+    let db = rusqlite::Connection::open(&*path).unwrap();
+    let request_id = |gate: &str| -> Option<String> {
+        db.query_row(
+            "SELECT request_id FROM audit_journal WHERE gate = ?1",
+            [gate],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let search = request_id("web_search");
+    assert!(search.is_some(), "the search row must carry a request id");
+    assert_eq!(
+        search,
+        request_id("dispatch"),
+        "the search row must carry the engine's request id"
+    );
+}

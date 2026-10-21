@@ -441,9 +441,10 @@ impl WebSearchService {
             );
             self.refusal_for_denial(&caller, &denial)
         })?;
+        audit.search.request_id = Some(reservation.request_id.clone());
         let dispatched = engine.revalidate_and_dispatch(&reservation);
         let fetched_at_ms = crate::storage::now_ms();
-        audit.search.dispatched = true;
+        audit.search.transmission = Some(dispatched.transmission);
         let body = facade::vendor_body(
             facade::SearchTool::Web,
             backend.name(),

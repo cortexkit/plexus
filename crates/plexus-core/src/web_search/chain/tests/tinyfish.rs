@@ -374,7 +374,7 @@ fn capability_skip_before_dispatch_has_no_allowance_or_cooldown() {
         0
     );
     assert!(service.chain_cooldowns.lock().unwrap().is_empty());
-    assert!(!audit.search.dispatched);
+    assert!(audit.search.transmission.is_none());
     let skipped = audit.chain.unwrap().skipped;
     assert_eq!(
         skipped,

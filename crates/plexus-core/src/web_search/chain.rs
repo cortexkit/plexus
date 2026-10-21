@@ -453,6 +453,7 @@ impl WebSearchService {
                     request = request.with_relay_origin(origin.clone());
                 }
                 audit.search.resolved(&connection, &action);
+                audit.search.new_attempt();
                 audit.chain.as_mut().unwrap().attempted = Some(identity);
                 // Connector-home ownership is mediated only by authorize, not
                 // preflight, so its denial is this provider's unavailable reason.
@@ -460,6 +461,7 @@ impl WebSearchService {
                     eprintln!(warn web_search: "web_search chain authorization refused on {} ({})", connection.connection_id, denial.reason_code());
                     SkipReason::for_refusal(&self.refusal_for_denial(caller, &denial))
                 })?;
+                audit.search.request_id = Some(reservation.request_id.clone());
                 let dispatched = engine.revalidate_and_dispatch(&reservation);
                 // Revalidation refusals also report NotSent. Sent and
                 // OutcomeUnknown may have reached the vendor, so they keep it.
@@ -468,7 +470,7 @@ impl WebSearchService {
                 } else {
                     drop(hold);
                 }
-                audit.search.dispatched = true;
+                audit.search.transmission = Some(dispatched.transmission);
                 let results = match outcome::classify(
                     backend.as_ref(),
                     &dispatched,

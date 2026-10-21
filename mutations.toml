@@ -4391,7 +4391,7 @@ build_timeout_s = 3600
 [[control]]
 id = "code-search-grant-before-rate-charge"
 guards = "code_search finds the caller's granted connection before charging the shared grep.app rate bucket, so ungranted callers cannot drain it"
-edits = [{ file = "crates/plexus-core/src/code_search/mod.rs", old = "let (connection, action) = backing_connection(engine.store(), caller, now)?;", new = "            if backing_connection(engine.store(), caller, now).is_err() { /* NON-VACUITY BREAK */\n            // Limits are stored by backend in web_search_limits. Charge the caller's\n            // module bucket and the global grep.app bucket, irrespective of agent identity.\n            let limits = engine\n                .store()\n                .web_search_limits(BACKEND)\n                .map_err(store_failure)?\n                .unwrap_or_else(default_limits);\n            self.limiter\n                .try_acquire(\n                    BACKEND,\n                    &CallerKey {\n                        principal: caller.to_string(),\n                        agent_id: None,\n                    },\n                    limits,\n                    now,\n                )\n                .map_err(|retry_after_ms| CodeSearchRefusal {\n                    retry_after_ms: Some(retry_after_ms),\n                    ..CodeSearchRefusal::new(RefusalCode::RateLimited)\n                })?;\n            }\n            let (connection, action) = backing_connection(engine.store(), caller, now)?; /* NON-VACUITY BREAK */" }, { file = "crates/plexus-core/src/code_search/mod.rs", old = "            let mut request =", new = "            /* NON-VACUITY BREAK: leave the normal granted-call quota charge in place */\n            let mut request =" }]
+edits = [{ file = "crates/plexus-core/src/code_search/mod.rs", old = "            let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());", new = "            let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());\n            if backing_connection(engine.store(), caller, now).is_err() { /* NON-VACUITY BREAK */\n            let limits = engine\n                .store()\n                .web_search_limits(BACKEND)\n                .map_err(store_failure)?\n                .unwrap_or_else(default_limits);\n            self.limiter\n                .try_acquire(\n                    BACKEND,\n                    &CallerKey {\n                        principal: caller.to_string(),\n                        agent_id: None,\n                    },\n                    limits,\n                    now,\n                )\n                .map_err(|retry_after_ms| CodeSearchRefusal {\n                    retry_after_ms: Some(retry_after_ms),\n                    ..CodeSearchRefusal::new(RefusalCode::RateLimited)\n                })?;\n            }" }, { file = "crates/plexus-core/src/code_search/mod.rs", old = "            let mut request =", new = "            /* NON-VACUITY BREAK: leave the normal granted-call quota charge in place */\n            let mut request =" }]
 test_file = "crates/plexus-core/src/code_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -9028,7 +9028,7 @@ build_timeout_s = 3600
 [[control]]
 id = "code-policy-before-shared-quota"
 guards = "Policy-blocked code searches refuse before charging shared quota"
-edits = [{ file = "crates/plexus-core/src/code_search/mod.rs", old = "            if effect != \"allow\" {\n                return Err(CodeSearchRefusal::new(RefusalCode::NotGranted));\n            }", new = "            /* NON-VACUITY BREAK: policy moved after charging */" }, { file = "crates/plexus-core/src/code_search/mod.rs", old = "            let mut request = AuthorizationRequest::new(", new = "            if effect != \"allow\" { return Err(CodeSearchRefusal::new(RefusalCode::NotGranted)); }\n            let mut request = AuthorizationRequest::new(" }]
+edits = [{ file = "crates/plexus-core/src/code_search/mod.rs", old = "            facade::standing_checks(engine.store(), SearchTool::Code, &connection, &action, now)\n                .map_err(refusal_from)?;", new = "            /* NON-VACUITY BREAK: policy moved after charging */" }, { file = "crates/plexus-core/src/code_search/mod.rs", old = "            let mut request = AuthorizationRequest::new(", new = "            facade::standing_checks(engine.store(), SearchTool::Code, &connection, &action, now).map_err(refusal_from)?;\n            let mut request = AuthorizationRequest::new(" }]
 test_file = "crates/plexus-core/src/code_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -16274,8 +16274,8 @@ timeout_s = 120
 id = "web-search-outcome-completed-results"
 guards = "A mapped nonempty reply serves without contacting the next provider"
 file = "crates/plexus-core/src/web_search/chain/outcome.rs"
-old = 'Ok(results) => Classified::Serve(results),'
-new = 'Ok(results) if results.is_empty() => Classified::Serve(results), Ok(_) => Classified::MoveOn { reason: SkipReason::Unavailable, cooldown_ms: UNAVAILABLE_COOLDOWN_MS }, /* NON-VACUITY BREAK */'
+old = "Ok(results) => {\n                        Classified::Serve(crate::web_search::backend::sanitize_results(results))\n                    }"
+new = "Ok(results) if results.is_empty() => Classified::Serve(results), Ok(_) => Classified::MoveOn { reason: SkipReason::Unavailable, cooldown_ms: UNAVAILABLE_COOLDOWN_MS }, /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/chain/tests/outcomes.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -16289,8 +16289,8 @@ timeout_s = 120
 id = "web-search-outcome-completed-empty"
 guards = "A mapped empty reply serves rather than failing over"
 file = "crates/plexus-core/src/web_search/chain/outcome.rs"
-old = 'Ok(results) => Classified::Serve(results),'
-new = 'Ok(results) if !results.is_empty() => Classified::Serve(results), Ok(_) => Classified::MoveOn { reason: SkipReason::Unavailable, cooldown_ms: UNAVAILABLE_COOLDOWN_MS }, /* NON-VACUITY BREAK */'
+old = "Ok(results) => {\n                        Classified::Serve(crate::web_search::backend::sanitize_results(results))\n                    }"
+new = "Ok(results) if !results.is_empty() => Classified::Serve(results), Ok(_) => Classified::MoveOn { reason: SkipReason::Unavailable, cooldown_ms: UNAVAILABLE_COOLDOWN_MS }, /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -20602,5 +20602,53 @@ target = "--lib"
 select = "expected"
 expect_red = ["web_search::tests::blocked_searches_keep_the_rate_budget", "code_search::tests::blocked_searches_keep_the_code_search_rate_budget"]
 expect_message = "must not consume quota"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-row-carries-request-id"
+guards = "The search audit row carries the engine's request id so it joins the engine's authorization and dispatch rows"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "            request_id: self.request_id.clone(),"
+new = "            request_id: None, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::the_search_row_joins_the_engine_rows_by_request_id", "web_search::tests::the_search_row_joins_the_engine_rows_by_request_id"]
+expect_message = "the search row must carry a request id"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-row-outcome-from-transmission"
+guards = "A dispatched search's audit row states whether the request reached the vendor, from the dispatch's transmission state"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "            Some(TransmissionState::OutcomeUnknown) => (\"allow\", \"unknown\"),"
+new = "            Some(TransmissionState::OutcomeUnknown) => (\"deny\", \"failed\"), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::a_dispatched_search_row_states_what_reached_the_vendor"]
+expect_message = "the search row must state what reached the vendor"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-row-unsent-dispatch-not-sent"
+guards = "A dispatch that never left is audited as deny/not_sent, not as a failed send"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "            None | Some(TransmissionState::NotSent) => (\"deny\", \"not_sent\"),"
+new = "            None => (\"deny\", \"not_sent\"), Some(TransmissionState::NotSent) => (\"deny\", \"failed\"), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::a_dispatched_search_row_states_what_reached_the_vendor"]
+expect_message = "the search row must state what reached the vendor"
 build_timeout_s = 3600
 timeout_s = 120

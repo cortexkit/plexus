@@ -523,3 +523,75 @@ fn quarantine_met_at_authorize_is_backend_quarantined() {
         "a quarantine met at authorize must name the quarantine"
     );
 }
+
+/// The search row carries the engine's request id, so a reviewer can join the
+/// query to the engine's authorization and dispatch rows for the same call.
+#[test]
+fn the_search_row_joins_the_engine_rows_by_request_id() {
+    let f = Fixture::new();
+    f.grant("direct");
+    f.search("direct", None).unwrap();
+    let db = rusqlite::Connection::open(f.path.path()).unwrap();
+    let request_id = |gate: &str| -> Option<String> {
+        db.query_row(
+            "SELECT request_id FROM audit_journal WHERE gate = ?1",
+            [gate],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let search = request_id("code_search");
+    assert!(search.is_some(), "the search row must carry a request id");
+    assert_eq!(
+        search,
+        request_id("dispatch"),
+        "the search row must carry the engine's request id"
+    );
+}
+
+/// After governance admitted a search, the row says whether the request
+/// reached the vendor: a vendor failure is an allowed call that failed, an
+/// unresolved send is unknown, and a dispatch that never left is not sent.
+#[test]
+fn a_dispatched_search_row_states_what_reached_the_vendor() {
+    let f = Fixture::new();
+    for (caller, response, expected) in [
+        (
+            "direct",
+            MockResponse::VendorError {
+                code: "http_503".into(),
+                message: "vendor down".into(),
+            },
+            ("allow", "failed"),
+        ),
+        (
+            "reserved:unknown",
+            MockResponse::OutcomeUnknown,
+            ("allow", "unknown"),
+        ),
+        (
+            "reserved:unsent",
+            MockResponse::TransientNotSent {
+                message: "connection refused".into(),
+            },
+            ("deny", "not_sent"),
+        ),
+    ] {
+        f.grant(caller);
+        f.transport.set_response(response);
+        assert!(f.search(caller, None).is_err());
+        let db = rusqlite::Connection::open(f.path.path()).unwrap();
+        let row: (String, String) = db
+            .query_row(
+                "SELECT decision, outcome FROM audit_journal WHERE gate = 'code_search' AND actor = ?1",
+                [caller],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (row.0.as_str(), row.1.as_str()),
+            expected,
+            "the search row must state what reached the vendor for {caller}"
+        );
+    }
+}

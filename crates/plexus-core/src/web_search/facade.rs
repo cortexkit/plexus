@@ -18,6 +18,7 @@ use crate::governance::{
 use crate::grant_refusal::{Cause, GrantRefusal, GrantTarget};
 use crate::scope::CallScope;
 use crate::storage::{AuditRecord, CatalogAction, ConnectionRecord, PlexusStore, RelayOrigin};
+use crate::transport::TransmissionState;
 
 /// Which tool a shared check is running for. It picks the log component and
 /// the tool name written into log lines.
@@ -330,8 +331,12 @@ pub(crate) struct SearchAudit {
     pub risk: Option<String>,
     pub severity: Option<String>,
     pub query_text: Option<String>,
-    /// Set once the engine dispatched the call.
-    pub dispatched: bool,
+    /// The engine's request id once `authorize` admitted the call, so this
+    /// row can be joined to the engine's own authorization and dispatch rows.
+    pub request_id: Option<String>,
+    /// Whether the dispatched request reached the vendor; `None` until the
+    /// engine dispatched it.
+    pub transmission: Option<TransmissionState>,
     /// The daemon scope the caller's route was bound under, if any.
     pub scope: Option<CallScope>,
     /// The call from which this search was relayed, if the relay stated one.
@@ -364,7 +369,8 @@ impl SearchAudit {
             risk: None,
             severity: None,
             query_text: None,
-            dispatched: false,
+            request_id: None,
+            transmission: None,
             scope: scope.cloned(),
             relay_origin: relay_origin.cloned(),
         }
@@ -378,16 +384,28 @@ impl SearchAudit {
         self.severity = Some(action.severity.clone());
     }
 
-    /// The row for a refused call, named by the tool's refusal code.
+    /// Forget an earlier provider's dispatch when the ordered walk moves on
+    /// to attempt another, so the row describes the attempt it names.
+    pub(crate) fn new_attempt(&mut self) {
+        self.request_id = None;
+        self.transmission = None;
+    }
+
+    /// The row for a refused call, named by the tool's refusal code. A call
+    /// governance admitted and sent (or may have sent) failed at the vendor:
+    /// its decision is `allow`, as on the engine's own rows, and its outcome
+    /// says whether the request was sent. Anything refused before a send,
+    /// including a dispatch that aborted unsent, is `deny` and `not_sent`.
     pub(crate) fn refused(&self, reason_code: &str) -> RowOutcome {
+        let (decision, outcome) = match self.transmission {
+            None | Some(TransmissionState::NotSent) => ("deny", "not_sent"),
+            Some(TransmissionState::Sent) => ("allow", "failed"),
+            Some(TransmissionState::OutcomeUnknown) => ("allow", "unknown"),
+        };
         RowOutcome {
-            decision: "deny",
+            decision,
             reason_code: reason_code.to_string(),
-            outcome: if self.dispatched {
-                "failed"
-            } else {
-                "not_sent"
-            },
+            outcome,
             response_class: None,
             result_count: None,
         }
@@ -421,7 +439,7 @@ impl SearchAudit {
             args_redaction_summary: Some(summary),
             outcome: Some(row.outcome.to_string()),
             latency_ms: None,
-            request_id: None,
+            request_id: self.request_id.clone(),
             credential_fingerprint: None,
             provider_account_fingerprint: None,
             attempt_no: None,
