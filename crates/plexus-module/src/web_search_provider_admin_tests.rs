@@ -912,3 +912,65 @@ fn searxng_instance_address_never_reaches_the_log() {
         "the instance address was logged: {stderr}"
     );
 }
+
+/// Without the connector home role this process must not enroll a provider:
+/// an applied add is refused before anyone is asked and before any ticket,
+/// connection, grant or vendor request, while a preview still works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_applied_add_without_the_connector_home_role_is_refused_before_asking() {
+    let fixture = fixture("add-provider-no-connector-home");
+    seed_exa_callers(&fixture);
+    let vendor = CountingVendor::start();
+    let mut runtime = runtime_for_test(Arc::clone(&fixture.store));
+    runtime.endpoint_override = Some(vendor.url.clone());
+    runtime.connector_home = Arc::new(crate::connector_home::ConnectorHome::unavailable());
+    assert!(!runtime.connector_home.held());
+    let state = Arc::new(ModuleState {
+        health: Arc::new(health::HealthState::new()),
+        runtime,
+    });
+    let before = snapshot(&fixture.path, true);
+
+    let preview = add(&state, &fixture.path, json!({"provider":"zai"}), Ok(())).await;
+    assert!(preview.prompts.is_empty(), "a preview never asks");
+    assert_eq!(
+        (
+            &preview.reply["result"]["dry_run"],
+            &preview.reply["result"]["connection_id"]
+        ),
+        (&json!(true), &json!("conn-web-search-zai")),
+        "a preview works without the connector home role: {}",
+        preview.reply
+    );
+
+    let refused = add(
+        &state,
+        &fixture.path,
+        json!({"provider":"zai","dry_run":false}),
+        Ok(()),
+    )
+    .await;
+    assert!(
+        refused.prompts.is_empty(),
+        "an applied add without the connector home role must not ask: {:?}",
+        refused.prompts
+    );
+    assert_eq!(
+        refused.reply["error"]["code"], "connector_home_not_held",
+        "{}",
+        refused.reply
+    );
+    for query in [
+        "SELECT COUNT(*) FROM binding_tickets",
+        "SELECT COUNT(*) FROM connections WHERE app_key = 'zai'",
+        "SELECT COUNT(*) FROM grants WHERE connection_id <> 'conn-exa-rest'",
+    ] {
+        assert_eq!(count(&fixture.path, query), 0, "{query}");
+    }
+    assert_eq!(
+        snapshot(&fixture.path, true),
+        before,
+        "nothing may be written without the connector home role"
+    );
+    assert_eq!(vendor.contacts(), 0, "no vendor request may be sent");
+}

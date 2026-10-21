@@ -20951,3 +20951,19 @@ expect_red = ["tests::web_search_provider_admin_tests::default_grantees_are_the_
 expect_message = "the default grantees are exactly the live search callers, never a wildcard"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "web-search-provider-add-requires-connector-home"
+guards = "Without the connector home role, an applied web search provider add is refused before any confirmation, write or vendor request"
+file = "crates/plexus-module/src/web_search_provider_admin.rs"
+old = "    if let Some(refusal) = state.runtime.connector_home.refusal() {\n        return Ok(refusal);\n    }\n"
+new = "    /* NON-VACUITY BREAK: connector home check removed */\n"
+test_file = "crates/plexus-module/src/web_search_provider_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::web_search_provider_admin_tests::an_applied_add_without_the_connector_home_role_is_refused_before_asking"]
+expect_message = "an applied add without the connector home role must not ask"
+build_timeout_s = 3600
+timeout_s = 120
