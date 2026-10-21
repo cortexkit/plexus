@@ -4,8 +4,6 @@
 //! fixed facade registration, exercises the real store-backed empty connection
 //! listing, probes health-v2, and checks the in-module principal backstop.
 
-#![cfg(test)]
-
 #[path = "support/bounded.rs"]
 mod bounded;
 #[path = "support/daemon_client.rs"]

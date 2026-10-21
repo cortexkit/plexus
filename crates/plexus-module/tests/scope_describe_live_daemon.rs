@@ -17,8 +17,6 @@
 //! `approval_scope_verdict` decides whether a stored approval runs, is
 //! refused, or waits.
 
-#![cfg(test)]
-
 #[path = "support/bounded.rs"]
 mod bounded;
 #[path = "support/daemon_client.rs"]

@@ -11326,12 +11326,12 @@ guards = "Shipped sources cannot reintroduce the removed Engram claim operations
 file = "crates/plexus-module/src/connector_home.rs"
 old = "let _read = self.read_lane.lock().unwrap();"
 new = "let _read = self.read_lane.lock().unwrap();\n        if false { let _ = self.peer.call(\"claim.read\", json!({})); } /* NON-VACUITY BREAK */"
-test_file = "crates/plexus-module/tests/connector_home_cutover.rs"
+test_file = "crates/plexus-module/tests/it/connector_home_cutover.rs"
 runner = "cargo"
 package = "plexus-module"
-target = "--test connector_home_cutover"
+target = "--test it"
 select = "expected"
-expect_red = ["shipped_sources_never_call_removed_claim_operations"]
+expect_red = ["connector_home_cutover::shipped_sources_never_call_removed_claim_operations"]
 expect_message = "removed claim operation in shipped source"
 build_timeout_s = 3600
 
