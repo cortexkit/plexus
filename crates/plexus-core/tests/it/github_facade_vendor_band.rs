@@ -3972,7 +3972,7 @@ fn read_handle_store_failure_is_not_repository_unbound() {
 
 #[test]
 fn read_page_bound_is_distinct_from_invalid_response() {
-    let (_, _, engine, transport, _) =
+    let (_scratch, _, engine, transport, _) =
         setup("read-page-bound", &[("github.issue_comments.list", "read")]);
     transport.set_response(MockResponse::Success(json!((0..100)
         .map(|id| json!({"id":id}))

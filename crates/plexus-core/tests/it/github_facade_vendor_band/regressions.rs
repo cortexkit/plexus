@@ -211,7 +211,7 @@ fn generation_preflight_failure_is_audited() {
 
 #[test]
 fn close_does_not_require_an_unused_issue_read() {
-    let (_, store, engine, transport, scope) =
+    let (_scratch, store, engine, transport, scope) =
         setup("close-without-read", &[("close_issue", "write")]);
     let reply = bot_request_scoped(
         &store,
