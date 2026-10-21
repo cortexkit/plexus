@@ -2912,9 +2912,9 @@ timeout_s = 60
 [[control]]
 id = "code-search-module-grant"
 guards = "Code search candidate selection requires a module grant before engine dispatch"
-file = "crates/plexus-core/src/code_search/mod.rs"
-old = "if scoped_grant_refusal(grant.as_ref(), ACTION, &action.risk, now).is_some() {"
-new = "if false && scoped_grant_refusal(grant.as_ref(), ACTION, &action.risk, now).is_some() { /* NON-VACUITY BREAK */"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "        match scoped_grant_refusal(grant.as_ref(), target.action, &action.risk, now_ms) {"
+new = "        match None::<GrantDenial> { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/code_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -4416,8 +4416,8 @@ build_timeout_s = 3600
 id = "web-search-grant-refusal-names-caller"
 guards = "A grant refusal met inside the engine names the calling module as grantee, not a fixed principal"
 file = "crates/plexus-core/src/web_search/mod.rs"
-old = "                    Self::grant_target(caller),\n                    refusal.detail().cause,"
-new = "                    Self::grant_target(\"reserved:basal\"), /* NON-VACUITY BREAK */\n                    refusal.detail().cause,"
+old = "        self.refusal_from(facade::denial_for(denial, Self::grant_target(caller)))"
+new = "        self.refusal_from(facade::denial_for(denial, Self::grant_target(\"reserved:basal\"))) /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -9013,9 +9013,9 @@ build_timeout_s = 3600
 [[control]]
 id = "web-block-before-shared-quota"
 guards = "Policy-blocked web searches cannot drain shared quota"
-file = "crates/plexus-core/src/web_search/mod.rs"
-old = "        if effect != \"allow\" {"
-new = "        if false && effect != \"allow\" { /* NON-VACUITY BREAK */"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "    if effect != \"allow\" {"
+new = "    if false && effect != \"allow\" { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -9072,8 +9072,8 @@ build_timeout_s = 3600
 id = "code-quarantine-refusal"
 guards = "Quarantined code search actions have a specific refusal"
 file = "crates/plexus-core/src/code_search/mod.rs"
-old = "        return Err(CodeSearchRefusal::new(RefusalCode::BackendQuarantined));"
-new = "        return Err(unavailable()); /* NON-VACUITY BREAK */"
+old = "        SearchDenial::Quarantined => CodeSearchRefusal::new(RefusalCode::BackendQuarantined),"
+new = "        SearchDenial::Quarantined => unavailable(), /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/code_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -9087,8 +9087,8 @@ build_timeout_s = 3600
 id = "code-ambiguous-refusal"
 guards = "Ambiguous code search connections have a specific refusal without dispatch"
 file = "crates/plexus-core/src/code_search/mod.rs"
-old = "        return Err(CodeSearchRefusal::new(RefusalCode::BackendAmbiguous));"
-new = "        return Err(unavailable()); /* NON-VACUITY BREAK */"
+old = "        SearchDenial::Ambiguous => CodeSearchRefusal::new(RefusalCode::BackendAmbiguous),"
+new = "        SearchDenial::Ambiguous => unavailable(), /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/code_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -9131,9 +9131,9 @@ build_timeout_s = 3600
 [[control]]
 id = "web-policy-diagnostics"
 guards = "Policy lookup errors retain their cause in operator diagnostics"
-file = "crates/plexus-core/src/web_search/mod.rs"
-old = "                eprintln!(error web_search: \"web_search policy lookup failed: {error}\");"
-new = "                let _ = error; /* NON-VACUITY BREAK */"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "            search_log!(tool, error, \"{} policy lookup failed: {error}\", tool.name());"
+new = "            let _ = (&error, tool); /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/tests.rs"
 runner = "cargo"
 package = "plexus-core"
@@ -15900,18 +15900,17 @@ build_timeout_s = 3600
 timeout_s = 120
 
 [[control]]
-id = "web-search-chain-policy-before-status"
-guards = "Policy refusal precedes action quarantine and later checks"
-file = "crates/plexus-core/src/web_search/chain.rs"
-old = 'let effect = self'
-new = '''if action.status == "quarantined" { return Err(SkipReason::Quarantined); } /* NON-VACUITY BREAK */
-        let effect = self'''
+id = "search-governance-check-order"
+guards = "A search checks connection health, then the catalog action's status, then policy, the order governance's own authorization uses, so it reports the refusal an invoke would"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "    if let Some(reason) = connection_denial(connection) {"
+new = "    if let Some(reason) = connection_denial(connection).filter(|_| action.status == \"active\") { /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/src/web_search/chain/tests.rs"
 runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::chain::tests::policy_status_connection_cooldown_then_rate_is_the_failure_order"]
+expect_red = ["web_search::chain::tests::connection_status_policy_cooldown_then_rate_is_the_failure_order"]
 build_timeout_s = 3600
 timeout_s = 120
 
@@ -16005,7 +16004,7 @@ runner = "cargo"
 package = "plexus-core"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search::chain::tests::policy_status_connection_cooldown_then_rate_is_the_failure_order"]
+expect_red = ["web_search::chain::tests::connection_status_policy_cooldown_then_rate_is_the_failure_order"]
 build_timeout_s = 3600
 timeout_s = 120
 
@@ -20539,5 +20538,53 @@ target = "--lib"
 select = "expected"
 expect_red = ["web_search_tests::web_search_admin_tests::code_search_limits_are_settable_and_report_the_replaced_row"]
 expect_message = "the reply must report the row the write replaced"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "code-search-flow-typed-grant-refusal"
+guards = "A flow refused code search for want of a grant gets the typed grant refusal naming the grant to restore"
+file = "crates/plexus-core/src/code_search/mod.rs"
+old = "            let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());"
+new = "            let is_flow = scope.is_some_and(|_| false); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::flow_without_a_grant_gets_a_typed_grant_refusal"]
+expect_message = "a flow must be told which grant to restore"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-authorize-quarantine-named"
+guards = "A quarantine governance meets at authorize is reported as backend_quarantined by both search tools"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "        Denial::Catalog(CatalogDenial::Quarantined) => SearchDenial::Quarantined,"
+new = "        Denial::Catalog(CatalogDenial::Quarantined) => SearchDenial::Unavailable, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/code_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["code_search::tests::quarantine_met_at_authorize_is_backend_quarantined", "web_search::chain::tests::authorize_denial_reasons_follow_legacy_mapping"]
+expect_message = "a quarantine met at authorize must name the quarantine"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "search-vendor-throttle-rate-limited"
+guards = "A vendor throttle after dispatch reaches both search tools as rate_limited with the vendor's delay or a default"
+file = "crates/plexus-core/src/web_search/facade.rs"
+old = "            if code == \"throttled\" =>"
+new = "            if false && code == \"throttled\" => /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/web_search/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search::tests::vendor_throttle_is_rate_limited_with_the_vendor_delay", "code_search::tests::vendor_throttle_uses_retry_after_field_not_message_text_and_audits_reason"]
+expect_message = "a vendor throttle must tell the caller when to retry"
 build_timeout_s = 3600
 timeout_s = 120

@@ -29,6 +29,7 @@ pub mod cache;
 pub mod capability;
 mod chain;
 mod code_lookup;
+pub(crate) mod facade;
 pub mod limiter;
 pub mod providers;
 pub mod query;
@@ -39,12 +40,9 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::credentials::CredentialSource;
-use crate::governance::{
-    connection_denial, scoped_grant, scoped_grant_refusal, AuthorizationRequest, CatalogDenial,
-    Denial, GovernanceEngine, TransportOutcome, AUTHORITY_INVOKE,
-};
+use crate::governance::{AuthorizationRequest, Denial, GovernanceEngine, TransportOutcome};
 use crate::scope::{resolve_call_agent, CallScope};
-use crate::storage::{AuditRecord, CatalogAction, ConnectionRecord, PlexusStore, RelayOrigin};
+use crate::storage::{CatalogAction, ConnectionRecord, PlexusStore, RelayOrigin};
 use crate::transport::Transport;
 
 pub use backend::{
@@ -222,23 +220,10 @@ pub struct WebSearchService {
     chain_cooldowns: std::sync::Mutex<std::collections::HashMap<String, i64>>,
 }
 
-/// What the one `web_search` audit row of a call records, filled in as the
-/// call learns more about itself.
+/// What the one `web_search` audit row of a call records: the fields every
+/// search row has, plus the provider walk of an ordered search.
 struct CallAudit {
-    caller: String,
-    /// The connection owner once resolved; the caller until then.
-    principal: String,
-    connection_id: Option<String>,
-    risk: Option<String>,
-    severity: Option<String>,
-    agent_id: Option<String>,
-    gate: &'static str,
-    query_text: Option<String>,
-    dispatched: bool,
-    /// The daemon scope the caller's route was bound under, if any.
-    scope: Option<CallScope>,
-    /// The call from which this search was relayed, if the relay stated one.
-    relay_origin: Option<RelayOrigin>,
+    search: facade::SearchAudit,
     chain: Option<chain::ChainAudit>,
 }
 
@@ -337,17 +322,13 @@ impl WebSearchService {
     ) -> Result<WebSearchResponse, WebSearchRefusal> {
         let now_ms = (self.clock)();
         let mut audit = CallAudit {
-            caller: caller.to_string(),
-            principal: caller.to_string(),
-            connection_id: None,
-            risk: None,
-            severity: None,
-            agent_id: None,
-            gate: "web_search",
-            query_text: None,
-            dispatched: false,
-            scope: scope.cloned(),
-            relay_origin: relay_origin.cloned(),
+            search: facade::SearchAudit::new(
+                facade::SearchTool::Web,
+                caller,
+                None,
+                scope,
+                relay_origin,
+            ),
             chain: None,
         };
         let outcome = self.run(engine, arguments, now_ms, &mut audit);
@@ -364,12 +345,12 @@ impl WebSearchService {
     ) -> Result<WebSearchResponse, WebSearchRefusal> {
         let store = engine.store();
         let backend = self.backend.as_ref();
-        let caller = audit.caller.clone();
+        let caller = audit.search.caller.clone();
         let query = WebSearchQuery::parse(arguments)?;
-        audit.query_text = Some(query.query.clone());
+        audit.search.query_text = Some(query.query.clone());
 
-        let agent = resolve_call_agent(audit.scope.as_ref());
-        audit.agent_id = agent.attributed.clone();
+        let agent = resolve_call_agent(audit.search.scope.as_ref());
+        audit.search.agent_id = agent.attributed.clone();
 
         // Refuse before charging quota or reading old cached source-search results.
         if code_lookup::classify(&query).is_some() {
@@ -397,37 +378,14 @@ impl WebSearchService {
         };
 
         let is_flow = audit
+            .search
             .scope
             .as_ref()
             .is_some_and(|scope| scope.flow_id.is_some());
         let (connection, action) = self.backing_connection(store, &caller, now_ms, is_flow)?;
-        audit.principal = connection.principal.clone();
-        audit.connection_id = Some(connection.connection_id.clone());
-        audit.risk = Some(action.risk.clone());
-        audit.severity = Some(action.severity.clone());
-        let effect = self.policy_effect(store, &connection, &action, now_ms)?;
-        if crate::governance::per_call_approval_unsupported(effect, false) {
-            return Err(WebSearchRefusal::PerCallApprovalUnsupported);
-        }
-        match action.status.as_str() {
-            "active" => {}
-            "quarantined" => {
-                return Err(WebSearchRefusal::BackendQuarantined {
-                    backend: backend.name().to_string(),
-                })
-            }
-            _ => return Err(self.unavailable()),
-        }
-        if let Some(reason) = connection_denial(&connection) {
-            eprintln!(warn web_search:
-                "web_search connection {} cannot serve: {reason:?}",
-                connection.connection_id
-            );
-            return Err(self.unavailable());
-        }
-        if effect != "allow" {
-            return Err(WebSearchRefusal::NotGranted);
-        }
+        audit.search.resolved(&connection, &action);
+        facade::standing_checks(store, facade::SearchTool::Web, &connection, &action, now_ms)
+            .map_err(|denial| self.refusal_from(denial))?;
         // Charge the rate buckets only once the caller is known to hold a grant
         // on a usable connection. The backend bucket is shared by every caller,
         // so charging earlier would let an ungranted caller drain it for all.
@@ -462,10 +420,10 @@ impl WebSearchService {
         }
         // The scope goes on the audit rows only: it never makes the engine
         // require the agent's own grant for a search.
-        if let Some(scope) = &audit.scope {
+        if let Some(scope) = &audit.search.scope {
             request = request.with_scope_attribution_only(scope.clone());
         }
-        if let Some(relay_origin) = &audit.relay_origin {
+        if let Some(relay_origin) = &audit.search.relay_origin {
             request = request.with_relay_origin(relay_origin.clone());
         }
         let reservation = engine.authorize(request).map_err(|denial| {
@@ -478,22 +436,14 @@ impl WebSearchService {
         })?;
         let dispatched = engine.revalidate_and_dispatch(&reservation);
         let fetched_at_ms = crate::storage::now_ms();
-        audit.dispatched = true;
-        let body = match dispatched.outcome {
-            TransportOutcome::Completed {
-                response: Some(body),
-            } => body,
-            other => {
-                // The transport has already logged the vendor's own body;
-                // this line ties that failure to the web_search call.
-                eprintln!(warn web_search:
-                    "web_search backend {} failed on {}: {other:?}",
-                    backend.name(),
-                    connection.connection_id
-                );
-                return Err(self.unavailable());
-            }
-        };
+        audit.search.dispatched = true;
+        let body = facade::vendor_body(
+            facade::SearchTool::Web,
+            backend.name(),
+            &connection.connection_id,
+            &dispatched,
+        )
+        .map_err(|denial| self.refusal_from(denial))?;
         let results = backend
             .map_reply(&body, usize::from(query.max_results), fetched_at_ms)
             .map(backend::sanitize_results)
@@ -546,87 +496,19 @@ impl WebSearchService {
         backend: chain::BackendIdentity,
         target: crate::grant_refusal::GrantTarget,
     ) -> Result<(ConnectionRecord, CatalogAction), WebSearchRefusal> {
-        let store_failure = |error: cortexkit_store::StoreError| {
-            eprintln!(error web_search: "web_search connection lookup failed: {error}");
-            self.unavailable()
-        };
-        let mut eligible = Vec::new();
-        let mut cause = crate::grant_refusal::Cause::Missing;
-        for connection_id in store
-            .web_search_candidate_connection_ids(caller, backend.app_key, now_ms)
-            .map_err(store_failure)?
-        {
-            let Some(connection) = store
-                .connection_for_invoke(caller, &connection_id)
-                .map_err(store_failure)?
-            else {
-                continue;
-            };
-            // Reload after candidate selection: a connection may have changed
-            // owner, backend or status between the two store reads.
-            if connection.app_key != backend.app_key
-                || !connection_status_can_search(&connection.status)
-            {
-                continue;
-            }
-            let Some(action) = store
-                .catalog_action(
-                    &connection.principal,
-                    &connection.connection_id,
-                    backend.action,
-                )
-                .map_err(store_failure)?
-            else {
-                continue;
-            };
-            let rows = store
-                .scoped_invoke_grant_rows(&connection, caller, None)
-                .map_err(store_failure)?;
-            let grant = scoped_grant(
-                &rows,
-                &connection,
-                caller,
-                None,
-                AUTHORITY_INVOKE,
-                backend.action,
-                now_ms,
-                Some(&action.risk),
-            );
-            match scoped_grant_refusal(grant.as_ref(), backend.action, &action.risk, now_ms) {
-                None => eligible.push((connection, action)),
-                Some(reason) => {
-                    cause = match reason {
-                        crate::governance::GrantDenial::Expired => {
-                            crate::grant_refusal::Cause::Expired
-                        }
-                        crate::governance::GrantDenial::ActionSelector => {
-                            crate::grant_refusal::Cause::ActionSelector
-                        }
-                        crate::governance::GrantDenial::RiskCeiling => {
-                            crate::grant_refusal::Cause::RiskCeiling
-                        }
-                        _ => crate::grant_refusal::Cause::Missing,
-                    }
-                }
-            }
-        }
-        match eligible.len() {
-            0 if is_flow => Err(WebSearchRefusal::Grant(
-                crate::grant_refusal::GrantRefusal::new(target, cause),
-            )),
-            0 => Err(WebSearchRefusal::NotGranted),
-            1 => Ok(eligible.remove(0)),
-            _ => {
-                eprintln!(warn web_search:
-                    "web_search for {caller} is ambiguous across connections {:?}",
-                    eligible
-                        .iter()
-                        .map(|(connection, _)| connection.connection_id.as_str())
-                        .collect::<Vec<_>>()
-                );
-                Err(WebSearchRefusal::BackendAmbiguous)
-            }
-        }
+        facade::resolve_connection(
+            store,
+            caller,
+            now_ms,
+            is_flow,
+            facade::SearchTarget {
+                tool: facade::SearchTool::Web,
+                app_key: backend.app_key,
+                action: backend.action,
+            },
+            target,
+        )
+        .map_err(|denial| self.refusal_from(denial))
     }
 
     /// Apply the policy the engine would apply before dispatching `action`.
@@ -685,22 +567,8 @@ impl WebSearchService {
         action: &CatalogAction,
         now: i64,
     ) -> Result<&'static str, WebSearchRefusal> {
-        let policy = store
-            .matching_policy(
-                &connection.principal,
-                &connection.connection_id,
-                &action.name,
-                now,
-            )
-            .map_err(|error| {
-                eprintln!(error web_search: "web_search policy lookup failed: {error}");
-                self.unavailable()
-            })?;
-        Ok(crate::governance::catalog_policy_effect(
-            action,
-            policy.as_ref().map(|p| p.effect.as_str()),
-            None,
-        ))
+        facade::policy_effect(store, facade::SearchTool::Web, connection, action, now)
+            .map_err(|denial| self.refusal_from(denial))
     }
 
     fn unavailable(&self) -> WebSearchRefusal {
@@ -709,34 +577,32 @@ impl WebSearchService {
         }
     }
 
-    /// Map a governance denial met after the checks above onto the tool's
-    /// closed refusal set. Per-call approval is refused explicitly; other
-    /// grant and policy denials read as not granted;
-    /// everything else (credential, transport, health, store) as unavailable.
-    /// A grant refusal names `caller` as the grantee, the same target the
-    /// pre-flight grant check reports, so the operator is told to grant the
-    /// module that actually asked.
+    /// Map a governance denial met in `authorize` onto the tool's closed
+    /// refusal set. A grant refusal names `caller` as the grantee, the same
+    /// target the pre-flight grant check reports, so the operator is told to
+    /// grant the module that actually asked.
     fn refusal_for_denial(&self, caller: &str, denial: &Denial) -> WebSearchRefusal {
+        self.refusal_from(facade::denial_for(denial, Self::grant_target(caller)))
+    }
+
+    /// Name a shared search denial in web_search's refusal set.
+    fn refusal_from(&self, denial: facade::SearchDenial) -> WebSearchRefusal {
+        use facade::SearchDenial;
         match denial {
-            Denial::Policy(crate::governance::PolicyDenial::AskFirst) => {
-                WebSearchRefusal::PerCallApprovalUnsupported
-            }
-            Denial::GrantRefusal(refusal) => {
-                WebSearchRefusal::Grant(crate::grant_refusal::GrantRefusal::new(
-                    Self::grant_target(caller),
-                    refusal.detail().cause,
-                ))
-            }
-            Denial::ConsentUnavailable { action } => WebSearchRefusal::ConsentUnavailable {
-                action: action.clone(),
-            },
-            Denial::Catalog(CatalogDenial::Quarantined) => WebSearchRefusal::BackendQuarantined {
+            SearchDenial::NotGranted | SearchDenial::Blocked => WebSearchRefusal::NotGranted,
+            SearchDenial::Grant(refusal) => WebSearchRefusal::Grant(refusal),
+            SearchDenial::Ambiguous => WebSearchRefusal::BackendAmbiguous,
+            SearchDenial::AskFirst => WebSearchRefusal::PerCallApprovalUnsupported,
+            SearchDenial::Quarantined => WebSearchRefusal::BackendQuarantined {
                 backend: self.backend.name().to_string(),
             },
-            Denial::Grant(_) | Denial::Policy(_) | Denial::ActionRequestCreated { .. } => {
-                WebSearchRefusal::NotGranted
+            SearchDenial::Throttled { retry_after_ms } => {
+                WebSearchRefusal::RateLimited { retry_after_ms }
             }
-            _ => self.unavailable(),
+            SearchDenial::ConsentUnavailable { action } => {
+                WebSearchRefusal::ConsentUnavailable { action }
+            }
+            SearchDenial::ConnectionUnusable | SearchDenial::Unavailable => self.unavailable(),
         }
     }
 
@@ -746,71 +612,41 @@ impl WebSearchService {
         audit: &CallAudit,
         outcome: &Result<WebSearchResponse, WebSearchRefusal>,
     ) {
-        let (decision, reason_code, row_outcome, response_class, result_count) = match outcome {
-            Ok(response) if response.cached => (
-                "allow",
-                "web_search_cache_hit".to_string(),
-                "cached",
-                Some("cached"),
-                Some(response.results.len() as i64),
+        let row = match outcome {
+            Ok(response) if response.cached => facade::RowOutcome {
+                decision: "allow",
+                reason_code: "web_search_cache_hit".to_string(),
+                outcome: "cached",
+                response_class: Some("cached"),
+                result_count: Some(response.results.len() as i64),
+            },
+            Ok(response) => facade::RowOutcome {
+                decision: "allow",
+                reason_code: "web_search_dispatched".to_string(),
+                outcome: "completed",
+                response_class: Some("vendor"),
+                result_count: Some(response.results.len() as i64),
+            },
+            Err(refusal) => audit.search.refused(refusal.code()),
+        };
+        let (app_key, action) = match &audit.chain {
+            None => (
+                Some(self.backend.app_key().to_string()),
+                Some(self.backend.action().to_string()),
             ),
-            Ok(response) => (
-                "allow",
-                "web_search_dispatched".to_string(),
-                "completed",
-                Some("vendor"),
-                Some(response.results.len() as i64),
-            ),
-            Err(refusal) => (
-                "deny",
-                refusal.code().to_string(),
-                if audit.dispatched {
-                    "failed"
-                } else {
-                    "not_sent"
-                },
-                None,
-                None,
+            Some(chain) => (
+                chain.attempted.map(|backend| backend.app_key.to_string()),
+                chain.attempted.map(|backend| backend.action.to_string()),
             ),
         };
-        let record = AuditRecord {
-            principal: audit.principal.clone(),
-            actor: audit.caller.clone(),
-            acting_principal: audit.caller.clone(),
-            agent_id: audit.agent_id.clone(),
-            app_handle_id: None,
-            agent_handle: None,
-            connection_id: audit.connection_id.clone(),
-            app_key: audit.chain.as_ref().map_or_else(
-                || Some(self.backend.app_key().to_string()),
-                |chain| chain.attempted.map(|backend| backend.app_key.to_string()),
-            ),
-            action: audit.chain.as_ref().map_or_else(
-                || Some(self.backend.action().to_string()),
-                |chain| chain.attempted.map(|backend| backend.action.to_string()),
-            ),
-            risk: audit.risk.clone(),
-            severity: audit.severity.clone(),
-            decision: decision.to_string(),
-            reason_code,
-            gate: Some(audit.gate.to_string()),
-            args_redaction_summary: Some(audit.chain.as_ref().map_or_else(
-                || {
-                    "web_search query recorded in query_text; assertion and other arguments omitted"
-                        .to_string()
-                },
-                |chain| json!({"served_by": chain.served_by, "skipped": chain.skipped}).to_string(),
-            )),
-            outcome: Some(row_outcome.to_string()),
-            latency_ms: None,
-            request_id: None,
-            credential_fingerprint: None,
-            provider_account_fingerprint: None,
-            attempt_no: None,
-            vendor_request_id: None,
-            idempotency_key_fingerprint: None,
-            response_class: response_class.map(str::to_string),
-            reconciliation_of: None,
+        let summary = match &audit.chain {
+            None => {
+                "web_search query recorded in query_text; assertion and other arguments omitted"
+                    .to_string()
+            }
+            Some(chain) => {
+                json!({"served_by": chain.served_by, "skipped": chain.skipped}).to_string()
+            }
         };
         // DELIBERATE EXCEPTION to the hash-only argument policy: every other
         // audit row records arguments only as hashes, but a web search is
@@ -818,18 +654,7 @@ impl WebSearchService {
         // not credentials. The query is kept as text for the journal's normal
         // retention window (30 days by default) and ages out with the row.
         // Nothing credential-derived is written here.
-        if let Err(error) = store.append_web_search_audit(
-            &record,
-            audit.query_text.as_deref(),
-            result_count,
-            audit.scope.as_ref(),
-            audit.relay_origin.as_ref(),
-        ) {
-            eprintln!(error governance:
-                "audit append failed: web_search reason={:?} principal={:?} actor={:?} connection_id={:?}: {error}",
-                record.reason_code, record.principal, record.actor, record.connection_id
-            );
-        }
+        let _ = audit.search.append(store, app_key, action, summary, row);
     }
 }
 

@@ -116,6 +116,34 @@ fn both_search_paths_sanitize_vendor_results() {
     assert_eq!(transport.requests().len(), 2);
 }
 
+/// A vendor throttle tells the caller when to retry, with the vendor's own
+/// delay or a default when it named none, as code_search always has.
+#[test]
+fn vendor_throttle_is_rate_limited_with_the_vendor_delay() {
+    let (engine, transport) = granted_exa_engine("web-vendor-throttle");
+    let service =
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000));
+    for (delay, expected) in [(Some(12_000), 12_000), (None, 30_000)] {
+        transport.set_response(crate::MockResponse::Throttled {
+            retry_after_ms: delay,
+            message: "slow down".into(),
+        });
+        assert_eq!(
+            service.search(
+                &engine,
+                "direct",
+                json!({"query": format!("throttled {expected}")})
+                    .as_object()
+                    .unwrap()
+            ),
+            Err(WebSearchRefusal::RateLimited {
+                retry_after_ms: expected
+            }),
+            "a vendor throttle must tell the caller when to retry"
+        );
+    }
+}
+
 #[test]
 fn blocked_searches_keep_the_rate_budget() {
     let (engine, _) = granted_exa_engine("blocked-search-budget");

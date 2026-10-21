@@ -9,13 +9,12 @@ use std::sync::Arc;
 use serde_json::{json, Map, Value};
 
 use crate::credentials::CredentialSource;
-use crate::governance::{
-    connection_denial, scoped_grant, scoped_grant_refusal, AuthorizationRequest, Denial,
-    GovernanceEngine, TransportOutcome, AUTHORITY_INVOKE,
-};
+use crate::governance::{AuthorizationRequest, GovernanceEngine};
+use crate::grant_refusal::{GrantRefusal, GrantTarget, Layer};
 use crate::scope::{resolve_call_agent, CallScope};
-use crate::storage::{AuditRecord, CatalogAction, ConnectionRecord, PlexusStore, RelayOrigin};
+use crate::storage::RelayOrigin;
 use crate::transport::Transport;
+use crate::web_search::facade::{self, SearchDenial, SearchTarget, SearchTool};
 use crate::web_search::limiter::{default_limits, CallerKey, RateLimiter};
 
 pub use query::CodeSearchQuery;
@@ -23,11 +22,18 @@ pub use reply::CodeSearchResponse;
 
 pub const BACKEND: &str = "grep_app";
 pub const ACTION: &str = "searchGitHub";
-const DEFAULT_VENDOR_RETRY_AFTER_MS: u64 = 30_000;
+
+const TARGET: SearchTarget = SearchTarget {
+    tool: SearchTool::Code,
+    app_key: BACKEND,
+    action: ACTION,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefusalCode {
     NotGranted,
+    /// A flow's typed grant refusal at the named layer.
+    GrantAbsent(Layer),
     RateLimited,
     InvalidQuery,
     ConsentUnavailable,
@@ -41,6 +47,8 @@ impl RefusalCode {
     fn as_str(self) -> &'static str {
         match self {
             Self::NotGranted => "code_search_not_granted",
+            Self::GrantAbsent(Layer::Module) => "module_grant_absent",
+            Self::GrantAbsent(Layer::Agent) => "agent_grant_absent",
             Self::RateLimited => "rate_limited",
             Self::InvalidQuery => "invalid_query",
             Self::ConsentUnavailable => "consent_unavailable",
@@ -69,6 +77,8 @@ pub struct CodeSearchRefusal {
     code: RefusalCode,
     field: Option<String>,
     retry_after_ms: Option<u64>,
+    /// Boxed: the typed refusal is large and rarely present.
+    grant: Option<Box<GrantRefusal>>,
 }
 
 impl CodeSearchRefusal {
@@ -77,6 +87,13 @@ impl CodeSearchRefusal {
             code,
             field: None,
             retry_after_ms: None,
+            grant: None,
+        }
+    }
+    fn grant(refusal: GrantRefusal) -> Self {
+        Self {
+            grant: Some(Box::new(refusal.clone())),
+            ..Self::new(RefusalCode::GrantAbsent(refusal.detail().layer))
         }
     }
     pub fn invalid(field: &str) -> Self {
@@ -87,7 +104,9 @@ impl CodeSearchRefusal {
     }
     pub fn to_wire(&self) -> Value {
         let message = match self.code {
-            RefusalCode::NotGranted => "no code search backend is granted to this caller",
+            RefusalCode::NotGranted | RefusalCode::GrantAbsent(_) => {
+                "no code search backend is granted to this caller"
+            }
             RefusalCode::RateLimited => {
                 "code search rate limit reached; retry after retry_after_ms"
             }
@@ -110,6 +129,9 @@ impl CodeSearchRefusal {
         }
         if let Some(delay) = self.retry_after_ms {
             error["retry_after_ms"] = json!(delay);
+        }
+        if let Some(grant) = &self.grant {
+            error["detail"] = json!(grant.detail());
         }
         if self.code == "consent_unavailable" {
             error["action"] = json!(ACTION);
@@ -146,69 +168,34 @@ impl CodeSearchService {
         scope: Option<&CallScope>,
         relay_origin: Option<&RelayOrigin>,
     ) -> Result<CodeSearchResponse, CodeSearchRefusal> {
-        let mut audit = AuditRecord {
-            principal: caller.to_string(),
-            actor: caller.to_string(),
-            acting_principal: caller.to_string(),
-            agent_id: scope.and_then(|s| s.agent_id.clone()),
-            app_handle_id: None,
-            agent_handle: None,
-            connection_id: None,
-            app_key: Some(BACKEND.to_string()),
-            action: Some(ACTION.to_string()),
-            risk: None,
-            severity: None,
-            decision: "deny".into(),
-            reason_code: "invalid_query".into(),
-            gate: Some("code_search".into()),
-            args_redaction_summary: Some(
-                "code_search query recorded in query_text; other arguments omitted".into(),
-            ),
-            outcome: Some("not_sent".into()),
-            latency_ms: None,
-            request_id: None,
-            credential_fingerprint: None,
-            provider_account_fingerprint: None,
-            attempt_no: None,
-            vendor_request_id: None,
-            idempotency_key_fingerprint: None,
-            response_class: None,
-            reconciliation_of: None,
-        };
-        let mut query_text = None;
+        let mut audit = facade::SearchAudit::new(
+            SearchTool::Code,
+            caller,
+            scope.and_then(|s| s.agent_id.clone()),
+            scope,
+            relay_origin,
+        );
         let outcome = (|| {
             let query = CodeSearchQuery::parse(arguments)?;
-            query_text = Some(query.query.clone());
+            audit.query_text = Some(query.query.clone());
             let agent = resolve_call_agent(scope);
             let now = (self.clock)();
+            let is_flow = scope.is_some_and(|scope| scope.flow_id.is_some());
             // Find the granted connection first: the rate buckets are shared
             // (the global grep.app bucket serves every caller), so a caller
             // with no grant must be refused before it can spend from them.
-            let (connection, action) = backing_connection(engine.store(), caller, now)?;
-            audit.principal = connection.principal.clone();
-            audit.connection_id = Some(connection.connection_id.clone());
-            audit.risk = Some(action.risk.clone());
-            audit.severity = Some(action.severity.clone());
-            let policy = engine
-                .store()
-                .matching_policy(
-                    &connection.principal,
-                    &connection.connection_id,
-                    ACTION,
-                    now,
-                )
-                .map_err(store_failure)?;
-            let effect = crate::governance::catalog_policy_effect(
-                &action,
-                policy.as_ref().map(|row| row.effect.as_str()),
-                None,
-            );
-            if crate::governance::per_call_approval_unsupported(effect, false) {
-                return Err(CodeSearchRefusal::new(RefusalCode::AskFirst));
-            }
-            if effect != "allow" {
-                return Err(CodeSearchRefusal::new(RefusalCode::NotGranted));
-            }
+            let (connection, action) = facade::resolve_connection(
+                engine.store(),
+                caller,
+                now,
+                is_flow,
+                TARGET,
+                grant_target(caller),
+            )
+            .map_err(refusal_from)?;
+            audit.resolved(&connection, &action);
+            facade::standing_checks(engine.store(), SearchTool::Code, &connection, &action, now)
+                .map_err(refusal_from)?;
             // Limits are stored by backend in web_search_limits. Charge the caller's
             // module bucket and the global grep.app bucket, irrespective of agent identity.
             let limits = engine
@@ -248,56 +235,43 @@ impl CodeSearchService {
             if let Some(origin) = relay_origin {
                 request = request.with_relay_origin(origin.clone());
             }
-            let reservation = engine.authorize(request).map_err(refusal_for_denial)?;
+            let reservation = engine.authorize(request).map_err(|denial| {
+                refusal_from(facade::denial_for(&denial, grant_target(caller)))
+            })?;
             let dispatched = engine.revalidate_and_dispatch(&reservation);
-            audit.outcome = Some("failed".into());
-            let retry_after_ms = dispatched.retry_after_ms;
-            let body = match dispatched.outcome {
-                TransportOutcome::Completed {
-                    response: Some(body),
-                } => body,
-                TransportOutcome::VendorFailed { code, .. }
-                | TransportOutcome::NotSent { code, .. }
-                    if code == "throttled" =>
-                {
-                    let retry_after_ms = retry_after_ms.unwrap_or(DEFAULT_VENDOR_RETRY_AFTER_MS);
-                    return Err(CodeSearchRefusal {
-                        retry_after_ms: Some(retry_after_ms),
-                        ..CodeSearchRefusal::new(RefusalCode::RateLimited)
-                    });
-                }
-                _ => return Err(unavailable()),
-            };
+            audit.dispatched = true;
+            let body = facade::vendor_body(
+                SearchTool::Code,
+                BACKEND,
+                &connection.connection_id,
+                &dispatched,
+            )
+            .map_err(refusal_from)?;
             reply::parse_reply(&body).map_err(|error| {
                 eprintln!(warn governance: "code_search reply unreadable: {error}");
                 unavailable()
             })
         })();
-        let result_count = match &outcome {
-            Ok(response) => {
-                audit.decision = "allow".into();
-                audit.reason_code = "code_search_dispatched".into();
-                audit.outcome = Some("completed".into());
-                audit.response_class = Some("vendor".into());
-                Some(response.matches.len() as i64)
-            }
-            Err(refusal) => {
-                audit.reason_code = refusal.code.to_string();
-                None
-            }
+        let row = match &outcome {
+            Ok(response) => facade::RowOutcome {
+                decision: "allow",
+                reason_code: "code_search_dispatched".to_string(),
+                outcome: "completed",
+                response_class: Some("vendor"),
+                result_count: Some(response.matches.len() as i64),
+            },
+            Err(refusal) => audit.refused(refusal.code.as_str()),
         };
         // Code search queries are retained as text so usage can be analysed, like web search.
         // Journal retention defaults to 30 days (PLEXUS_AUDIT_RETENTION_DAYS).
         // Credentials are omitted; agent identity comes only from the daemon's route scope.
-        if let Err(error) = engine.store().append_web_search_audit(
-            &audit,
-            query_text.as_deref(),
-            result_count,
-            scope,
-            relay_origin,
-        ) {
-            eprintln!(error governance: "code_search audit append failed: {error}");
-        }
+        let _ = audit.append(
+            engine.store(),
+            Some(BACKEND.to_string()),
+            Some(ACTION.to_string()),
+            "code_search query recorded in query_text; other arguments omitted".to_string(),
+            row,
+        );
         outcome
     }
 }
@@ -311,78 +285,48 @@ fn store_failure(error: cortexkit_store::StoreError) -> CodeSearchRefusal {
     unavailable()
 }
 
-fn refusal_for_denial(denial: Denial) -> CodeSearchRefusal {
+/// The grant a flow is told to restore when no code search connection admits
+/// it: the calling module's grant for grep.app's search action.
+fn grant_target(caller: &str) -> GrantTarget {
+    GrantTarget::new(Layer::Module, caller, "code_search", Some(BACKEND), ACTION)
+}
+
+/// Name a shared search denial in code_search's refusal set.
+fn refusal_from(denial: SearchDenial) -> CodeSearchRefusal {
     match denial {
-        Denial::Policy(crate::governance::PolicyDenial::AskFirst) => {
-            CodeSearchRefusal::new(RefusalCode::AskFirst)
+        SearchDenial::NotGranted | SearchDenial::Blocked => {
+            CodeSearchRefusal::new(RefusalCode::NotGranted)
         }
-        Denial::Grant(_)
-        | Denial::GrantRefusal(_)
-        | Denial::Policy(_)
-        | Denial::ActionRequestCreated { .. } => CodeSearchRefusal::new(RefusalCode::NotGranted),
-        Denial::ConsentUnavailable { .. } => {
+        SearchDenial::Grant(refusal) => CodeSearchRefusal::grant(refusal),
+        SearchDenial::Ambiguous => CodeSearchRefusal::new(RefusalCode::BackendAmbiguous),
+        SearchDenial::AskFirst => CodeSearchRefusal::new(RefusalCode::AskFirst),
+        SearchDenial::Quarantined => CodeSearchRefusal::new(RefusalCode::BackendQuarantined),
+        SearchDenial::Throttled { retry_after_ms } => CodeSearchRefusal {
+            retry_after_ms: Some(retry_after_ms),
+            ..CodeSearchRefusal::new(RefusalCode::RateLimited)
+        },
+        SearchDenial::ConsentUnavailable { .. } => {
             CodeSearchRefusal::new(RefusalCode::ConsentUnavailable)
         }
-        _ => unavailable(),
+        SearchDenial::ConnectionUnusable | SearchDenial::Unavailable => unavailable(),
     }
 }
 
+/// The connection that backs a code search for a caller outside a flow.
+#[cfg(test)]
 fn backing_connection(
-    store: &PlexusStore,
+    store: &crate::storage::PlexusStore,
     caller: &str,
     now: i64,
-) -> Result<(ConnectionRecord, CatalogAction), CodeSearchRefusal> {
-    let mut eligible = Vec::new();
-    for id in store
-        .web_search_candidate_connection_ids(caller, BACKEND, now)
-        .map_err(store_failure)?
-    {
-        let Some(connection) = store
-            .connection_for_invoke(caller, &id)
-            .map_err(store_failure)?
-        else {
-            continue;
-        };
-        let Some(action) = store
-            .catalog_action(&connection.principal, &id, ACTION)
-            .map_err(store_failure)?
-        else {
-            continue;
-        };
-        let rows = store
-            .scoped_invoke_grant_rows(&connection, caller, None)
-            .map_err(store_failure)?;
-        let grant = scoped_grant(
-            &rows,
-            &connection,
-            caller,
-            None,
-            AUTHORITY_INVOKE,
-            ACTION,
-            now,
-            Some(&action.risk),
-        );
-        if scoped_grant_refusal(grant.as_ref(), ACTION, &action.risk, now).is_some() {
-            continue;
-        }
-        eligible.push((connection, action));
-    }
-    if eligible.is_empty() {
-        return Err(CodeSearchRefusal::new(RefusalCode::NotGranted));
-    }
-    if eligible.len() != 1 {
-        eprintln!(warn governance: "code_search for {caller} is ambiguous across connections {:?}", eligible.iter().map(|(connection, _)| &connection.connection_id).collect::<Vec<_>>());
-        return Err(CodeSearchRefusal::new(RefusalCode::BackendAmbiguous));
-    }
-    let (connection, action) = eligible.remove(0);
-    if action.status == "quarantined" {
-        eprintln!(warn governance: "code_search action quarantined on {}", connection.connection_id);
-        return Err(CodeSearchRefusal::new(RefusalCode::BackendQuarantined));
-    }
-    if action.status != "active" || connection_denial(&connection).is_some() {
-        return Err(unavailable());
-    }
-    Ok((connection, action))
+) -> Result<
+    (
+        crate::storage::ConnectionRecord,
+        crate::storage::CatalogAction,
+    ),
+    CodeSearchRefusal,
+> {
+    facade::resolve_connection(store, caller, now, false, TARGET, grant_target(caller))
+        .map_err(refusal_from)
 }
 
 #[cfg(test)]

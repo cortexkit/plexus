@@ -1,6 +1,7 @@
 use super::*;
 use crate::storage::{
-    web_search_store::WebSearchLimits, CatalogActionInput, GrantInput, CATALOG_PRINCIPAL,
+    web_search_store::WebSearchLimits, CatalogActionInput, GrantInput, PlexusStore,
+    CATALOG_PRINCIPAL,
 };
 use crate::test_scratch::Scratch;
 use crate::{MockResponse, MockTransport, StubCredentialSource};
@@ -474,4 +475,51 @@ fn ungranted_callers_cannot_drain_the_global_bucket() {
         10
     );
     assert_eq!(f.transport.requests().len(), 1);
+}
+
+/// A flow is told which grant to restore, in the same typed form every flow
+/// refusal uses; a caller outside a flow keeps the tool's closed code.
+#[test]
+fn flow_without_a_grant_gets_a_typed_grant_refusal() {
+    let f = Fixture::new();
+    let scope = CallScope {
+        owner: "reserved:stranger".into(),
+        scope_ref: "flow-1".into(),
+        scope_epoch: 1,
+        kind: Some("worker".into()),
+        parent: None,
+        parent_state: None,
+        agent_id: None,
+        flow_id: Some("flow-1".into()),
+        delegates: true,
+        owner_authorized: true,
+    };
+    let wire = f
+        .search("reserved:stranger", Some(&scope))
+        .unwrap_err()
+        .to_wire();
+    assert_eq!(
+        wire["error"]["code"], "module_grant_absent",
+        "a flow must be told which grant to restore: {wire}"
+    );
+    assert_eq!(wire["error"]["detail"]["action"], ACTION);
+    assert_eq!(wire["error"]["detail"]["cause"], "missing");
+    assert_eq!(
+        f.search("reserved:stranger", None).unwrap_err().code,
+        "code_search_not_granted"
+    );
+    assert!(f.transport.requests().is_empty());
+}
+
+/// A quarantine governance meets while authorizing (the action was
+/// quarantined after the preflight read it) is reported as a quarantine, as
+/// an invoke would report it, not as an unavailable backend.
+#[test]
+fn quarantine_met_at_authorize_is_backend_quarantined() {
+    let denial = crate::governance::Denial::Catalog(crate::governance::CatalogDenial::Quarantined);
+    assert_eq!(
+        refusal_from(facade::denial_for(&denial, grant_target("direct"))).code,
+        "backend_quarantined",
+        "a quarantine met at authorize must name the quarantine"
+    );
 }
