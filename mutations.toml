@@ -20493,3 +20493,19 @@ expect_red = ["web_search::code_lookup::tests::gist_pages_are_source_lookups"]
 expect_message = "a gist.github.com page must refuse"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "search-candidates-use-callers-clock"
+guards = "The search candidate query judges grant expiry at the caller's now, the instant the caller's own grant check uses"
+file = "crates/plexus-core/src/store/web_search.rs"
+old = "statement.query_map((caller, app_key, now_ms), |row| row.get::<_, String>(0))?;"
+new = "statement.query_map((caller, app_key, super::now_ms()), |row| row.get::<_, String>(0))?; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/web_search_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::web_search_store::tests::candidate_grant_expiry_uses_the_callers_clock"]
+expect_message = "a grant still live at the caller's now must keep its connection a candidate"
+build_timeout_s = 3600
+timeout_s = 120

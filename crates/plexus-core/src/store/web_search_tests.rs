@@ -595,3 +595,45 @@ fn migration_53_is_additive_and_preserves_existing_limits_and_rows() {
         0
     );
 }
+
+/// Grant expiry in the candidate query is judged at the caller's `now`, not
+/// the store's own wall clock, so it agrees with the caller's grant check.
+#[test]
+fn candidate_grant_expiry_uses_the_callers_clock() {
+    let store = store();
+    store
+        .insert_connection(
+            "owner",
+            "shared",
+            "exa_rest",
+            "active",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+    store
+        .insert_grant(&crate::storage::GrantInput {
+            grant_id: "expiring".into(),
+            principal: "owner".into(),
+            connection_id: "shared".into(),
+            grantee_principal: "caller".into(),
+            risk_ceiling: "read".into(),
+            action_selectors: vec!["search".into()],
+            authority_kind: "invoke".into(),
+            expires_at: Some(FEBRUARY),
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .web_search_candidate_connection_ids("caller", "exa_rest", FEBRUARY - 1)
+            .unwrap(),
+        vec!["shared"],
+        "a grant still live at the caller's now must keep its connection a candidate"
+    );
+    assert!(
+        store
+            .web_search_candidate_connection_ids("caller", "exa_rest", FEBRUARY)
+            .unwrap()
+            .is_empty(),
+        "a grant expired at the caller's now must not widen the candidates"
+    );
+}

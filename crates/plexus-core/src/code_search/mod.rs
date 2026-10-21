@@ -334,7 +334,7 @@ fn backing_connection(
 ) -> Result<(ConnectionRecord, CatalogAction), CodeSearchRefusal> {
     let mut eligible = Vec::new();
     for id in store
-        .web_search_candidate_connection_ids(caller, BACKEND)
+        .web_search_candidate_connection_ids(caller, BACKEND, now)
         .map_err(store_failure)?
     {
         let Some(connection) = store

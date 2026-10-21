@@ -553,7 +553,7 @@ impl WebSearchService {
         let mut eligible = Vec::new();
         let mut cause = crate::grant_refusal::Cause::Missing;
         for connection_id in store
-            .web_search_candidate_connection_ids(caller, backend.app_key)
+            .web_search_candidate_connection_ids(caller, backend.app_key, now_ms)
             .map_err(store_failure)?
         {
             let Some(connection) = store

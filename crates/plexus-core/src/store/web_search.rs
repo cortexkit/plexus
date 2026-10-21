@@ -324,10 +324,14 @@ impl PlexusStore {
     /// Revoked, disabled and never-activated connections are left out. Degraded
     /// and auth-required rows remain candidates so governance can name their
     /// recoverable health condition. Expired grants do not widen the candidate set.
+    ///
+    /// Expiry is judged at `now_ms`, the caller's clock, so the candidate set
+    /// agrees with the grant check the caller then applies at the same instant.
     pub fn web_search_candidate_connection_ids(
         &self,
         caller: &str,
         app_key: &str,
+        now_ms: i64,
     ) -> Result<Vec<String>, StoreError> {
         self.inner.with_read(|conn| {
             let mut statement = conn.prepare(
@@ -346,7 +350,7 @@ impl PlexusStore {
                  ORDER BY connection.connection_id",
             )?;
             let rows =
-                statement.query_map((caller, app_key, now_ms()), |row| row.get::<_, String>(0))?;
+                statement.query_map((caller, app_key, now_ms), |row| row.get::<_, String>(0))?;
             rows.collect()
         })
     }

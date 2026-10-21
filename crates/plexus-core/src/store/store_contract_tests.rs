@@ -1861,7 +1861,7 @@ fn expired_invoke_grants_do_not_widen_search_candidates() {
         .unwrap();
     assert_eq!(
         store
-            .web_search_candidate_connection_ids("caller", "fixture")
+            .web_search_candidate_connection_ids("caller", "fixture", now_ms())
             .unwrap(),
         vec!["own"],
         "expired grants must not make a single usable search connection ambiguous"
@@ -1872,7 +1872,7 @@ fn expired_invoke_grants_do_not_widen_search_candidates() {
         .unwrap();
     assert_eq!(
         store
-            .web_search_candidate_connection_ids("caller", "fixture")
+            .web_search_candidate_connection_ids("caller", "fixture", now_ms())
             .unwrap(),
         vec!["connection", "own"]
     );
