@@ -1277,8 +1277,12 @@ async fn all_pinned_event_and_sequence_boundary_bytes_are_consumed() {
     );
 }
 
+/// Relay states follow store work: `Connected` is set only after the hello
+/// cursor commits on the blocking pool, which ordinary parallel runs can delay
+/// for seconds. So this waits with the store-work watchdog; the short bound in
+/// `bounded` is for local accept, dial and socket reads.
 async fn wait_state(status: &Status, expected: State) {
-    bounded(async {
+    tokio::time::timeout(crate::bounded::STORE_WORK_WAIT, async {
         loop {
             if status.0.lock().unwrap().state == expected {
                 break;
@@ -1286,7 +1290,8 @@ async fn wait_state(status: &Status, expected: State) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
-    .await;
+    .await
+    .unwrap_or_else(|_| panic!("relay never reached {expected:?}"));
 }
 
 #[tokio::test]
