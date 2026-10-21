@@ -8,6 +8,8 @@
 
 #[path = "support/bounded.rs"]
 mod bounded;
+#[path = "support/daemon_client.rs"]
+mod daemon_client;
 #[path = "support/operator_confirmation.rs"]
 mod operator_confirmation_peer;
 #[path = "support/shell.rs"]
@@ -22,6 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use cortexkit_test_support::ckdev_binary;
+use daemon_client::connect_client;
 use plexus_conformance::{catalog_manifests, StubRestRoute, StubRestServer};
 use plexus_core::test_scratch::Scratch;
 use plexus_core::{
@@ -37,7 +40,7 @@ use subc_protocol::session::{HealthStatus, ModuleControlRequest};
 use subc_protocol::{
     BindIdentity, Flags, Frame, FrameType, Principal, Priority, RouteTarget, PROTOCOL_VERSION,
 };
-use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
+use subc_transport::{connection_file, read_frame, write_frame};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -1275,17 +1278,6 @@ async fn start_live_daemon_with(
         },
         connection,
     )
-}
-
-async fn connect_client(connection: &subc_transport::ConnectionInfo) -> TcpStream {
-    let endpoint = connection.endpoints.first().expect("daemon endpoint");
-    let mut stream = TcpStream::connect(format!("{}:{}", endpoint.host, endpoint.port))
-        .await
-        .expect("connect daemon");
-    authenticate_client(&mut stream, connection, Duration::from_secs(5))
-        .await
-        .expect("authenticate daemon client");
-    stream
 }
 
 async fn send_control_request(

@@ -168,18 +168,6 @@ fn seed_bot(fixture: &crate::withdraw_tests::Fixture) {
             VALUES (?1,'operator','conn-bot','reserved:aft','write','invoke',1,'[\"add_reaction\"]',?2)", rusqlite::params![id, agent]).unwrap();
     }
 }
-struct BotToken;
-impl plexus_core::github::credential::HandleCredentialProvider for BotToken {
-    fn prepare(
-        &self,
-        _: &str,
-        _: i64,
-        _: &str,
-    ) -> Result<plexus_core::ResolvedCredential, &'static str> {
-        Ok(plexus_core::ResolvedCredential::anonymous())
-    }
-    fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
-}
 
 /// As many approval waits as there are blocking slots, so a parked wait that
 /// kept its blocking slot would leave no room for the unrelated work below.
@@ -244,7 +232,9 @@ async fn parked_calls_do_not_starve_work(recalled: bool) {
         .with_governance_seams(Arc::new(
             plexus_core::storage::github_store::GithubGovernanceSeams {
                 store: fixture.store.clone(),
-                credential_provider: Some(Arc::new(BotToken)),
+                credential_provider: Some(
+                    crate::consent_test_support::anonymous_handle_credentials(),
+                ),
             },
         ));
     runtime.web_search = Arc::new(plexus_core::web_search::WebSearchService::exa());

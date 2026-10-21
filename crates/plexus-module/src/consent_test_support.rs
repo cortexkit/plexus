@@ -86,6 +86,25 @@ pub(super) fn live_reader(scope: CallScope) -> Arc<dyn plexus_core::scope::Scope
     Arc::new(Live(scope))
 }
 
+/// A bot-token source that hands every handle an anonymous credential, for
+/// tests whose vendor is a mock transport that never reads the token.
+pub(super) fn anonymous_handle_credentials(
+) -> Arc<dyn plexus_core::github::credential::HandleCredentialProvider> {
+    struct Anonymous;
+    impl plexus_core::github::credential::HandleCredentialProvider for Anonymous {
+        fn prepare(
+            &self,
+            _: &str,
+            _: i64,
+            _: &str,
+        ) -> Result<plexus_core::ResolvedCredential, &'static str> {
+            Ok(plexus_core::ResolvedCredential::anonymous())
+        }
+        fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
+    }
+    Arc::new(Anonymous)
+}
+
 pub(super) fn worker_stamp(scope_ref: &str, epoch: u64) -> subc_protocol::scope::ScopeStamp {
     let owner = subc_protocol::Principal::Reserved {
         module_id: "prefrontal-core".into(),

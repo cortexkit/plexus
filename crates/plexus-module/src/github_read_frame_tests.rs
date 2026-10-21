@@ -15,15 +15,7 @@ mod review_threads_tests;
 use super::*;
 use plexus_core::github::credential::HandleCredentialProvider;
 use plexus_core::storage::github_store::{GithubGovernanceSeams, GithubHandle, GithubImportRow};
-use plexus_core::{ingest_value, MockResponse, ResolvedCredential, CATALOG_PRINCIPAL};
-
-struct ReadyToken;
-impl HandleCredentialProvider for ReadyToken {
-    fn prepare(&self, _: &str, _: i64, _: &str) -> Result<ResolvedCredential, &'static str> {
-        Ok(ResolvedCredential::anonymous())
-    }
-    fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
-}
+use plexus_core::{ingest_value, MockResponse, CATALOG_PRINCIPAL};
 
 pub(super) fn github_manifest() -> plexus_core::IngestedManifest {
     let source = include_str!("../../../catalog/github_rest.jsonc");
@@ -52,7 +44,10 @@ fn imported_runtime_with_actions(
     Arc<MockTransport>,
     Scratch,
 ) {
-    imported_runtime_with_provider(actions, Arc::new(ReadyToken))
+    imported_runtime_with_provider(
+        actions,
+        crate::consent_test_support::anonymous_handle_credentials(),
+    )
 }
 
 /// [`imported_runtime_with_actions`] whose bot tokens come from `provider`,

@@ -21,6 +21,8 @@
 
 #[path = "support/bounded.rs"]
 mod bounded;
+#[path = "support/daemon_client.rs"]
+mod daemon_client;
 #[path = "support/shell.rs"]
 mod shell;
 
@@ -29,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use daemon_client::connect_client;
 use plexus_core::scope::{
     approval_scope_verdict, recheck_call_scope, ApprovalScope, ApprovalScopeVerdict, CallScope,
     ScopeDescription, ScopeReader, ScopeStatus, SCOPE_ENDED, SCOPE_NOT_SYNCED, SCOPE_UNVERIFIABLE,
@@ -40,7 +43,7 @@ use serde_json::{json, Value};
 use shell::single_quoted;
 use subc_protocol::session::{ModuleControlRequestFromModule, ModuleControlResponseToModule};
 use subc_protocol::{Frame, FrameType, ModuleHelloAckBody, PROTOCOL_VERSION};
-use subc_transport::{authenticate_client, connection_file, read_frame, write_frame};
+use subc_transport::{connection_file, read_frame, write_frame};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
@@ -470,17 +473,6 @@ async fn wait_for_owner_results(path: &Path) -> Vec<Value> {
     })
     .await
     .expect("the scope owner fixture must sync within the deadline")
-}
-
-async fn connect_client(connection: &subc_transport::ConnectionInfo) -> TcpStream {
-    let endpoint = connection.endpoints.first().expect("daemon endpoint");
-    let mut stream = TcpStream::connect(format!("{}:{}", endpoint.host, endpoint.port))
-        .await
-        .expect("connect daemon");
-    authenticate_client(&mut stream, connection, Duration::from_secs(5))
-        .await
-        .expect("authenticate with the daemon");
-    stream
 }
 
 async fn hello(

@@ -118,23 +118,10 @@ async fn invoke(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bot_request_module_entry_dispatches_through_governed_transport() {
     use plexus_core::credentials::CredentialSource;
-    use plexus_core::github::credential::HandleCredentialProvider;
     use plexus_core::governance::GovernanceEngine;
     use plexus_core::storage::github_store::{GithubGovernanceSeams, GithubHandle};
     use plexus_core::transport::Transport;
     use rusqlite::{params, Connection};
-    struct Token;
-    impl HandleCredentialProvider for Token {
-        fn prepare(
-            &self,
-            _: &str,
-            _: i64,
-            _: &str,
-        ) -> Result<plexus_core::ResolvedCredential, &'static str> {
-            Ok(plexus_core::ResolvedCredential::anonymous())
-        }
-        fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
-    }
     let path = Scratch::database("module-facade-dispatch");
     let store = Arc::new(
         PlexusStore::open(&StorageDescriptor {
@@ -208,7 +195,7 @@ async fn bot_request_module_entry_dispatches_through_governed_transport() {
     )
     .with_governance_seams(Arc::new(GithubGovernanceSeams {
         store: store.clone(),
-        credential_provider: Some(Arc::new(Token)),
+        credential_provider: Some(crate::consent_test_support::anonymous_handle_credentials()),
     }));
     let stamp = subc_protocol::scope::ScopeStamp::new(
         Principal::Reserved {
@@ -224,25 +211,11 @@ async fn bot_request_module_entry_dispatches_through_governed_transport() {
             .with_delegates(true),
     )
     .with_owner_authorized(true);
-    struct Live(plexus_core::scope::CallScope);
-    impl plexus_core::scope::ScopeReader for Live {
-        fn describe(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> Result<plexus_core::scope::ScopeDescription, plexus_core::scope::ScopeReadError>
-        {
-            Ok(plexus_core::scope::ScopeDescription {
-                status: plexus_core::scope::ScopeStatus::Live,
-                owner_synced: true,
-                owner_configured: true,
-                live: Some(self.0.clone()),
-            })
-        }
-    }
     runtime.engine = runtime
         .engine
-        .with_scope_reader(Arc::new(Live(CallScope::from_stamp(&stamp))));
+        .with_scope_reader(crate::consent_test_support::live_reader(
+            CallScope::from_stamp(&stamp),
+        ));
     let frame = Frame::build_with_version(PROTOCOL_VERSION, FrameType::Request,
             Flags::new(false, Priority::Interactive, false), 41, 1, 99,
             serde_json::to_vec(&json!({"name":manifest::GITHUB_TOOL,"arguments":{
