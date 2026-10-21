@@ -700,11 +700,7 @@ mod tests {
             include_str!("../../../../catalog/github.jsonc"),
             include_str!("../../../../catalog/github_actions.jsonc"),
         ] {
-            let source = source
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let source = subc_jsonc::jsonc_to_json(source).expect("shipped catalog is valid JSONC");
             let manifest =
                 crate::manifest::ingest_value(serde_json::from_str(&source).unwrap()).unwrap();
             store.upsert_manifest(CATALOG_PRINCIPAL, &manifest).unwrap();

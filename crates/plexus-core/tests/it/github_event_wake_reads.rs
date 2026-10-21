@@ -47,35 +47,7 @@ impl HandleCredentialProvider for Wire {
 
 fn manifest() -> plexus_core::IngestedManifest {
     let source = include_str!(concat!("../", "../../../catalog/github_rest.jsonc"));
-    let mut clean = String::new();
-    let mut chars = source.chars().peekable();
-    let mut quoted = false;
-    let mut escaped = false;
-    while let Some(ch) = chars.next() {
-        if quoted {
-            clean.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-        } else if ch == '"' {
-            quoted = true;
-            clean.push(ch);
-        } else if ch == '/' && chars.peek() == Some(&'/') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    clean.push(next);
-                    break;
-                }
-            }
-        } else {
-            clean.push(ch);
-        }
-    }
+    let clean = subc_jsonc::jsonc_to_json(source).expect("shipped catalog is valid JSONC");
     ingest_value(serde_json::from_str(&clean).unwrap()).unwrap()
 }
 

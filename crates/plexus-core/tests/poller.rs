@@ -6167,34 +6167,7 @@ impl plexus_core::github::credential::HandleCredentialProvider for VaultStub {
 /// read, to reproduce the manifest the fleet's handles were imported under.
 fn github_rest_manifest(with_timeline: bool) -> plexus_core::IngestedManifest {
     let source = include_str!("../../../catalog/github_rest.jsonc");
-    // Strip `//` comments outside strings (JSONC to JSON).
-    let mut clean = String::new();
-    let mut chars = source.chars().peekable();
-    let (mut quoted, mut escaped) = (false, false);
-    while let Some(ch) = chars.next() {
-        if quoted {
-            clean.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-        } else if ch == '"' {
-            quoted = true;
-            clean.push(ch);
-        } else if ch == '/' && chars.peek() == Some(&'/') {
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    clean.push(next);
-                    break;
-                }
-            }
-        } else {
-            clean.push(ch);
-        }
-    }
+    let clean = subc_jsonc::jsonc_to_json(source).expect("shipped catalog is valid JSONC");
     let mut value: Value = serde_json::from_str(&clean).expect("github_rest manifest is JSON");
     if !with_timeline {
         value["actions_baseline"]

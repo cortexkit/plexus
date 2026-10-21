@@ -109,11 +109,8 @@ fn fixture() -> (Arc<PlexusStore>, Engine, Arc<Github>) {
         })
         .unwrap(),
     );
-    let source = include_str!("../../../catalog/github.jsonc")
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let source = subc_jsonc::jsonc_to_json(include_str!("../../../catalog/github.jsonc"))
+        .expect("shipped catalog is valid JSONC");
     let manifest = crate::manifest::ingest_value(serde_json::from_str(&source).unwrap()).unwrap();
     store
         .upsert_manifest(crate::storage::CATALOG_PRINCIPAL, &manifest)

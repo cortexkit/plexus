@@ -1869,11 +1869,7 @@ mod tests {
     #[test]
     fn catalog_app_key_is_carried_into_mcp_connection_config() {
         let source = include_str!("../../../catalog/grep_app.jsonc");
-        let source = source
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let source = subc_jsonc::jsonc_to_json(source).expect("shipped catalog is valid JSONC");
         let manifest: crate::manifest::AppManifest =
             serde_json::from_str(&source).expect("reviewed grep.app manifest");
 
