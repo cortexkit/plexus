@@ -834,4 +834,6 @@ impl WebSearchService {
 }
 
 #[cfg(test)]
+mod refusal_parity_tests;
+#[cfg(test)]
 mod tests;
