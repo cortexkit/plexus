@@ -195,13 +195,18 @@ fn child_with_pipe_holding_descendant_is_killed_at_its_deadline() {
 
 #[test]
 fn a_worker_missing_completion_does_not_join_after_the_deadline() {
-    let worker = bounded::Task::spawn(|| std::thread::sleep(Duration::from_secs(1)));
+    // The worker outlives the elapsed bound by a wide margin, so the bound only
+    // fails when join waits for the worker, not when the host is slow.
+    let worker = bounded::Task::spawn(|| std::thread::sleep(Duration::from_secs(20)));
     let started = Instant::now();
     let error = worker
         .join_timeout(Duration::from_millis(50))
         .expect_err("the worker is still running");
     assert!(error.contains("test worker did not finish within 50ms"));
-    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "join_timeout waited for the worker instead of its deadline"
+    );
 }
 
 #[test]

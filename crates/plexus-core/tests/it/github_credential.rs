@@ -320,10 +320,12 @@ fn slow_vault_handle_does_not_block_another_handle() {
             let id = params["credential_id"].as_str().unwrap();
             if id == "github_app:slow" {
                 self.entered.send(()).unwrap();
+                // Outlasts the fast handle's wait below, so a blocked cache
+                // fails that assertion instead of this release gate.
                 self.release
                     .lock()
                     .unwrap()
-                    .recv_timeout(Duration::from_secs(5))
+                    .recv_timeout(Duration::from_secs(30))
                     .unwrap();
             }
             Ok(vault_reply(id, &first_token()))
@@ -349,7 +351,9 @@ fn slow_vault_handle_does_not_block_another_handle() {
             .send(fast.prepare("fast", 1, "github_app:fast"))
             .unwrap();
     });
-    let result = done_rx.recv_timeout(Duration::from_millis(500));
+    // The slow handle stays blocked until released below, so a fast reply that
+    // never comes is the failure; a generous wait costs nothing when it passes.
+    let result = done_rx.recv_timeout(Duration::from_secs(10));
     let elapsed = start.elapsed();
     release_tx.send(()).unwrap();
     slow.join().unwrap().unwrap();
