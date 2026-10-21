@@ -110,6 +110,19 @@ pub const ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP: &str = "plexus.admin.set_web_search
 /// Enroll one web search provider and grant its search action to its callers
 /// under a single operator confirmation: ticket, connect and grants together.
 pub const ADMIN_ADD_WEB_SEARCH_PROVIDER_OP: &str = "plexus.admin.add_web_search_provider";
+/// Enroll a write-capable connection and the authority to use it under a
+/// single operator confirmation: ticket, connect, connection-admin grant,
+/// resource filters, invoke grants and optional allow policies.
+pub const ADMIN_ADD_WRITE_CONNECTION_OP: &str = "plexus.admin.add_write_connection";
+/// Enroll a polled connection under a single operator confirmation: ticket,
+/// connect, poll grant and events-consume grants.
+pub const ADMIN_ADD_POLL_CONNECTION_OP: &str = "plexus.admin.add_poll_connection";
+/// Widen a connection's ceiling and grant the added actions in one
+/// transaction under a single operator confirmation.
+pub const ADMIN_WIDEN_AND_GRANT_OP: &str = "plexus.admin.widen_and_grant";
+/// Import, prove, bind and grant one GitHub App handle under a single
+/// operator confirmation.
+pub const ADMIN_ONBOARD_GITHUB_BOT_OP: &str = "plexus.admin.onboard_github_bot";
 /// Adding a recipient entry lets the agent send to that recipient without
 /// asking for approval, widening its authority under an allow policy.
 pub const ADMIN_RECIPIENTS_ADD_OP: &str = "plexus.admin.recipients_add";
@@ -404,6 +417,26 @@ pub fn build_with_launch_nonce_source(
                     name: ADMIN_ADD_WEB_SEARCH_PROVIDER_OP.to_string(),
                     kind: ManagementOperationKind::Mutate,
                     description: Some("Preview or apply one web search provider's connection and caller search grants under one confirmation; Direct only".to_string()),
+                },
+                ManagementOperation {
+                    name: ADMIN_ADD_WRITE_CONNECTION_OP.to_string(),
+                    kind: ManagementOperationKind::Mutate,
+                    description: Some("Preview or apply a write-capable connection with its admin grant, filters, invoke grants and allow policies under one confirmation; Direct only".to_string()),
+                },
+                ManagementOperation {
+                    name: ADMIN_ADD_POLL_CONNECTION_OP.to_string(),
+                    kind: ManagementOperationKind::Mutate,
+                    description: Some("Preview or apply a polled connection with its poll and events-consume grants under one confirmation; Direct only".to_string()),
+                },
+                ManagementOperation {
+                    name: ADMIN_WIDEN_AND_GRANT_OP.to_string(),
+                    kind: ManagementOperationKind::Mutate,
+                    description: Some("Preview or apply a ceiling widening and the grants that use it in one transaction under one confirmation; Direct only".to_string()),
+                },
+                ManagementOperation {
+                    name: ADMIN_ONBOARD_GITHUB_BOT_OP.to_string(),
+                    kind: ManagementOperationKind::Mutate,
+                    description: Some("Preview or apply a GitHub App handle's import, probe, bind and grants under one confirmation; Direct only".to_string()),
                 },
                 ManagementOperation {
                     name: crate::connector_home::STATUS_OP.to_string(),

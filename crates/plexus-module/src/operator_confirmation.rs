@@ -41,17 +41,20 @@ pub fn may_need_confirmation(method: &str, params: &Value) -> bool {
         | manifest::GITHUB_BIND_OP
         | manifest::GITHUB_GRANT_OP
         | manifest::GITHUB_IMPORT_OP
-        | manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP => params["dry_run"] == false,
+        | manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP
+        | manifest::ADMIN_ADD_WRITE_CONNECTION_OP
+        | manifest::ADMIN_ADD_POLL_CONNECTION_OP
+        | manifest::ADMIN_WIDEN_AND_GRANT_OP
+        | manifest::ADMIN_ONBOARD_GITHUB_BOT_OP => params["dry_run"] == false,
         _ => false,
     }
 }
 
 pub(crate) fn summary(method: &str, params: &Value) -> Option<String> {
-    // Adding a web search provider may take its grantees from the store, so its
-    // handler builds the summary from its own plan and asks exactly once.
-    if !may_need_confirmation(method, params)
-        || method == manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP
-    {
+    // The composite operations bundle several changes and read part of their
+    // plan from the store, so each handler builds its summary from its own
+    // plan and asks exactly once.
+    if !may_need_confirmation(method, params) || is_composite(method) {
         return None;
     }
     // Only authority identifiers are included, never credential IDs, inventory
@@ -115,6 +118,19 @@ pub(crate) fn summary(method: &str, params: &Value) -> Option<String> {
         ),
         _ => unreachable!("only authority-widening ceremonies need confirmation"),
     })
+}
+
+/// The management operations that ask for confirmation themselves, once, with
+/// a summary of their whole plan.
+fn is_composite(method: &str) -> bool {
+    matches!(
+        method,
+        manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP
+            | manifest::ADMIN_ADD_WRITE_CONNECTION_OP
+            | manifest::ADMIN_ADD_POLL_CONNECTION_OP
+            | manifest::ADMIN_WIDEN_AND_GRANT_OP
+            | manifest::ADMIN_ONBOARD_GITHUB_BOT_OP
+    )
 }
 
 pub(crate) fn audit_refusal(state: &crate::ModuleState, method: &str, refusal: &Refusal) -> Value {

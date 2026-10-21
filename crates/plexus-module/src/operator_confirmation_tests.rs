@@ -29,6 +29,16 @@ struct Case {
     state: Arc<ModuleState>,
     method: &'static str,
     params: Value,
+    /// The MCP vendor discovery reaches, for the cases that connect to one.
+    _vendor: Option<plexus_conformance::stub_server::StubMcpServer>,
+}
+
+fn install_catalog_manifest(store: &PlexusStore, source: &str) {
+    let manifest = plexus_core::ingest_value(
+        serde_json::from_str(&subc_jsonc::jsonc_to_json(source).unwrap()).unwrap(),
+    )
+    .unwrap();
+    store.upsert_manifest("system", &manifest).unwrap();
 }
 
 impl Case {
@@ -47,6 +57,7 @@ impl Case {
         let mut runtime = runtime_for_test(store.clone());
         runtime.github_handle_credentials = Some(Arc::new(AnyHandleToken));
         runtime.github_control_reader = Some(Arc::new(Installation));
+        let mut vendor = None;
         let params = match method {
             manifest::ADMIN_ISSUE_TICKET_OP => {
                 json!({"app_key":"exa_rest","connection_id":"conn-new","credential_id":"apikey:exa"})
@@ -88,6 +99,48 @@ impl Case {
                 store.upsert_manifest("system", &manifest).unwrap();
                 json!({"provider":"tavily","grantees":["reserved:basal"],"dry_run":false})
             }
+            manifest::ADMIN_ADD_WRITE_CONNECTION_OP => {
+                store
+                    .upsert_manifest(
+                        "system",
+                        &test_write_manifest("confirm_write", "https://confirm.invalid/mcp"),
+                    )
+                    .unwrap();
+                let stub = plexus_conformance::stub_server::StubMcpServer::start(vec![
+                    plexus_conformance::stub_server::StubTool::simple("held_write"),
+                ])
+                .unwrap();
+                runtime.endpoint_override = Some(stub.endpoint().to_string());
+                vendor = Some(stub);
+                json!({"app_key":"confirm_write","connection_id":"conn-confirm-write",
+                    "credential_id":"apikey:write","actions":["held_write"],
+                    "grantees":["reserved:basal"],"dry_run":false})
+            }
+            manifest::ADMIN_ADD_POLL_CONNECTION_OP => {
+                install_catalog_manifest(
+                    &store,
+                    include_str!("../../../catalog/github_actions.jsonc"),
+                );
+                json!({"app_key":"github_actions","connection_id":"conn-confirm-poll",
+                    "credential_id":"apikey:github","actions":["list_workflow_runs"],
+                    "dry_run":false})
+            }
+            manifest::ADMIN_WIDEN_AND_GRANT_OP => {
+                database
+                    .execute("UPDATE connections SET ceiling_selectors = '[]'", [])
+                    .unwrap();
+                json!({"connection_id":CONNECTION,"actions":["search"],
+                    "grantees":["reserved:basal"],"dry_run":false})
+            }
+            manifest::ADMIN_ONBOARD_GITHUB_BOT_OP => {
+                install_catalog_manifest(
+                    &store,
+                    include_str!("../../../catalog/github_rest.jsonc"),
+                );
+                json!({"inventory":inventory(),"actions":["add_issue_comment"],
+                    "carrier":"reserved:basal","effect":"allow",
+                    "shim_manifest_maps_repo":true,"dry_run":false})
+            }
             manifest::GITHUB_IMPORT_OP | manifest::GITHUB_BIND_OP | manifest::GITHUB_GRANT_OP => {
                 let source = include_str!("../../../catalog/github_rest.jsonc");
                 let manifest = plexus_core::ingest_value(
@@ -127,6 +180,7 @@ impl Case {
             }),
             method,
             params,
+            _vendor: vendor,
         }
     }
 
@@ -173,6 +227,10 @@ const WIDENING: &[&str] = &[
     manifest::GITHUB_BIND_OP,
     manifest::GITHUB_GRANT_OP,
     manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP,
+    manifest::ADMIN_ADD_WRITE_CONNECTION_OP,
+    manifest::ADMIN_ADD_POLL_CONNECTION_OP,
+    manifest::ADMIN_WIDEN_AND_GRANT_OP,
+    manifest::ADMIN_ONBOARD_GITHUB_BOT_OP,
 ];
 
 fn route() -> RouteFrameContext {
@@ -351,6 +409,10 @@ async fn previews_never_request_confirmation() {
         manifest::GITHUB_BIND_OP,
         manifest::GITHUB_GRANT_OP,
         manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP,
+        manifest::ADMIN_ADD_WRITE_CONNECTION_OP,
+        manifest::ADMIN_ADD_POLL_CONNECTION_OP,
+        manifest::ADMIN_WIDEN_AND_GRANT_OP,
+        manifest::ADMIN_ONBOARD_GITHUB_BOT_OP,
     ] {
         for explicit_preview in [true, false] {
             let mut case = Case::new(method);

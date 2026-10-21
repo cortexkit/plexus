@@ -44,71 +44,176 @@ impl PlexusStore {
         actions: &[String],
         dry_run: bool,
     ) -> Result<Result<Value, CeremonyRefusal>, StoreError> {
-        if actions.is_empty() || actions.iter().any(|action| action.trim().is_empty()) {
-            return Ok(Err(CeremonyRefusal::EmptyActionSelectors));
+        if let Some(refusal) = unnamed_actions_refusal(actions) {
+            return Ok(Err(refusal));
         }
-        if actions.iter().any(|action| action.contains('*')) {
-            return Ok(Err(CeremonyRefusal::ExplicitActionsRequired));
-        }
-        let actions: std::collections::BTreeSet<_> = actions.iter().collect();
         self.inner.with_conn_fenced(|conn| {
-            let ceiling = match grant_ceiling_on_conn(conn, principal, connection_id)? {
-                Ok(ceiling) => ceiling,
-                Err(refusal) => return Ok(Err(refusal)),
-            };
-            let backs_handle: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM github_app_handle
-                 WHERE connection_principal=?1 AND connection_id=?2)",
-                (principal, connection_id), |row| row.get(0),
-            )?;
-            if backs_handle || connection_id.starts_with(GITHUB_HANDLE_CONNECTION_PREFIX) {
-                return Ok(Err(CeremonyRefusal::HandleCeilingRequiresHandleGrant));
-            }
-            let mut added = Vec::new();
-            let mut unchanged = Vec::new();
-            for action in actions {
-                let reviewed: Option<String> = conn.query_row(
-                    "SELECT risk FROM catalog_actions WHERE principal=?1 AND connection_id=?2
-                     AND name=?3 AND status='active' AND quarantine_reason IS NULL",
-                    (principal, connection_id, action), |row| row.get(0),
-                ).optional()?;
-                let Some(risk) = reviewed else {
-                    return Ok(Err(CeremonyRefusal::UnreviewedAction(action.clone())));
-                };
-                let Some(risk) = Risk::parse(&risk) else {
-                    return Ok(Err(CeremonyRefusal::InvalidRisk(risk)));
-                };
-                if !risk.within(ceiling.risk) {
-                    return Ok(Err(CeremonyRefusal::RiskAboveCeiling {
-                        requested: risk.to_string(), ceiling: ceiling.risk.to_string(),
-                    }));
-                }
-                if ceiling.action_selectors.iter().any(|selector| selector == action || selector == "*") {
-                    unchanged.push(action.clone());
-                } else {
-                    added.push(action.clone());
-                }
-            }
-            let mut resulting = ceiling.action_selectors.clone();
-            resulting.extend_from_slice(&added);
-            let applied = !dry_run && !added.is_empty();
-            if applied {
-                let now = now_ms();
-                extend_connection_ceiling_on_conn(conn, principal, connection_id, &ceiling.action_selectors, &added, now)?;
-                conn.execute(
-                    "INSERT INTO audit_journal(principal,actor,acting_principal,connection_id,action,risk,decision,reason_code,gate,args_redaction_summary,outcome,ts)
-                     VALUES (?1,'operator',?1,?2,'widen_ceiling',?3,'allow','ceremony_widen_ceiling','operator_ceremony',?4,'applied',?5)",
-                    rusqlite::params![principal, connection_id, ceiling.risk.to_string(),
-                        serde_json::json!({"connection_id":connection_id,"added_actions":added,"operator":principal}).to_string(), now],
-                )?;
-            }
-            Ok(Ok(serde_json::json!({
-                "connection_id":connection_id,"ceiling_risk":ceiling.risk.to_string(),
-                "dry_run":dry_run,"applied":applied,"current_ceiling":ceiling.action_selectors,
-                "added_actions":added,"unchanged_actions":unchanged,"resulting_ceiling":resulting,
-            })))
+            widen_connection_ceiling_on_conn(conn, principal, connection_id, actions, dry_run)
         })
     }
+
+    /// Widen a connection's ceiling by `actions` and mint `grants`, which may
+    /// use the added actions, in one fenced transaction: the widening, its
+    /// audit row, every grant and every grant's audit row commit together, or
+    /// nothing does. Each grant is bounded by the ceiling as widened. A
+    /// refusal of the widening or of any grant writes nothing.
+    ///
+    /// `dry_run` runs every write and then rolls the transaction back, so a
+    /// preview checks the grants against the widened ceiling exactly as an
+    /// apply would, and still writes nothing. The minted records it returns
+    /// carry ids that were never stored.
+    pub fn widen_ceiling_and_mint_grants(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        actions: &[String],
+        grants: &[GrantMintRequest],
+        audit: &dyn Fn(&GrantRecord) -> AuditRecord,
+        dry_run: bool,
+    ) -> Result<Result<(Value, Vec<GrantRecord>), CeremonyRefusal>, StoreError> {
+        if let Some(refusal) = unnamed_actions_refusal(actions) {
+            return Ok(Err(refusal));
+        }
+        if grants.iter().any(|grant| grant.grantee_principal == "*") {
+            return Ok(Err(CeremonyRefusal::WildcardGrantee));
+        }
+        // A refusal, or a preview's finished plan, is kept here while an error
+        // rolls the transaction back.
+        let kept = std::sync::Mutex::new(None);
+        let result = self.inner.with_conn_fenced(|conn| {
+            let outcome = match widen_connection_ceiling_on_conn(
+                conn,
+                principal,
+                connection_id,
+                actions,
+                false,
+            )? {
+                Ok(mut plan) => match mint_grants_bounded_on_conn(conn, grants, Some(audit))? {
+                    Ok(minted) => {
+                        if dry_run {
+                            plan["dry_run"] = Value::Bool(true);
+                            plan["applied"] = Value::Bool(false);
+                        }
+                        Ok((plan, minted))
+                    }
+                    Err(refusal) => Err(refusal),
+                },
+                Err(refusal) => Err(refusal),
+            };
+            match outcome {
+                Ok(applied) if !dry_run => Ok(applied),
+                kept_outcome => {
+                    *kept.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(kept_outcome);
+                    Err(rusqlite::Error::QueryReturnedNoRows)
+                }
+            }
+        });
+        match result {
+            Ok(applied) => Ok(Ok(applied)),
+            Err(error) => match kept
+                .into_inner()
+                .unwrap_or_else(|poison| poison.into_inner())
+            {
+                Some(outcome) => Ok(outcome),
+                None => Err(error),
+            },
+        }
+    }
+}
+
+/// A widening must name each action it adds: an empty name or a wildcard is
+/// refused before any transaction opens.
+fn unnamed_actions_refusal(actions: &[String]) -> Option<CeremonyRefusal> {
+    if actions.is_empty() || actions.iter().any(|action| action.trim().is_empty()) {
+        return Some(CeremonyRefusal::EmptyActionSelectors);
+    }
+    if actions.iter().any(|action| action.contains('*')) {
+        return Some(CeremonyRefusal::ExplicitActionsRequired);
+    }
+    None
+}
+
+/// [`PlexusStore::widen_connection_ceiling`] on `conn`, the caller's
+/// transaction. A refusal writes nothing.
+fn widen_connection_ceiling_on_conn(
+    conn: &rusqlite::Connection,
+    principal: &str,
+    connection_id: &str,
+    actions: &[String],
+    dry_run: bool,
+) -> rusqlite::Result<Result<Value, CeremonyRefusal>> {
+    let actions: std::collections::BTreeSet<_> = actions.iter().collect();
+    let ceiling = match grant_ceiling_on_conn(conn, principal, connection_id)? {
+        Ok(ceiling) => ceiling,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
+    let backs_handle: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM github_app_handle
+         WHERE connection_principal=?1 AND connection_id=?2)",
+        (principal, connection_id),
+        |row| row.get(0),
+    )?;
+    if backs_handle || connection_id.starts_with(GITHUB_HANDLE_CONNECTION_PREFIX) {
+        return Ok(Err(CeremonyRefusal::HandleCeilingRequiresHandleGrant));
+    }
+    let mut added = Vec::new();
+    let mut unchanged = Vec::new();
+    for action in actions {
+        let reviewed: Option<String> = conn
+            .query_row(
+                "SELECT risk FROM catalog_actions WHERE principal=?1 AND connection_id=?2
+             AND name=?3 AND status='active' AND quarantine_reason IS NULL",
+                (principal, connection_id, action),
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(risk) = reviewed else {
+            return Ok(Err(CeremonyRefusal::UnreviewedAction(action.clone())));
+        };
+        let Some(risk) = Risk::parse(&risk) else {
+            return Ok(Err(CeremonyRefusal::InvalidRisk(risk)));
+        };
+        if !risk.within(ceiling.risk) {
+            return Ok(Err(CeremonyRefusal::RiskAboveCeiling {
+                requested: risk.to_string(),
+                ceiling: ceiling.risk.to_string(),
+            }));
+        }
+        if ceiling
+            .action_selectors
+            .iter()
+            .any(|selector| selector == action || selector == "*")
+        {
+            unchanged.push(action.clone());
+        } else {
+            added.push(action.clone());
+        }
+    }
+    let mut resulting = ceiling.action_selectors.clone();
+    resulting.extend_from_slice(&added);
+    let applied = !dry_run && !added.is_empty();
+    if applied {
+        let now = now_ms();
+        extend_connection_ceiling_on_conn(
+            conn,
+            principal,
+            connection_id,
+            &ceiling.action_selectors,
+            &added,
+            now,
+        )?;
+        conn.execute(
+            "INSERT INTO audit_journal(principal,actor,acting_principal,connection_id,action,risk,decision,reason_code,gate,args_redaction_summary,outcome,ts)
+             VALUES (?1,'operator',?1,?2,'widen_ceiling',?3,'allow','ceremony_widen_ceiling','operator_ceremony',?4,'applied',?5)",
+            rusqlite::params![principal, connection_id, ceiling.risk.to_string(),
+                serde_json::json!({"connection_id":connection_id,"added_actions":added,"operator":principal}).to_string(), now],
+        )?;
+    }
+    Ok(Ok(serde_json::json!({
+        "connection_id":connection_id,"ceiling_risk":ceiling.risk.to_string(),
+        "dry_run":dry_run,"applied":applied,"current_ceiling":ceiling.action_selectors,
+        "added_actions":added,"unchanged_actions":unchanged,"resulting_ceiling":resulting,
+    })))
 }
 
 #[cfg(test)]

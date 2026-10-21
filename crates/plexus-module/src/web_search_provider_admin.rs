@@ -30,10 +30,10 @@ use serde_json::{json, Value};
 use subc_protocol::Frame;
 use tokio::sync::mpsc;
 
-use crate::{
-    ceremony, manifest, operator_confirmation, FacadeArguments, ModuleError, ModuleState,
-    RouteBindings, RouteFrameContext,
+use crate::composite_admin::{
+    self, diagnostic, named_principals, prompt_label, refusal, Caller, Composite, ConnectorHome,
 };
+use crate::{ceremony, manifest, ModuleError, ModuleState, RouteBindings, RouteFrameContext};
 
 /// Every grant this ceremony mints is invoke authority at read risk on exactly
 /// the provider's search action, the same grant the rollout guide mints by hand.
@@ -98,10 +98,6 @@ struct Plan {
     dry_run: bool,
 }
 
-fn refusal(code: &str, message: impl Into<String>) -> Value {
-    json!({"error": {"code": code, "message": message.into()}})
-}
-
 /// Serve `plexus.admin.add_web_search_provider`: a preview by default, or, with
 /// `dry_run: false`, exactly one operator confirmation followed by the writes.
 pub(crate) async fn add(
@@ -114,44 +110,19 @@ pub(crate) async fn add(
 ) -> Result<Value, ModuleError> {
     // Planning reads the store only: no vault read, no ticket, no vendor
     // request. A refusal here is returned before anyone is asked to confirm.
-    let plan = match plan(state, principal_key, params) {
-        Ok(plan) => plan,
-        Err(response) => return Ok(response),
-    };
-    if plan.dry_run {
-        return Ok(json!({ "result": plan.json() }));
-    }
-    if let Some(refusal) = state.runtime.connector_home.refusal() {
-        return Ok(refusal);
-    }
-    if let Err(refusal) = operator_confirmation::confirm(
-        &plan.summary(),
-        route,
-        writer,
-        &route_bindings.control_replies,
+    composite_admin::run(
+        Caller {
+            route,
+            writer,
+            state,
+            route_bindings,
+            method: manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP,
+        },
+        ConnectorHome::BeforeApplying,
+        || plan(state, principal_key, params),
+        |plan| apply(state, principal_key, plan),
     )
     .await
-    {
-        return Ok(operator_confirmation::audit_refusal(
-            state,
-            manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP,
-            &refusal,
-        ));
-    }
-    if route_bindings
-        .binding(route.channel, route.epoch)?
-        .is_none()
-    {
-        return Ok(operator_confirmation::audit_refusal(
-            state,
-            manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP,
-            &operator_confirmation::Refusal {
-                code: "operator_confirmation_unavailable",
-                reason: "the caller route closed while awaiting confirmation".to_string(),
-            },
-        ));
-    }
-    Ok(apply(state, principal_key, &plan))
 }
 
 fn plan(state: &Arc<ModuleState>, principal: &str, params: &Value) -> Result<Plan, Value> {
@@ -211,7 +182,7 @@ fn plan(state: &Arc<ModuleState>, principal: &str, params: &Value) -> Result<Pla
     let (step, connection_id) =
         connection_step(state, principal, provider, credential, instance.as_ref())?;
     let (grantees, grantees_source) = match request.grantees {
-        Some(named) => (explicit_grantees(named)?, "explicit"),
+        Some(named) => (named_principals(named)?, "explicit"),
         None => (
             default_grantees(state, principal)?,
             "existing_search_grants",
@@ -240,15 +211,6 @@ fn plan(state: &Arc<ModuleState>, principal: &str, params: &Value) -> Result<Pla
         present,
         dry_run: request.dry_run,
     })
-}
-
-/// Bound caller-supplied text before it is echoed in a refusal.
-fn diagnostic(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| if c.is_ascii_graphic() { c } else { '_' })
-        .take(60)
-        .collect()
 }
 
 /// The SearXNG instance address is required exactly when the reviewed
@@ -399,31 +361,6 @@ fn connection_step(
     Ok((ConnectionStep::Reuse, id.to_string()))
 }
 
-/// Caller-named grantees, in the order given and without repeats. A wildcard
-/// grantee would hand the search action to every principal, so it is refused.
-fn explicit_grantees(named: Vec<String>) -> Result<Vec<String>, Value> {
-    let mut seen = BTreeSet::new();
-    let mut grantees = Vec::new();
-    for grantee in named {
-        if grantee.trim().is_empty() || grantee.chars().any(char::is_whitespace) {
-            return Err(refusal(
-                "invalid_request",
-                "each grantee must be a principal name without spaces",
-            ));
-        }
-        if grantee.contains('*') {
-            return Err(refusal(
-                "wildcard_grantee",
-                "a wildcard grantee is never granted; name each caller",
-            ));
-        }
-        if seen.insert(grantee.clone()) {
-            grantees.push(grantee);
-        }
-    }
-    Ok(grantees)
-}
-
 /// Whether a stored grant authorizes invoking `action` now.
 fn live_search_grant(grant: &plexus_core::storage::GrantSummary, action: &str) -> bool {
     grant.authority_kind == GRANT_KIND
@@ -502,22 +439,6 @@ fn present_grantees(
         .collect())
 }
 
-/// Restrict a caller-supplied label to identifier characters, so it cannot
-/// add sentences or formatting to the confirmation prompt.
-fn prompt_label(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || "-_:./".contains(c) {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(60)
-        .collect()
-}
-
 impl Plan {
     fn grants_json(
         &self,
@@ -546,8 +467,8 @@ impl Plan {
             .collect()
     }
 
-    /// The preview: everything an apply would do, with the credential named
-    /// but never resolved, and the instance address withheld.
+    /// Everything an apply would do, with the credential named but never
+    /// resolved, and the instance address withheld.
     fn json(&self) -> Value {
         let provider = self.provider;
         let mut plan = json!({
@@ -570,6 +491,16 @@ impl Plan {
             plan["instance_url"] = json!("supplied (not shown)");
         }
         plan
+    }
+}
+
+impl Composite for Plan {
+    fn dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    fn preview(&self) -> Value {
+        self.json()
     }
 
     /// One line for the operator's presence prompt naming every effect: the
@@ -612,15 +543,7 @@ impl Plan {
     }
 }
 
-/// What exists after a failed step, for the operator deciding what to do next.
-fn existing_connection(state: &Arc<ModuleState>, principal: &str, connection_id: &str) -> String {
-    match state.store().connection(principal, connection_id) {
-        Ok(Some(connection)) => format!("connection {connection_id} is {}", connection.status),
-        Ok(None) => format!("no connection {connection_id} exists"),
-        Err(_) => format!("the state of connection {connection_id} could not be read"),
-    }
-}
-
+/// The reply for a failed step: nothing after it ran, so no grant was minted.
 fn step_failure(
     state: &Arc<ModuleState>,
     principal: &str,
@@ -628,23 +551,15 @@ fn step_failure(
     stage: &str,
     response: &Value,
 ) -> Value {
-    let code = response
-        .pointer("/error/code")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown_error");
-    let message = response
-        .pointer("/error/message")
-        .and_then(Value::as_str)
-        .unwrap_or("no message");
-    json!({"error": {
-        "code": code,
-        "stage": stage,
-        "connection_id": connection_id,
-        "message": format!(
-            "{stage} failed ({message}); {}; no grants were minted. Rerun add-web-search-provider to finish",
-            existing_connection(state, principal, connection_id)
-        ),
-    }})
+    composite_admin::step_failure(
+        state,
+        principal,
+        connection_id,
+        stage,
+        "no grants were minted",
+        "add-web-search-provider",
+        response,
+    )
 }
 
 /// Run the confirmed plan through the paths the manual commands use: the
@@ -652,7 +567,7 @@ fn step_failure(
 fn apply(state: &Arc<ModuleState>, principal: &str, plan: &Plan) -> Value {
     let provider = plan.provider;
     let connection_id = plan.connection_id.as_str();
-    let (discovery, reason) = match plan.step {
+    let discovery = match plan.step {
         ConnectionStep::Create | ConnectionStep::Reenroll => {
             let mut ticket = json!({
                 "app_key": provider.app_key,
@@ -666,50 +581,26 @@ fn apply(state: &Arc<ModuleState>, principal: &str, plan: &Plan) -> Value {
             if let Some(instance) = &plan.instance {
                 ticket["instance_url"] = json!(instance.as_str());
             }
-            let issued = ceremony::issue_ticket(state, principal, &ticket);
-            let Some(ticket_id) = issued.pointer("/result/ticket_id").and_then(Value::as_str)
-            else {
-                return step_failure(state, principal, connection_id, "ticket", &issued);
-            };
-            let arguments = json!({"op": "connect", "ticket_id": ticket_id});
-            let connected = crate::facade_connections_connect(&FacadeArguments {
-                state,
-                arguments: arguments
-                    .as_object()
-                    .expect("connect arguments are an object"),
-                principal_key: principal,
-                op: Some("connect"),
-            })
-            .unwrap_or_else(|error| refusal("connect_failed", error.to_string()));
-            let Some(result) = connected.get("result") else {
-                return step_failure(state, principal, connection_id, "connect", &connected);
-            };
-            (
-                result["discovery"]
-                    .as_str()
-                    .unwrap_or("degraded")
-                    .to_string(),
-                result.get("reason").cloned(),
-            )
+            match composite_admin::issue_and_connect(state, principal, &ticket) {
+                Ok(discovery) => discovery,
+                Err((stage, response)) => {
+                    return step_failure(state, principal, connection_id, stage, &response)
+                }
+            }
         }
         ConnectionStep::Reuse => {
-            let (discovery, reason) =
-                crate::connect_time_catalog(state, principal, connection_id, provider.app_key);
-            (discovery.to_string(), reason.map(Value::String))
+            composite_admin::rediscover(state, principal, connection_id, provider.app_key)
         }
     };
-    if discovery != "complete" {
-        return json!({"error": {
-            "code": "discovery_incomplete",
-            "stage": "discovery",
-            "connection_id": connection_id,
-            "discovery": discovery,
-            "reason": reason,
-            "message": format!(
-                "{}, but discovery is {discovery}; no grants were minted. Fix the cause, then rerun add-web-search-provider to finish",
-                existing_connection(state, principal, connection_id)
-            ),
-        }});
+    if discovery.outcome != "complete" {
+        return composite_admin::discovery_incomplete(
+            state,
+            principal,
+            connection_id,
+            &discovery,
+            "no grants were minted",
+            "add-web-search-provider",
+        );
     }
     // Read again after connecting: a grant minted since the plan was made
     // must not be minted a second time.
@@ -771,7 +662,7 @@ fn apply(state: &Arc<ModuleState>, principal: &str, plan: &Plan) -> Value {
     let mut result = plan.json();
     result["dry_run"] = json!(false);
     result["applied"] = json!(true);
-    result["discovery"] = json!(discovery);
+    result["discovery"] = json!(discovery.outcome);
     result["grants"] = json!(plan.grants_json(&present, &minted));
     json!({ "result": result })
 }

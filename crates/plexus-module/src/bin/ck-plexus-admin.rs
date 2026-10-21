@@ -123,6 +123,22 @@ commands:
   add-web-search-provider
                  connect a web search provider and grant its callers under one
                  confirmation (preview by default)
+  add-write-connection
+                 enroll a write-capable connection and the authority its agents
+                 use under one confirmation (preview by default)
+  add-poll-connection
+                 enroll a polled connection and its event consumers under one
+                 confirmation (preview by default)
+  widen-and-grant
+                 widen a connection ceiling and grant the added actions in one
+                 transaction under one confirmation (preview by default)
+  onboard-github-bot
+                 import, prove, bind and grant one GitHub App handle under one
+                 confirmation (preview by default)
+
+The four commands above and add-web-search-provider each ask for one Touch ID
+confirmation for the whole change. The single-step commands they combine stay
+available as the manual fallback.
 
 import-store --from <old.db> --to <new.db>
     Stop the module first; the source lease enforces this. The destination must
@@ -301,6 +317,60 @@ add-web-search-provider <name> [--grantee <principal>]... [--instance-url <url>]
     completed; rerunning reuses a matching connection and skips grants that
     already exist, and refuses a connection bound to another app, credential
     or instance. It never sets the order or allowances.
+
+add-write-connection --app <key> --actions a,b --grantee <principal>...
+                     [--connection <id>] [--credential-id <id>]
+                     [--risk write|destructive] [--invoke-actions a,b]
+                     [--resource-filters <json>] [--allow a,b] [--apply]
+    Does what issue-ticket, connections op=connect, grant --kind
+    connection_admin --grantee direct, connections op=configure, one invoke
+    grant per --grantee and set-policy --effect allow per --allow action do,
+    with one Touch ID confirmation instead of one per step. --actions sets the
+    connection ceiling at --risk (default write); each grantee gets an invoke
+    grant at that risk on --invoke-actions (default: every action).
+    --resource-filters is the JSON configure takes, for example
+    '{\"write_enabling\":[\"team\"],\"values\":{\"team\":\"core\"}}'. The connection id
+    defaults to conn-<app>. Without --apply this previews and writes nothing.
+    With --apply, the steps after connect run only once the connection is
+    active and discovery completed; if a step fails, the reply names what
+    exists and what did not run, and rerunning finishes the job. A rerun
+    reuses a matching connection and skips steps already done; it refuses a
+    connection of another app, another credential or a ceiling that does not
+    cover --actions, and filters or policies that differ.
+
+add-poll-connection --app <key> --actions a,b [--connection <id>]
+                    [--credential-id <id>] [--consumer <principal>]...
+                    [--consume-actions a,b] [--apply]
+    Does what issue-ticket --risk read, connections op=connect, grant --kind
+    poll --grantee direct on --actions and one grant --kind events_consume per
+    --consumer on --consume-actions do, with one Touch ID confirmation.
+    Preview, discovery, failure and rerun rules are add-write-connection's.
+
+widen-and-grant --connection <id> --actions a,b --grantee <principal>...
+                [--kind invoke|poll|events_consume] [--risk ...] [--apply]
+    Does what widen-ceiling --apply and one grant per --grantee on exactly
+    --actions do, in one transaction with one Touch ID confirmation: the
+    widening and every grant commit together or not at all. The preview runs
+    the whole change and rolls it back, so it refuses exactly what an apply
+    would. A rerun leaves actions already in the ceiling alone and skips a
+    grantee whose live grant of that kind and risk covers --actions.
+
+onboard-github-bot --inventory <file> --actions a,b --carrier <principal>
+                   --effect allow|ask_first|block [--repositories owner/a,...]
+                   [--read-actions a,b] [--poll-actions a,b]
+                   [--shim-manifest-maps-repo] [--apply]
+    Does what github.handle.import, github.handle.probe, handle-bind
+    --repositories and handle-grant (the writes, then --kind read and --kind
+    poll when named) do, with one Touch ID confirmation. --inventory is a
+    github-grant-import.v1 JSON file holding exactly the one handle. The
+    handle's installation is listed on GitHub once, while planning, even for
+    a preview; nothing is sent to GitHub after the confirmation. Binding a
+    repository the active AFT gh shim manifest does not map to the same agent
+    makes the shim refuse every governed bot write, so an applied run that
+    binds any repository requires --shim-manifest-maps-repo, your statement
+    that the active manifest already maps them, and the confirmation repeats
+    it. A rerun reuses an imported handle that matches the inventory, skips
+    bindings and grants that exist, and refuses a handle that differs.
 ";
 
 fn run(arguments: &[String]) -> Result<(), Failure> {
@@ -439,6 +509,10 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         "set-web-search-order" => set_web_search_order_request(&flags)?,
         "set-web-search-allowance" => set_web_search_allowance_request(&flags)?,
         "add-web-search-provider" => add_web_search_provider_request(&flags)?,
+        "add-write-connection" => add_write_connection_request(&flags)?,
+        "add-poll-connection" => add_poll_connection_request(&flags)?,
+        "widen-and-grant" => widen_and_grant_request(&flags)?,
+        "onboard-github-bot" => onboard_github_bot_request(&flags)?,
         "recipients-add" | "recipients-remove" | "recipients-list" => {
             recipients_request(command, &flags)?
         }
@@ -527,6 +601,46 @@ fn accepted_flags(command: &str) -> Option<&'static [&'static str]> {
         "set-web-search-limit" => &["--backend", "--per-caller", "--per-backend", "--apply"],
         "set-web-search-order" | "set-web-search-allowance" => &["--clear", "--apply"],
         "add-web-search-provider" => &["--grantee", "--instance-url", "--with-key", "--apply"],
+        "add-write-connection" => &[
+            "--app",
+            "--actions",
+            "--grantee",
+            "--connection",
+            "--credential-id",
+            "--risk",
+            "--invoke-actions",
+            "--resource-filters",
+            "--allow",
+            "--apply",
+        ],
+        "add-poll-connection" => &[
+            "--app",
+            "--actions",
+            "--connection",
+            "--credential-id",
+            "--consumer",
+            "--consume-actions",
+            "--apply",
+        ],
+        "widen-and-grant" => &[
+            "--connection",
+            "--actions",
+            "--grantee",
+            "--kind",
+            "--risk",
+            "--apply",
+        ],
+        "onboard-github-bot" => &[
+            "--inventory",
+            "--actions",
+            "--carrier",
+            "--effect",
+            "--repositories",
+            "--read-actions",
+            "--poll-actions",
+            "--shim-manifest-maps-repo",
+            "--apply",
+        ],
         "recipients-add" | "recipients-remove" => {
             &["--connection", "--agent", "--recipient", "--apply"]
         }
@@ -538,12 +652,20 @@ fn accepted_flags(command: &str) -> Option<&'static [&'static str]> {
 /// Parsed command line: flags with values, plus bare `--help`.
 /// Flags that take no value. An allowlist, so a mistyped value-taking flag
 /// still refuses rather than being read as a boolean.
-const BARE_FLAGS: &[&str] = &["--all", "--all-handles", "--apply", "--clear", "--with-key"];
+const BARE_FLAGS: &[&str] = &[
+    "--all",
+    "--all-handles",
+    "--apply",
+    "--clear",
+    "--with-key",
+    "--shim-manifest-maps-repo",
+];
 
 /// Flags a command may give more than once, each occurrence adding a value.
 fn repeatable_flags(command: &str) -> &'static [&'static str] {
     match command {
-        "add-web-search-provider" => &["--grantee"],
+        "add-web-search-provider" | "add-write-connection" | "widen-and-grant" => &["--grantee"],
+        "add-poll-connection" => &["--consumer"],
         _ => &[],
     }
 }
@@ -1252,6 +1374,223 @@ fn add_web_search_provider_lines(result: &Value) -> Vec<String> {
     lines
 }
 
+/// A comma-separated flag value as a list, or `None` when the flag is absent.
+fn comma_list(flags: &Flags, name: &str) -> Result<Option<Vec<String>>, Failure> {
+    let Some(value) = flags.value(name) else {
+        return Ok(None);
+    };
+    let values: Vec<String> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if values.is_empty() {
+        return Err(Failure::usage(format!(
+            "{name} must name at least one value"
+        )));
+    }
+    Ok(Some(values))
+}
+
+/// The connection half shared by add-write-connection and
+/// add-poll-connection. The module checks the app, credential and actions
+/// against the reviewed manifest; the CLI only shapes the request.
+fn enrollment_params(flags: &Flags) -> Result<Value, Failure> {
+    let mut params = json!({
+        "app_key": flags.required("--app")?,
+        "actions": flags.action_selectors()?,
+        "dry_run": !flags.has("--apply"),
+    });
+    if let Some(connection) = flags.value("--connection") {
+        params["connection_id"] = json!(connection);
+    }
+    if let Some(id) = flags.value("--credential-id") {
+        if !plexus_core::credentials::valid_credential_id(id) {
+            return Err(Failure::usage("invalid --credential-id"));
+        }
+        params["credential_id"] = json!(id);
+    }
+    Ok(params)
+}
+
+fn add_write_connection_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
+    let mut params = enrollment_params(flags)?;
+    let grantees = flags.values("--grantee");
+    if grantees.is_empty() {
+        return Err(Failure::usage(
+            "add-write-connection requires at least one --grantee",
+        ));
+    }
+    params["grantees"] = json!(grantees);
+    if let Some(risk) = flags.value("--risk") {
+        params["risk"] = json!(risk);
+    }
+    if let Some(actions) = comma_list(flags, "--invoke-actions")? {
+        params["invoke_actions"] = json!(actions);
+    }
+    if let Some(actions) = comma_list(flags, "--allow")? {
+        params["allow_actions"] = json!(actions);
+    }
+    if let Some(filters) = flags.value("--resource-filters") {
+        let filters: Value = serde_json::from_str(filters)
+            .map_err(|_| Failure::usage("--resource-filters must be a JSON object"))?;
+        if !filters.is_object() {
+            return Err(Failure::usage("--resource-filters must be a JSON object"));
+        }
+        params["resource_filters"] = filters;
+    }
+    Ok((
+        plexus_module::manifest::ADMIN_ADD_WRITE_CONNECTION_OP,
+        params,
+    ))
+}
+
+fn add_poll_connection_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
+    let mut params = enrollment_params(flags)?;
+    let consumers = flags.values("--consumer");
+    if !consumers.is_empty() {
+        params["consumers"] = json!(consumers);
+    }
+    if let Some(actions) = comma_list(flags, "--consume-actions")? {
+        params["consume_actions"] = json!(actions);
+    }
+    Ok((
+        plexus_module::manifest::ADMIN_ADD_POLL_CONNECTION_OP,
+        params,
+    ))
+}
+
+fn widen_and_grant_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
+    let actions = flags.action_selectors()?;
+    if actions.iter().any(|action| action.contains('*')) {
+        return Err(Failure::usage(
+            "--actions must name explicit actions, not '*'",
+        ));
+    }
+    let grantees = flags.values("--grantee");
+    if grantees.is_empty() {
+        return Err(Failure::usage(
+            "widen-and-grant requires at least one --grantee",
+        ));
+    }
+    let mut params = json!({
+        "connection_id": flags.required("--connection")?,
+        "actions": actions,
+        "grantees": grantees,
+        "dry_run": !flags.has("--apply"),
+    });
+    if let Some(kind) = flags.value("--kind") {
+        params["authority_kind"] = json!(kind);
+    }
+    if let Some(risk) = flags.value("--risk") {
+        params["risk_ceiling"] = json!(risk);
+    }
+    Ok((plexus_module::manifest::ADMIN_WIDEN_AND_GRANT_OP, params))
+}
+
+fn onboard_github_bot_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
+    let path = flags.required("--inventory")?;
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| Failure::usage(format!("cannot read --inventory {path}: {error}")))?;
+    let inventory: Value = serde_json::from_str(&source)
+        .map_err(|_| Failure::usage("--inventory must be a github-grant-import.v1 JSON file"))?;
+    let effect = flags.required("--effect")?;
+    if !POLICY_EFFECTS.contains(&effect) {
+        return Err(Failure::usage(
+            "--effect must be one of: allow, ask_first, block",
+        ));
+    }
+    let mut params = json!({
+        "inventory": inventory,
+        "actions": flags.action_selectors()?,
+        "carrier": flags.required("--carrier")?,
+        "effect": effect,
+        "shim_manifest_maps_repo": flags.has("--shim-manifest-maps-repo"),
+        "dry_run": !flags.has("--apply"),
+    });
+    if let Some(repositories) = comma_list(flags, "--repositories")? {
+        params["repositories"] = json!(repositories);
+    }
+    if let Some(actions) = comma_list(flags, "--read-actions")? {
+        params["read_actions"] = json!(actions);
+    }
+    if let Some(actions) = comma_list(flags, "--poll-actions")? {
+        params["poll_actions"] = json!(actions);
+    }
+    Ok((plexus_module::manifest::ADMIN_ONBOARD_GITHUB_BOT_OP, params))
+}
+
+/// The lines every composite command prints: what it is, each step with its
+/// status, the confirmation it asks (or asked) for, and whether it applied.
+fn composite_lines(result: &Value) -> Vec<String> {
+    let mut lines = vec![format!("operation:  {}", text(&result["operation"]))];
+    if let Some(connection) = result["connection_id"].as_str() {
+        let mut line = format!("connection: {connection}");
+        if let Some(step) = result["connection"].as_str() {
+            line.push_str(&format!(" ({step})"));
+        }
+        lines.push(line);
+    }
+    if let Some(handle) = result["app_handle_id"].as_str() {
+        lines.push(format!(
+            "handle:     {handle} ({}) for agent {}",
+            text(&result["handle"]),
+            text(&result["agent_id"])
+        ));
+        lines.push(format!(
+            "installation lists: {}",
+            list(&result["installation_repositories"])
+        ));
+    }
+    if result.get("ceiling").is_some() {
+        let mut ceiling = format!(
+            "ceiling:    risk={} actions={}",
+            text(&result["ceiling"]["risk"]),
+            list(&result["ceiling"]["action_selectors"])
+        );
+        if let Some(note) = result["ceiling_note"].as_str() {
+            ceiling.push_str(&format!(" ({note})"));
+        }
+        lines.push(ceiling);
+    }
+    for step in result["steps"].as_array().into_iter().flatten() {
+        let mut line = format!(
+            "step:       {} {}",
+            text(&step["step"]),
+            text(&step["status"])
+        );
+        if let Some(fields) = step.as_object() {
+            for (key, value) in fields {
+                if matches!(
+                    key.as_str(),
+                    "step" | "status" | "plan" | "params" | "proof"
+                ) {
+                    continue;
+                }
+                let shown = if value.is_array() {
+                    list(value)
+                } else {
+                    text(value)
+                };
+                line.push_str(&format!(" {key}={shown}"));
+            }
+        }
+        lines.push(line);
+    }
+    if result["applied"] == true {
+        if let Some(discovery) = result["discovery"].as_str() {
+            lines.push(format!("discovery:  {discovery}"));
+        }
+        lines.push(format!("confirmed:  {}", text(&result["summary"])));
+        lines.push("applied".into());
+    } else {
+        lines.push(format!("will ask:   {}", text(&result["summary"])));
+        lines.push("preview only; pass --apply to confirm once and apply".into());
+    }
+    lines
+}
+
 fn catalog_app_requirements(
     connection_file: &Path,
     module_id: &str,
@@ -1574,6 +1913,14 @@ fn report(command: &str, response: &Value, flags: &Flags) -> Result<(), Failure>
         }
         "add-web-search-provider" => {
             for line in add_web_search_provider_lines(result) {
+                println!("{line}");
+            }
+        }
+        "add-write-connection"
+        | "add-poll-connection"
+        | "widen-and-grant"
+        | "onboard-github-bot" => {
+            for line in composite_lines(result) {
                 println!("{line}");
             }
         }

@@ -3302,7 +3302,19 @@ impl PlexusStore {
         let Some(connection) = self.connection(principal, connection_id)? else {
             return Ok(Err(ConfigureOutcome::ConnectionNotFound));
         };
-        let Some(document) = self.parsed_manifest(CATALOG_PRINCIPAL, &connection.app_key)? else {
+        self.resource_filters_for_app(&connection.app_key, requested)
+    }
+
+    /// The filter document a configure request would store on a connection of
+    /// `app_key`, or the outcome that refuses it, checked against the app's
+    /// reviewed manifest. Reads only; lets an operator ceremony refuse bad
+    /// filters before the connection they belong to exists.
+    pub fn resource_filters_for_app(
+        &self,
+        app_key: &str,
+        requested: &Value,
+    ) -> Result<Result<Value, ConfigureOutcome>, StoreError> {
+        let Some(document) = self.parsed_manifest(CATALOG_PRINCIPAL, app_key)? else {
             return Ok(Err(ConfigureOutcome::ManifestMissing));
         };
         let manifest = match document {
@@ -7659,7 +7671,6 @@ impl PlexusStore {
 
     /// The ceiling recorded on a connection, or `CeilingAbsent` when the
     /// connection predates ceilings (fail closed: nothing may be minted).
-    #[cfg(any(test, feature = "test-support"))]
     pub fn connection_ceiling(
         &self,
         principal: &str,
@@ -7745,41 +7756,8 @@ impl PlexusStore {
             return Ok(Err(CeremonyRefusal::WildcardGrantee));
         }
         race_point("grant_insert");
-        self.inner.with_conn_fenced(|conn| {
-            // The ceiling is read inside the insert transaction for every
-            // request, so a revocation or narrowing committed before this
-            // transaction cannot be outrun by a ceiling read earlier.
-            let mut checked = Vec::with_capacity(requests.len());
-            for request in requests {
-                match bounded_grant_on_conn(conn, request)? {
-                    Ok(input) => checked.push(input),
-                    Err(refusal) => return Ok(Err(refusal)),
-                }
-            }
-            let now = now_ms();
-            let mut minted = Vec::with_capacity(checked.len());
-            for input in checked {
-                insert_grant_on_conn(conn, &input)?;
-                let record = GrantRecord {
-                    state: grant_state(input.expires_at, None, now).to_string(),
-                    grant_id: input.grant_id,
-                    principal: input.principal,
-                    connection_id: input.connection_id,
-                    grantee_principal: input.grantee_principal,
-                    risk_ceiling: input.risk_ceiling,
-                    action_selectors: input.action_selectors,
-                    authority_kind: input.authority_kind,
-                    expires_at: input.expires_at,
-                    // `insert_grant` stores a new grant at generation 1.
-                    generation: 1,
-                    revoked_at_ms: None,
-                    revoked_by: None,
-                };
-                append_audit_for(conn, audit, &record)?;
-                minted.push(record);
-            }
-            Ok(Ok(minted))
-        })
+        self.inner
+            .with_conn_fenced(|conn| mint_grants_bounded_on_conn(conn, requests, audit))
     }
 
     /// Read one live grant by its owner-scoped id for revocation audit attribution.
@@ -9354,6 +9332,51 @@ fn append_audit_for<T>(
         Some(build) => append_audit_on_conn(conn, &build(value), None, None, None, None),
         None => Ok(()),
     }
+}
+
+/// Mint every request on `conn`, the caller's transaction, each bounded by the
+/// connection ceiling as it stands in that transaction, with one audit row per
+/// grant. Every request is checked before any row is written, so a refusal
+/// writes nothing. The caller commits, which lets a ceiling widening and the
+/// grants that use it commit together.
+pub(crate) fn mint_grants_bounded_on_conn(
+    conn: &Connection,
+    requests: &[GrantMintRequest],
+    audit: AuditFor<'_, GrantRecord>,
+) -> rusqlite::Result<Result<Vec<GrantRecord>, CeremonyRefusal>> {
+    // The ceiling is read inside the insert transaction for every request, so
+    // a revocation or narrowing committed before this transaction cannot be
+    // outrun by a ceiling read earlier.
+    let mut checked = Vec::with_capacity(requests.len());
+    for request in requests {
+        match bounded_grant_on_conn(conn, request)? {
+            Ok(input) => checked.push(input),
+            Err(refusal) => return Ok(Err(refusal)),
+        }
+    }
+    let now = now_ms();
+    let mut minted = Vec::with_capacity(checked.len());
+    for input in checked {
+        insert_grant_on_conn(conn, &input)?;
+        let record = GrantRecord {
+            state: grant_state(input.expires_at, None, now).to_string(),
+            grant_id: input.grant_id,
+            principal: input.principal,
+            connection_id: input.connection_id,
+            grantee_principal: input.grantee_principal,
+            risk_ceiling: input.risk_ceiling,
+            action_selectors: input.action_selectors,
+            authority_kind: input.authority_kind,
+            expires_at: input.expires_at,
+            // `insert_grant` stores a new grant at generation 1.
+            generation: 1,
+            revoked_at_ms: None,
+            revoked_by: None,
+        };
+        append_audit_for(conn, audit, &record)?;
+        minted.push(record);
+    }
+    Ok(Ok(minted))
 }
 
 fn grant_summary_on_conn(

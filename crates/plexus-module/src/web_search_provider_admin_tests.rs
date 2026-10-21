@@ -15,13 +15,13 @@ const CALLERS: [&str; 3] = [
 ];
 const SEARXNG_CANARY: &str = "https://private-searx-canary.invalid/secret-instance-path";
 
-struct Fixture {
-    path: DiagnosticStorePath,
-    store: Arc<PlexusStore>,
-    state: Arc<ModuleState>,
+pub(super) struct Fixture {
+    pub(super) path: DiagnosticStorePath,
+    pub(super) store: Arc<PlexusStore>,
+    pub(super) state: Arc<ModuleState>,
 }
 
-fn install(store: &PlexusStore, app: &str) {
+pub(super) fn install(store: &PlexusStore, app: &str) {
     let source = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../catalog/{app}.jsonc")),
     )
@@ -36,7 +36,10 @@ fn install(store: &PlexusStore, app: &str) {
 /// A state whose discovery is sent to `endpoint` instead of the vendor. Every
 /// test that can reach MCP discovery passes a local endpoint, so no test can
 /// contact Z.AI.
-fn state_with_endpoint(store: &Arc<PlexusStore>, endpoint: Option<&str>) -> Arc<ModuleState> {
+pub(super) fn state_with_endpoint(
+    store: &Arc<PlexusStore>,
+    endpoint: Option<&str>,
+) -> Arc<ModuleState> {
     let mut runtime = runtime_for_test(Arc::clone(store));
     runtime.endpoint_override = endpoint.map(str::to_owned);
     Arc::new(ModuleState {
@@ -55,7 +58,7 @@ fn fixture(label: &str) -> Fixture {
     Fixture { path, store, state }
 }
 
-fn sql(path: &Path, statement: &str) {
+pub(super) fn sql(path: &Path, statement: &str) {
     rusqlite::Connection::open(path)
         .unwrap()
         .execute(statement, [])
@@ -94,7 +97,7 @@ fn seed_exa_callers(fixture: &Fixture) {
     }
 }
 
-fn snapshot(path: &Path, include_audit: bool) -> Vec<(String, Vec<String>)> {
+pub(super) fn snapshot(path: &Path, include_audit: bool) -> Vec<(String, Vec<String>)> {
     let db = rusqlite::Connection::open(path).unwrap();
     let tables: Vec<String> = db
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
@@ -128,8 +131,9 @@ fn snapshot(path: &Path, include_audit: bool) -> Vec<(String, Vec<String>)> {
 }
 
 /// Rows of `table` with every column named, minus the ones that differ
-/// between two runs by construction: generated ids and clock readings.
-fn rows(path: &Path, table: &str, filter: &str) -> Vec<Vec<(String, String)>> {
+/// between two runs by construction: generated ids and clock readings
+/// (`proven_at` is when a GitHub handle's installation was last proven).
+pub(super) fn rows(path: &Path, table: &str, filter: &str) -> Vec<Vec<(String, String)>> {
     let db = rusqlite::Connection::open(path).unwrap();
     let mut statement = db
         .prepare(&format!("SELECT * FROM {table} {filter}"))
@@ -143,7 +147,12 @@ fn rows(path: &Path, table: &str, filter: &str) -> Vec<Vec<(String, String)>> {
         name.ends_with("_ms")
             || matches!(
                 name,
-                "ts" | "journal_id" | "request_id" | "grant_id" | "ticket_id"
+                "ts" | "journal_id"
+                    | "request_id"
+                    | "grant_id"
+                    | "ticket_id"
+                    | "policy_id"
+                    | "proven_at"
             )
             || (table == "binding_tickets" && name == "expires_at")
     };
@@ -163,7 +172,7 @@ fn rows(path: &Path, table: &str, filter: &str) -> Vec<Vec<(String, String)>> {
     rows
 }
 
-fn count(path: &Path, query: &str) -> i64 {
+pub(super) fn count(path: &Path, query: &str) -> i64 {
     rusqlite::Connection::open(path)
         .unwrap()
         .query_row(query, [], |row| row.get(0))
@@ -193,17 +202,17 @@ fn answer(frame: &Frame, decision: Result<(), &str>) -> Frame {
     .unwrap()
 }
 
-struct Outcome {
-    reply: Value,
+pub(super) struct Outcome {
+    pub(super) reply: Value,
     /// The summary of every operator confirmation the request asked for.
-    prompts: Vec<String>,
+    pub(super) prompts: Vec<String>,
 }
 
 /// Serve one request as the daemon would, answering every operator
 /// confirmation with `decision` through a fake presence peer, never Touch ID.
 /// At each prompt the store must still be exactly as it was before the
 /// request: nothing is written before confirmation.
-async fn request(
+pub(super) async fn request(
     state: &Arc<ModuleState>,
     path: &Path,
     body: Value,
@@ -236,7 +245,9 @@ async fn request(
             if frame.header.channel == 0 && frame.header.ty == FrameType::Request {
                 let asked: OperatorConfirmRequest = serde_json::from_slice(&frame.body).unwrap();
                 assert!(
-                    !asked.summary.contains("apikey:") && !asked.summary.contains('\n'),
+                    !asked.summary.contains("apikey:")
+                        && !asked.summary.contains("github_app:")
+                        && !asked.summary.contains('\n'),
                     "a prompt names no vault reference and is one line: {}",
                     asked.summary
                 );
@@ -292,15 +303,15 @@ fn grantees(reply: &Value) -> Vec<(String, String)> {
 
 /// A vendor that counts every connection and closes it at once, so MCP
 /// discovery against it fails fast and every contact is visible.
-struct CountingVendor {
-    url: String,
+pub(super) struct CountingVendor {
+    pub(super) url: String,
     contacts: Arc<AtomicUsize>,
     running: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl CountingVendor {
-    fn start() -> Self {
+    pub(super) fn start() -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
@@ -329,7 +340,7 @@ impl CountingVendor {
         }
     }
 
-    fn contacts(&self) -> usize {
+    pub(super) fn contacts(&self) -> usize {
         self.contacts.load(Ordering::SeqCst)
     }
 }
