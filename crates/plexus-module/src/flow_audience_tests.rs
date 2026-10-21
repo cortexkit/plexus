@@ -487,11 +487,17 @@ async fn global_workspace_and_agent_audiences_preserve_their_authority() {
             assert_eq!(transport.requests().len(), 1);
         }
         let before = core.calls().len();
-        let _ = call(
+        let agent_reply = call(
             &state,
             "github_read",
             read_args("o/x"),
             Some(scope(Some("agent-x"))),
+        );
+        // A call refused before routing would also leave the audience
+        // unconsulted, so the count below means something only if it ran.
+        assert!(
+            agent_reply.get("result").is_some(),
+            "agent-stamped call should dispatch: {agent_reply}"
         );
         assert_eq!(
             core.calls().len(),

@@ -10242,12 +10242,20 @@ mod subscription_lifecycle_tests {
             Arc::clone(&bindings),
         )
         .await;
-        let _ = recv_within(
-            responses.recv(),
-            std::time::Duration::from_secs(5),
-            "clear resp",
+        let cleared: Value = serde_json::from_slice(
+            &recv_within(
+                responses.recv(),
+                std::time::Duration::from_secs(5),
+                "clear resp",
+            )
+            .await
+            .body,
         )
-        .await;
+        .expect("body");
+        assert!(
+            cleared["error"].is_null(),
+            "an explicit null project_id must be accepted: {cleared}"
+        );
         assert_eq!(
             stored(&store),
             None,
@@ -10267,7 +10275,16 @@ mod subscription_lifecycle_tests {
             Arc::clone(&bindings),
         )
         .await;
-        let _ = recv_within(responses.recv(), std::time::Duration::from_secs(5), "set").await;
+        let set: Value = serde_json::from_slice(
+            &recv_within(responses.recv(), std::time::Duration::from_secs(5), "set")
+                .await
+                .body,
+        )
+        .expect("body");
+        assert!(
+            set["error"].is_null(),
+            "setting the project the next step must preserve: {set}"
+        );
         call(
             json!({
                 "op": "set_project",
@@ -10662,12 +10679,20 @@ mod subscription_lifecycle_tests {
             Arc::clone(&bindings),
         )
         .await;
-        let _ = recv_within(
-            responses.recv(),
-            std::time::Duration::from_secs(5),
-            "actor clear resp",
+        let cleared: Value = serde_json::from_slice(
+            &recv_within(
+                responses.recv(),
+                std::time::Duration::from_secs(5),
+                "actor clear resp",
+            )
+            .await
+            .body,
         )
-        .await;
+        .expect("body");
+        assert!(
+            cleared["error"].is_null(),
+            "an explicit null actor_source must be accepted: {cleared}"
+        );
         assert_eq!(
             store
                 .subscription("direct", &subscription.subscription_id)
