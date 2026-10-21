@@ -2,7 +2,6 @@
 use crate::github::facade::effects;
 use crate::github::resolver::{self, RequestKind, ResolvedRepositories};
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 
 /// The reactions a bot request may place: GitHub's full set, and the same
 /// list as add_reaction's `content` enum in catalog/github_rest.jsonc. A test
@@ -176,11 +175,14 @@ pub fn map(
     // required by the JSON Canonicalization Scheme used for grant parity.
     // A distinct prefix refuses replay of older receipts: their hashes cannot
     // prove that a large integer in the original request was unchanged.
+    // This is serde_json's own sorted text, not `jcs::canonicalize_exact_integers`:
+    // the two order some keys and write some numbers differently, and receipts
+    // store this value, so switching would need a new prefix.
     let mut exact = canonical.clone();
     exact.sort_all_objects();
     let fingerprint = format!(
-        "exact-json-v1:{:x}",
-        Sha256::digest(exact.to_string().as_bytes())
+        "exact-json-v1:{}",
+        crate::jcs::sha256_hex(exact.to_string().as_bytes())
     );
     let mut body = Map::new();
     if let Some(fields) = object.get("body").and_then(Value::as_object) {
@@ -295,6 +297,40 @@ pub fn map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Receipts store this fingerprint and a replayed request is matched by
+    /// it, so its bytes must not move. The literal is SHA-256 of the sorted
+    /// compact JSON text, computed outside plexus.
+    #[test]
+    fn request_fingerprint_is_pinned_and_differs_from_jcs() {
+        let resolved = ResolvedRepositories {
+            repositories: vec!["org/repo".into()],
+            binding: crate::github::resolver::Binding {
+                app_handle_id: "app".into(),
+                connection_id: "conn".into(),
+            },
+        };
+        let request = serde_json::json!({
+            "action": "issue comment",
+            "number": 18_446_744_073_709_551_615_u64,
+            "comment": "héllo 😀",
+            "metadata": {"\u{E000}": 1, "\u{1F600}": 2.5},
+            "request_nonce": "nonce-1",
+        });
+        let mapped = map(&request, &resolved, "org/repo").unwrap();
+        assert_eq!(
+            mapped.fingerprint,
+            "exact-json-v1:13e467821cea1b4cfe7bad64d15b37c2e4cfb99c20ed5ba262b52dd2fd4ab77c",
+            "the stored receipt fingerprint must not move"
+        );
+        // RFC 8785 orders U+1F600 before U+E000, so the JCS form is other bytes.
+        let jcs = crate::jcs::canonicalize_exact_integers(&mapped.canonical).unwrap();
+        assert_ne!(
+            mapped.fingerprint,
+            format!("exact-json-v1:{}", crate::jcs::sha256_hex(&jcs))
+        );
+    }
+
     #[test]
     fn request_body_must_be_an_object() {
         let resolved = ResolvedRepositories {

@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 // `PartialEq` only: `actions_baseline[].http.args_schema` is a JSON Schema held
 // as `serde_json::Value`, which does not implement `Eq`.
@@ -699,8 +698,7 @@ pub fn ingest_value(value: Value) -> Result<IngestedManifest, ManifestError> {
         .map_err(|error| ManifestError::InvalidJson(error.to_string()))?;
     let bytes = crate::jcs::canonicalize_exact_integers(&normalized)
         .map_err(|error| ManifestError::InvalidJson(error.to_string()))?;
-    let digest = Sha256::digest(bytes);
-    let content_hash = format!("sha256:{digest:x}");
+    let content_hash = crate::jcs::sha256_tagged(&bytes);
     Ok(IngestedManifest {
         manifest,
         json: value,

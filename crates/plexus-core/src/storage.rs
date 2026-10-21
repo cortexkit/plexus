@@ -16,6 +16,8 @@ use cortexkit_store_types::StorageBackend;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+// The event-outbox tests hash fixture bodies through this import.
+#[cfg(test)]
 use sha2::Digest;
 
 use crate::actor_attribution::{served_actor_fields, ActorAttribution, ActorUnknown};
