@@ -18,7 +18,10 @@ operator runs them, never an automated worker. Deploy in this order:
 3. Run `handle-grant` for `mark_pull_request_ready`,
    `convert_pull_request_to_draft`, and the pre-read `github.pull_request.get` on
    every bot. Both writes require that pre-read; fresh imports imply it from
-   either write grant.
+   either write grant. A bot onboarded after this release can take both writes
+   in the `--actions` list of `ck-plexus-admin onboard-github-bot`, which
+   imports, binds and grants it with one Touch ID confirmation; `handle-grant`
+   stays the command for bots that already exist.
 
 AFT's `gh` shim sends these requests only once its signed list of allowed `gh`
 commands (manifest version 19) includes `pr ready`. Release that manifest after

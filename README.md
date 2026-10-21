@@ -125,6 +125,23 @@ target/debug/ck-plexus-admin --help
 target/debug/ck-plexus-admin list-grants --subc <connection file>
 ```
 
+An operator intent that takes several authority-widening steps costs one Touch
+ID confirmation when it runs as one composite command. Each previews by default
+(writing nothing and contacting no vendor beyond what planning reads), refuses
+before asking if anything in its plan is wrong, asks once with a summary naming
+every change, and is safe to rerun:
+
+| Command | Combines |
+|---|---|
+| `add-web-search-provider` | `issue-ticket`, `connections op=connect`, one search grant per caller |
+| `add-write-connection` | `issue-ticket`, connect, a `connection_admin` grant to `direct`, `configure` with resource filters, invoke grants, optional allow policies |
+| `add-poll-connection` | `issue-ticket`, connect, a poll grant to `direct`, `events_consume` grants |
+| `widen-and-grant` | `widen-ceiling --apply` and the grants on the added actions, in one transaction |
+| `onboard-github-bot` | `github.handle.import`, `github.handle.probe`, `handle-bind`, `handle-grant` (writes, reads, poll) |
+
+Use the composite first. The single-step commands stay available as the manual
+fallback; `ck-plexus-admin --help` documents both.
+
 `cargo run --locked -p plexus-module --example facade_call -- <connection file> '<json>'`
 sends one tool call to the running module and prints the reply, for example
 `'{"name":"events","arguments":{"op":"list"}}'`.
