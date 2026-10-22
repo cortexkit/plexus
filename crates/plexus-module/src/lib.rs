@@ -22,7 +22,9 @@ macro_rules! eprintln {
 mod bounded;
 pub mod bus;
 pub mod ceremony;
+mod composite_admin;
 pub mod composition;
+mod connection_enrollment_admin;
 pub mod connector_home;
 #[cfg(test)]
 mod connector_home_tests;
@@ -31,6 +33,7 @@ mod consent_capacity_tests;
 #[cfg(test)]
 mod consent_test_support;
 mod engram_catalog;
+mod github_bot_admin;
 pub mod health;
 pub mod manifest;
 pub mod operator_confirmation;
@@ -58,6 +61,7 @@ use test_support::{
 mod tool_provider;
 mod web_search_health;
 mod web_search_provider_admin;
+mod widen_and_grant_admin;
 pub mod wire;
 #[cfg(test)]
 mod wire_safety_tests;
@@ -1771,6 +1775,10 @@ async fn handle_management_request(
             | manifest::ADMIN_SET_WEB_SEARCH_ORDER_OP
             | manifest::ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP
             | manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP
+            | manifest::ADMIN_ADD_WRITE_CONNECTION_OP
+            | manifest::ADMIN_ADD_POLL_CONNECTION_OP
+            | manifest::ADMIN_WIDEN_AND_GRANT_OP
+            | manifest::ADMIN_ONBOARD_GITHUB_BOT_OP
             | manifest::ADMIN_RECIPIENTS_ADD_OP
             | manifest::ADMIN_RECIPIENTS_REMOVE_OP
             | manifest::ADMIN_RECIPIENTS_LIST_OP
@@ -1991,7 +1999,8 @@ async fn handle_management_request(
         manifest::ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP => {
             ceremony::set_web_search_allowance(state, &principal_key, params)
         }
-        // Confirms for itself, once, with a summary built from its own plan.
+        // The composite operations confirm for themselves, once, with a
+        // summary built from their own plan.
         manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP => {
             web_search_provider_admin::add(
                 route,
@@ -2002,6 +2011,43 @@ async fn handle_management_request(
                 &principal_key,
             )
             .await?
+        }
+        manifest::ADMIN_ADD_WRITE_CONNECTION_OP => {
+            connection_enrollment_admin::add_write(
+                route,
+                params,
+                writer,
+                state,
+                route_bindings,
+                &principal_key,
+            )
+            .await?
+        }
+        manifest::ADMIN_ADD_POLL_CONNECTION_OP => {
+            connection_enrollment_admin::add_poll(
+                route,
+                params,
+                writer,
+                state,
+                route_bindings,
+                &principal_key,
+            )
+            .await?
+        }
+        manifest::ADMIN_WIDEN_AND_GRANT_OP => {
+            widen_and_grant_admin::widen_and_grant(
+                route,
+                params,
+                writer,
+                state,
+                route_bindings,
+                &principal_key,
+            )
+            .await?
+        }
+        manifest::ADMIN_ONBOARD_GITHUB_BOT_OP => {
+            github_bot_admin::onboard(route, params, writer, state, route_bindings, &principal_key)
+                .await?
         }
         _ => unreachable!("management operation was checked above"),
     };
@@ -3331,59 +3377,67 @@ fn facade_connections_configure(call: &FacadeArguments<'_>) -> Result<Value, Mod
         };
         // The store checks the admin grant and writes the filters in one
         // fenced transaction, so a grant revoked mid-request cannot be outrun.
-        match state.store().configure_connection_filters_if_admin(
+        configure_outcome_response(state.store().configure_connection_filters_if_admin(
             principal_key,
             connection_id,
             principal_key,
             filters,
-        ) {
-            Ok(ConfigureOutcome::AdminRequired) => {
-                json!({"error": {"code": "connection_admin_required", "message": "connection administration grant required"}})
-            }
-            Ok(ConfigureOutcome::Configured(stored)) => {
-                json!({"result": {"resource_filters": stored}})
-            }
-            Ok(ConfigureOutcome::ConnectionNotFound) => {
-                json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
-            }
-            Ok(ConfigureOutcome::ManifestMissing) => {
-                json!({"error": {"code": "manifest_missing", "message": "vendor manifest is not in the catalog"}})
-            }
-            Ok(ConfigureOutcome::UndeclaredFilter(key)) => {
-                json!({"error": {"code": "undeclared_filter", "message": format!("filter key '{key}' is not declared by the vendor manifest"), "key": key}})
-            }
-            // Distinct from undeclared_filter because the fixes differ:
-            // an undeclared filter names a key the VENDOR does not have,
-            // while this names one this OPERATION does not read. Telling
-            // an operator their key is not in the manifest when they
-            // actually mistyped `write_enabling` sends them to read
-            // vendor documentation for a spelling mistake.
-            Ok(ConfigureOutcome::UnreadFilterKey { key, accepted }) => {
-                json!({"error": {
-                    "code": "unread_filter_key",
-                    "message": format!(
-                        "resource_filters key '{key}' is not read by configure (accepted: {})",
-                        accepted.join(", ")
-                    ),
-                    "key": key,
-                    "accepted": accepted
-                }})
-            }
-            Ok(ConfigureOutcome::MalformedFilters { field, expected }) => {
-                json!({"error": {
-                    "code": "malformed_filters",
-                    "message": format!("resource_filters {field} must be {expected}"),
-                    "field": field,
-                    "expected": expected
-                }})
-            }
-            Err(error) => crate::wire::store_failure(
-                "filters configured",
-                "filters could not be configured",
-                &error,
-            ),
-        }
+        ))
     })
+}
+
+/// The reply for a configure outcome, whether the filters were written or
+/// only checked.
+fn configure_outcome_response(
+    outcome: Result<ConfigureOutcome, cortexkit_store::StoreError>,
+) -> Value {
+    match outcome {
+        Ok(ConfigureOutcome::AdminRequired) => {
+            json!({"error": {"code": "connection_admin_required", "message": "connection administration grant required"}})
+        }
+        Ok(ConfigureOutcome::Configured(stored)) => {
+            json!({"result": {"resource_filters": stored}})
+        }
+        Ok(ConfigureOutcome::ConnectionNotFound) => {
+            json!({"error": {"code": "connection_not_found", "message": "connection was not found"}})
+        }
+        Ok(ConfigureOutcome::ManifestMissing) => {
+            json!({"error": {"code": "manifest_missing", "message": "vendor manifest is not in the catalog"}})
+        }
+        Ok(ConfigureOutcome::UndeclaredFilter(key)) => {
+            json!({"error": {"code": "undeclared_filter", "message": format!("filter key '{key}' is not declared by the vendor manifest"), "key": key}})
+        }
+        // Distinct from undeclared_filter because the fixes differ:
+        // an undeclared filter names a key the VENDOR does not have,
+        // while this names one this OPERATION does not read. Telling
+        // an operator their key is not in the manifest when they
+        // actually mistyped `write_enabling` sends them to read
+        // vendor documentation for a spelling mistake.
+        Ok(ConfigureOutcome::UnreadFilterKey { key, accepted }) => {
+            json!({"error": {
+                "code": "unread_filter_key",
+                "message": format!(
+                    "resource_filters key '{key}' is not read by configure (accepted: {})",
+                    accepted.join(", ")
+                ),
+                "key": key,
+                "accepted": accepted
+            }})
+        }
+        Ok(ConfigureOutcome::MalformedFilters { field, expected }) => {
+            json!({"error": {
+                "code": "malformed_filters",
+                "message": format!("resource_filters {field} must be {expected}"),
+                "field": field,
+                "expected": expected
+            }})
+        }
+        Err(error) => crate::wire::store_failure(
+            "filters configured",
+            "filters could not be configured",
+            &error,
+        ),
+    }
 }
 
 fn facade_connections_revoke(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {

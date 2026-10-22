@@ -1486,6 +1486,9 @@ mod operator_confirmation_tests;
 #[path = "web_search_provider_admin_tests.rs"]
 mod web_search_provider_admin_tests;
 
+#[path = "composite_admin_tests.rs"]
+mod composite_admin_tests;
+
 fn delete_audit_rows(path: &Path, connection_id: &str) -> i64 {
     rusqlite::Connection::open(path)
         .unwrap()

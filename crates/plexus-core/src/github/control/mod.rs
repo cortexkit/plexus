@@ -385,6 +385,69 @@ pub fn import(
     now: i64,
     dry_run: bool,
 ) -> Result<Value, String> {
+    import_with(store, principal, inventory, dry_run, |item, generation| {
+        resolve_repositories(provider, reader, item, generation, now)
+    })
+}
+
+/// The repositories one handle's installation lists, read with the handle's
+/// own token exactly as [`import`] reads them before importing it: at the
+/// stored handle's credential generation, or the initial one for a handle not
+/// imported yet. [`import_listed`], [`probe_listed`] and [`bind_listed`] take
+/// this listing, so one read can serve an import, a probe and a bind.
+pub fn installation_repositories(
+    store: &PlexusStore,
+    handle: &InventoryHandle,
+    provider: &dyn HandleCredentialProvider,
+    reader: &dyn InstallationReader,
+    now: i64,
+) -> Result<Vec<String>, String> {
+    resolve_repositories(
+        provider,
+        reader,
+        handle,
+        handle_generation(store, handle)?,
+        now,
+    )
+}
+
+/// The credential generation an installation read for `handle` uses.
+fn handle_generation(store: &PlexusStore, handle: &InventoryHandle) -> Result<i64, String> {
+    Ok(store
+        .github_handle_and_bindings(&handle.app_handle_id)
+        .map_err(|_| "store_failure")?
+        .map_or(IMPORTED_CREDENTIAL_GENERATION, |(handle, _)| {
+            handle.credential_generation
+        }))
+}
+
+/// [`import`] with each handle's installation listing already read (see
+/// [`installation_repositories`]), keyed by app handle id. A handle without a
+/// listing is refused with `installation_not_listed`.
+pub fn import_listed(
+    store: &PlexusStore,
+    principal: &str,
+    inventory: &Inventory,
+    listings: &BTreeMap<String, Vec<String>>,
+    dry_run: bool,
+) -> Result<Value, String> {
+    import_with(store, principal, inventory, dry_run, |item, _| {
+        listings
+            .get(&item.app_handle_id)
+            .cloned()
+            .ok_or_else(|| "installation_not_listed".to_string())
+    })
+}
+
+/// The import itself, with `list` supplying each handle's installation
+/// repositories given the handle and its credential generation.
+fn import_with(
+    store: &PlexusStore,
+    principal: &str,
+    inventory: &Inventory,
+    dry_run: bool,
+    mut list: impl FnMut(&InventoryHandle, i64) -> Result<Vec<String>, String>,
+) -> Result<Value, String> {
     if principal != "direct" {
         return Err("operator_authority_required".into());
     }
@@ -402,13 +465,8 @@ pub fn import(
     let mut module_grants = Vec::new();
     let mut policy_plan = BTreeMap::new();
     for item in &inventory.handles {
-        let generation = store
-            .github_handle_and_bindings(&item.app_handle_id)
-            .map_err(|_| "store_failure")?
-            .map_or(IMPORTED_CREDENTIAL_GENERATION, |(handle, _)| {
-                handle.credential_generation
-            });
-        let repositories = resolve_repositories(provider, reader, item, generation, now)?;
+        let generation = handle_generation(store, item)?;
+        let repositories = list(item, generation)?;
         let reachable: BTreeSet<_> = repositories.iter().map(String::as_str).collect();
         for permission in &item.grants {
             if !reachable.contains(permission.repository.as_str()) {
@@ -684,6 +742,55 @@ pub fn bind(
     now: i64,
     dry_run: bool,
 ) -> Result<Value, String> {
+    bind_with(
+        store,
+        principal,
+        app_handle_id,
+        repositories,
+        dry_run,
+        |handle| {
+            let generation = handle.credential_generation;
+            resolve_repositories(
+                provider,
+                reader,
+                &installation_item(handle),
+                generation,
+                now,
+            )
+        },
+    )
+}
+
+/// [`bind`] with the handle's installation listing already read (see
+/// [`installation_repositories`]).
+pub fn bind_listed(
+    store: &PlexusStore,
+    principal: &str,
+    app_handle_id: &str,
+    repositories: &[String],
+    installation: &[String],
+    dry_run: bool,
+) -> Result<Value, String> {
+    bind_with(
+        store,
+        principal,
+        app_handle_id,
+        repositories,
+        dry_run,
+        |_| Ok(installation.to_vec()),
+    )
+}
+
+/// The bind itself, with `list` supplying the stored handle's installation
+/// repositories.
+fn bind_with(
+    store: &PlexusStore,
+    principal: &str,
+    app_handle_id: &str,
+    repositories: &[String],
+    dry_run: bool,
+    list: impl FnOnce(GithubHandle) -> Result<Vec<String>, String>,
+) -> Result<Value, String> {
     if principal != "direct" {
         return Err("operator_authority_required".into());
     }
@@ -714,14 +821,7 @@ pub fn bind(
             "agent_handle_disabled{{app_handle_id: {app_handle_id}}}"
         ));
     }
-    let generation = handle.credential_generation;
-    let installation = resolve_repositories(
-        provider,
-        reader,
-        &installation_item(handle),
-        generation,
-        now,
-    )?;
+    let installation = list(handle)?;
     store
         .bind_github_handle_repos(&crate::storage::github_store::GithubHandleBind {
             app_handle_id: app_handle_id.to_owned(),
@@ -730,6 +830,82 @@ pub fn bind(
             dry_run,
         })
         .map_err(|error| format!("bind_failed: {error}"))?
+}
+
+/// Check a bind that will run right after `handle` is imported, before the
+/// handle exists: the checks [`bind`] makes, against the repositories the
+/// import binds (`imported`) and the installation listing already read. The
+/// result has the shape of a bind preview: `add` and `already_bound`.
+pub fn bind_after_import_preview(
+    store: &PlexusStore,
+    handle: &InventoryHandle,
+    imported: &[String],
+    repositories: &[String],
+    installation: &[String],
+) -> Result<Value, String> {
+    if repositories.is_empty() {
+        return Err("repositories_required".into());
+    }
+    let installation: BTreeSet<String> = installation
+        .iter()
+        .map(|name| crate::github::canonical_repository(name))
+        .collect();
+    let imported: BTreeSet<String> = imported
+        .iter()
+        .map(|name| crate::github::canonical_repository(name))
+        .collect();
+    let owner_of = |name: &str| name.split_once('/').map(|(owner, _)| owner.to_owned());
+    let mut listed: Vec<String> = Vec::new();
+    for repository in repositories {
+        if crate::github::resolver::split_repository(repository).is_err() {
+            return Err(format!("repository_invalid{{repository: {repository}}}"));
+        }
+        let repository = crate::github::canonical_repository(repository);
+        if !listed.contains(&repository) {
+            listed.push(repository);
+        }
+    }
+    // The bind takes the owner of the handle's first bound repository, or of
+    // the first listed one when the handle has none.
+    let owner = imported
+        .iter()
+        .next()
+        .or(listed.first())
+        .and_then(|name| owner_of(name));
+    let mut add = Vec::new();
+    let mut already_bound = Vec::new();
+    for repository in listed {
+        if owner_of(&repository) != owner {
+            return Err(format!(
+                "binding_owner_mismatch{{repository: {repository}, owner: {}}}",
+                owner.as_deref().unwrap_or("")
+            ));
+        }
+        if imported.contains(&repository) {
+            already_bound.push(repository);
+            continue;
+        }
+        if let Some((_, connection)) = store
+            .github_handle_connection_for_repo(&repository)
+            .map_err(|_| "store_failure")?
+        {
+            return Err(format!(
+                "repository_bound_elsewhere{{repository: {repository}, connection_id: {connection}}}"
+            ));
+        }
+        if !installation.contains(&repository) {
+            return Err(format!(
+                "repository_not_in_installation{{repository: {repository}}}"
+            ));
+        }
+        add.push(repository);
+    }
+    Ok(json!({
+        "app_handle_id": handle.app_handle_id,
+        "dry_run": true,
+        "add": add,
+        "already_bound": already_bound,
+    }))
 }
 
 /// Unbinding narrows authority and requires no credential or additional
@@ -765,6 +941,41 @@ pub fn probe(
     reader: &dyn InstallationReader,
     now: i64,
 ) -> Result<Value, String> {
+    probe_with(store, principal, app_handle_id, now, |handle| {
+        let generation = handle.credential_generation;
+        resolve_repositories(
+            provider,
+            reader,
+            &installation_item(handle),
+            generation,
+            now,
+        )
+    })
+}
+
+/// [`probe`] with the handle's installation listing already read (see
+/// [`installation_repositories`]).
+pub fn probe_listed(
+    store: &PlexusStore,
+    principal: &str,
+    app_handle_id: &str,
+    installation: &[String],
+    now: i64,
+) -> Result<Value, String> {
+    probe_with(store, principal, app_handle_id, now, |_| {
+        Ok(installation.to_vec())
+    })
+}
+
+/// The probe itself, with `list` supplying the stored handle's installation
+/// repositories.
+fn probe_with(
+    store: &PlexusStore,
+    principal: &str,
+    app_handle_id: &str,
+    now: i64,
+    list: impl FnOnce(GithubHandle) -> Result<Vec<String>, String>,
+) -> Result<Value, String> {
     if principal != "direct" {
         return Err("operator_authority_required".into());
     }
@@ -776,13 +987,7 @@ pub fn probe(
         .map_err(|_| "store_failure")?
         .ok_or("agent_handle_unknown")?;
     let generation = handle.credential_generation;
-    let reachable = resolve_repositories(
-        provider,
-        reader,
-        &installation_item(handle),
-        generation,
-        now,
-    )?;
+    let reachable = list(handle)?;
     let available: BTreeSet<_> = reachable.iter().map(String::as_str).collect();
     for repository in &bound {
         if !available.contains(repository.as_str()) {

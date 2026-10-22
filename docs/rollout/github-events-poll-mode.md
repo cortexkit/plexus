@@ -168,14 +168,50 @@ manifest against the vendor's own MCP tool list, and a REST manifest such as
 exits 2, which proves nothing about the four actions. The first live poll after
 connecting, checked in step 4, is the compatibility check for this manifest.
 
-Issue a connection ticket owned by principal **`direct`**. `direct` is the
-identity the daemon gives a plain operator client. `ck-plexus-admin` connects
-this way, and so does the `facade_call` example used below. A ticket belongs to
-the principal that issues it, and so does the connection made from it. So
-`direct` owns `conn-github-actions` and the poll subscriptions on it, not an
-agent or a reserved module. The `--actions` list sets the connection's ceiling
-to the four reviewed reads. Every later grant on this connection is bounded by
-that ceiling, so no other GitHub Actions call can gain authority through it:
+The connection is owned by principal **`direct`**. `direct` is the identity
+the daemon gives a plain operator client. `ck-plexus-admin` connects this way,
+and so does the `facade_call` example used below. A ticket belongs to the
+principal that issues it, and so does the connection made from it. So `direct`
+owns `conn-github-actions` and the poll subscriptions on it, not an agent or a
+reserved module. The `--actions` list sets the connection's ceiling to the four
+reviewed reads. Every later grant on this connection is bounded by that
+ceiling, so no other GitHub Actions call can gain authority through it.
+
+Use `add-poll-connection`. It issues the ticket, connects, mints the poll grant
+to `direct` on the four reads and the `events_consume` grant to
+`reserved:basal` on `list_workflow_runs`, with one Touch ID confirmation for
+all of it. Preview first; the preview writes nothing and contacts nothing, and
+its `will ask:` line is the exact confirmation the apply asks for:
+
+```sh
+"$LIVE_BIN/ck-plexus-admin" add-poll-connection --subc "$SUBC" \
+  --app github_actions --connection conn-github-actions \
+  --credential-id apikey:github \
+  --actions list_workflow_runs,get_workflow_run,list_jobs_for_workflow_run_attempt,get_repository \
+  --consumer reserved:basal --consume-actions list_workflow_runs \
+  > "$EVIDENCE/poll-connection-preview.txt"
+"$LIVE_BIN/ck-plexus-admin" add-poll-connection --subc "$SUBC" \
+  --app github_actions --connection conn-github-actions \
+  --credential-id apikey:github \
+  --actions list_workflow_runs,get_workflow_run,list_jobs_for_workflow_run_attempt,get_repository \
+  --consumer reserved:basal --consume-actions list_workflow_runs \
+  --apply > "$EVIDENCE/poll-connection-applied.txt"
+"$LIVE_BIN/ck-plexus-admin" list-grants --subc "$SUBC" \
+  --connection conn-github-actions --all > "$EVIDENCE/grants-all.txt"
+sqlite3 -readonly -json "$LIVE_STORE" \
+  "SELECT principal,grantee_principal,authority_kind,action_selectors FROM grants WHERE connection_id='conn-github-actions';" \
+  > "$EVIDENCE/grants-all.json"
+```
+
+The grants are minted only after the connection is active and its discovery
+completed. If a step fails, the reply names the step, what exists and what did
+not run; rerun the same command to finish. A rerun reuses the connection and
+skips grants that already exist, so it never mints a duplicate, and it refuses
+by name a connection bound to another app or credential, or with a ceiling
+that does not cover the four reads.
+
+**Manual fallback.** The same setup as separate commands, each grant asking
+for its own confirmation. Issue the ticket:
 
 ```sh
 "$LIVE_BIN/ck-plexus-admin" issue-ticket --subc "$SUBC" \
@@ -224,6 +260,36 @@ a complete machine-readable cross-check.
 
 Run these operator commands only after the connection exists and the refreshed
 reviewed catalog is loaded. Workers must not touch the live store.
+
+Use `widen-and-grant`. It adds the six flow reads named in `CI_FLOW_ACTIONS`
+below (job, job log, run artifacts, artifact file, run metadata and a
+workflow's runs) to the connection ceiling and mints Basal's `invoke` grant on
+exactly those six, in one transaction with one Touch ID confirmation: both
+commit or neither does. It never raises the connection's risk ceiling. The
+preview runs the whole change and rolls it back, so it refuses exactly what the
+apply would and writes nothing:
+
+```sh
+CI_FLOW_ACTIONS=get_job,github.actions.job_log,list_workflow_run_artifacts,github.actions.artifact_file,get_workflow_run_metadata,list_workflow_runs_for_workflow
+"$LIVE_BIN/ck-plexus-admin" widen-and-grant --subc "$SUBC" \
+  --connection conn-github-actions --actions "$CI_FLOW_ACTIONS" \
+  --grantee reserved:basal > "$EVIDENCE/ci-flow-preview.txt"
+"$LIVE_BIN/ck-plexus-admin" widen-and-grant --subc "$SUBC" \
+  --connection conn-github-actions --actions "$CI_FLOW_ACTIONS" \
+  --grantee reserved:basal --apply > "$EVIDENCE/ci-flow-applied.txt"
+"$LIVE_BIN/ck-plexus-admin" list-grants --subc "$SUBC" \
+  --connection conn-github-actions --all > "$EVIDENCE/ci-flow-grants.txt"
+```
+
+**Pass:** the applied output's `widen_ceiling` step shows a resulting ceiling
+with all six reads and all four existing polling reads at the unchanged `read`
+risk, and its `grant` step shows the minted grant ID for `reserved:basal`;
+record it for rollback. `list-grants` shows that grant covering exactly the six
+actions, with the polling and consume grants still present. A rerun reports the
+actions as unchanged and the grant as `already_present`, and mints nothing.
+
+**Manual fallback.** The same change as two commands, each with its own
+confirmation, committed separately:
 
 1. **Widen the ceiling (pending: run at deploy).** Preview adding the six flow
    reads named in `CI_FLOW_ACTIONS` below (job, job log, run artifacts, artifact
@@ -441,7 +507,15 @@ AFT activates it, and only then you bind. Then bind the scratch repo to the
 handle with
 `ck-plexus-admin handle-bind --subc "$SUBC" --handle <app_handle_id> --repositories "$SCRATCH_REPO" --apply`.
 The repo must share the handle's owner and be listed by the handle's
-installation. For a global flow, use step 3's `events_consume` grant (owner
+installation. If the owner agent has no handle yet, onboard its bot with
+`ck-plexus-admin onboard-github-bot --subc "$SUBC" --inventory <file>
+--repositories "$SCRATCH_REPO" --actions <writes> --carrier reserved:aft
+--effect allow --shim-manifest-maps-repo --apply` after the same manifest
+steps: it imports, proves, binds and grants the handle with one Touch ID
+confirmation, and refuses to bind without `--shim-manifest-maps-repo`. Run it
+without `--apply` first to see what GitHub lists and what it would bind. The
+manual commands (`github.handle.import`, `github.handle.probe`, `handle-bind`,
+`handle-grant`) remain the fallback. For a global flow, use step 3's `events_consume` grant (owner
 `direct`, grantee `reserved:basal`, selector `list_workflow_runs`). A denial is
 not fixed by widening the grant to `*`.
 
