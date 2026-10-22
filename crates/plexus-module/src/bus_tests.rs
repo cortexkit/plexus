@@ -445,11 +445,22 @@ fn own_crate_info_keeps_plexus_component_names() {
 
 #[test]
 fn own_crate_names_match_workspace_cargo_targets() {
-    let output = std::process::Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("run cargo metadata for workspace target names");
+    let mut command = std::process::Command::new(env!("CARGO"));
+    command
+        .args([
+            "metadata",
+            "--no-deps",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"));
+    let output = crate::bounded::child_output(
+        &mut command,
+        std::time::Duration::from_secs(60),
+        "cargo metadata",
+    )
+    .expect("run cargo metadata for workspace target names");
     assert!(
         output.status.success(),
         "cargo metadata failed: {}",
