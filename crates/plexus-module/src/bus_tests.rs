@@ -276,10 +276,12 @@ fn credential_url_requires_exact_loopback_without_userinfo() {
 async fn trace_loopback_never_logs_jwt() {
     const CHILD: &str = "PLEXUS_TRACE_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        for spec in [
-            "trace",
-            "trace,async_nats=trace,async_nats::connection=trace",
-        ] {
+        // The fleet logger files every async_nats event under the `plexus` root
+        // logger, so these are the two ways CK_LOG can ask for its trace output:
+        // the bare root level and an explicit `plexus` directive. CK_LOG cannot
+        // name `async_nats` itself; a spec that tries is rejected whole and the
+        // logger falls back to `info`.
+        for spec in ["trace", "plexus=trace"] {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command
                 .args([
@@ -338,6 +340,174 @@ async fn trace_loopback_never_logs_jwt() {
     drop(connection);
     server.abort();
     std::fs::remove_dir_all(logs).unwrap();
+}
+
+/// Dispatches one event exactly as a dependency's `tracing` macro would: from a
+/// callsite whose target and module path are `hyper_util`'s connection pool,
+/// which is where most of the connection-pool chatter in the module log comes
+/// from. `tracing`'s own macros always record the calling module's path, so a
+/// test can only reproduce a dependency's callsite by building it by hand.
+macro_rules! dependency_event {
+    ($level:expr, $message:expr) => {{
+        struct Site;
+        static SITE: Site = Site;
+        static META: tracing::Metadata<'static> = tracing::Metadata::new(
+            "dependency event",
+            "hyper_util::client::legacy::pool",
+            $level,
+            Some(file!()),
+            Some(line!()),
+            Some("hyper_util::client::legacy::pool"),
+            tracing::field::FieldSet::new(&["message"], tracing::callsite::Identifier(&SITE)),
+            tracing::metadata::Kind::EVENT,
+        );
+        impl tracing::callsite::Callsite for Site {
+            fn set_interest(&self, _: tracing::subscriber::Interest) {}
+            fn metadata(&self) -> &tracing::Metadata<'_> {
+                &META
+            }
+        }
+        tracing::callsite::register(&SITE);
+        let field = META.fields().field("message").unwrap();
+        let message: &str = $message;
+        tracing::dispatcher::get_default(|dispatch| {
+            if dispatch.enabled(&META) {
+                dispatch.event(&tracing::Event::new(
+                    &META,
+                    &META
+                        .fields()
+                        .value_set(&[(&field, Some(&message as &dyn tracing::Value))]),
+                ));
+            }
+        });
+    }};
+}
+
+/// The module log as written through `safe_log_layer` with `spec` as CK_LOG,
+/// after one event of each level from a dependency and plexus's own INFO and
+/// DEBUG diagnostics.
+fn module_log_under(spec: &str) -> String {
+    let scratch = Scratch::database("dependency-cap");
+    let logs = scratch.path().with_extension("logs");
+    let mut config = cortexkit_log::Config::in_dir("plexus", &logs);
+    config.spec = Some(spec.into());
+    let (layer, handle) = safe_log_layer(config).unwrap();
+    tracing::subscriber::with_default(tracing_subscriber::Registry::default().with(layer), || {
+        dependency_event!(
+            tracing::Level::TRACE,
+            "dependency-trace idle interval checking for expired"
+        );
+        dependency_event!(
+            tracing::Level::DEBUG,
+            "dependency-debug pooling idle connection"
+        );
+        dependency_event!(
+            tracing::Level::INFO,
+            "dependency-info connection established"
+        );
+        dependency_event!(tracing::Level::WARN, "dependency-warn connection error");
+        eprintln!(info relay: "plexus-info relay state changed: connected");
+        eprintln!(debug scheduler: "plexus-debug scheduling pass selected nothing");
+    });
+    let text = std::fs::read_to_string(handle.path()).unwrap();
+    std::fs::remove_dir_all(logs).unwrap();
+    text
+}
+
+fn line_with<'a>(text: &'a str, marker: &str) -> Option<cortexkit_log::ParsedLine<'a>> {
+    text.lines()
+        .find(|line| line.contains(marker))
+        .map(|line| cortexkit_log::parse_line(line).expect("fleet-formatted line"))
+}
+
+#[test]
+fn dependency_trace_and_debug_stay_out_of_the_module_log_whatever_ck_log_says() {
+    // `info` is the fleet default; `trace` is what an operator sets to see
+    // plexus's own debug lines, and it used to admit every dependency line too.
+    for spec in ["info", "debug", "trace"] {
+        let text = module_log_under(spec);
+        for marker in ["dependency-trace", "dependency-debug", "dependency-info"] {
+            assert!(
+                !text.contains(marker),
+                "CK_LOG={spec}: a dependency line below WARN reached the module log: {text}"
+            );
+        }
+        let warn = line_with(&text, "dependency-warn")
+            .unwrap_or_else(|| panic!("CK_LOG={spec}: a dependency WARN must be written: {text}"));
+        assert_eq!(warn.level, cortexkit_log::ParsedLevel::Warn);
+        // The fleet logger maps every `::` target to the module root, so the
+        // line cannot yet carry `hyper_util::client::legacy::pool` as its name.
+        assert_eq!(warn.logger, "plexus");
+    }
+}
+
+#[test]
+fn plexus_info_and_debug_diagnostics_keep_their_ck_log_levels() {
+    for (spec, debug_written) in [("info", false), ("debug", true), ("trace", true)] {
+        let text = module_log_under(spec);
+        let info = line_with(&text, "plexus-info")
+            .unwrap_or_else(|| panic!("CK_LOG={spec}: plexus INFO must be written: {text}"));
+        assert_eq!(info.level, cortexkit_log::ParsedLevel::Info);
+        assert_eq!(info.logger, "plexus.relay");
+        let debug = line_with(&text, "plexus-debug");
+        assert_eq!(
+            debug.is_some(),
+            debug_written,
+            "CK_LOG={spec}: plexus DEBUG follows CK_LOG: {text}"
+        );
+        if let Some(debug) = debug {
+            assert_eq!(debug.level, cortexkit_log::ParsedLevel::Debug);
+            assert_eq!(debug.logger, "plexus.scheduler");
+        }
+    }
+}
+
+#[test]
+fn subc_log_tags_bring_back_a_plexus_debug_line_through_ck_log() {
+    // The daemon builds a module's CK_LOG from its subc.jsonc `log` block and
+    // sets it in the child's environment. Parse real config documents with
+    // the daemon's own loader and log under exactly the value it would pass.
+    // A module with no `log` block gets no CK_LOG, which the logger reads as
+    // its `info` default, as the empty spec does here.
+    let scratch = Scratch::database("subc-log-tags");
+    let path = scratch.path().with_extension("jsonc");
+    for (log_block, debug_written) in [
+        (r#", "log": { "tags": { "scheduler": "debug" } }"#, true),
+        (r#", "log": { "level": "info" }"#, false),
+        ("", false),
+    ] {
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{ "version": 1, "modules": {{ "plexus": {{ "program": "ck-plexus"{log_block} }} }} }}"#
+            ),
+        )
+        .unwrap();
+        let config = subc_daemon::daemon_config::load(&path).unwrap().unwrap();
+        let module = config
+            .modules
+            .iter()
+            .find(|module| module.module_id == "plexus")
+            .unwrap();
+        let ck_log = module
+            .module_spec()
+            .env
+            .into_iter()
+            .find(|(key, _)| key == "CK_LOG")
+            .map(|(_, value)| value)
+            .unwrap_or_default();
+        let text = module_log_under(&ck_log);
+        assert_eq!(
+            line_with(&text, "plexus-debug").is_some(),
+            debug_written,
+            "log block {log_block:?} gave CK_LOG={ck_log:?}; plexus DEBUG follows CK_LOG: {text}"
+        );
+        assert!(
+            line_with(&text, "plexus-info").is_some(),
+            "CK_LOG={ck_log:?}: {text}"
+        );
+    }
+    std::fs::remove_file(path).unwrap();
 }
 
 #[derive(Default, Clone)]

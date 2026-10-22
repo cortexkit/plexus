@@ -46,8 +46,45 @@ fn zeroizing_string<'de, D: serde::Deserializer<'de>>(
     String::deserialize(deserializer).map(zeroize::Zeroizing::new)
 }
 
-// Transport trace output includes authentication headers and NATS ConnectInfo.
-// This filter is outside the fleet log filter, so CK_LOG cannot enable secret output.
+/// Whether a callsite was compiled into one of plexus's own crates rather than
+/// into a dependency. A plexus diagnostic is emitted by `diag!` (or the crate
+/// `eprintln!` shadow) at its call site, so its module path starts with a
+/// plexus crate name (`plexus_core::scheduler`, `plexus_module::relay`). A
+/// dependency's events carry the dependency's own module path
+/// (`hyper_util::client::legacy::pool`), and a dependency cannot change that by
+/// choosing a target name. An event with no module path is treated as a
+/// dependency's.
+fn is_plexus_callsite(metadata: &tracing::Metadata<'_>) -> bool {
+    metadata.module_path().is_some_and(|path| {
+        let crate_name = path.split("::").next().unwrap_or(path);
+        crate_name.starts_with("plexus_")
+    })
+}
+
+/// Whether the module log may carry anything from this callsite, before CK_LOG
+/// is consulted.
+///
+/// Transport trace output includes authentication headers and NATS ConnectInfo,
+/// so tungstenite is never admitted and async_nats never below INFO. These two
+/// rules hold on their own, separately from the dependency cap below. This
+/// check sits outside the fleet log filter, so CK_LOG cannot enable
+/// secret output.
+///
+/// Every other dependency is admitted only at WARN and above, whatever CK_LOG
+/// says. The fleet logger names a line after its tracing target and maps any
+/// target containing `::` (a dependency's default target is its Rust module
+/// path) to the bare `plexus` root logger. So CK_LOG can't give dependencies a
+/// level of their own: whatever level it sets for plexus's root also applies to
+/// every hyper/reqwest connection-pool line, and its logger-name grammar has no
+/// way to name a dependency. Plexus's own callsites are left to CK_LOG.
+fn admitted_before_ck_log(metadata: &tracing::Metadata<'_>) -> bool {
+    !metadata.target().starts_with("tungstenite")
+        && !metadata.target().starts_with("tokio_tungstenite")
+        && (!metadata.target().starts_with("async_nats")
+            || *metadata.level() <= tracing::Level::INFO)
+        && (is_plexus_callsite(metadata) || *metadata.level() <= tracing::Level::WARN)
+}
+
 pub(crate) fn safe_log_layer(
     config: cortexkit_log::Config,
 ) -> Result<
@@ -58,15 +95,27 @@ pub(crate) fn safe_log_layer(
     cortexkit_log::InitError,
 > {
     let (layer, handle) = cortexkit_log::layer(config)?;
-    Ok((
-        layer.with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
-            !metadata.target().starts_with("tungstenite")
-                && !metadata.target().starts_with("tokio_tungstenite")
-                && (!metadata.target().starts_with("async_nats")
-                    || *metadata.level() <= tracing::Level::INFO)
-        })),
-        handle,
-    ))
+    // cortexkit-log applies CK_LOG only in its layer's `enabled`. A plain
+    // `filter_fn` caches every callsite it admits as `Interest::always`, the
+    // filtered wrapper drops the inner layer's own answer, and tracing skips
+    // `enabled` for an `always` callsite. With that filter every admitted event
+    // was written at every level and CK_LOG was never asked. Answering
+    // `sometimes` for an admitted callsite makes tracing call `enabled` on each
+    // event, so CK_LOG decides; a refused callsite is cached as `never`.
+    let filter = tracing_subscriber::filter::dynamic_filter_fn(
+        |metadata: &tracing::Metadata<'_>,
+         _: &tracing_subscriber::layer::Context<'_, tracing_subscriber::Registry>| {
+            admitted_before_ck_log(metadata)
+        },
+    )
+    .with_callsite_filter(|metadata| {
+        if admitted_before_ck_log(metadata) {
+            tracing::subscriber::Interest::sometimes()
+        } else {
+            tracing::subscriber::Interest::never()
+        }
+    });
+    Ok((layer.with_filter(filter), handle))
 }
 
 pub(crate) fn init_logger_from_env() -> Result<cortexkit_log::Handle, cortexkit_log::InitError> {

@@ -441,7 +441,7 @@ where
                 now_ms,
             ) {
                 Ok(removed) if removed > 0 => {
-                    eprintln!(debug scheduler: "event retention pruned {removed} row(s)");
+                    eprintln!(info scheduler: "event retention pruned {removed} row(s)");
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -465,7 +465,7 @@ where
                     // back into the table with self-referential noise. The operator log
                     // records the destructive pass without manufacturing more journal
                     // history that will itself be pruned later.
-                    eprintln!(debug scheduler: "audit retention pruned {removed} row(s)");
+                    eprintln!(info scheduler: "audit retention pruned {removed} row(s)");
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -485,7 +485,7 @@ where
 
             match self.store.prune_reservations(now_ms) {
                 Ok(removed) if removed > 0 => {
-                    eprintln!(debug scheduler: "reservation retention pruned {removed} row(s)");
+                    eprintln!(info scheduler: "reservation retention pruned {removed} row(s)");
                 }
                 Ok(_) => {}
                 Err(error) => {

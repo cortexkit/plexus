@@ -21419,3 +21419,35 @@ expect_red = ["tests::composite_admin_tests::a_wildcard_action_is_refused_before
 expect_message = "a wildcard action must be refused"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "module-log-caps-dependencies-at-warn"
+guards = "A dependency's TRACE, DEBUG or INFO event never reaches the plexus module log, whatever CK_LOG asks for, while its WARN still does"
+file = "crates/plexus-module/src/bus.rs"
+old = "        && (is_plexus_callsite(metadata) || *metadata.level() <= tracing::Level::WARN)"
+new = "        && (true || is_plexus_callsite(metadata) || *metadata.level() <= tracing::Level::WARN) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bus_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["bus::tests::dependency_trace_and_debug_stay_out_of_the_module_log_whatever_ck_log_says"]
+expect_message = "a dependency line below WARN reached the module log"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-log-asks-ck-log-on-every-event"
+guards = "The module log's safety filter caches an admitted callsite as sometimes, so tracing asks the fleet layer on every event and CK_LOG decides plexus's own levels"
+file = "crates/plexus-module/src/bus.rs"
+old = "            tracing::subscriber::Interest::sometimes()"
+new = "            tracing::subscriber::Interest::always() /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bus_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["bus::tests::plexus_info_and_debug_diagnostics_keep_their_ck_log_levels", "bus::tests::subc_log_tags_bring_back_a_plexus_debug_line_through_ck_log"]
+expect_message = "plexus DEBUG follows CK_LOG"
+build_timeout_s = 3600
+timeout_s = 120
