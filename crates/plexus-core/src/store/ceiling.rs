@@ -31,6 +31,10 @@ pub(super) fn extend_connection_ceiling_on_conn(
     Ok(())
 }
 
+/// What [`PlexusStore::widen_ceiling_and_mint_grants`] did: the widening's
+/// plan, as `widen_connection_ceiling` reports it, and the grants it minted.
+pub type WidenedAndGranted = (Value, Vec<GrantRecord>);
+
 impl PlexusStore {
     /// Preview or apply an additive, explicitly named widening. One transaction
     /// protects validation, the ceiling update, the authority-version bump and the
@@ -70,7 +74,7 @@ impl PlexusStore {
         grants: &[GrantMintRequest],
         audit: &dyn Fn(&GrantRecord) -> AuditRecord,
         dry_run: bool,
-    ) -> Result<Result<(Value, Vec<GrantRecord>), CeremonyRefusal>, StoreError> {
+    ) -> Result<Result<WidenedAndGranted, CeremonyRefusal>, StoreError> {
         if let Some(refusal) = unnamed_actions_refusal(actions) {
             return Ok(Err(refusal));
         }

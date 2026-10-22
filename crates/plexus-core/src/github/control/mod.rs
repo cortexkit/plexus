@@ -385,13 +385,9 @@ pub fn import(
     now: i64,
     dry_run: bool,
 ) -> Result<Value, String> {
-    import_with(
-        store,
-        principal,
-        inventory,
-        dry_run,
-        &mut |item, generation| resolve_repositories(provider, reader, item, generation, now),
-    )
+    import_with(store, principal, inventory, dry_run, |item, generation| {
+        resolve_repositories(provider, reader, item, generation, now)
+    })
 }
 
 /// The repositories one handle's installation lists, read with the handle's
@@ -435,7 +431,7 @@ pub fn import_listed(
     listings: &BTreeMap<String, Vec<String>>,
     dry_run: bool,
 ) -> Result<Value, String> {
-    import_with(store, principal, inventory, dry_run, &mut |item, _| {
+    import_with(store, principal, inventory, dry_run, |item, _| {
         listings
             .get(&item.app_handle_id)
             .cloned()
@@ -450,7 +446,7 @@ fn import_with(
     principal: &str,
     inventory: &Inventory,
     dry_run: bool,
-    list: &mut dyn FnMut(&InventoryHandle, i64) -> Result<Vec<String>, String>,
+    mut list: impl FnMut(&InventoryHandle, i64) -> Result<Vec<String>, String>,
 ) -> Result<Value, String> {
     if principal != "direct" {
         return Err("operator_authority_required".into());
