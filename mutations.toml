@@ -1319,6 +1319,8 @@ build_timeout_s = 3600
 [[control]]
 id = "full-resume-window"
 guards = "Ordered timestamp retention preserves the full possible one-hour resume window"
+hub = "The retention window is the history the ordered-timestamp poller resumes from; poller tests that resume or replay inside that hour depend on the same rows surviving retention."
+hub_targets = ["plexus_core", "poller"]
 file = "crates/plexus-core/src/store/event_outbox.rs"
 old = "pub(crate) const RETENTION_MAX_WINDOW_MS: i64 = 3_600_000;"
 new = "pub(crate) const RETENTION_MAX_WINDOW_MS: i64 = 0; // NON-VACUITY BREAK"
@@ -4551,6 +4553,8 @@ build_timeout_s = 3600
 [[control]]
 id = "secret-key-pagination-tokens-pass"
 guards = "Secret screening matches whole words, so pagination and limit arguments (page_token, max_tokens) are not refused as credentials"
+hub = "Every governed call goes through this argument-name screen; the poller's cursor strategies send pagination tokens on every poll, so refusing them breaks polling as well."
+hub_targets = ["plexus_core", "poller"]
 file = "crates/plexus-core/src/secret_input.rs"
 old = "    if SECRET_KEYS.contains(&words.concat().as_str()) {\n        return true;\n    }"
 new = "    if words.concat().contains(\"token\") { /* NON-VACUITY BREAK */\n        return true;\n    }"
@@ -4621,6 +4625,8 @@ build_timeout_s = 3600
 [[control]]
 id = "governance-unknown-tier-gates-strongest"
 guards = "An app with no reviewed system manifest is gated at the strongest tier, so its writes need the decision plane"
+hub = "Unknown severity resolves to the strongest tier in one place; the governance unit test for an unknown severity string checks that same default."
+hub_targets = ["plexus_core"]
 file = "crates/plexus-core/src/governance.rs"
 old = "        .unwrap_or(Tier::S4);"
 new = "        .unwrap_or(Tier::S1); /* NON-VACUITY BREAK */"
@@ -21221,6 +21227,8 @@ timeout_s = 120
 [[control]]
 id = "governance-engine-real-wall-clock"
 guards = "A governance engine built for production judges expiry on the real wall clock, not a clock frozen when it was built"
+hub = "The production engine's clock is what every expiry decision reads; the governance integration test that lets a policy expire between authorization and dispatch depends on that same moving clock."
+hub_targets = ["governance"]
 file = "crates/plexus-core/src/governance.rs"
 old = "            now_ms: Arc::new(crate::storage::now_ms),"
 new = "            now_ms: { let frozen = crate::storage::now_ms(); Arc::new(move || frozen) }, /* NON-VACUITY BREAK */"
