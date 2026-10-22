@@ -1568,16 +1568,19 @@ build_timeout_s = 3600
 
 [[control]]
 id = "bus-trace-jwt-filter"
-guards = "Env trace directives cannot expose async-nats ConnectInfo JWTs; both the async_nats rule and the general dependency cap are neutralized because either one alone keeps async_nats TRACE out"
+guards = "CK_LOG cannot raise async-nats TRACE beyond its INFO ceiling"
 file = "crates/plexus-module/src/bus.rs"
-old = "        && (!metadata.target().starts_with(\"async_nats\")\n            || *metadata.level() <= tracing::Level::INFO)\n        && (is_plexus_callsite(metadata) || *metadata.level() <= tracing::Level::WARN)"
-new = "        && true /* NON-VACUITY BREAK */"
+old = ".ceiling(\"async_nats\", cortexkit_log::LevelFilter::INFO)"
+new = "/* NON-VACUITY BREAK: remove async_nats ceiling */"
 test_file = "crates/plexus-module/src/bus_tests.rs"
 runner = "cargo"
 package = "plexus-module"
 target = "--lib"
-expect_red = ["bus::tests::trace_loopback_never_logs_jwt"]
+select = "expected"
+expect_red = ["bus::tests::ck_log_cannot_raise_transport_crates_past_their_ceilings"]
+expect_message = "CK_LOG must not raise async-nats above its hard ceiling"
 build_timeout_s = 3600
+timeout_s = 120
 
 [[control]]
 id = "bus-per-publish-home"
@@ -21429,33 +21432,49 @@ build_timeout_s = 3600
 timeout_s = 120
 
 [[control]]
-id = "module-log-caps-dependencies-at-warn"
-guards = "A dependency's TRACE, DEBUG and INFO events are refused before CK_LOG is consulted, so no CK_LOG value writes them; its WARN is still written when CK_LOG enables WARN"
+id = "module-log-own-crate-label"
+guards = "Plexus module callsites retain Plexus logger names rather than being treated as dependencies"
 file = "crates/plexus-module/src/bus.rs"
-old = "        && (is_plexus_callsite(metadata) || *metadata.level() <= tracing::Level::WARN)"
-new = "        && (true || is_plexus_callsite(metadata) || *metadata.level() <= tracing::Level::WARN) /* NON-VACUITY BREAK */"
+old = "\"plexus_module\","
+new = "/* NON-VACUITY BREAK: plexus_module omitted */"
 test_file = "crates/plexus-module/src/bus_tests.rs"
 runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["bus::tests::dependency_trace_and_debug_stay_out_of_the_module_log_whatever_ck_log_says"]
-expect_message = "a dependency line below WARN reached the module log"
+expect_red = ["bus::tests::plexus_info_and_debug_diagnostics_keep_their_ck_log_levels"]
+expect_message = "plexus INFO must be written"
 build_timeout_s = 3600
 timeout_s = 120
 
 [[control]]
-id = "module-log-asks-ck-log-on-every-event"
-guards = "The module log's safety filter caches an admitted callsite as sometimes, so tracing asks the fleet layer on every event and CK_LOG decides plexus's own levels"
+id = "module-log-core-own-crate-label"
+guards = "plexus_core is treated as an own crate so its INFO diagnostics keep the Plexus component namespace"
 file = "crates/plexus-module/src/bus.rs"
-old = "            tracing::subscriber::Interest::sometimes()"
-new = "            tracing::subscriber::Interest::always() /* NON-VACUITY BREAK */"
+old = "    \"plexus_core\","
+new = "    /* NON-VACUITY BREAK: plexus_core omitted */"
 test_file = "crates/plexus-module/src/bus_tests.rs"
 runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["bus::tests::plexus_info_and_debug_diagnostics_keep_their_ck_log_levels", "bus::tests::subc_log_tags_bring_back_a_plexus_debug_line_through_ck_log"]
-expect_message = "plexus DEBUG follows CK_LOG"
+expect_red = ["bus::tests::own_crate_info_keeps_plexus_component_names"]
+expect_message = "plexus-core-ownership-positive-control INFO diagnostic was not written"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-log-tungstenite-ceiling"
+guards = "CK_LOG cannot raise tungstenite TRACE past its OFF ceiling"
+file = "crates/plexus-module/src/bus.rs"
+old = ".ceiling(\"tungstenite\", cortexkit_log::LevelFilter::OFF)"
+new = ".ceiling(\"tungstenite\", cortexkit_log::LevelFilter::TRACE) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/bus_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["bus::tests::ck_log_cannot_raise_transport_crates_past_their_ceilings"]
+expect_message = "CK_LOG must not raise tungstenite above its hard ceiling"
 build_timeout_s = 3600
 timeout_s = 120

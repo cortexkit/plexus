@@ -26,7 +26,7 @@ use subc_client_rs::{CallOptions, ConsumerIdentity, ConsumerOptions, SubcConsume
 use subc_protocol::{BindIdentity, RouteTarget};
 use tokio::sync::mpsc;
 
-use tracing_subscriber::{layer::SubscriberExt, Layer};
+use tracing_subscriber::layer::SubscriberExt;
 
 use crate::ModuleState;
 
@@ -46,77 +46,27 @@ fn zeroizing_string<'de, D: serde::Deserializer<'de>>(
     String::deserialize(deserializer).map(zeroize::Zeroizing::new)
 }
 
-/// Whether a callsite belongs to plexus rather than to a dependency, judged by
-/// the first component of its module path starting with `plexus_` (no
-/// dependency in the lock uses that prefix). A plexus diagnostic is emitted by `diag!` (or the crate
-/// `eprintln!` shadow) at its call site, so its module path starts with a
-/// plexus crate name (`plexus_core::scheduler`, `plexus_module::relay`). A
-/// dependency's events carry the dependency's own module path
-/// (`hyper_util::client::legacy::pool`), and a dependency cannot change that by
-/// choosing a target name. An event with no module path is treated as a
-/// dependency's.
-fn is_plexus_callsite(metadata: &tracing::Metadata<'_>) -> bool {
-    metadata.module_path().is_some_and(|path| {
-        let crate_name = path.split("::").next().unwrap_or(path);
-        crate_name.starts_with("plexus_")
-    })
-}
-
-/// Whether the module log may carry anything from this callsite, before CK_LOG
-/// is consulted.
-///
-/// Transport trace output includes authentication headers and NATS ConnectInfo,
-/// so tungstenite is never admitted and async_nats never below INFO. These two
-/// rules hold on their own, separately from the dependency cap below. This
-/// check sits outside the fleet log filter, so CK_LOG cannot enable
-/// secret output.
-///
-/// Every other dependency is admitted only at WARN and above, whatever CK_LOG
-/// says. The fleet logger names a line after its tracing target and maps any
-/// target containing `::` (a dependency's default target is its Rust module
-/// path) to the bare `plexus` root logger. So CK_LOG can't give dependencies a
-/// level of their own: whatever level it sets for plexus's root also applies to
-/// every hyper/reqwest connection-pool line, and its logger-name grammar has no
-/// way to name a dependency. Plexus's own callsites are left to CK_LOG.
-fn admitted_before_ck_log(metadata: &tracing::Metadata<'_>) -> bool {
-    !metadata.target().starts_with("tungstenite")
-        && !metadata.target().starts_with("tokio_tungstenite")
-        && (!metadata.target().starts_with("async_nats")
-            || *metadata.level() <= tracing::Level::INFO)
-        && (is_plexus_callsite(metadata) || *metadata.level() <= tracing::Level::WARN)
-}
+const OWN_CRATE_NAMES: &[&str] = &[
+    "plexus_core",
+    "plexus_module",
+    "plexus_probe",
+    "plexus_conformance",
+    "ck_plexus",
+    "ck_plexus_admin",
+];
 
 pub(crate) fn safe_log_layer(
     config: cortexkit_log::Config,
-) -> Result<
-    (
-        impl Layer<tracing_subscriber::Registry>,
-        cortexkit_log::Handle,
-    ),
-    cortexkit_log::InitError,
-> {
+) -> Result<(cortexkit_log::LogLayer, cortexkit_log::Handle), cortexkit_log::InitError> {
+    // The logger gives every dependency a separate namespace and default WARN
+    // cap. Only these compiled Plexus crates keep the module's own namespaces.
+    let crates = cortexkit_log::Crates::new()
+        .own(OWN_CRATE_NAMES.iter().copied())
+        .ceiling("tungstenite", cortexkit_log::LevelFilter::OFF)
+        .ceiling("tokio_tungstenite", cortexkit_log::LevelFilter::OFF)
+        .ceiling("async_nats", cortexkit_log::LevelFilter::INFO);
     let (layer, handle) = cortexkit_log::layer(config)?;
-    // cortexkit-log applies CK_LOG only in its layer's `enabled`. A plain
-    // `filter_fn` caches every callsite it admits as `Interest::always`, the
-    // filtered wrapper drops the inner layer's own answer, and tracing skips
-    // `enabled` for an `always` callsite. With that filter every admitted event
-    // was written at every level and CK_LOG was never asked. Answering
-    // `sometimes` for an admitted callsite makes tracing call `enabled` on each
-    // event, so CK_LOG decides; a refused callsite is cached as `never`.
-    let filter = tracing_subscriber::filter::dynamic_filter_fn(
-        |metadata: &tracing::Metadata<'_>,
-         _: &tracing_subscriber::layer::Context<'_, tracing_subscriber::Registry>| {
-            admitted_before_ck_log(metadata)
-        },
-    )
-    .with_callsite_filter(|metadata| {
-        if admitted_before_ck_log(metadata) {
-            tracing::subscriber::Interest::sometimes()
-        } else {
-            tracing::subscriber::Interest::never()
-        }
-    });
-    Ok((layer.with_filter(filter), handle))
+    Ok((layer.with_crates(crates), handle))
 }
 
 pub(crate) fn init_logger_from_env() -> Result<cortexkit_log::Handle, cortexkit_log::InitError> {

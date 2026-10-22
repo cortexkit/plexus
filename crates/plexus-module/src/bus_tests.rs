@@ -276,11 +276,8 @@ fn credential_url_requires_exact_loopback_without_userinfo() {
 async fn trace_loopback_never_logs_jwt() {
     const CHILD: &str = "PLEXUS_TRACE_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        // The fleet logger files every async_nats event under the `plexus` root
-        // logger, so these are the two ways CK_LOG can ask for its trace output:
-        // the bare root level and an explicit `plexus` directive. CK_LOG cannot
-        // name `async_nats` itself; a spec that tries is rejected whole and the
-        // logger falls back to `info`.
+        // The layer's async_nats ceiling must keep transport trace output out
+        // even when CK_LOG enables trace for the whole module.
         for spec in ["trace", "plexus=trace"] {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command
@@ -342,22 +339,20 @@ async fn trace_loopback_never_logs_jwt() {
     std::fs::remove_dir_all(logs).unwrap();
 }
 
-/// Dispatches one event exactly as a dependency's `tracing` macro would: from a
-/// callsite whose target and module path are `hyper_util`'s connection pool,
-/// which is where most of the connection-pool chatter in the module log comes
-/// from. `tracing`'s own macros always record the calling module's path, so a
-/// test can only reproduce a dependency's callsite by building it by hand.
+/// Dispatches an event from a synthetic dependency callsite. Tracing derives a
+/// macro's module path from the crate that contains it, so tests build metadata
+/// by hand to represent a dependency's actual module path.
 macro_rules! dependency_event {
-    ($level:expr, $message:expr) => {{
+    ($module_path:literal, $level:expr, $message:expr) => {{
         struct Site;
         static SITE: Site = Site;
         static META: tracing::Metadata<'static> = tracing::Metadata::new(
             "dependency event",
-            "hyper_util::client::legacy::pool",
+            $module_path,
             $level,
             Some(file!()),
             Some(line!()),
-            Some("hyper_util::client::legacy::pool"),
+            Some($module_path),
             tracing::field::FieldSet::new(&["message"], tracing::callsite::Identifier(&SITE)),
             tracing::metadata::Kind::EVENT,
         );
@@ -383,9 +378,9 @@ macro_rules! dependency_event {
     }};
 }
 
-/// The module log as written through `safe_log_layer` with `spec` as CK_LOG,
-/// after dependency TRACE, DEBUG, INFO and WARN events and plexus's own INFO
-/// and DEBUG diagnostics.
+/// The module log written through the configured cortexkit-log layer with
+/// `spec` as CK_LOG, after dependency TRACE, DEBUG, INFO and WARN events and
+/// Plexus's own INFO and DEBUG diagnostics.
 fn module_log_under(spec: &str) -> String {
     let scratch = Scratch::database("dependency-cap");
     let logs = scratch.path().with_extension("logs");
@@ -394,24 +389,161 @@ fn module_log_under(spec: &str) -> String {
     let (layer, handle) = safe_log_layer(config).unwrap();
     tracing::subscriber::with_default(tracing_subscriber::Registry::default().with(layer), || {
         dependency_event!(
+            "hyper_util::client::legacy::pool",
             tracing::Level::TRACE,
             "dependency-trace idle interval checking for expired"
         );
         dependency_event!(
+            "hyper_util::client::legacy::pool",
             tracing::Level::DEBUG,
             "dependency-debug pooling idle connection"
         );
         dependency_event!(
+            "hyper_util::client::legacy::pool",
             tracing::Level::INFO,
             "dependency-info connection established"
         );
-        dependency_event!(tracing::Level::WARN, "dependency-warn connection error");
+        dependency_event!(
+            "hyper_util::client::legacy::pool",
+            tracing::Level::WARN,
+            "dependency-warn connection error"
+        );
         eprintln!(info relay: "plexus-info relay state changed: connected");
         eprintln!(debug scheduler: "plexus-debug scheduling pass selected nothing");
     });
     let text = std::fs::read_to_string(handle.path()).unwrap();
     std::fs::remove_dir_all(logs).unwrap();
     text
+}
+
+#[test]
+fn own_crate_info_keeps_plexus_component_names() {
+    let scratch = Scratch::database("own-crate-labels");
+    let logs = scratch.path().with_extension("logs");
+    let mut config = cortexkit_log::Config::in_dir("plexus", &logs);
+    config.spec = Some("info".into());
+    let (layer, handle) = safe_log_layer(config).unwrap();
+    tracing::subscriber::with_default(tracing_subscriber::Registry::default().with(layer), || {
+        plexus_core::log_ownership_test_info();
+        eprintln!(info relay: "plexus-module-ownership-positive-control");
+    });
+    let text = std::fs::read_to_string(handle.path()).unwrap();
+    std::fs::remove_dir_all(logs).unwrap();
+
+    for (marker, expected_logger) in [
+        ("plexus-core-ownership-positive-control", "plexus.storage"),
+        ("plexus-module-ownership-positive-control", "plexus.relay"),
+    ] {
+        let line = line_with(&text, marker)
+            .unwrap_or_else(|| panic!("{marker} INFO diagnostic was not written: {text}"));
+        assert_eq!(line.level, cortexkit_log::ParsedLevel::Info);
+        assert!(line.logger.starts_with("plexus."), "{line:?}");
+        assert!(!line.logger.starts_with("plexus.dep."), "{line:?}");
+        assert_eq!(line.logger, expected_logger);
+    }
+}
+
+#[test]
+fn own_crate_names_match_workspace_cargo_targets() {
+    let output = std::process::Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run cargo metadata for workspace target names");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: Value = serde_json::from_slice(&output.stdout).expect("parse cargo metadata");
+    let members: std::collections::BTreeSet<_> = metadata["workspace_members"]
+        .as_array()
+        .expect("workspace member list")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let expected: std::collections::BTreeSet<String> = metadata["packages"]
+        .as_array()
+        .expect("workspace packages")
+        .iter()
+        .filter(|package| {
+            package["id"]
+                .as_str()
+                .is_some_and(|id| members.contains(id))
+        })
+        .flat_map(|package| {
+            package["targets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|target| {
+                    let kinds = target["kind"].as_array()?;
+                    let is_crate = kinds
+                        .iter()
+                        .any(|kind| matches!(kind.as_str(), Some("lib" | "bin")));
+                    is_crate
+                        .then(|| target["name"].as_str())
+                        .flatten()
+                        .map(|name| name.replace('-', "_"))
+                })
+        })
+        .collect();
+    let actual: std::collections::BTreeSet<String> = OWN_CRATE_NAMES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    assert_eq!(
+        OWN_CRATE_NAMES.len(),
+        actual.len(),
+        "own crate list has duplicates"
+    );
+    assert_eq!(
+        actual, expected,
+        "own crate list must match workspace crate targets"
+    );
+}
+
+fn transport_log_under(spec: &str) -> String {
+    let scratch = Scratch::database("transport-ceilings");
+    let logs = scratch.path().with_extension("logs");
+    let mut config = cortexkit_log::Config::in_dir("plexus", &logs);
+    config.spec = Some(spec.into());
+    let (layer, handle) = safe_log_layer(config).unwrap();
+    tracing::subscriber::with_default(tracing_subscriber::Registry::default().with(layer), || {
+        dependency_event!(
+            "async_nats::client::connection",
+            tracing::Level::TRACE,
+            "async-nats-trace-must-stay-out"
+        );
+        dependency_event!(
+            "tungstenite::protocol",
+            tracing::Level::TRACE,
+            "tungstenite-trace-must-stay-out"
+        );
+        dependency_event!(
+            "tokio_tungstenite::handshake",
+            tracing::Level::TRACE,
+            "tokio-tungstenite-trace-must-stay-out"
+        );
+    });
+    let text = std::fs::read_to_string(handle.path()).unwrap();
+    std::fs::remove_dir_all(logs).unwrap();
+    text
+}
+
+#[test]
+fn ck_log_cannot_raise_transport_crates_past_their_ceilings() {
+    for (crate_name, marker) in [
+        ("async-nats", "async-nats-trace-must-stay-out"),
+        ("tungstenite", "tungstenite-trace-must-stay-out"),
+        ("tokio-tungstenite", "tokio-tungstenite-trace-must-stay-out"),
+    ] {
+        let text = transport_log_under(&format!("plexus.dep.{crate_name}=trace"));
+        assert!(
+            !text.contains(marker),
+            "CK_LOG must not raise {crate_name} above its hard ceiling: {text}"
+        );
+    }
 }
 
 fn line_with<'a>(text: &'a str, marker: &str) -> Option<cortexkit_log::ParsedLine<'a>> {
@@ -422,8 +554,8 @@ fn line_with<'a>(text: &'a str, marker: &str) -> Option<cortexkit_log::ParsedLin
 
 #[test]
 fn dependency_trace_and_debug_stay_out_of_the_module_log_whatever_ck_log_says() {
-    // `info` is the fleet default; `trace` is what an operator sets to see
-    // plexus's own debug lines, and it used to admit every dependency line too.
+    // The dependency policy keeps its WARN ceiling under every root level,
+    // while an explicitly named dependency can receive its own CK_LOG level.
     for spec in ["info", "debug", "trace"] {
         let text = module_log_under(spec);
         for marker in ["dependency-trace", "dependency-debug", "dependency-info"] {
@@ -435,9 +567,7 @@ fn dependency_trace_and_debug_stay_out_of_the_module_log_whatever_ck_log_says() 
         let warn = line_with(&text, "dependency-warn")
             .unwrap_or_else(|| panic!("CK_LOG={spec}: a dependency WARN must be written: {text}"));
         assert_eq!(warn.level, cortexkit_log::ParsedLevel::Warn);
-        // The fleet logger maps every `::` target to the module root, so the
-        // line cannot yet carry `hyper_util::client::legacy::pool` as its name.
-        assert_eq!(warn.logger, "plexus");
+        assert_eq!(warn.logger, "plexus.dep.hyper-util");
     }
 }
 

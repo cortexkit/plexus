@@ -19,7 +19,7 @@ members = [
 # From crates.io, matching the source subc-daemon uses. Two copies would each
 # carry their own "installed logger" static, so the in-process test daemon would
 # log through a copy no subscriber was ever installed on, and go silent.
-cortexkit-log = "0.3.5"
+cortexkit-log = "0.3.6"
 tracing = "0.1"
 # Exact pins, moved together on purpose. A caret on subc-daemon alone resolved
 # 0.20.25, which requires protocol 0.25 and control 0.18, and the lock then held
