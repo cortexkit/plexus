@@ -151,15 +151,23 @@ class WorkflowGatesTests(Scratch):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("path-dependent condition", result.stdout)
 
-    def test_preconditions_allow_only_the_exact_planner_pr_exclusion(self):
+    def test_preconditions_allow_only_exact_planner_output_conditions(self):
         path = self.tmp / "ci.yml"
-        condition = "github.event_name != 'pull_request' && needs.test.outputs.has-mutations == 'true'"
-        path.write_text(workflow("[main, 'train/**']", job_if=condition))
-        result = self.gates("--preconditions", path)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for unsafe in [condition + " && github.ref == 'refs/heads/main'",
-                       condition + " || github.event_name == 'push'",
-                       "github.event_name == 'pull_request' && needs.test.outputs.has-mutations == 'true'"]:
+        conditions = [
+            "needs.plan.outputs.has-mutations == 'true'",
+            "needs.plan.outputs.skip-test != 'true'",
+        ]
+        for condition in conditions:
+            with self.subTest(condition=condition):
+                path.write_text(workflow("[main, 'train/**']", job_if=condition))
+                result = self.gates("--preconditions", path)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for unsafe in [
+            conditions[0] + " && github.ref == 'refs/heads/main'",
+            conditions[0] + " || github.event_name == 'push'",
+            "github.event_name != 'pull_request' && needs.test.outputs.has-mutations == 'true'",
+            conditions[1] + " || github.event_name == 'push'",
+        ]:
             with self.subTest(condition=unsafe):
                 path.write_text(workflow("[main, 'train/**']", job_if=unsafe))
                 result = self.gates("--preconditions", path)
@@ -282,6 +290,20 @@ class WatchCiTests(Scratch):
         result = self.watch(gh, {"WATCH_CI_MAX_POLL_ERRORS": "1"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("CI_DONE run=12345 conclusion=success", result.stdout)
+
+    def test_a_failed_mutation_plan_is_red_even_when_test_is_skipped(self):
+        gh = """
+        #!/bin/sh
+        case "$*" in
+          *"--json jobs"*) echo "Mutation plan|123" ;;
+          *status*) echo in_progress ;;
+          *url*) echo https://example.invalid/run ;;
+          *) echo "" ;;
+        esac
+        """
+        result = self.watch(gh, {"WATCH_CI_MAX_POLL_ERRORS": "1"})
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("CI_EARLY_FAIL job='Mutation plan'", result.stdout)
 
 
 class OperatorGhTests(Scratch):

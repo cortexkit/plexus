@@ -82,12 +82,13 @@ if ! checks="$("$OPERATOR_GH" api "repos/$repo_slug/commits/$sha/check-runs" \
 fi
 
 # The mutation shards are skipped by design when a change touches no catalogue
-# row, and on every push to main: the test job's planner decides that, and a
-# failed planner fails the test job itself. So a skipped shard counts as green
-# only when that test job succeeded. Any other skipped check, or a skipped shard
-# beside a test job that did not succeed, stays a refusal. The planner sizes the
-# shard count to the selection, so shards are named "Mutation proofs (i/n)" for
-# any n and are matched by that prefix alone.
+# row, and on main only after a successful train run for the same sha. Without
+# that proof, the planner selects all rows. A skipped shard counts as green only
+# beside a successful Test (ubuntu) check. Planning has its own check, so a
+# planner failure remains non-green below even if Test succeeds independently.
+# Any other skipped check, or a skipped shard beside a non-successful test, stays
+# a refusal. The planner sizes shards to the selection, so their names are
+# matched by the "Mutation proofs (" prefix rather than a fixed shard count.
 tab="$(printf '\t')"
 tested=0
 verdicts=""

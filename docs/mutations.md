@@ -83,24 +83,28 @@ named assertion with the other tests accounted for.
 ### CI
 
 [CI](../.github/workflows/ci.yml) validates the catalogue in the Linux Test job
-and replays selected controls in nonempty mutation shards. The planner
-(`scripts/mutation-plan.py`) sizes the shard count to the selection: one shard
-per 120 rows for a train replay, one per 80 rows for a broad replay, at most 16
-(past that cap shards grow beyond those sizes), so each shard finishes inside
-the job's 180-minute limit. Train pushes select changed rows with
-`--diff origin/main`, or every row when there is no `origin/main` to compare
-against. Main pushes replay nothing: a commit
-reaches main only after its train's run replayed every touched row on that
-exact commit, which the pre-push hook and `scripts/train.sh` enforce. The
-nightly schedule at 03:23 UTC and manual runs replay all rows with `--broad`,
-which catches interactions between changes that no single train's diff
-selects. Only CAUGHT and HUB are accepted, and JSON reports are uploaded even
-when a shard fails.
+and replays selected controls in nonempty mutation shards. A separate planning
+job computes the selection and matrix before either test compilation or mutation
+replay. The planner (`scripts/mutation-plan.py`) sizes landing shards to 23 rows
+and keeps broad nightly shards at 80 rows, with at most 16 shards. Reports from
+runs 39784016510, 39741325245 and 39717873268 showed 31, 45 and 83 plain rows
+at 38.7-41.6 seconds per row, plus 5-9 minutes of setup and baseline per shard;
+23 rows takes about 25 minutes at the slowest observed rate and longest baseline.
+Typical 45- and 83-row selections split into 22-23 and 20-21 rows per runner.
+Past the cap, shards grow beyond the target. Train pushes select changed rows
+with `--diff origin/main`, or every row when there is no `origin/main` to compare
+against. The nightly schedule at
+03:23 UTC and manual runs replay all rows with `--broad`, which catches
+interactions between changes that no single train's diff selects. Only CAUGHT
+and HUB are accepted, and JSON reports are uploaded even when a shard fails.
 
-The planner computes selection before shard allocation, and the replay step
-passes it to the mutation runner. `scripts/check-train-preconditions.sh` refuses
-ref- or event-dependent job and step conditions except the explicit PR exclusion
-on the mutation job. Train and main execute the same CI steps; main skips only
-the mutation shards its train already ran, and fork PRs allocate no mutation
-runners. Concurrency groups include the event name so main pushes
-cannot cancel the nightly broad replay on the same ref.
+The train flow waits for its run to replay every touched row before advancing a
+commit to main. If main receives a push without a verified same-SHA train run,
+CI runs Test and all mutation controls. The main push planner checks the
+read-only Actions API for that same sha's successful train run; only then may it
+skip the duplicate Test and mutation jobs. Schedule and manual runs always run
+in full. When CI verifies a successful train run for the same SHA, its successful
+`Test (ubuntu)` check satisfies main's required context. The precondition
+checker allows only the exact planner-output conditions for mutation selection
+and this verified main-test reuse. Concurrency groups include the event name so
+main pushes cannot cancel the nightly broad replay on the same ref.

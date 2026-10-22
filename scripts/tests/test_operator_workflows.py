@@ -192,17 +192,18 @@ esac
         self.assertEqual(planner.selected_rows({**current, 'prebuild':['build']}, current, set()), rows)
         self.assertEqual(planner.selected_rows({'control':rows + [{'id':'new'}]}, current, set()), [{'id':'new'}])
 
-    # Below the 16-shard cap, a shard holds at most 120 plain rows or 80 broad
-    # ones, so each finishes inside the mutation job's 180-minute limit; the
-    # matrix names every shard and the total each passes to
+    # The planner returns only the runners a selection needs, sized for landing
+    # wait time or the unchanged nightly target. Mutations receive every shard as
+    # independent runners, and the matrix names each shard and its total for
     # `ckdev-mutate run --shard i/n`.
     def test_mutation_shards_are_sized_to_the_selection(self):
         planner = load_script('mutation-plan')
         rows = lambda count: [{"id": str(i)} for i in range(count)]
         for count, selection, total in [(0, "--diff origin/main", 0), (1, "--diff origin/main", 1),
-                                        (120, "--diff origin/main", 1), (121, "--diff origin/main", 2),
-                                        (983, "--diff origin/main", 9), (240, "--all", 2),
-                                        (80, "--all --broad", 1), (81, "--all --broad", 2)]:
+                                        (23, "--diff origin/main", 1), (24, "--diff origin/main", 2),
+                                        (207, "--diff origin/main", 9), (208, "--diff origin/main", 10),
+                                        (46, "--all", 2), (80, "--all --broad", 1),
+                                        (81, "--all --broad", 2)]:
             with self.subTest(count=count, selection=selection):
                 result = planner.plan_selection(rows(count), selection)
                 expected = {"shard": list(range(1, total + 1)), "total": [total]} if total else {"shard": []}

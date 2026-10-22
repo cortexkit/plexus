@@ -42,10 +42,12 @@ Usage:
 each one that no longer holds: the push trigger runs on train branches
 (including nested names such as train/a/b) and on main, no job or step `if:`
 changes the gates between train and main pushes, and the concurrency group is
-per-ref. The planner-driven mutation job explicitly excludes PR events. Its
-other condition reads only the planner's output, which selects rows for train
-pushes and selects none for main pushes, so a main push can skip mutation
-shards that its train already ran but never runs a gate its train skipped.
+per-ref. The planner-driven mutation job reads only the planner's output. It selects
+changed rows for train pushes, all rows for a main push without a verified train
+run, and none for a main push whose same sha already passed on a train ref. The
+test job has one additional exact exception: it can skip only after the
+read-only Actions lookup confirms that same-sha train run. Other conditions
+that distinguish train from main remain forbidden.
 """
 
 from __future__ import annotations
@@ -366,13 +368,14 @@ PER_REF_GROUP = re.compile(r"\bgithub\.(?:ref|ref_name)\b")
 
 def classify(condition: str) -> str | None:
     """ref = provably dead under trains, warn = depends on the landing path."""
-    # This exact planner-driven exclusion names no ref. Whether shards run on a
-    # push depends only on the planner's selection, which replays touched rows
-    # on train pushes and nothing on main pushes; main never runs a mutation
-    # shard that its train skipped, so the landing flow loses no gate.
-    # Do not allow arbitrary event expressions: an OR or a ref clause could
-    # silently skip a gate that the landing flow relies on.
-    if condition == "github.event_name != 'pull_request' && needs.test.outputs.has-mutations == 'true'":
+    # These exact output conditions are safe: planning selects touched rows on
+    # train pushes, and only reuses a main test result after verifying that the
+    # same sha passed on a train ref. Do not allow arbitrary event expressions:
+    # an OR or a ref clause could silently skip a gate the landing flow relies on.
+    if condition in {
+        "needs.plan.outputs.has-mutations == 'true'",
+        "needs.plan.outputs.skip-test != 'true'",
+    }:
         return None
     if REF_CONTEXT.search(condition):
         if "train/" in condition:
@@ -470,8 +473,8 @@ def precondition_failures(workflow: dict[str, Any]) -> list[str]:
     # Arm 2: a workflow can fire on a train push while a job or step gated on
     # the ref, or on the event that started the run, is skipped - and the run
     # still reports green, so the gate everyone relies on is silently absent.
-    # Such conditions fail here except the exact planner-driven PR exclusion,
-    # which cannot distinguish a train push from a main push. This is stricter than the scan
+    # Such conditions fail here except the exact planner-driven mutation and
+    # proven-main-test conditions above. This is stricter than the scan
     # train-push.sh runs before each push (main() below without
     # --preconditions), which only warns on event conditions, because CI and
     # the preflight must keep train and main runs identical.

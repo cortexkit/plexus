@@ -21478,3 +21478,75 @@ expect_red = ["bus::tests::ck_log_cannot_raise_transport_crates_past_their_ceili
 expect_message = "CK_LOG must not raise tungstenite above its hard ceiling"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "ci-planner-landing-shard-size"
+guards = "Landing mutations use the measured wait-time shard size"
+file = "scripts/mutation-plan.py"
+old = "ROWS_PER_SHARD = 23"
+new = "ROWS_PER_SHARD = 120 # NON-VACUITY BREAK"
+test_file = "scripts/tests/test_mutation_plan.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+list_command = ["python3", "-B", "scripts/tests/run-one.py", "--list", "{test}"]
+test_count_pattern = "Ran {count} test"
+broad_command = ["python3", "-B", "scripts/tests/run-one.py", "--broad"]
+broad_report = "target/mutations/g-scripts-junit.xml"
+broad_id = "{name}"
+expect_red = ["test_mutation_plan.MutationPlanTests.test_landing_shard_size_is_twenty_three_rows"]
+expect_message = "landing rows should stay at the wait-time target"
+timeout_s = 120
+
+[[control]]
+id = "ci-planner-shard-rounding"
+guards = "The planner rounds up so every selected mutation row is assigned"
+file = "scripts/mutation-plan.py"
+old = "return min(MAX_SHARDS, max(1, math.ceil(count / per_shard)))"
+new = "return min(MAX_SHARDS, max(1, math.floor(count / per_shard)))  # NON-VACUITY BREAK"
+test_file = "scripts/tests/test_mutation_plan.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+list_command = ["python3", "-B", "scripts/tests/run-one.py", "--list", "{test}"]
+test_count_pattern = "Ran {count} test"
+broad_command = ["python3", "-B", "scripts/tests/run-one.py", "--broad"]
+broad_report = "target/mutations/g-scripts-junit.xml"
+broad_id = "{name}"
+expect_red = ["test_mutation_plan.MutationPlanTests.test_shard_count_rounds_up_to_cover_selected_rows"]
+expect_message = "every selected row must fit an allocated shard"
+timeout_s = 120
+
+[[control]]
+id = "ci-planner-broad-shard-size"
+guards = "Nightly broad mutation shards keep their 80-row target"
+file = "scripts/mutation-plan.py"
+old = "BROAD_ROWS_PER_SHARD = 80"
+new = "BROAD_ROWS_PER_SHARD = 120 # NON-VACUITY BREAK"
+test_file = "scripts/tests/test_mutation_plan.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+list_command = ["python3", "-B", "scripts/tests/run-one.py", "--list", "{test}"]
+test_count_pattern = "Ran {count} test"
+broad_command = ["python3", "-B", "scripts/tests/run-one.py", "--broad"]
+broad_report = "target/mutations/g-scripts-junit.xml"
+broad_id = "{name}"
+expect_red = ["test_mutation_plan.MutationPlanTests.test_broad_shard_size_remains_eighty_rows"]
+expect_message = "nightly broad shards keep their measured row target"
+timeout_s = 120
+
+[[control]]
+id = "ci-planner-shard-cap"
+guards = "Mutation shard allocation is capped at sixteen runners"
+file = "scripts/mutation-plan.py"
+old = "MAX_SHARDS = 16"
+new = "MAX_SHARDS = 32 # NON-VACUITY BREAK"
+test_file = "scripts/tests/test_mutation_plan.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+list_command = ["python3", "-B", "scripts/tests/run-one.py", "--list", "{test}"]
+test_count_pattern = "Ran {count} test"
+broad_command = ["python3", "-B", "scripts/tests/run-one.py", "--broad"]
+broad_report = "target/mutations/g-scripts-junit.xml"
+broad_id = "{name}"
+expect_red = ["test_mutation_plan.MutationPlanTests.test_shard_count_respects_sixteen_shard_cap"]
+expect_message = "mutation runner allocation must stay capped at 16 shards"
+timeout_s = 120

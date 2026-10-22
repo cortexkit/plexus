@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Test a deliberate source edit with one named regression, or check the full suite."""
+"""Test one deliberate source edit, list test IDs, or check the full suite."""
+import json
 import sys
 import unittest
 import xml.etree.ElementTree as ET
@@ -7,6 +8,25 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 loader = unittest.TestLoader()
+if sys.argv[1:2] == ['--list']:
+    suite = loader.discover(str(Path(__file__).parent), pattern='test_*.py')
+
+    def test_ids(tests):
+        for test in tests:
+            if isinstance(test, unittest.TestSuite):
+                yield from test_ids(test)
+            else:
+                yield test.id()
+
+    if loader.errors or not suite.countTestCases():
+        raise SystemExit("expected importable script tests")
+    listed = set(test_ids(suite))
+    requested = sys.argv[2:]
+    if len(requested) > 1 or (requested and requested[0] not in listed):
+        raise SystemExit("expected an existing script test name")
+    print(json.dumps(requested or sorted(listed)))
+    raise SystemExit(0)
+
 broad = sys.argv[1] == '--broad'
 suite = loader.discover(str(Path(__file__).parent), pattern='test_*.py') if broad else loader.loadTestsFromName(sys.argv[1])
 if loader.errors or not suite.countTestCases() or (not broad and suite.countTestCases() != 1):

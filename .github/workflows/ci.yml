@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   # The nightly schedule runs the full catalogue with --broad on main. A group
@@ -39,6 +40,47 @@ env:
   NATS_SERVER_LINUX_AMD64_SHA256: 5d2c51caca950333aba84911df7d377f826f3a59ec36061c6539105084f65c92
 
 jobs:
+  plan:
+    name: Mutation plan
+    runs-on: ubuntu-24.04
+    outputs:
+      mutation-matrix: ${{ steps.mutation-plan.outputs.matrix }}
+      mutation-selection: ${{ steps.mutation-plan.outputs.selection }}
+      has-mutations: ${{ steps.mutation-plan.outputs.has-mutations }}
+      skip-test: ${{ steps.main-duplicate.outputs.skip-test }}
+    defaults:
+      run:
+        working-directory: plexus
+    steps:
+      - name: Checkout plexus with train comparison base
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          path: plexus
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Keep train-flow checks independent of the long compile/test job, so a
+      # main push that reuses a proven train result still checks workflow drift.
+      - name: Train preconditions
+        run: ./scripts/check-train-preconditions.sh
+
+      - name: Check for an already successful train run
+        id: main-duplicate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/skip_main_tests.py
+
+      - name: Plan nonempty mutation shards
+        id: mutation-plan
+        env:
+          MAIN_TRAIN_RUN_VERIFIED: ${{ steps.main-duplicate.outputs.skip-test }}
+        run: |
+          extra=()
+          if [ "$MAIN_TRAIN_RUN_VERIFIED" = "true" ]; then
+            extra=(--main-train-verified)
+          fi
+          python3 scripts/mutation-plan.py --event "$GITHUB_EVENT_NAME" --ref "$GITHUB_REF" "${extra[@]}" >> "$GITHUB_OUTPUT"
+
   # Linux-only: plexus has no platform-specific code paths (catalog + store +
   # subc wire). Every dependency comes from crates.io at an exact version, so
   # the job checks out this repository alone.
@@ -47,10 +89,11 @@ jobs:
   # provider and runs the same way in any fork.
   test:
     name: Test (ubuntu)
-    outputs:
-      mutation-matrix: ${{ steps.mutation-plan.outputs.matrix }}
-      mutation-selection: ${{ steps.mutation-plan.outputs.selection }}
-      has-mutations: ${{ steps.mutation-plan.outputs.has-mutations }}
+    needs: plan
+    # The active main ruleset requires Test (ubuntu), and accepts the successful
+    # check on this exact sha from any app. A successful train run already
+    # supplies that required context, so its skipped duplicate main check stays green.
+    if: needs.plan.outputs.skip-test != 'true'
     runs-on: ubuntu-24.04
     # A wedged test must surface as a fast red run, not burn the runner for
     # the 6-hour Actions default. Healthy runs finish well under 15 minutes.
@@ -74,16 +117,6 @@ jobs:
           path: plexus
           fetch-depth: 0
           persist-credentials: false
-
-      # First: assert the train-flow
-      # preconditions still hold for this very file. Verified-by-hand facts
-      # expire while the file keeps being edited; this fails drift by name.
-      - name: Train preconditions
-        run: ./scripts/check-train-preconditions.sh
-
-      - name: Plan nonempty mutation shards
-        id: mutation-plan
-        run: python3 scripts/mutation-plan.py --event "$GITHUB_EVENT_NAME" --ref "$GITHUB_REF" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
@@ -204,19 +237,20 @@ jobs:
         run: bash scripts/build-probe-guest.sh --check
 
   mutations:
-    # The Test job's planner sizes the matrix to the selection, so `total` is
-    # the shard count of this run, not a fixed number.
+    # The planning job sizes the matrix to the selection, so `total` is the
+    # shard count of this run, not a fixed number.
     name: Mutation proofs (${{ matrix.shard }}/${{ matrix.total }})
-    needs: test
-    # scripts/mutation-plan.py selects no mutation proofs for PR events. Exclude them
-    # here too, so fork PRs cannot allocate runners for empty replay jobs.
-    if: github.event_name != 'pull_request' && needs.test.outputs.has-mutations == 'true'
+    needs: plan
+    # The planner emits no rows for PRs or a main push with a verified train
+    # run. Without that proof it selects all controls; planning failures still
+    # make the workflow fail and do not allocate empty runners.
+    if: needs.plan.outputs.has-mutations == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:
       # Every shard owns a separate checkout; never mutate a shared tree.
       fail-fast: false
-      matrix: ${{ fromJSON(needs.test.outputs.mutation-matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.mutation-matrix) }}
     defaults:
       run:
         working-directory: plexus
@@ -246,7 +280,8 @@ jobs:
         id: rust-identity
         run: echo "version=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      # Restore the Test job's cache, but never save mutant build artifacts.
+      # Restore a compatible public cache immediately; Test saves this sha's
+      # cache only after it completes. This restore-only job never saves mutants.
       - name: Restore Rust build
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -255,6 +290,8 @@ jobs:
             ~/.cargo/git/db
             plexus/target
           key: rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-identity.outputs.version }}-${{ hashFiles('plexus/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-identity.outputs.version }}-${{ hashFiles('plexus/Cargo.lock') }}-
 
       - name: Install pinned nats-server
         run: bash scripts/install-nats-server.sh
@@ -276,11 +313,11 @@ jobs:
       # replay of every touched row. The nightly schedule and manual dispatch
       # replay the full catalogue with --broad, which catches interactions
       # between changes that no single train's diff selects.
-      # The Test job plans this selection before any shard runner is allocated.
+      # The planning job selects controls before any shard runner is allocated.
       - name: Replay selected mutation proofs
         env:
           MUTATION_SHARD: ${{ matrix.shard }}/${{ matrix.total }}
-          MUTATION_SELECTION: ${{ needs.test.outputs.mutation-selection }}
+          MUTATION_SELECTION: ${{ needs.plan.outputs.mutation-selection }}
         run: |
           set -euo pipefail
           ckdev-mutate --version

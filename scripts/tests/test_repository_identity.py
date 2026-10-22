@@ -116,8 +116,10 @@ exec "{real_git}" "$@"
         for label, verdicts, message in [
             ("test job failed", f"Test (ubuntu)\\tfailure\\n{shard}", "no check is green"),
             ("no test job", shard, "no check is green"),
-            # Only the test job plans the shards, so another check's success
-            # must not excuse a skipped shard.
+            # A planner failure remains red even when Test succeeds independently.
+            ("planner failed", f"Test (ubuntu)\\tsuccess\\nMutation plan\\tfailure\\n{shard}",
+             "not every check is green"),
+            # Another check's success must not excuse a skipped shard without Test.
             ("another green check but no test job", f"Lint\\tsuccess\\n{shard}", "not every check is green"),
             ("another skipped check", "Test (ubuntu)\\tsuccess\\nLint\\tskipped", "not every check is green"),
             ("a failed shard", "Test (ubuntu)\\tsuccess\\nMutation proofs (1/9)\\tfailure", "not every check is green"),

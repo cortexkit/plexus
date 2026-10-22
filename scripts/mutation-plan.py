@@ -11,12 +11,12 @@ Which rows run depends on the event:
   reaches main only after its train's run went green on that exact commit (the
   pre-push hook and scripts/train.sh both enforce this), so every touched row
   has already been replayed by the time main moves.
-- A push to main therefore replays nothing. Replaying the whole catalogue there
-  would repeat the train's work on the same commit and costs many runner-hours
-  per landing.
+- A main push skips mutation proofs only when the CI workflow has a successful
+  run for the same sha on a train ref. Without that API proof, it replays every
+  control so a missing or failed lookup cannot suppress the gate.
 - The nightly schedule and manual dispatch replay every row with --broad. That
   run catches interactions between changes that no single train's diff selects.
-- Pull requests replay nothing; the mutation job also excludes them.
+- Pull requests select nothing, so the mutation job allocates no shards.
 
 The shard count grows with the selection, up to MAX_SHARDS, so each shard stays
 well inside the mutation job's 180-minute limit.
@@ -27,18 +27,19 @@ import math
 import subprocess
 import tomllib
 
-# Rows one shard aims to replay. A diff or --all replay runs only each row's
-# named tests. A --broad replay runs every test target of the row's package, so
-# a row takes longer and a shard gets fewer of them. Measured on GitHub's hosted
-# runners, one shard of 292 broad rows took 166 minutes, and shards of about 246
-# plain rows did not all finish inside the 180-minute limit. These sizes leave a
-# shard roughly half its time to spare.
-ROWS_PER_SHARD = 120
+# Train reports 39784016510, 39741325245 and 39717873268 replayed 31, 45 and
+# 83 plain rows at 38.7-41.6 seconds per row, with 5-9 minutes of setup and
+# baseline per shard. At the slowest observed rate and longest baseline, 23 rows
+# take about 25 minutes; typical 45- and 83-row selections split into 22-23 and
+# 20-21 rows per runner respectively.
+ROWS_PER_SHARD = 23
+# Broad replays run every test target of each row's package, so their per-row
+# cost is higher. Keep the nightly shard target at 80 rows for its 180-minute
+# job limit; landing shards use the 23-row wait-time target.
 BROAD_ROWS_PER_SHARD = 80
-# Upper bound on runners one CI run allocates for mutation proofs. Past
-# 16 x 80 broad rows or 16 x 120 plain rows, shards grow beyond the sizes above;
-# the full broad catalogue of 1,369 rows gives about 86 rows per shard, still
-# far below the measured limit.
+# Upper bound on runners one CI run allocates for mutation proofs. Above 1,280
+# broad rows, shards exceed 80; the 1,369-row catalogue averages about 86 rows
+# per shard at the 16-shard cap.
 MAX_SHARDS = 16
 
 
@@ -59,19 +60,22 @@ def shard_total(count, broad):
     return min(MAX_SHARDS, max(1, math.ceil(count / per_shard)))
 
 
-def selection_for(event, ref):
-    """The ckdev-mutate selection flags for a CI event; empty selects nothing."""
+def selection_for(event, ref, main_train_verified=False):
+    """Select controls for CI; unverified main pushes fail safe to all rows."""
     if event == "push" and ref.startswith("refs/heads/train/"):
         return "--diff origin/main"
     if event in ("schedule", "workflow_dispatch"):
         return "--all --broad"
-    # A main push lands a commit whose train already replayed every touched
-    # row; pull requests never allocate mutation runners.
+    if event == "push" and ref == "refs/heads/main":
+        # A successful train run on this exact sha already replayed every
+        # touched row. Without that proof, run all controls rather than assuming.
+        return "" if main_train_verified else "--all"
+    # Pull requests never allocate mutation runners.
     return ""
 
 
-def plan(rows, event, ref):
-    return plan_selection(rows, selection_for(event, ref))
+def plan(rows, event, ref, main_train_verified=False):
+    return plan_selection(rows, selection_for(event, ref, main_train_verified))
 
 
 def plan_selection(rows, selection):
@@ -96,6 +100,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--event", required=True)
     parser.add_argument("--ref", required=True)
+    parser.add_argument(
+        "--main-train-verified", action="store_true",
+        help="main push has a successful CI run on this exact sha on a train ref",
+    )
     args = parser.parse_args()
     with open("mutations.toml", "rb") as stream:
         current = tomllib.load(stream)
@@ -116,10 +124,10 @@ def main():
             raise RuntimeError("cannot read the comparison mutation catalogue")
         baseline = tomllib.loads(base.stdout.decode()) if base.returncode == 0 else {}
         rows = selected_rows(current, baseline, changed)
-        result = plan(rows, args.event, args.ref)
+        result = plan(rows, args.event, args.ref, args.main_train_verified)
         result["selection"] = "--diff " + base_ref
     else:
-        result = plan(rows, args.event, args.ref)
+        result = plan(rows, args.event, args.ref, args.main_train_verified)
     print("matrix=" + json.dumps(result["matrix"], separators=(",", ":")))
     print("selection=" + result["selection"])
     print("has-mutations=" + str(result["has_mutations"]).lower())
