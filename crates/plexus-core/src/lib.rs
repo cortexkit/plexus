@@ -218,6 +218,12 @@ mod test_http;
 pub(crate) mod test_logging;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_scratch;
+/// Emit a core-owned INFO event so logger tests can verify this crate's namespace.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn log_ownership_test_info() {
+    diag!(info storage: "plexus-core-ownership-positive-control");
+}
 pub mod text;
 pub mod transport;
 pub mod web_search;

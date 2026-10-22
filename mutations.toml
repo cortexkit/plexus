@@ -1568,8 +1568,8 @@ build_timeout_s = 3600
 id = "bus-trace-jwt-filter"
 guards = "CK_LOG cannot raise async-nats TRACE beyond its INFO ceiling"
 file = "crates/plexus-module/src/bus.rs"
-old = "    let crates = crates.ceiling(\"async_nats\", cortexkit_log::LevelFilter::INFO);"
-new = "    let crates = crates; /* NON-VACUITY BREAK */"
+old = ".ceiling(\"async_nats\", cortexkit_log::LevelFilter::INFO)"
+new = "/* NON-VACUITY BREAK: remove async_nats ceiling */"
 test_file = "crates/plexus-module/src/bus_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -21427,8 +21427,8 @@ timeout_s = 120
 id = "module-log-own-crate-label"
 guards = "Plexus module callsites retain Plexus logger names rather than being treated as dependencies"
 file = "crates/plexus-module/src/bus.rs"
-old = "            \"plexus_module\","
-new = "            /* NON-VACUITY BREAK: plexus_module omitted */"
+old = "\"plexus_module\","
+new = "/* NON-VACUITY BREAK: plexus_module omitted */"
 test_file = "crates/plexus-module/src/bus_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -21436,6 +21436,22 @@ target = "--lib"
 select = "expected"
 expect_red = ["bus::tests::plexus_info_and_debug_diagnostics_keep_their_ck_log_levels"]
 expect_message = "plexus INFO must be written"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "module-log-core-own-crate-label"
+guards = "plexus_core is treated as an own crate so its INFO diagnostics keep the Plexus component namespace"
+file = "crates/plexus-module/src/bus.rs"
+old = "    \"plexus_core\","
+new = "    /* NON-VACUITY BREAK: plexus_core omitted */"
+test_file = "crates/plexus-module/src/bus_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["bus::tests::own_crate_info_keeps_plexus_component_names"]
+expect_message = "plexus-core-ownership-positive-control INFO diagnostic was not written"
 build_timeout_s = 3600
 timeout_s = 120
 

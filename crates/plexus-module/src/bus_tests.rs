@@ -416,6 +416,93 @@ fn module_log_under(spec: &str) -> String {
     text
 }
 
+#[test]
+fn own_crate_info_keeps_plexus_component_names() {
+    let scratch = Scratch::database("own-crate-labels");
+    let logs = scratch.path().with_extension("logs");
+    let mut config = cortexkit_log::Config::in_dir("plexus", &logs);
+    config.spec = Some("info".into());
+    let (layer, handle) = safe_log_layer(config).unwrap();
+    tracing::subscriber::with_default(tracing_subscriber::Registry::default().with(layer), || {
+        plexus_core::log_ownership_test_info();
+        eprintln!(info relay: "plexus-module-ownership-positive-control");
+    });
+    let text = std::fs::read_to_string(handle.path()).unwrap();
+    std::fs::remove_dir_all(logs).unwrap();
+
+    for (marker, expected_logger) in [
+        ("plexus-core-ownership-positive-control", "plexus.storage"),
+        ("plexus-module-ownership-positive-control", "plexus.relay"),
+    ] {
+        let line = line_with(&text, marker)
+            .unwrap_or_else(|| panic!("{marker} INFO diagnostic was not written: {text}"));
+        assert_eq!(line.level, cortexkit_log::ParsedLevel::Info);
+        assert!(line.logger.starts_with("plexus."), "{line:?}");
+        assert!(!line.logger.starts_with("plexus.dep."), "{line:?}");
+        assert_eq!(line.logger, expected_logger);
+    }
+}
+
+#[test]
+fn own_crate_names_match_workspace_cargo_targets() {
+    let output = std::process::Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run cargo metadata for workspace target names");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: Value = serde_json::from_slice(&output.stdout).expect("parse cargo metadata");
+    let members: std::collections::BTreeSet<_> = metadata["workspace_members"]
+        .as_array()
+        .expect("workspace member list")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let expected: std::collections::BTreeSet<String> = metadata["packages"]
+        .as_array()
+        .expect("workspace packages")
+        .iter()
+        .filter(|package| {
+            package["id"]
+                .as_str()
+                .is_some_and(|id| members.contains(id))
+        })
+        .flat_map(|package| {
+            package["targets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|target| {
+                    let kinds = target["kind"].as_array()?;
+                    let is_crate = kinds
+                        .iter()
+                        .any(|kind| matches!(kind.as_str(), Some("lib" | "bin")));
+                    is_crate
+                        .then(|| target["name"].as_str())
+                        .flatten()
+                        .map(|name| name.replace('-', "_"))
+                })
+        })
+        .collect();
+    let actual: std::collections::BTreeSet<String> = OWN_CRATE_NAMES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    assert_eq!(
+        OWN_CRATE_NAMES.len(),
+        actual.len(),
+        "own crate list has duplicates"
+    );
+    assert_eq!(
+        actual, expected,
+        "own crate list must match workspace crate targets"
+    );
+}
+
 fn transport_log_under(spec: &str) -> String {
     let scratch = Scratch::database("transport-ceilings");
     let logs = scratch.path().with_extension("logs");

@@ -46,23 +46,25 @@ fn zeroizing_string<'de, D: serde::Deserializer<'de>>(
     String::deserialize(deserializer).map(zeroize::Zeroizing::new)
 }
 
+const OWN_CRATE_NAMES: &[&str] = &[
+    "plexus_core",
+    "plexus_module",
+    "plexus_probe",
+    "plexus_conformance",
+    "ck_plexus",
+    "ck_plexus_admin",
+];
+
 pub(crate) fn safe_log_layer(
     config: cortexkit_log::Config,
 ) -> Result<(cortexkit_log::LogLayer, cortexkit_log::Handle), cortexkit_log::InitError> {
     // The logger gives every dependency a separate namespace and default WARN
     // cap. Only these compiled Plexus crates keep the module's own namespaces.
     let crates = cortexkit_log::Crates::new()
-        .own([
-            "plexus_core",
-            "plexus_module",
-            "plexus_probe",
-            "plexus_conformance",
-            "ck_plexus",
-            "ck_plexus_admin",
-        ])
+        .own(OWN_CRATE_NAMES.iter().copied())
         .ceiling("tungstenite", cortexkit_log::LevelFilter::OFF)
-        .ceiling("tokio_tungstenite", cortexkit_log::LevelFilter::OFF);
-    let crates = crates.ceiling("async_nats", cortexkit_log::LevelFilter::INFO);
+        .ceiling("tokio_tungstenite", cortexkit_log::LevelFilter::OFF)
+        .ceiling("async_nats", cortexkit_log::LevelFilter::INFO);
     let (layer, handle) = cortexkit_log::layer(config)?;
     Ok((layer.with_crates(crates), handle))
 }
