@@ -711,8 +711,7 @@
     // event must not park an approval request for each one. The write ceiling,
     // the per-action grant and the repo filter are what bound this; ask-first
     // would make the feature unusable without making it safer.
-    "ask_first_risk": ["destructive"],
-    "rate_limit": { "calls_per_min": 60 }
+    "ask_first_risk": ["destructive"]
   },
   "availability": "ga"
 }

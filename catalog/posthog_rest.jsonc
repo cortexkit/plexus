@@ -244,8 +244,7 @@
   // parameter too. A poll shape without a verified filter could silently replay
   // the first page forever, so this manifest intentionally declares none.
   "defaults": {
-    "ask_first_risk": ["write", "destructive"],
-    "rate_limit": { "calls_per_min": 30 }
+    "ask_first_risk": ["write", "destructive"]
   },
   "availability": "ga"
 }

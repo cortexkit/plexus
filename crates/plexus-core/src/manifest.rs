@@ -625,9 +625,9 @@ pub struct ManifestDefaults {
     pub ask_first_risk: Vec<Risk>,
     /// Accepted and ignored. Plexus enforces no per-connection call budget:
     /// vendor 429 replies and their Retry-After are what pace calls, and the
-    /// search facades have their own limiters. The field stays declared,
-    /// optional, so the shipped catalogs that still carry it parse under
-    /// `deny_unknown_fields`, and a manifest without it parses too.
+    /// search facades have their own limiters. Shipped catalogs no longer
+    /// carry it, but the field stays declared and optional so an older
+    /// catalog that still carries it parses under `deny_unknown_fields`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimit>,
     /// Maximum age of an observed MCP catalog before periodic refresh.
@@ -2210,10 +2210,10 @@ mod tests {
     }
 
     /// `defaults.rate_limit` is optional and ignored: plexus enforces no
-    /// per-connection call budget. A manifest without it parses, so a later
-    /// catalog can drop it; one that still carries it parses unchanged and
-    /// keeps it in the normalized form its content hash is computed from, so
-    /// the shipped catalogs keep their hashes across this change.
+    /// per-connection call budget. A manifest without it parses, which is how
+    /// the shipped catalogs now look; an older one that still carries it
+    /// parses unchanged and keeps it in the normalized form its content hash
+    /// is computed from.
     #[test]
     fn defaults_rate_limit_is_optional_and_ignored() {
         let carried = ingest_value(rest_manifest_value())

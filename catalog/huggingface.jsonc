@@ -52,8 +52,7 @@
     { "name": "hf_doc_fetch", "risk": "read" }
   ],
   "defaults": {
-    "ask_first_risk": ["write", "destructive"],
-    "rate_limit": { "calls_per_min": 30 }
+    "ask_first_risk": ["write", "destructive"]
   },
   "availability": "ga"
 }

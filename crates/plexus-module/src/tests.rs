@@ -2091,6 +2091,213 @@ fn the_catalog_check_counts_an_unreadable_manifest_once() {
     );
 }
 
+/// One app on each side of a catalog deploy, from
+/// [`catalog_rows_across_a_deploy`].
+struct DeployedApp {
+    key: String,
+    /// The app's parsed manifest from the earlier catalog.
+    earlier: plexus_core::AppManifest,
+    /// The app's parsed manifest from the deployed catalog.
+    deployed: plexus_core::AppManifest,
+    /// A connection seeded from the earlier catalog, read before the deploy.
+    seeded: Vec<plexus_core::CatalogAction>,
+    /// The same connection's rows after the deployed catalog is ingested.
+    after_deploy: Vec<plexus_core::CatalogAction>,
+    /// A second connection, created and seeded after the deploy, so its
+    /// schemas are pinned from the deployed manifest.
+    seeded_after_deploy: Vec<plexus_core::CatalogAction>,
+}
+
+/// Boot-ingest `before`, seed one connection per app the way a new connection
+/// is seeded, then boot-ingest `after` over the same store, as a catalog
+/// deploy over a running module does, and seed a second connection per app.
+fn catalog_rows_across_a_deploy(
+    before: &Path,
+    after: &Path,
+    store_directory: &Path,
+) -> Vec<DeployedApp> {
+    let descriptor = StorageDescriptor {
+        module_id: DEFAULT_MODULE_ID.to_string(),
+        storage_namespace: format!("deploy-{}-{}", std::process::id(), plexus_core::now_ms()),
+        isolation: cortexkit_store_types::Isolation::Module,
+        backend: cortexkit_store_types::StorageBackend::Sqlite {
+            path: store_directory
+                .join("store.db")
+                .to_string_lossy()
+                .into_owned(),
+        },
+    };
+    let store = PlexusStore::open(&descriptor).expect("test store");
+    let manifests =
+        |directory: &Path| -> std::collections::BTreeMap<String, plexus_core::AppManifest> {
+            catalog_paths(directory)
+                .expect("catalog paths")
+                .iter()
+                .map(|path| {
+                    let source = std::fs::read_to_string(path).expect("read manifest");
+                    let manifest = parse_catalog_manifest(&source)
+                        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+                        .manifest;
+                    (manifest.key.clone(), manifest)
+                })
+                .collect()
+        };
+    let seed = |key: &str, connection_id: &str| {
+        store
+            .create_connection("direct", connection_id, key)
+            .expect("create connection");
+        store
+            .seed_catalog_from_manifest("direct", connection_id, key)
+            .expect("seed connection catalog");
+    };
+    let rows = |connection_id: &str| {
+        store
+            .list_catalog_actions_all("direct", connection_id)
+            .expect("catalog rows")
+    };
+    let later_connection = |key: &str| format!("{key}-after-deploy");
+
+    let before_manifests = manifests(before);
+    ingest_catalog_from(&store, before).expect("ingest the earlier catalog");
+    for key in before_manifests.keys() {
+        seed(key, key);
+    }
+    let seeded: Vec<_> = before_manifests.keys().map(|key| rows(key)).collect();
+
+    let mut after_manifests = manifests(after);
+    ingest_catalog_from(&store, after).expect("ingest the deployed catalog");
+    for key in before_manifests.keys() {
+        seed(key, &later_connection(key));
+    }
+    before_manifests
+        .into_iter()
+        .zip(seeded)
+        .map(|((key, earlier), seeded)| DeployedApp {
+            deployed: after_manifests
+                .remove(&key)
+                .unwrap_or_else(|| panic!("{key} missing from the deployed catalog")),
+            after_deploy: rows(&key),
+            seeded_after_deploy: rows(&later_connection(&key)),
+            key,
+            earlier,
+            seeded,
+        })
+        .collect()
+}
+
+/// Removing `defaults.rate_limit` from the shipped catalog leaves every
+/// action's pinned argument schema hash unchanged, so deploying the cleaned
+/// files repins or quarantines nothing on any connection.
+///
+/// Plexus never enforced the field, but it was part of every shipped file, so
+/// this checks the removal with the code that pins schemas rather than by
+/// reading the diff. The earlier catalog is each shipped file with the field
+/// put back. Both catalogs go through the real boot ingest into one store, and
+/// for every action:
+/// - a connection seeded from the earlier catalog keeps its rows unchanged
+///   across the deploy (schema hash, status, risk, ask-first, generation);
+/// - a connection seeded after the deploy pins the same schema hashes;
+/// - on a REST app, the hash a catalog refresh computes from the deployed
+///   manifest's `http.args_schema` equals the pinned hash, so the refresh
+///   sees no schema change and quarantines nothing.
+///
+/// The parsed manifests must also be identical apart from the field. That
+/// covers MCP apps, whose discovered schemas are checked against the
+/// manifest's declared `input_schema` at the next refresh.
+#[test]
+fn removing_defaults_rate_limit_from_the_catalog_changes_no_reviewed_schema() {
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../catalog");
+    let before = Scratch::directory("rate-limit-before");
+    let after = Scratch::directory("rate-limit-after");
+    let store_directory = Scratch::directory("rate-limit-store");
+    for path in catalog_paths(&shipped).expect("shipped catalog") {
+        let name = path.file_name().expect("file name");
+        let source = std::fs::read_to_string(&path).expect("read shipped manifest");
+        let mut value: Value =
+            serde_json::from_str(&subc_jsonc::jsonc_to_json(&source).expect("normalize"))
+                .expect("parse");
+        assert!(
+            value["defaults"].get("rate_limit").is_none(),
+            "{} still carries defaults.rate_limit",
+            path.display()
+        );
+        value["defaults"]["rate_limit"] = json!({"calls_per_min": 30});
+        std::fs::write(
+            before.join(name),
+            serde_json::to_string_pretty(&value).expect("serialize"),
+        )
+        .expect("write earlier manifest");
+        std::fs::copy(&path, after.join(name)).expect("copy shipped manifest");
+    }
+
+    let apps = catalog_rows_across_a_deploy(&before, &after, &store_directory);
+    assert!(
+        apps.len() >= 30,
+        "the whole shipped catalog must be compared"
+    );
+    let (mut compared, mut refresh_hashes) = (0, 0);
+    for app in apps {
+        let key = &app.key;
+        assert!(
+            app.earlier.defaults.rate_limit.is_some() && app.deployed.defaults.rate_limit.is_none(),
+            "{key}: the earlier catalog carries the field and the shipped one does not"
+        );
+        let mut without = app.earlier.clone();
+        without.defaults.rate_limit = None;
+        assert_eq!(
+            without, app.deployed,
+            "{key}: only defaults.rate_limit may differ"
+        );
+        assert_eq!(
+            app.seeded.len(),
+            app.deployed.actions_baseline.len(),
+            "{key}: every declared action is seeded"
+        );
+        assert_eq!(
+            app.seeded, app.after_deploy,
+            "{key}: catalog rows changed across the deploy"
+        );
+        let renamed: Vec<_> = app
+            .seeded_after_deploy
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                row.connection_id = key.clone();
+                row
+            })
+            .collect();
+        assert_eq!(
+            app.seeded, renamed,
+            "{key}: a connection seeded after the deploy pins different rows"
+        );
+        for row in &app.after_deploy {
+            assert_eq!(row.status, "active", "{key}/{}", row.name);
+            assert!(row.quarantine_reason.is_none(), "{key}/{}", row.name);
+            assert!(row.schema_hash.starts_with("sha256:"), "{key}/{}", row.name);
+        }
+        for action in &app.deployed.actions_baseline {
+            let Some(http) = &action.http else { continue };
+            let pinned = app
+                .after_deploy
+                .iter()
+                .find(|row| row.name == action.name)
+                .unwrap_or_else(|| panic!("{key}/{} not seeded", action.name));
+            assert_eq!(
+                plexus_core::jcs_sha256(&http.args_schema).expect("hashable schema"),
+                pinned.schema_hash,
+                "{key}/{}: a refresh would see a changed schema",
+                action.name
+            );
+            refresh_hashes += 1;
+        }
+        compared += app.after_deploy.len();
+    }
+    assert!(
+        compared >= 100 && refresh_hashes >= 50,
+        "only {compared} catalog rows and {refresh_hashes} refresh hashes were compared"
+    );
+}
+
 /// A catalog directory with no manifests refuses the boot and retires
 /// nothing: an empty or wrong PLEXUS_CATALOG_DIR must not withdraw every
 /// vendor the store already serves.
