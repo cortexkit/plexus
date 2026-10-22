@@ -52,6 +52,7 @@ fn destination_allowed(url: &reqwest::Url, hosts: &[String]) -> bool {
 pub(super) fn api_redirect(
     client: &Client,
     throttle_until: &mut Option<Instant>,
+    clock: &TransportClock,
     config: &RestConfig,
     operation: &HttpOperation,
     tail: &crate::manifest::CredentiallessTail,
@@ -88,6 +89,7 @@ pub(super) fn api_redirect(
         return Err(Box::new(classify_response(
             response,
             throttle_until,
+            clock,
             &prepared.method,
             &prepared.path,
             false,
@@ -135,9 +137,11 @@ pub(super) fn redact(bytes: &[u8], url: &reqwest::Url, credential: &ResolvedCred
     text
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn download(
     client: &Client,
     throttle_until: &mut Option<Instant>,
+    clock: &TransportClock,
     config: &RestConfig,
     operation: &HttpOperation,
     tail: &crate::manifest::CredentiallessTail,
@@ -153,6 +157,7 @@ pub(super) fn download(
         return download_range(
             client,
             throttle_until,
+            clock,
             config,
             operation,
             tail,
@@ -176,6 +181,7 @@ pub(super) fn download(
     let url = match api_redirect(
         client,
         throttle_until,
+        clock,
         config,
         operation,
         tail,
@@ -290,6 +296,7 @@ pub(super) fn download(
 fn download_range(
     client: &Client,
     throttle_until: &mut Option<Instant>,
+    clock: &TransportClock,
     config: &RestConfig,
     operation: &HttpOperation,
     tail: &crate::manifest::CredentiallessTail,
@@ -322,6 +329,7 @@ fn download_range(
     let url = match api_redirect(
         client,
         throttle_until,
+        clock,
         config,
         operation,
         tail,

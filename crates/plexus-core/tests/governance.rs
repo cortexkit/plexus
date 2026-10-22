@@ -5,6 +5,7 @@ mod scratch_store;
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
@@ -126,6 +127,20 @@ fn seed(
     // app without one is gated at the strongest tier.
     install_mock_manifest_tier(&engine, "S1");
     (path, engine)
+}
+
+/// Put `engine` on a wall clock that stands at the current time until the
+/// test moves it, by storing a new reading in the returned cell.
+fn on_manual_clock(
+    engine: GovernanceEngine<StubCredentialSource, MockTransport>,
+) -> (
+    Arc<AtomicI64>,
+    GovernanceEngine<StubCredentialSource, MockTransport>,
+) {
+    let clock = Arc::new(AtomicI64::new(now_ms()));
+    let reading = Arc::clone(&clock);
+    let engine = engine.with_clock(Arc::new(move || reading.load(Ordering::SeqCst)));
+    (clock, engine)
 }
 
 fn engine_with_authority_change_during_credential_resolution(
@@ -265,9 +280,10 @@ fn policy_expired_before_authorization_does_not_block_dispatch() {
 #[test]
 fn policy_expiring_between_authorization_and_claim_aborts_dispatch() {
     let (_path, engine) = seed("policy-expires-before-claim");
+    let (clock, engine) = on_manual_clock(engine);
     let action = "read_while_policy_expires";
     add_action_with_policy(&engine, action, "read", "none", "read");
-    let expires_at = now_ms().saturating_add(5_000);
+    let expires_at = clock.load(Ordering::SeqCst).saturating_add(5_000);
     engine
         .store()
         .insert_policy(&PolicyInput {
@@ -289,15 +305,46 @@ fn policy_expiring_between_authorization_and_claim_aborts_dispatch() {
         ))
         .expect("unexpired policy authorizes reservation");
     assert_eq!(reservation.snapshot.policy, 1);
-    while now_ms() <= expires_at {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    // The first millisecond after the policy's expiry, reached by moving the
+    // engine's clock rather than by waiting for the real one.
+    clock.store(expires_at + 1, Ordering::SeqCst);
     let outcome = engine.revalidate_and_dispatch(&reservation);
 
     assert!(matches!(
         outcome.outcome,
         TransportOutcome::NotSent { ref code, .. } if code == "aborted_stale_authorization"
     ));
+    assert!(engine.transport().requests().is_empty());
+}
+
+/// A reservation is expired from its expiry instant on, not one millisecond
+/// later: dispatched exactly at `expires_at_ms`, it is refused as expired and
+/// nothing is sent.
+#[test]
+fn a_reservation_dispatched_at_its_expiry_instant_is_refused_as_expired() {
+    let (_path, engine) = seed("reservation-expiry-instant");
+    let (clock, engine) = on_manual_clock(engine);
+    let action = "read_at_reservation_expiry";
+    add_action_with_policy(&engine, action, "read", "none", "read");
+    let reservation = engine
+        .authorize(AuthorizationRequest::new(
+            "direct",
+            "conn-1",
+            action,
+            json!({}),
+        ))
+        .expect("authorize reservation");
+    clock.store(reservation.expires_at_ms, Ordering::SeqCst);
+    let outcome = engine.revalidate_and_dispatch(&reservation);
+
+    assert!(
+        matches!(
+            outcome.outcome,
+            TransportOutcome::NotSent { ref code, .. } if code == "reservation_expired"
+        ),
+        "a reservation at its expiry instant must be refused as expired: {:?}",
+        outcome.outcome
+    );
     assert!(engine.transport().requests().is_empty());
 }
 

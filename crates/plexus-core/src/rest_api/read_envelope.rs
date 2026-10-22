@@ -42,6 +42,7 @@ fn projection(status: u16, rate_limit: &Value) -> String {
 pub(super) fn send(
     client: &Client,
     throttle_until: &mut Option<Instant>,
+    clock: &TransportClock,
     config: &RestConfig,
     operation: &HttpOperation,
     shape: EnvelopeShape,
@@ -115,7 +116,7 @@ pub(super) fn send(
         Ok(response) => response,
         Err(error) => return request_failure_response(error, &method, &path),
     };
-    classify(response, throttle_until, &method, &path, media_type)
+    classify(response, throttle_until, clock, &method, &path, media_type)
 }
 
 fn strip_query_keys(url: &str, keys: &[&str]) -> String {
@@ -139,6 +140,7 @@ fn strip_query_keys(url: &str, keys: &[&str]) -> String {
 fn classify(
     response: Response,
     throttle_until: &mut Option<Instant>,
+    clock: &TransportClock,
     method: &reqwest::Method,
     path: &str,
     media_type: &str,
@@ -147,7 +149,7 @@ fn classify(
     let headers = response.headers().clone();
     let limit = rate_limit(&headers);
     if let Some(delay) = response_throttle(status, &headers) {
-        *throttle_until = throttle_deadline(Instant::now(), delay);
+        *throttle_until = throttle_deadline(clock.now(), delay);
         eprintln!(warn transport: "REST vendor throttle: status={status} retry_after_ms={}", duration_ms(delay));
         let mut throttled = crate::http_support::throttled_response("REST", delay);
         throttled.error_message = Some(projection(status, &limit));

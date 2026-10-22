@@ -2,6 +2,7 @@ use super::tests::{config, notification_response, request, response, start_serve
 use super::*;
 use crate::test_scratch::Scratch;
 use crate::CredentialSource;
+use std::thread;
 
 #[test]
 fn mcp_lookup_reserves_lease_before_releasing_the_pool_map() {
@@ -23,7 +24,7 @@ fn mcp_lookup_reserves_lease_before_releasing_the_pool_map() {
         transport.entries.lock().unwrap().insert(
             "lease-gap".into(),
             Arc::new(PooledEntry {
-                state: Mutex::new(ConnectionEntry::build(&cfg).unwrap()),
+                state: Mutex::new(ConnectionEntry::build(&cfg, transport.clock.clone()).unwrap()),
                 leases: AtomicUsize::new(0),
             }),
         );
@@ -747,7 +748,8 @@ fn retry_after_is_returned_as_throttle_and_honored_before_next_call() {
         }
         response(200, r#"{"jsonrpc":"2.0","id":3,"result":{"ok":true}}"#, "")
     });
-    let transport = McpRemoteTransport::new(config(endpoint));
+    let clock = TransportClock::manual();
+    let transport = McpRemoteTransport::new(config(endpoint)).with_clock(clock.clone());
     let credential = ResolvedCredential::new(b"token".to_vec(), None, 1);
     let first = transport.dispatch(request("throttle", "read_tool"), &credential);
     assert_eq!(first.retryability, Retryability::Throttle);
@@ -756,11 +758,31 @@ fn retry_after_is_returned_as_throttle_and_honored_before_next_call() {
         Some(1_000),
         "the vendor's delay reaches the caller as a number, not only as prose"
     );
-    let started = Instant::now();
+    // The transport waits on the manual clock, which moves only when slept
+    // on: the time it shows passing is the wait the transport made.
+    let started = clock.now();
     let second = transport.dispatch(request("throttle", "read_tool"), &credential);
-    assert!(started.elapsed() >= Duration::from_millis(900));
+    assert!(
+        clock.now().duration_since(started) >= Duration::from_millis(900),
+        "retry-after must be honored before the next call"
+    );
     assert!(second.response.is_some());
     task.join().expect("throttle server exits");
+}
+
+/// A transport built for production reads the real clock. A manual clock
+/// advances at once when slept on, so in production it would let every
+/// throttle wait pass instantly.
+#[test]
+fn a_new_mcp_transport_reads_the_real_clock() {
+    let transport = McpRemoteTransport::default();
+    let before = Instant::now();
+    thread::sleep(Duration::from_millis(5));
+    let read = transport.clock.now();
+    assert!(
+        read >= before + Duration::from_millis(5) && read <= Instant::now(),
+        "the transport clock must be the real one"
+    );
 }
 
 #[test]

@@ -4,6 +4,7 @@ use super::tests::{config, notification_response, request, response, start_serve
 use super::*;
 use crate::bounded::Task;
 use std::sync::{mpsc, TryLockError};
+use std::thread;
 
 /// How long a step that must make progress while another connection's RPC is
 /// held may take. The busy RPC stays blocked until the test releases it, so the

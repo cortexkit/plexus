@@ -10,7 +10,6 @@ use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
-use std::thread;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, Response};
@@ -22,7 +21,7 @@ use crate::http_support::{
     build_headers, classify_reqwest_error, credentialed_redirect_policy, duration_ms,
     read_body_bounded, redact_value, redacted_endpoint, redirect_location_for_log,
     reqwest_error_cause, response_throttle, throttle_deadline, throttle_gate, throttle_refusal,
-    with_request_deadline, BodyReadFailure, HttpAttemptFailure, ThrottleGate,
+    with_request_deadline, BodyReadFailure, HttpAttemptFailure, ThrottleGate, TransportClock,
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_REQUEST_TIMEOUT,
     MAX_RESPONSE_BODY_BYTES, POOLED_CONNECTION_IDLE_LIMIT,
 };
@@ -268,6 +267,9 @@ struct ConnectionEntry {
     /// fresh session: the client carries the timeouts, pool limit and redirect
     /// policy, and a session belongs to the endpoint that issued it.
     config: McpRemoteConfig,
+    /// The owning transport's clock, which `last_used` and `throttle_until`
+    /// are read on. A rebuilt entry keeps it.
+    clock: TransportClock,
     /// Makes the next tools/call panic just after it is sent, so a test can
     /// reach the panic recovery without a real defect.
     #[cfg(test)]
@@ -275,16 +277,17 @@ struct ConnectionEntry {
 }
 
 impl ConnectionEntry {
-    fn build(config: &McpRemoteConfig) -> Result<Self, McpRemoteError> {
+    fn build(config: &McpRemoteConfig, clock: TransportClock) -> Result<Self, McpRemoteError> {
         Ok(Self {
             client: build_client(config)?,
             initialized: false,
             session_id: None,
             protocol_version: MCP_PROTOCOL_VERSION,
-            last_used: Instant::now(),
+            last_used: clock.now(),
             throttle_until: None,
             idle_timeout: config.idle_timeout,
             config: config.clone(),
+            clock,
             #[cfg(test)]
             panic_after_send: false,
         })
@@ -301,7 +304,7 @@ impl ConnectionEntry {
     }
 
     fn rebuild(&mut self, config: &McpRemoteConfig) -> Result<(), McpRemoteError> {
-        *self = Self::build(config)?;
+        *self = Self::build(config, self.clock.clone())?;
         Ok(())
     }
 }
@@ -364,7 +367,7 @@ impl std::ops::Deref for Lease {
 impl Drop for Lease {
     fn drop(&mut self) {
         if let Ok(mut state) = self.entry.try_lock() {
-            state.last_used = Instant::now();
+            state.last_used = state.clock.now();
         }
         self.entry.leases.fetch_sub(1, Ordering::Relaxed);
     }
@@ -382,6 +385,9 @@ pub struct McpRemoteTransport {
     /// How many times a panic was recovered from: a dispatch that panicked
     /// while holding its connection, or a poisoned entry the sweep evicted.
     panic_recoveries: Arc<AtomicU64>,
+    /// Reads idle and throttle time for every pooled entry; see
+    /// [`TransportClock`].
+    clock: TransportClock,
     #[cfg(test)]
     lookup_pause: Arc<Mutex<Option<LookupPause>>>,
 }
@@ -401,9 +407,19 @@ impl McpRemoteTransport {
             entries: Arc::new(Mutex::new(HashMap::new())),
             next_request_id: Arc::new(AtomicU64::new(1)),
             panic_recoveries: Arc::new(AtomicU64::new(0)),
+            clock: TransportClock::real(),
             #[cfg(test)]
             lookup_pause: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Run this transport's idle and throttle bookkeeping on `clock`. Each
+    /// pooled entry copies the clock when it is built, so set it before the
+    /// first call.
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, clock: TransportClock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// How many panics this transport has recovered from since it was built:
@@ -517,7 +533,7 @@ impl McpRemoteTransport {
         let Ok(mut entries) = self.entries.lock() else {
             return 0;
         };
-        let now = Instant::now();
+        let now = self.clock.now();
         let mut removed = 0;
         entries.retain(|connection_id, entry| {
             if entry.is_poisoned() {
@@ -632,7 +648,7 @@ impl McpRemoteTransport {
             }
         }
         let entry = Arc::new(PooledEntry {
-            state: Mutex::new(ConnectionEntry::build(supplied)?),
+            state: Mutex::new(ConnectionEntry::build(supplied, self.clock.clone())?),
             leases: AtomicUsize::new(0),
         });
         let mut entries = self.entries.lock().map_err(|_| poisoned_lock_error())?;
@@ -789,9 +805,9 @@ impl McpRemoteTransport {
         // A short throttle from an earlier response is waited out; a long one
         // refuses this request rather than parking the thread, and the
         // connection lock with it, for up to an hour.
-        match throttle_gate(&mut state.throttle_until, Instant::now()) {
+        match throttle_gate(&mut state.throttle_until, state.clock.now()) {
             ThrottleGate::Clear => {}
-            ThrottleGate::Wait(remaining) => thread::sleep(remaining),
+            ThrottleGate::Wait(remaining) => state.clock.sleep(remaining),
             ThrottleGate::Refuse(remaining) => {
                 return Err(AttemptError::Local(McpRemoteError::ThrottleInEffect(
                     remaining,
@@ -987,7 +1003,7 @@ impl Transport for McpRemoteTransport {
                         Some((GrepAppToolError::NoResults, response)) => return response,
                         Some((GrepAppToolError::RateLimited, response)) => {
                             state.throttle_until =
-                                throttle_deadline(Instant::now(), GREP_APP_RATE_LIMIT_DELAY);
+                                throttle_deadline(state.clock.now(), GREP_APP_RATE_LIMIT_DELAY);
                             eprintln!(warn transport:
                                 "vendor tool rate limit on {}: retry after {}ms",
                                 request.action,
@@ -1518,7 +1534,7 @@ fn read_matching_sse_response(
 
 fn classify_reply(reply: HttpReply, state: &mut ConnectionEntry) -> Result<Value, McpRemoteError> {
     if let Some(delay) = reply.retry_after {
-        state.throttle_until = throttle_deadline(Instant::now(), delay);
+        state.throttle_until = throttle_deadline(state.clock.now(), delay);
         return Err(McpRemoteError::Throttled(delay));
     }
     if !(200..300).contains(&reply.status) {

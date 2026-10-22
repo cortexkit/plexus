@@ -1444,6 +1444,12 @@ where
     /// Confirms an authorized write's target is still current before it is
     /// sent; see [`Self::with_freshness_check`].
     freshness_check: Option<FreshnessCheck>,
+    /// The wall clock, in Unix milliseconds, that every expiry this engine
+    /// judges is read on: grants, policies, approvals, approval holds and
+    /// reservations, including the reservation claim in the store. It is
+    /// [`crate::storage::now_ms`] unless a test replaces it with a clock it
+    /// moves itself; see [`Self::with_clock`].
+    now_ms: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
 /// The pre-dispatch check that an authorized call's target is still current.
@@ -1474,6 +1480,7 @@ where
             consent_wait_hook: self.consent_wait_hook.clone(),
             connector_home_guard: self.connector_home_guard.clone(),
             freshness_check: self.freshness_check.clone(),
+            now_ms: Arc::clone(&self.now_ms),
         }
     }
 }
@@ -1495,7 +1502,21 @@ where
             consent_wait_hook: None,
             connector_home_guard: None,
             freshness_check: None,
+            now_ms: Arc::new(crate::storage::now_ms),
         }
+    }
+
+    /// Judge every expiry on `now_ms` instead of the real wall clock, so a
+    /// test can move time past a deadline instead of sleeping until it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_clock(mut self, now_ms: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
+        self.now_ms = now_ms;
+        self
+    }
+
+    /// The engine's clock reading, in Unix milliseconds.
+    fn now_ms(&self) -> i64 {
+        (self.now_ms)()
     }
 
     /// Attach the freshness check [`Self::dispatch_checked`] runs between
@@ -1780,7 +1801,7 @@ where
         if let Some(reason) = catalog_denial(&action, None) {
             return Err(Denial::Catalog(reason));
         }
-        self.evaluate_authority(&request, &connection, &action, crate::storage::now_ms())
+        self.evaluate_authority(&request, &connection, &action, self.now_ms())
             .map(|value| value.policy_effect)
     }
 
@@ -2051,7 +2072,7 @@ where
             );
             return Err(denial);
         }
-        let now = crate::storage::now_ms();
+        let now = self.now_ms();
         // Every declaration must resolve, even when policy would allow or an
         // approval is presented. Missing arguments never disable this gate.
         let recipient_pointers = self
@@ -3126,7 +3147,7 @@ where
         let (code, held) = match verdict {
             ApprovalScopeVerdict::Run => return None,
             ApprovalScopeVerdict::Refuse(code) => (code, false),
-            ApprovalScopeVerdict::Hold(_) if crate::storage::now_ms() >= bound.expires_at => {
+            ApprovalScopeVerdict::Hold(_) if self.now_ms() >= bound.expires_at => {
                 (SCOPE_UNVERIFIABLE, false)
             }
             ApprovalScopeVerdict::Hold(reason) => (reason, true),
@@ -3323,7 +3344,7 @@ where
         // `approval_consumed`. Found here, the reservation is abandoned and the
         // approval stays usable. A reservation that cannot be claimed anyway
         // (stale or expired) skips this and is refused by the claim below.
-        let claimable = !stale && crate::storage::now_ms() < reservation.expires_at_ms;
+        let claimable = !stale && self.now_ms() < reservation.expires_at_ms;
         if !claimable {
             self.abandon_unsent_reservation(reservation);
         }
@@ -3336,10 +3357,11 @@ where
             None
         };
         let claimed = if claimable {
-            match self
-                .store
-                .claim_reservation(&reservation_record(reservation), &reservation.request_id)
-            {
+            match self.store.claim_reservation(
+                &reservation_record(reservation),
+                &reservation.request_id,
+                &*self.now_ms,
+            ) {
                 Ok(claimed) => claimed,
                 Err(error) => {
                     // The claim's transaction did not commit, so neither the
@@ -3369,7 +3391,7 @@ where
             false
         };
         if !claimed {
-            let expired = crate::storage::now_ms() >= reservation.expires_at_ms;
+            let expired = self.now_ms() >= reservation.expires_at_ms;
             let reason = if expired {
                 "reservation_expired"
             } else {
@@ -3748,7 +3770,7 @@ where
             .catalog_action(&request.principal, &request.connection_id, &request.action)
             .map_err(|_| Denial::StoreFailure)?
             .ok_or(Denial::Catalog(CatalogDenial::NotFound))?;
-        let now = crate::storage::now_ms();
+        let now = self.now_ms();
         let grant = self
             .store
             .matching_grant(
@@ -3856,7 +3878,7 @@ where
         for request in waiting {
             let principal = request.principal.clone();
             let request_id = request.request_id.clone();
-            if request.expires_at <= crate::storage::now_ms() {
+            if request.expires_at <= self.now_ms() {
                 // The approval lapsed while held: nothing will ever send it.
                 if let Err(error) =
                     self.store
@@ -4022,7 +4044,7 @@ where
         if RequestStatus::of(&request.status) != RequestStatus::Pending {
             return;
         }
-        let expires_in_ms = request.expires_at.saturating_sub(crate::storage::now_ms());
+        let expires_in_ms = request.expires_at.saturating_sub(self.now_ms());
         if expires_in_ms <= 0 {
             return;
         }
@@ -4296,7 +4318,7 @@ where
                     Err(Denial::Policy(
                         if RequestStatus::of(&current.status) == RequestStatus::Cancelled {
                             PolicyDenial::ApprovalWithdrawn
-                        } else if current.expires_at <= crate::storage::now_ms()
+                        } else if current.expires_at <= self.now_ms()
                             || RequestStatus::of(&current.status) == RequestStatus::Expired
                         {
                             PolicyDenial::ApprovalExpired
