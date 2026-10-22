@@ -33,7 +33,7 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
   CARGO_INCREMENTAL: 0
-  MUTATE_RUNNER_REV: 0c99c7e16d8ae22b6e114136b6b7b68be6f1394e
+  MUTATE_RUNNER_REV: 5d005f453c892a09147ffb5e991c06966ff9b4a2
   # Official nats-io/nats-server v2.15.0 linux-amd64 release asset digest:
   # https://api.github.com/repos/nats-io/nats-server/releases/assets/570234667
   NATS_SERVER_VERSION: '2.15.0'

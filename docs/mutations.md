@@ -27,9 +27,9 @@ that the guard was caught.
 
 ## Replay and maintenance
 
-Use `ckdev-mutate 0.9.8` from
-[commons revision 0c99c7e16d8ae22b6e114136b6b7b68be6f1394e](https://github.com/cortexkit/commons/tree/0c99c7e16d8ae22b6e114136b6b7b68be6f1394e).
-The [runner README](https://github.com/cortexkit/commons/blob/0c99c7e16d8ae22b6e114136b6b7b68be6f1394e/crates/cortexkit-mutate/README.md)
+Use `ckdev-mutate 0.12.7` from
+[commons revision 5d005f453c892a09147ffb5e991c06966ff9b4a2](https://github.com/cortexkit/commons/tree/5d005f453c892a09147ffb5e991c06966ff9b4a2).
+The [runner README](https://github.com/cortexkit/commons/blob/5d005f453c892a09147ffb5e991c06966ff9b4a2/crates/cortexkit-mutate/README.md)
 defines anchor matching, multi-file edits and report fields. This revision
 keeps its lock and output captures in the temp directory, not under `.git`, so
 `check` and replays also run where `.git` is read-only, as in remote build jobs.
@@ -38,7 +38,7 @@ From a clean checkout:
 
 ```sh
 cargo install --locked --git https://github.com/cortexkit/commons \
-  --rev 0c99c7e16d8ae22b6e114136b6b7b68be6f1394e cortexkit-mutate
+  --rev 5d005f453c892a09147ffb5e991c06966ff9b4a2 cortexkit-mutate
 ckdev-mutate --version
 cargo --version
 ckdev-mutate check
