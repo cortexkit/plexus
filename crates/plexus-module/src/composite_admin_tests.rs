@@ -1150,3 +1150,128 @@ async fn an_onboarding_without_the_connector_home_role_reads_and_asks_nothing() 
     );
     assert_eq!(snapshot(&fixture.path, true), before);
 }
+
+// ---------------------------------------------------------------------------
+// Wildcards
+//
+// The store accepts an explicit `*` selector as "every action the ceiling
+// allows", so a wildcard reaching a composite's ticket, grant or policy would
+// authorize every action. Each composite names exactly what it grants and
+// refuses a wildcard action or grantee while planning: before any prompt,
+// with nothing written.
+
+/// Every action list a composite takes, each set to `*` and to a name that
+/// contains `*`.
+fn wildcard_action_cases() -> Vec<(&'static str, &'static str, Value)> {
+    let mut cases = Vec::new();
+    for wildcard in ["*", "held_*"] {
+        for field in ["actions", "invoke_actions", "allow_actions"] {
+            let mut params = write_params(false);
+            params[field] = json!([wildcard]);
+            cases.push((WRITE, field, params));
+        }
+    }
+    for wildcard in ["*", "list_workflow_*"] {
+        for field in ["actions", "consume_actions"] {
+            let mut params = poll_params(false);
+            params[field] = json!(["list_workflow_runs", wildcard]);
+            cases.push((POLL, field, params));
+        }
+    }
+    for wildcard in ["*", "get_*"] {
+        let mut params = widen_params(false);
+        params["actions"] = json!(["get_job", wildcard]);
+        cases.push((WIDEN, "actions", params));
+    }
+    cases
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wildcard_action_is_refused_before_asking_and_writes_nothing() {
+    let vendor = CountingVendor::start();
+    let write = write_fixture("wildcard-action-write", Some(&vendor.url));
+    let poll = poll_fixture("wildcard-action-poll", Some(&vendor.url));
+    let widen = widen_fixture("wildcard-action-widen");
+    for (method, field, params) in wildcard_action_cases() {
+        let fixture = match method {
+            WRITE => &write,
+            POLL => &poll,
+            _ => &widen,
+        };
+        let named = params[field].clone();
+        for dry_run in [false, true] {
+            let mut params = params.clone();
+            params["dry_run"] = json!(dry_run);
+            let before = snapshot(&fixture.path, true);
+            let refused = call(&fixture.state, &fixture.path, method, params).await;
+            assert_eq!(
+                refused.reply["error"]["code"], "explicit_actions_required",
+                "a wildcard action must be refused: {method} {field}={named}: {}",
+                refused.reply
+            );
+            assert!(
+                refused.prompts.is_empty(),
+                "a wildcard action is refused before asking: {method} {field}={named}"
+            );
+            assert_eq!(
+                snapshot(&fixture.path, true),
+                before,
+                "a refused wildcard action wrote: {method} {field}={named}"
+            );
+        }
+    }
+    // The onboarding's write, read and poll action lists are named too.
+    let github = github_fixture("wildcard-action-onboard");
+    for field in ["actions", "read_actions", "poll_actions"] {
+        for wildcard in ["*", "github.*"] {
+            let mut params = onboard_params(false);
+            params[field] = json!([wildcard]);
+            let before = snapshot(&github.path, true);
+            let refused = call(&github.state, &github.path, ONBOARD, params).await;
+            assert_eq!(
+                refused.reply["error"]["code"], "explicit_actions_required",
+                "a wildcard action must be refused: onboarding {field}={wildcard}: {}",
+                refused.reply
+            );
+            assert!(refused.prompts.is_empty());
+            assert_eq!(snapshot(&github.path, true), before);
+        }
+    }
+    assert_eq!(vendor.contacts(), 0, "a refused wildcard reaches no vendor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wildcard_grantee_is_refused_before_asking_and_writes_nothing() {
+    let vendor = CountingVendor::start();
+    let write = write_fixture("wildcard-grantee-write", Some(&vendor.url));
+    let poll = poll_fixture("wildcard-grantee-poll", Some(&vendor.url));
+    let widen = widen_fixture("wildcard-grantee-widen");
+    let mut cases = Vec::new();
+    for wildcard in ["*", "reserved:*"] {
+        let mut params = write_params(false);
+        params["grantees"] = json!(["reserved:basal", wildcard]);
+        cases.push((&write, WRITE, params));
+        let mut params = poll_params(false);
+        params["consumers"] = json!([wildcard]);
+        cases.push((&poll, POLL, params));
+        let mut params = widen_params(false);
+        params["grantees"] = json!([wildcard]);
+        cases.push((&widen, WIDEN, params));
+    }
+    for (fixture, method, params) in cases {
+        for dry_run in [false, true] {
+            let mut params = params.clone();
+            params["dry_run"] = json!(dry_run);
+            let before = snapshot(&fixture.path, true);
+            let refused = call(&fixture.state, &fixture.path, method, params.clone()).await;
+            assert_eq!(
+                refused.reply["error"]["code"], "wildcard_grantee",
+                "a wildcard grantee must be refused: {method} {params}: {}",
+                refused.reply
+            );
+            assert!(refused.prompts.is_empty(), "{method} asked: {params}");
+            assert_eq!(snapshot(&fixture.path, true), before, "{method} wrote");
+        }
+    }
+    assert_eq!(vendor.contacts(), 0, "a refused wildcard reaches no vendor");
+}

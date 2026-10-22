@@ -21329,3 +21329,19 @@ expect_red = ["tests::composite_admin_tests::a_declined_onboarding_writes_nothin
 expect_message = "an applied bind without the shim statement must be refused before asking"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "composite-admin-refuses-wildcard-actions"
+guards = "A composite admin command refuses a wildcard action name before asking, so no ticket, grant or policy it writes can carry an explicit * selector"
+file = "crates/plexus-module/src/composite_admin.rs"
+old = "        if action.contains('*') {"
+new = "        if action.contains('*') && false { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/composite_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::composite_admin_tests::a_wildcard_action_is_refused_before_asking_and_writes_nothing"]
+expect_message = "a wildcard action must be refused"
+build_timeout_s = 3600
+timeout_s = 120
