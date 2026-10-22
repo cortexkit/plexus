@@ -21422,7 +21422,7 @@ timeout_s = 120
 
 [[control]]
 id = "module-log-caps-dependencies-at-warn"
-guards = "A dependency's TRACE, DEBUG or INFO event never reaches the plexus module log, whatever CK_LOG asks for, while its WARN still does"
+guards = "A dependency's TRACE, DEBUG and INFO events are refused before CK_LOG is consulted, so no CK_LOG value writes them; its WARN is still written when CK_LOG enables WARN"
 file = "crates/plexus-module/src/bus.rs"
 old = "        && (is_plexus_callsite(metadata) || *metadata.level() <= tracing::Level::WARN)"
 new = "        && (true || is_plexus_callsite(metadata) || *metadata.level() <= tracing::Level::WARN) /* NON-VACUITY BREAK */"

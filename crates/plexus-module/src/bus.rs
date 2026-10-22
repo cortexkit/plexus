@@ -46,8 +46,9 @@ fn zeroizing_string<'de, D: serde::Deserializer<'de>>(
     String::deserialize(deserializer).map(zeroize::Zeroizing::new)
 }
 
-/// Whether a callsite was compiled into one of plexus's own crates rather than
-/// into a dependency. A plexus diagnostic is emitted by `diag!` (or the crate
+/// Whether a callsite belongs to plexus rather than to a dependency, judged by
+/// the first component of its module path starting with `plexus_` (no
+/// dependency in the lock uses that prefix). A plexus diagnostic is emitted by `diag!` (or the crate
 /// `eprintln!` shadow) at its call site, so its module path starts with a
 /// plexus crate name (`plexus_core::scheduler`, `plexus_module::relay`). A
 /// dependency's events carry the dependency's own module path

@@ -384,8 +384,8 @@ macro_rules! dependency_event {
 }
 
 /// The module log as written through `safe_log_layer` with `spec` as CK_LOG,
-/// after one event of each level from a dependency and plexus's own INFO and
-/// DEBUG diagnostics.
+/// after dependency TRACE, DEBUG, INFO and WARN events and plexus's own INFO
+/// and DEBUG diagnostics.
 fn module_log_under(spec: &str) -> String {
     let scratch = Scratch::database("dependency-cap");
     let logs = scratch.path().with_extension("logs");
