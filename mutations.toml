@@ -21550,3 +21550,39 @@ broad_id = "{name}"
 expect_red = ["test_mutation_plan.MutationPlanTests.test_shard_count_respects_sixteen_shard_cap"]
 expect_message = "mutation runner allocation must stay capped at 16 shards"
 timeout_s = 120
+
+[[control]]
+id = "main-skip-requires-success-conclusion"
+guards = "Only a successful train run can waive duplicate main tests"
+file = "scripts/skip_main_tests.py"
+old = "                    and run.get(\"conclusion\") == \"success\"):"
+new = "                    and True): # NON-VACUITY BREAK"
+test_file = "scripts/tests/test_skip_main_tests.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+list_command = ["python3", "-B", "scripts/tests/run-one.py", "--list", "{test}"]
+test_count_pattern = "Ran {count} test"
+broad_command = ["python3", "-B", "scripts/tests/run-one.py", "--broad"]
+broad_report = "target/mutations/g-scripts-junit.xml"
+broad_id = "{name}"
+expect_red = ["test_skip_main_tests.SkipMainTests.test_failed_train_run_does_not_authorize_skipping"]
+expect_message = "failed train runs must not authorize skipping"
+timeout_s = 120
+
+[[control]]
+id = "main-skip-requires-train-branch"
+guards = "Only a train branch run can waive duplicate main tests"
+file = "scripts/skip_main_tests.py"
+old = "                    and run.get(\"head_branch\", \"\").startswith(\"train/\")"
+new = "                    and True  # NON-VACUITY BREAK"
+test_file = "scripts/tests/test_skip_main_tests.py"
+runner = "command"
+command = ["python3", "-B", "scripts/tests/run-one.py", "{test}"]
+list_command = ["python3", "-B", "scripts/tests/run-one.py", "--list", "{test}"]
+test_count_pattern = "Ran {count} test"
+broad_command = ["python3", "-B", "scripts/tests/run-one.py", "--broad"]
+broad_report = "target/mutations/g-scripts-junit.xml"
+broad_id = "{name}"
+expect_red = ["test_skip_main_tests.SkipMainTests.test_successful_main_run_does_not_authorize_skipping"]
+expect_message = "only a train ref can authorize duplicate-test skipping"
+timeout_s = 120
