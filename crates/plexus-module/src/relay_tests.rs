@@ -3059,6 +3059,9 @@ async fn relay_drops_are_debug_and_hourly_summary_counts_committed_activity() {
     frames.push(duplicate.to_string());
     replay_using_status(store.clone(), frames, true, None, &status).await;
     assert_eq!(count(&path, "trigger_events"), 1);
+    status.set(State::Reconnecting);
+    // Reconciliation has separate coverage; keep blocking store work outside paused time.
+    status.take_reconcile();
 
     // A disconnected relay still emits the previous connection's activity on schedule.
     let (stop, rx) = mpsc::channel(1);
@@ -3080,7 +3083,18 @@ async fn relay_drops_are_debug_and_hourly_summary_counts_committed_activity() {
             tokio::task::yield_now().await;
         }
         if seconds == 3599 {
+            assert_eq!(status.0.lock().unwrap().activity.stored, 1);
             std::eprintln!("before-hour");
+        } else {
+            let snapshot = status.0.lock().unwrap();
+            assert_eq!(
+                snapshot.activity.stored, 0,
+                "hourly timer must drain stored count"
+            );
+            assert!(
+                snapshot.activity.dropped.is_empty(),
+                "hourly timer must drain drop counts"
+            );
         }
     }
     drop(stop);
