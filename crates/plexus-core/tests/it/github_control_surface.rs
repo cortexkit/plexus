@@ -745,6 +745,7 @@ fn import_and_read_upgrade_share_all_bot_read_actions() {
         "github.repo.get",
         "github.search.code",
         "github.search.issues",
+        "github.pulls.open",
         "github.actions.job.get",
         "github.actions.job_log",
     ];
