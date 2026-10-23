@@ -179,7 +179,7 @@ ceiling, so no other GitHub Actions call can gain authority through it.
 
 Use `add-poll-connection`. It issues the ticket, connects, mints the poll grant
 to `direct` on the four reads and the `events_consume` grant to
-`reserved:basal` on `list_workflow_runs`, with one Touch ID confirmation for
+`reserved:basal` on `list_workflow_runs`, with one operator confirmation for
 all of it. Preview first; the preview writes nothing and contacts nothing, and
 its `will ask:` line is the exact confirmation the apply asks for:
 
@@ -264,7 +264,7 @@ reviewed catalog is loaded. Workers must not touch the live store.
 Use `widen-and-grant`. It adds the six flow reads named in `CI_FLOW_ACTIONS`
 below (job, job log, run artifacts, artifact file, run metadata and a
 workflow's runs) to the connection ceiling and mints Basal's `invoke` grant on
-exactly those six, in one transaction with one Touch ID confirmation: both
+exactly those six, in one transaction with one operator confirmation: both
 commit or neither does. It never raises the connection's risk ceiling. The
 preview runs the whole change and rolls it back, so it refuses exactly what the
 apply would and writes nothing:
@@ -511,7 +511,7 @@ installation. If the owner agent has no handle yet, onboard its bot with
 `ck-plexus-admin onboard-github-bot --subc "$SUBC" --inventory <file>
 --repositories "$SCRATCH_REPO" --actions <writes> --carrier reserved:aft
 --effect allow --shim-manifest-maps-repo --apply` after the same manifest
-steps: it imports, proves, binds and grants the handle with one Touch ID
+steps: it imports, proves, binds and grants the handle with one operator
 confirmation, and refuses to bind without `--shim-manifest-maps-repo`. Run it
 without `--apply` first to see what GitHub lists and what it would bind. The
 manual commands (`github.handle.import`, `github.handle.probe`, `handle-bind`,

@@ -31,7 +31,7 @@ integrity `code`, and `checkedAt`. State transitions are logged.
 
 Deploy Plexus with this cutover and Entorhinal 0.1.25 or later. Then **the
 operator runs `ck roles take connector_home` within the minute**, on the machine
-that should be the connector home; the command asks for Touch ID. Plexus refuses outside
+that should be the connector home; the command asks for operator confirmation. Plexus refuses outside
 effects until a confirmed read lands. Plexus no longer reads or takes claims
 through Engram; only Entorhinal serves its connector-home reads.
 
@@ -44,7 +44,7 @@ Status is answered only to the operator's own local connection (`direct`), not
 to a call carried by another module. It reads `role.read` and prints both the reply and the current gate. `ck-plexus-admin connector-home claim` is
 removed and refuses by name, directing the operator to `ck roles take
 connector_home`. Plexus never takes the role: Entorhinal's `role.take` is
-Direct-only with Touch ID and refuses `reserved:plexus`.
+Direct-only with operator confirmation and refuses `reserved:plexus`.
 
 Moving connector state still requires carrying `store.db` and
 `grant-revocations.jsonl` together; taking a role does not transfer the store.

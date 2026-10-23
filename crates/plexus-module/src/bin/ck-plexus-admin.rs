@@ -136,7 +136,7 @@ commands:
                  import, prove, bind and grant one GitHub App handle under one
                  confirmation (preview by default)
 
-The four commands above and add-web-search-provider each ask for one Touch ID
+The four commands above and add-web-search-provider each ask for one operator confirmation
 confirmation for the whole change. The single-step commands they combine stay
 available as the manual fallback.
 
@@ -252,7 +252,7 @@ handle-grant (--handle <app_handle_id> | --all-handles) --kind read
     for a bot job log read. Missing catalog rows are seeded from the reviewed
     manifest with AddMissing semantics; disabled/quarantined rows stay refused.
     No agent grants or policies change. --all-handles selects enabled handles
-    only. Preview writes nothing; --apply uses one Touch ID confirmation and
+    only. Preview writes nothing; --apply uses one operator confirmation and
     one audited transaction for all selected handles. Rerunning is a no-op.
 
 handle-unbind --handle <app_handle_id> --repo <owner/name> [--apply]
@@ -304,7 +304,7 @@ set-web-search-allowance <name> --clear [--apply]
 add-web-search-provider <name> [--grantee <principal>]... [--instance-url <url>]
                         [--with-key] [--apply]
     Does what issue-ticket, connections op=connect and one grant per caller do,
-    with one Touch ID confirmation instead of one per step. The app, action,
+    with one operator confirmation instead of one per step. The app, action,
     vault credential name and connection id come from the provider name table;
     the connection gets a read ceiling on the search action only, and each
     grantee an invoke grant at read risk on that action. Repeat --grantee per
@@ -324,7 +324,7 @@ add-write-connection --app <key> --actions a,b --grantee <principal>...
                      [--resource-filters <json>] [--allow a,b] [--apply]
     Does what issue-ticket, connections op=connect, a connection_admin grant
     to direct, connections op=configure, one invoke grant per --grantee and
-    an allow policy (set-policy) per --allow action do, with one Touch ID
+    an allow policy (set-policy) per --allow action do, with one operator
     confirmation instead of one per step. --actions sets the
     connection ceiling at --risk (default write); each grantee gets an invoke
     grant at that risk on --invoke-actions (default: every action).
@@ -343,13 +343,13 @@ add-poll-connection --app <key> --actions a,b [--connection <id>]
                     [--consume-actions a,b] [--apply]
     Does what issue-ticket at read risk, connections op=connect, a poll grant
     to direct on --actions and one events_consume grant per --consumer on
-    --consume-actions do, with one Touch ID confirmation.
+    --consume-actions do, with one operator confirmation.
     Preview, discovery, failure and rerun rules are add-write-connection's.
 
 widen-and-grant --connection <id> --actions a,b --grantee <principal>...
                 [--kind invoke|poll|events_consume] [--risk ...] [--apply]
     Does what widen-ceiling --apply and one grant per --grantee on exactly
-    --actions do, in one transaction with one Touch ID confirmation: the
+    --actions do, in one transaction with one operator confirmation: the
     widening and every grant commit together or not at all. The preview runs
     the whole change and rolls it back, so it refuses exactly what an apply
     would. A rerun leaves actions already in the ceiling alone and skips a
@@ -361,7 +361,7 @@ onboard-github-bot --inventory <file> --actions a,b --carrier <principal>
                    [--shim-manifest-maps-repo] [--apply]
     Does what github.handle.import, github.handle.probe, handle-bind
     --repositories and handle-grant (the writes, then its read and poll forms
-    for --read-actions and --poll-actions) do, with one Touch ID confirmation. --inventory is a
+    for --read-actions and --poll-actions) do, with one operator confirmation. --inventory is a
     github-grant-import.v1 JSON file holding exactly the one handle. The
     handle's installation is listed on GitHub once, while planning, even for
     a preview; nothing is sent to GitHub after the confirmation. Binding a
@@ -1686,7 +1686,7 @@ fn call_module(
             Failure::transport(format!("connect {}: {error}", connection_file.display()))
         })?;
         if confirmation {
-            eprintln!("waiting for Touch ID approval…");
+            eprintln!("waiting for operator confirmation…");
         }
         let bytes = consumer
             .call(

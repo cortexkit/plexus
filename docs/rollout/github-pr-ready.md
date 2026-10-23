@@ -20,7 +20,7 @@ operator runs them, never an automated worker. Deploy in this order:
    every bot. Both writes require that pre-read; fresh imports imply it from
    either write grant. A bot onboarded after this release can take both writes
    in the `--actions` list of `ck-plexus-admin onboard-github-bot`, which
-   imports, binds and grants it with one Touch ID confirmation; `handle-grant`
+   imports, binds and grants it with one operator confirmation; `handle-grant`
    stays the command for bots that already exist.
 
 AFT's `gh` shim sends these requests only once its signed list of allowed `gh`

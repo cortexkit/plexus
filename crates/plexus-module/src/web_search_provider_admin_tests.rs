@@ -209,7 +209,7 @@ pub(super) struct Outcome {
 }
 
 /// Serve one request as the daemon would, answering every operator
-/// confirmation with `decision` through a fake presence peer, never Touch ID.
+/// confirmation with `decision` through a fake presence peer, never a real confirmation prompt.
 /// At each prompt the store must still be exactly as it was before the
 /// request: nothing is written before confirmation.
 pub(super) async fn request(

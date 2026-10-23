@@ -234,7 +234,7 @@ existing vault permission is separate from each caller's Plexus invoke grants.
 Do not print, export, copy into a manifest, or retrieve a raw key for a probe.
 
 Steps 3 and 4 are one command per provider, `add-web-search-provider`, with
-one Touch ID confirmation. It reads the app, action, vault credential name and
+one operator confirmation. It reads the app, action, vault credential name and
 connection id from the provider name table (`conn-web-search-<name>`; Exa keeps
 `conn-exa-rest`), places the credential reference and issues the ticket,
 connects with discovery, then mints every caller's invoke grant at read risk on
