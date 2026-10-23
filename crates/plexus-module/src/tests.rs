@@ -1882,7 +1882,8 @@ fn module_diagnostic_output(test: &str) -> String {
                 Some(DiagnosticStorePath::Owned(prepare_imported_handle_probe_fixture()))
             }
             "tests::selection_log_fixture" => Some(DiagnosticStorePath::Owned(prepare_selection_fixture())),
-            "tests::revoke_then_probe_fixture" | "tests::route_capacity_log_fixture" => {
+            "tests::revoke_then_probe_fixture" | "tests::route_capacity_log_fixture"
+            | "tests::wire_success_is_debug_but_refused_bind_is_info" => {
                 let (path, store, state) = two_connection_fixture("diagnostic-connections");
                 drop(state);
                 drop(store);
@@ -1959,6 +1960,91 @@ fn route_capacity_refusals_emit_one_warning_per_period() {
         1,
         "cap pressure must emit exactly one warning per minute: {stderr}"
     );
+}
+
+#[tokio::test]
+async fn wire_success_is_debug_but_refused_bind_is_info() {
+    if !diagnostic_child() {
+        let stderr =
+            module_diagnostic_output("tests::wire_success_is_debug_but_refused_bind_is_info");
+        assert!(
+            !stderr.contains(": ACCEPTED"),
+            "accepted binds must be silent at INFO: {stderr}"
+        );
+        assert!(
+            !stderr.contains("tool frame received"),
+            "tool frames must be silent at INFO: {stderr}"
+        );
+        let refusals: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.contains("REFUSED (not first-party)"))
+            .collect();
+        assert_eq!(
+            refusals.len(),
+            1,
+            "refused binds must stay visible: {stderr}"
+        );
+        logging::assert_diagnostic(
+            refusals[0],
+            cortexkit_log::ParsedLevel::Info,
+            "plexus.wire",
+            "route bind from principal 'reserved:subc-mcp' on channel 4: REFUSED (not first-party)",
+        );
+        return;
+    }
+    let (_scratch, _store, state) = two_connection_fixture("wire-success-log");
+    let routes = Arc::new(RouteBindings::new());
+    let (writer, mut responses) = mpsc::channel(4);
+    handle_control_request(bind(Some(Principal::Direct)), &writer, &state, &routes)
+        .await
+        .unwrap();
+    let ack = recv_within(
+        responses.recv(),
+        std::time::Duration::from_secs(5),
+        "accepted bind ack",
+    )
+    .await;
+    assert_eq!(ack.header.ty, FrameType::Response);
+    let frame = Frame::build(
+        FrameType::Request,
+        Flags::new(false, Priority::Interactive, false),
+        4,
+        2,
+        8,
+        serde_json::to_vec(&json!({"method":"relay.status"})).unwrap(),
+    )
+    .unwrap();
+    handle_tool_request(frame, &writer, &state, &routes)
+        .await
+        .unwrap();
+    let response = recv_within(
+        responses.recv(),
+        std::time::Duration::from_secs(5),
+        "accepted tool frame reply",
+    )
+    .await;
+    assert_eq!(response.header.ty, FrameType::Response);
+    let reply: Value = serde_json::from_slice(&response.body).unwrap();
+    assert!(reply["result"]["sources"].is_array(), "{reply}");
+    handle_control_request(
+        bind(Some(Principal::Reserved {
+            module_id: "subc-mcp".into(),
+        })),
+        &writer,
+        &state,
+        &routes,
+    )
+    .await
+    .unwrap();
+    let refusal = recv_within(
+        responses.recv(),
+        std::time::Duration::from_secs(5),
+        "refused bind reply",
+    )
+    .await;
+    assert_eq!(refusal.header.ty, FrameType::Error);
+    let body: ErrorBody = serde_json::from_slice(&refusal.body).unwrap();
+    assert_eq!(body.code, "principal_denied");
 }
 
 #[test]

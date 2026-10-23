@@ -3001,6 +3001,205 @@ fn relay_marker_logging_counts_committed_watches_and_suppresses_repeats() {
     assert_eq!(due(&scratch), 2);
 }
 
+#[tokio::test]
+async fn relay_invalid_payload_is_info_and_identity_change_is_warn() {
+    const TEST: &str = "relay::tests::relay_invalid_payload_is_info_and_identity_change_is_warn";
+    if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
+        let scratch = prepare_relay_log_fixture("relay-exceptional-drop-log");
+        let output = crate::bounded::child_output(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env("PLEXUS_LOG_STDERR_CHILD", "1")
+                .env(PREPARED_RELAY_LOG_STORE, scratch.path()),
+            Duration::from_secs(30),
+            "relay exceptional drop diagnostic child",
+        )
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        crate::test_support::assert_exactly_one_test_passed(TEST, &output);
+        let drops: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.contains("relay event dropped"))
+            .collect();
+        assert_eq!(
+            drops.len(),
+            1,
+            "malformed relay payloads must stay visible at INFO: {stderr}"
+        );
+        diagnostic_logging::assert_diagnostic(
+            drops[0],
+            cortexkit_log::ParsedLevel::Info,
+            "plexus.relay",
+            "relay event dropped reason=InvalidPayload seq=2 event=issues action=Some(\"opened\")",
+        );
+        let identity_warnings: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.contains("repository org/repo identity changed"))
+            .collect();
+        assert_eq!(identity_warnings.len(), 1, "{stderr}");
+        diagnostic_logging::assert_diagnostic(
+            identity_warnings[0],
+            cortexkit_log::ParsedLevel::Warn,
+            "plexus.storage",
+            "repository org/repo identity changed from 101 to 999; suspended 2 watches",
+        );
+        assert!(
+            !stderr.contains("reason=RepositoryIdentityChanged"),
+            "the identity warning must not be duplicated by a per-event INFO line: {stderr}"
+        );
+        assert!(
+            !stderr.contains("reason=UnsupportedEvent"),
+            "routine relay drops must be silent at INFO: {stderr}"
+        );
+        return;
+    }
+    diagnostic_logging::init_child();
+    let (_scratch, store, path) = relay_log_fixture("relay-exceptional-drop-log");
+    let mut malformed: Value = serde_json::from_str(&full_event()).unwrap();
+    malformed["seq"] = json!(2);
+    malformed["delivery_id"] = json!("malformed-issue");
+    malformed["body"]["issue"] = Value::Null;
+    let mut unsupported: Value = serde_json::from_str(&full_event()).unwrap();
+    unsupported["seq"] = json!(3);
+    unsupported["delivery_id"] = json!("unsupported-event");
+    unsupported["event"] = json!("check_run");
+    let mut changed: Value = serde_json::from_str(&full_event()).unwrap();
+    changed["seq"] = json!(4);
+    changed["delivery_id"] = json!("changed-repository");
+    changed["body"]["repository"]["id"] = json!(999);
+    // The first stored event establishes repository 101 before the changed-identity frame arrives.
+    replay(
+        store,
+        vec![
+            hello(),
+            full_event(),
+            malformed.to_string(),
+            unsupported.to_string(),
+            changed.to_string(),
+        ],
+        true,
+    )
+    .await;
+    assert_eq!(count(&path, "trigger_events"), 1);
+    let conn = Connection::open(&path).unwrap();
+    for reason in [
+        "invalid_payload",
+        "unsupported_event",
+        "repository_identity_changed",
+    ] {
+        let dropped: i64 = conn
+            .query_row(
+                "SELECT value FROM event_outbox_counters WHERE name=?1",
+                [format!("relay_drop_{reason}")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dropped, 1, "fixture must reach the {reason} drop branch");
+    }
+}
+
+#[tokio::test]
+async fn relay_drops_are_debug_and_hourly_summary_counts_committed_activity() {
+    const TEST: &str =
+        "relay::tests::relay_drops_are_debug_and_hourly_summary_counts_committed_activity";
+    if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
+        let scratch = prepare_relay_log_fixture("relay-summary-log");
+        let output = crate::bounded::child_output(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env("PLEXUS_LOG_STDERR_CHILD", "1")
+                .env(PREPARED_RELAY_LOG_STORE, scratch.path()),
+            Duration::from_secs(30),
+            "relay activity summary child",
+        )
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        crate::test_support::assert_exactly_one_test_passed(TEST, &output);
+        assert!(
+            !stderr.contains("relay event dropped"),
+            "routine relay drops must be silent at INFO: {stderr}"
+        );
+        let (before_hour, after_hour) = stderr.split_once("before-hour\n").unwrap();
+        assert!(
+            !before_hour.contains("relay activity summary:"),
+            "summary must wait a full hour: {stderr}"
+        );
+        let summaries: Vec<_> = after_hour
+            .lines()
+            .filter(|line| line.contains("relay activity summary:"))
+            .collect();
+        assert_eq!(summaries.len(), 1, "idle hours must be skipped: {stderr}");
+        diagnostic_logging::assert_diagnostic(
+            summaries[0],
+            cortexkit_log::ParsedLevel::Info,
+            "plexus.relay",
+            "relay activity summary: stored=1 dropped=[{\"count\":1,\"event\":\"issues\",\"reason\":\"AlreadyDelivered\"},{\"count\":1,\"event\":\"check_run\",\"reason\":\"UnsupportedEvent\"},{\"count\":2,\"event\":\"workflow_job\",\"reason\":\"UnsupportedEvent\"},{\"count\":1,\"event\":\"issues\",\"reason\":\"UnwatchedRepository\"}]",
+        );
+        return;
+    }
+    diagnostic_logging::init_child();
+    let (_scratch, store, path) = relay_log_fixture("relay-summary-log");
+    let status = Status::default();
+    let mut frames = vec![hello(), full_event()];
+    for (seq, event_type) in [(2, "workflow_job"), (3, "workflow_job"), (4, "check_run")] {
+        frames.push(json!({"type":"event","seq":seq,"delivery_id":format!("drop-{seq}"),"event":event_type,"action":"queued","installation_id":42,"received_at":TIME,"body":{"repository":{"id":101,"full_name":"org/repo"}}}).to_string());
+    }
+    let mut unwatched: Value = serde_json::from_str(&full_event()).unwrap();
+    unwatched["seq"] = json!(5);
+    unwatched["delivery_id"] = json!("unwatched");
+    unwatched["body"]["repository"] = json!({"id":102,"full_name":"other/repo"});
+    frames.push(unwatched.to_string());
+    let mut duplicate: Value = serde_json::from_str(&full_event()).unwrap();
+    duplicate["seq"] = json!(6);
+    duplicate["delivery_id"] = json!("duplicate");
+    frames.push(duplicate.to_string());
+    replay_using_status(store.clone(), frames, true, None, &status).await;
+    assert_eq!(count(&path, "trigger_events"), 1);
+    status.set(State::Reconnecting);
+    // Reconciliation has separate coverage; keep blocking store work outside paused time.
+    status.take_reconcile();
+
+    // A disconnected relay still emits the previous connection's activity on schedule.
+    let (stop, rx) = mpsc::channel(1);
+    let relay = run(
+        "ws://127.0.0.1:0",
+        store,
+        Arc::new(StubCredentialSource::with_default_success(b"test".to_vec())),
+        Arc::new(ConnectorHome::test_admitted()),
+        &status,
+        rx,
+    );
+    tokio::pin!(relay);
+    tokio::time::pause();
+    assert!(futures_util::poll!(&mut relay).is_pending());
+    for seconds in [3599, 2, 3600] {
+        tokio::time::advance(Duration::from_secs(seconds)).await;
+        for _ in 0..20 {
+            assert!(futures_util::poll!(&mut relay).is_pending());
+            tokio::task::yield_now().await;
+        }
+        if seconds == 3599 {
+            assert_eq!(status.0.lock().unwrap().activity.stored, 1);
+            std::eprintln!("before-hour");
+        } else {
+            let snapshot = status.0.lock().unwrap();
+            assert_eq!(
+                snapshot.activity.stored, 0,
+                "hourly timer must drain stored count"
+            );
+            assert!(
+                snapshot.activity.dropped.is_empty(),
+                "hourly timer must drain drop counts"
+            );
+        }
+    }
+    drop(stop);
+    bounded(relay).await;
+    tokio::time::resume();
+}
+
 #[test]
 fn credential_id_is_the_public_field_only() {
     const ID: &str = "01HZX3K7Q9M2R8T4V6W0Y5Z1AB";

@@ -218,6 +218,15 @@ pub enum DropReason {
     AlreadyDelivered,
     PrCommentReread,
 }
+
+/// Admission result after a relay frame's store transaction commits.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CommitOutcome {
+    Stored,
+    Dropped(DropReason),
+    /// A cursor replay or reconciliation marker, not an admitted or dropped event.
+    CursorOnly,
+}
 impl DropReason {
     fn counter(&self) -> &'static str {
         match self {
@@ -367,6 +376,17 @@ impl PlexusStore {
         stream: &str,
         event: &Event,
     ) -> Result<(), StoreError> {
+        self.commit_relay_event_with_outcome(source, stream, event)
+            .map(|_| ())
+    }
+
+    /// Report admission only after the cursor and event transaction has committed.
+    pub fn commit_relay_event_with_outcome(
+        &self,
+        source: &str,
+        stream: &str,
+        event: &Event,
+    ) -> Result<CommitOutcome, StoreError> {
         let received = parse_to_millis(&event.received_at)
             .ok_or_else(|| StoreError::Backend("invalid relay receipt time".into()))?;
         if event.seq == 0
@@ -381,6 +401,7 @@ impl PlexusStore {
             return Err(StoreError::Backend("invalid relay event".into()));
         }
         let mut inserted = false;
+        let mut outcome = CommitOutcome::CursorOnly;
         let mut committed_new = false;
         let mut due_watches = 0;
         let mut marker_reason = "pr_comment_reread";
@@ -412,9 +433,16 @@ impl PlexusStore {
                 None => {
                     if let Err(reason) = admit(conn, event, received, &self.ci_runs, &mut due_watches)? {
                         event_outbox::increment(conn, reason.counter(), 1)?;
-                        diag!(info relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action);
+                        // Malformed payloads need immediate visibility; identity changes already emit a storage warning.
+                        if matches!(reason, DropReason::InvalidPayload) {
+                            diag!(info relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action);
+                        } else {
+                            diag!(debug relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action);
+                        }
+                        outcome = CommitOutcome::Dropped(reason);
                     } else {
                         inserted = true;
+                        outcome = CommitOutcome::Stored;
                     }
                 }
             }
@@ -428,7 +456,7 @@ impl PlexusStore {
         if inserted {
             self.outbox_ready.notify_one();
         }
-        Ok(())
+        Ok(outcome)
     }
 }
 

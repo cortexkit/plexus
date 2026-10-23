@@ -2,12 +2,13 @@
 use crate::{connector_home::ConnectorHome, ModuleState};
 use futures_util::{SinkExt, StreamExt};
 use plexus_core::{
-    storage::relay::{Event, Hello, Stub},
+    storage::relay::{CommitOutcome, Event, Hello, Stub},
     CredentialSource, PlexusStore,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -40,6 +41,7 @@ const HEALTHY_RELAY_WINDOW: Duration = Duration::from_secs(3600);
 const CLEAN_RECONNECT_WINDOW: Duration = Duration::from_secs(300);
 const PING_PERIOD: Duration = Duration::from_secs(30);
 const RECEIVE_DEADLINE: Duration = Duration::from_secs(60);
+const SUMMARY_PERIOD: Duration = Duration::from_secs(3600);
 const SUPERSEDED_MESSAGE: &str =
     "The relay was superseded by another machine also acting as connector home.";
 
@@ -95,6 +97,13 @@ struct Snapshot {
     disconnected_at: Option<Instant>,
     logged_slow: bool,
     reconcile_pending: bool,
+    activity: Activity,
+}
+
+#[derive(Default)]
+struct Activity {
+    stored: u64,
+    dropped: BTreeMap<(String, String), u64>,
 }
 pub struct Status(Mutex<Snapshot>, tokio::sync::Notify);
 impl Default for Status {
@@ -111,12 +120,41 @@ impl Default for Status {
                 disconnected_at: None,
                 logged_slow: false,
                 reconcile_pending: false,
+                activity: Activity::default(),
             }),
             tokio::sync::Notify::new(),
         )
     }
 }
 impl Status {
+    fn committed(&self, outcome: CommitOutcome, event: String) {
+        let mut status = self.0.lock().unwrap();
+        match outcome {
+            CommitOutcome::Stored => status.activity.stored += 1,
+            CommitOutcome::Dropped(reason) => {
+                *status
+                    .activity
+                    .dropped
+                    .entry((format!("{reason:?}"), event))
+                    .or_default() += 1;
+            }
+            CommitOutcome::CursorOnly => {}
+        }
+    }
+
+    fn log_summary(&self) {
+        let activity = std::mem::take(&mut self.0.lock().unwrap().activity);
+        if activity.stored == 0 && activity.dropped.is_empty() {
+            return;
+        }
+        let dropped: Vec<_> = activity
+            .dropped
+            .into_iter()
+            .map(|((reason, event), count)| json!({"reason": reason, "event": event, "count": count}))
+            .collect();
+        eprintln!(info relay: "relay activity summary: stored={} dropped={}", activity.stored, json!(dropped));
+    }
+
     fn set(&self, state: State) {
         self.transition(state, None);
     }
@@ -539,17 +577,23 @@ async fn consume(
                         let seq = event.seq;
                         let overflow = matches!(event.stub, Some(Stub::Overflow));
                         let received = event.received_at.clone();
+                        let event_type = event.event.clone();
                         let stream_id = stream.as_ref().unwrap().clone();
                         let db = Arc::clone(&store);
                         // One received frame at a time bounds our queue below the relay's 64-frame window.
                         let committed = tokio::task::spawn_blocking(move || {
-                            db.commit_relay_event(SOURCE, &stream_id, &event)
+                            db.commit_relay_event_with_outcome(SOURCE, &stream_id, &event)
                         })
                         .await;
-                        if !matches!(committed, Ok(Ok(()))) {
-                            local_store_failed("event commit", committed);
-                            return Failure::Reconnecting;
-                        }
+                        let outcome = match committed {
+                            Ok(Ok(outcome)) => outcome,
+                            failure => {
+                                local_store_failed("event commit", failure);
+                                return Failure::Reconnecting;
+                            }
+                        };
+                        // Count stored and dropped outcomes after commit, even if the acknowledgement fails.
+                        status.committed(outcome, event_type);
                         if overflow {
                             status.reset_clock("overflow");
                         }
@@ -615,10 +659,15 @@ async fn run(
 ) {
     let connection = run_connections(url, store.clone(), credentials, home, status, stop);
     tokio::pin!(connection);
+    // The outer relay loop survives reconnects and credential waits without a separate task.
+    let mut summary =
+        tokio::time::interval_at(tokio::time::Instant::now() + SUMMARY_PERIOD, SUMMARY_PERIOD);
+    summary.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let deadline = status.polling_deadline();
         tokio::select! {
             _ = &mut connection => return,
+            _ = summary.tick() => status.log_summary(),
             _ = status.1.notified() => {},
             _ = async {
                 match deadline {
