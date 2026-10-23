@@ -1581,35 +1581,16 @@ async fn handle_control_request(
                 return send(writer, response).await;
             }
             let trust = principal::trust_for_principal(&principal);
-            // EVERY BIND OUTCOME IS LOGGED, accepted and refused alike, because
-            // this is where a consumer's identity is decided and neither side of
-            // a route can see the decision otherwise.
-            //
-            // The refusal path had five error sites and no logging at all: a
-            // rejected consumer received an error frame and this module recorded
-            // nothing, so an operator asking "did that module even try to bind"
-            // had no way to answer. A consumer whose client turns an error frame
-            // into an empty result then presents as a quiet, working lane that is
-            // simply always empty -- indistinguishable from a correct scoping
-            // decision, which is the exact confusion that cost two seats an
-            // evening on the tool-call layer below.
-            //
-            // Accepted binds are logged too. Logging only refusals would make an
-            // ABSENT line ambiguous between "never arrived" and "arrived and was
-            // fine", and the first of those is a real diagnosis.
+            // Keep refused binds visible to operators; log binds that pass the
+            // first-party check at debug level when tracing a consumer's arrival.
             let bind_label = principal
                 .as_ref()
                 .map(principal::principal_key)
                 .unwrap_or_else(|| "absent".into());
-            eprintln!(info wire:
-                "route bind from principal '{bind_label}' on channel {route_channel}: {}",
-                if trust.is_first_party() {
-                    "ACCEPTED"
-                } else {
-                    "REFUSED (not first-party)"
-                }
-            );
             if !trust.is_first_party() {
+                eprintln!(info wire:
+                    "route bind from principal '{bind_label}' on channel {route_channel}: REFUSED (not first-party)"
+                );
                 return send_principal_denied(
                     writer,
                     frame.header.ver,
@@ -1618,6 +1599,9 @@ async fn handle_control_request(
                 )
                 .await;
             }
+            eprintln!(debug wire:
+                "route bind from principal '{bind_label}' on channel {route_channel}: ACCEPTED"
+            );
             let accepted = principal.ok_or_else(|| {
                 ModuleError::Message("first-party trust classification lost principal".to_string())
             })?;
@@ -2355,7 +2339,7 @@ async fn handle_tool_request_with_budget(
     // gates. Saturated requests are refused earlier by handle_frame, so an
     // absent entry log can also mean admission capacity was exhausted.
     // Log only shape and wire coordinates: arguments can contain vendor data.
-    eprintln!(info wire:
+    eprintln!(debug wire:
         "tool frame received on channel {channel} epoch {epoch} ({} bytes)",
         frame.body.len()
     );

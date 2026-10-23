@@ -3001,6 +3001,90 @@ fn relay_marker_logging_counts_committed_watches_and_suppresses_repeats() {
     assert_eq!(due(&scratch), 2);
 }
 
+#[tokio::test]
+async fn relay_drops_are_debug_and_hourly_summary_counts_committed_activity() {
+    const TEST: &str =
+        "relay::tests::relay_drops_are_debug_and_hourly_summary_counts_committed_activity";
+    if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
+        let scratch = prepare_relay_log_fixture("relay-summary-log");
+        let output = crate::bounded::child_output(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env("PLEXUS_LOG_STDERR_CHILD", "1")
+                .env(PREPARED_RELAY_LOG_STORE, scratch.path()),
+            Duration::from_secs(30),
+            "relay activity summary child",
+        )
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        crate::test_support::assert_exactly_one_test_passed(TEST, &output);
+        assert!(
+            !stderr.contains("relay event dropped"),
+            "routine relay drops must be silent at INFO: {stderr}"
+        );
+        let (before_hour, after_hour) = stderr.split_once("before-hour\n").unwrap();
+        assert!(
+            !before_hour.contains("relay activity summary:"),
+            "summary must wait a full hour: {stderr}"
+        );
+        let summaries: Vec<_> = after_hour
+            .lines()
+            .filter(|line| line.contains("relay activity summary:"))
+            .collect();
+        assert_eq!(summaries.len(), 1, "idle hours must be skipped: {stderr}");
+        diagnostic_logging::assert_diagnostic(
+            summaries[0],
+            cortexkit_log::ParsedLevel::Info,
+            "plexus.relay",
+            "relay activity summary: stored=1 dropped=[{\"count\":1,\"event\":\"issues\",\"reason\":\"AlreadyDelivered\"},{\"count\":1,\"event\":\"check_run\",\"reason\":\"UnsupportedEvent\"},{\"count\":2,\"event\":\"workflow_job\",\"reason\":\"UnsupportedEvent\"},{\"count\":1,\"event\":\"issues\",\"reason\":\"UnwatchedRepository\"}]",
+        );
+        return;
+    }
+    diagnostic_logging::init_child();
+    let (_scratch, store, path) = relay_log_fixture("relay-summary-log");
+    let status = Status::default();
+    let mut frames = vec![hello(), full_event()];
+    for (seq, event_type) in [(2, "workflow_job"), (3, "workflow_job"), (4, "check_run")] {
+        frames.push(json!({"type":"event","seq":seq,"delivery_id":format!("drop-{seq}"),"event":event_type,"action":"queued","installation_id":42,"received_at":TIME,"body":{"repository":{"id":101,"full_name":"org/repo"}}}).to_string());
+    }
+    let mut unwatched: Value = serde_json::from_str(&full_event()).unwrap();
+    unwatched["seq"] = json!(5);
+    unwatched["delivery_id"] = json!("unwatched");
+    unwatched["body"]["repository"] = json!({"id":102,"full_name":"other/repo"});
+    frames.push(unwatched.to_string());
+    let mut duplicate: Value = serde_json::from_str(&full_event()).unwrap();
+    duplicate["seq"] = json!(6);
+    duplicate["delivery_id"] = json!("duplicate");
+    frames.push(duplicate.to_string());
+    replay_using_status(store.clone(), frames, true, None, &status).await;
+    assert_eq!(count(&path, "trigger_events"), 1);
+
+    // A disconnected relay still emits the previous connection's activity on schedule.
+    let (stop, rx) = mpsc::channel(1);
+    let relay = run(
+        "ws://127.0.0.1:0",
+        store,
+        Arc::new(StubCredentialSource::with_default_success(b"test".to_vec())),
+        Arc::new(ConnectorHome::test_admitted()),
+        &status,
+        rx,
+    );
+    tokio::pin!(relay);
+    tokio::time::pause();
+    assert!(futures_util::poll!(&mut relay).is_pending());
+    tokio::time::advance(Duration::from_secs(3599)).await;
+    assert!(futures_util::poll!(&mut relay).is_pending());
+    std::eprintln!("before-hour");
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(futures_util::poll!(&mut relay).is_pending());
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    assert!(futures_util::poll!(&mut relay).is_pending());
+    drop(stop);
+    bounded(relay).await;
+    tokio::time::resume();
+}
+
 #[test]
 fn credential_id_is_the_public_field_only() {
     const ID: &str = "01HZX3K7Q9M2R8T4V6W0Y5Z1AB";

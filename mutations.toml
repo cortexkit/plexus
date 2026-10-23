@@ -2416,8 +2416,10 @@ build_timeout_s = 3600
 id = "relay-ack-after-commit"
 guards = "A failed event/cursor transaction cannot send a cumulative ack and lose the event"
 file = "crates/plexus-module/src/relay.rs"
-old = "if !matches!(committed, Ok(Ok(()))) {"
-new = "if false && !matches!(committed, Ok(Ok(()))) { /* NON-VACUITY BREAK */"
+old = '''local_store_failed("event commit", failure);
+                                return Failure::Reconnecting;'''
+new = '''local_store_failed("event commit", failure);
+                                CommitOutcome::CursorOnly /* NON-VACUITY BREAK */'''
 test_file = "crates/plexus-module/src/relay_tests.rs"
 runner = "cargo"
 package = "plexus-module"
@@ -21585,4 +21587,72 @@ broad_report = "target/mutations/g-scripts-junit.xml"
 broad_id = "{name}"
 expect_red = ["test_skip_main_tests.SkipMainTests.test_successful_main_run_does_not_authorize_skipping"]
 expect_message = "only a train ref can authorize duplicate-test skipping"
+timeout_s = 120
+
+[[control]]
+id = "relay-routine-drop-debug"
+guards = "Routine relay drops stay below INFO while the hourly summary retains their reason and event counts"
+file = "crates/plexus-core/src/store/relay.rs"
+old = 'diag!(debug relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action);'
+new = 'diag!(info relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action); /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_drops_are_debug_and_hourly_summary_counts_committed_activity"]
+expect_message = "routine relay drops must be silent at INFO"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "relay-hourly-summary-info"
+guards = "The existing relay task emits a nonempty hourly activity summary at INFO"
+file = "crates/plexus-module/src/relay.rs"
+old = 'eprintln!(info relay: "relay activity summary: stored={} dropped={}", activity.stored, json!(dropped));'
+new = 'eprintln!(debug relay: "relay activity summary: stored={} dropped={}", activity.stored, json!(dropped)); /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_drops_are_debug_and_hourly_summary_counts_committed_activity"]
+expect_message = "idle hours must be skipped"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "wire-accepted-bind-debug"
+guards = "Accepted route binds stay below INFO while refused binds remain visible"
+file = "crates/plexus-module/src/lib.rs"
+old = '''eprintln!(debug wire:
+                "route bind from principal '{bind_label}' on channel {route_channel}: ACCEPTED"'''
+new = '''eprintln!(info wire: /* NON-VACUITY BREAK */
+                "route bind from principal '{bind_label}' on channel {route_channel}: ACCEPTED"'''
+test_file = "crates/plexus-module/src/tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::wire_success_is_debug_but_refused_bind_is_info"]
+expect_message = "accepted binds must be silent at INFO"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "wire-tool-frame-debug"
+guards = "Per-call tool frame receipt stays below INFO without hiding refusals"
+file = "crates/plexus-module/src/lib.rs"
+old = '''eprintln!(debug wire:
+        "tool frame received on channel {channel} epoch {epoch} ({} bytes)",'''
+new = '''eprintln!(info wire: /* NON-VACUITY BREAK */
+        "tool frame received on channel {channel} epoch {epoch} ({} bytes)",'''
+test_file = "crates/plexus-module/src/tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::wire_success_is_debug_but_refused_bind_is_info"]
+expect_message = "tool frames must be silent at INFO"
+build_timeout_s = 3600
 timeout_s = 120
