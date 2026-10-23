@@ -73,9 +73,9 @@ pub(crate) fn envelope(
     actor: &ActorAttribution,
     context: &EnvelopeContext,
 ) -> Result<String, EventKeyError> {
-    // Review notices start at v1 with a normalized body, unlike the legacy
+    // Review and dequeue notices start at v1 with a normalized body, unlike the legacy
     // events whose v1 body is the vendor object. Do not reshape that body.
-    if is_review_notice(event_name) {
+    if is_normalized_notice(event_name) {
         return crate::jcs::canonicalize_exact_integers(item)
             .map(|bytes| String::from_utf8(bytes).expect("JCS is UTF-8"))
             .map_err(EventKeyError::Canonicalization);

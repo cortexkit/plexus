@@ -1,0 +1,14 @@
+{
+  "content": [
+    {
+      "text": "repository_not_visible: repository_not_visible",
+      "type": "text"
+    }
+  ],
+  "error": {
+    "code": "repository_not_visible",
+    "message": "repository_not_visible",
+    "transmission": "not_sent"
+  },
+  "isError": true
+}

@@ -1,0 +1,14 @@
+{
+  "content": [
+    {
+      "text": "agent_identity_required: GitHub bot reads need a head scope's agent or a worker scope working on behalf of one",
+      "type": "text"
+    }
+  ],
+  "error": {
+    "code": "agent_identity_required",
+    "message": "GitHub bot reads need a head scope's agent or a worker scope working on behalf of one",
+    "transmission": "not_sent"
+  },
+  "isError": true
+}

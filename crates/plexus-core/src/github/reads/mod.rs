@@ -26,7 +26,7 @@ macro_rules! read_actions {
 }
 read_actions!("github.issue.get", "github.issue_comments.list", "github.issue.search", "github.pr.review_threads";
     "github.actions.job_log", "github.actions.artifact_file", "github.actions.run.superseded";
-    "github.repo.get", "github.search.code", "github.search.issues");
+    "github.repo.get", "github.search.code", "github.search.issues", "github.pulls.open");
 
 /// Mark only a binding-checked selection as internal search authority. Raw
 /// caller arguments never become this marker merely by naming repositories.

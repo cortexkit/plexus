@@ -1,6 +1,172 @@
 # Mutation controls; see docs/mutations.md. Edits are temporary and must fail the named tests.
 
 [[control]]
+id = "dequeue-admission"
+guards = "Dequeue webhooks are distinct from PR-changed events even when updated_at is unchanged"
+file = "crates/plexus-core/src/store/relay.rs"
+old = '"pull_request" if event.action.as_deref() == Some("dequeued") => ('
+new = '"pull_request" if false && event.action.as_deref() == Some("dequeued") => ( /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/store/relay_dequeue_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::relay::tests::dequeue_tests::dequeue_delivery_identity_is_distinct_and_redelivery_deduplicates"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "dequeue-manifest"
+guards = "The module manifest declares the dequeue bus event and filter labels"
+file = "crates/plexus-core/src/event_key.rs"
+old = 'if is_normalized_notice(self.name) {'
+new = 'if self.name == GITHUB_PR_DEQUEUED { return &[]; } /* NON-VACUITY BREAK */ if is_normalized_notice(self.name) {'
+test_file = "crates/plexus-module/src/manifest_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["manifest::tests::manifest_events_pin_the_serialized_wire_json"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "pulls-open-prefix"
+guards = "Open PR head prefixes are filtered locally without including nonmatching PRs"
+file = "crates/plexus-core/src/github/reads/bot/open_pulls.rs"
+old = "if prefix.is_some_and(|prefix| !head.starts_with(prefix)) {"
+new = "if false && prefix.is_some_and(|prefix| !head.starts_with(prefix)) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/pulls_open_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::pulls_open_tests::pulls_open_shape_filter_and_unknown_are_verbatim"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "pulls-open-unknown"
+guards = "GitHub UNKNOWN mergeability remains UNKNOWN rather than becoming CONFLICTING"
+file = "crates/plexus-core/src/github/reads/bot/open_pulls.rs"
+old = '"mergeable":node["mergeable"]'
+new = '"mergeable":"CONFLICTING" /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/pulls_open_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::pulls_open_tests::pulls_open_shape_filter_and_unknown_are_verbatim"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "pulls-open-truncation"
+guards = "Open PR and review-thread snapshots report both page bounds"
+file = "crates/plexus-core/src/github/reads/bot/open_pulls.rs"
+old = '"threads_truncated":threads_truncated'
+new = '"threads_truncated":false /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/pulls_open_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::pulls_open_tests::pulls_open_reports_both_hundred_node_bounds"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "pulls-open-graphql-errors"
+guards = "GraphQL errors refuse a PR snapshot even when partial data is present"
+file = "crates/plexus-core/src/github/reads/bot/open_pulls.rs"
+old = '.is_some_and(|errors| !errors.is_null())'
+new = '.is_some_and(|errors| false && !errors.is_null()) /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/pulls_open_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::pulls_open_tests::pulls_open_graphql_errors_refuse_even_with_partial_data"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "pulls-open-budget"
+guards = "An exhausted bot read budget refuses the PR snapshot before sending"
+file = "crates/plexus-core/src/github/reads/bot.rs"
+old = 'Err(BotReadError::BudgetExhausted { retry_after_ms })'
+new = 'if action == "github.pulls.open" { Ok(()) } else { Err(BotReadError::BudgetExhausted { retry_after_ms }) } /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/pulls_open_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::pulls_open_tests::pulls_open_refuses_identity_visibility_budget_and_caller_graphql"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "pulls-open-visibility"
+guards = "PR snapshots cannot use another agent's repository binding"
+file = "crates/plexus-core/src/github/reads/bot.rs"
+old = '.filter(|handle| handle.agent_id == identity.agent() && handle.status == "enabled")'
+new = '.filter(|handle| handle.status == "enabled") /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/pulls_open_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["github_read_frame_tests::bot_read_tests::pulls_open_tests::pulls_open_refuses_identity_visibility_budget_and_caller_graphql"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "pulls-open-fixed-query"
+guards = "The shipped PR snapshot uses the reviewed open-only, hundred-node GraphQL query"
+file = "catalog/github_rest.jsonc"
+old = 'pullRequests(first: 100, states: OPEN)'
+new = 'pullRequests(first: 99, states: OPEN) # NON-VACUITY BREAK'
+test_file = "crates/plexus-core/tests/it/github_facade_vendor_band/pulls_open.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test it"
+select = "expected"
+expect_red = ["github_facade_vendor_band::pulls_open::pulls_open_wire_uses_fixed_query_and_bound_bot_token"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "dequeue-delivery-key"
+guards = "Separate dequeues of the same PR with unchanged updated_at remain separate events"
+file = "crates/plexus-core/src/event_key.rs"
+old = 'GITHUB_PR_DEQUEUED => (&[], &["delivery_id"]),'
+new = 'GITHUB_PR_DEQUEUED => (&["repo_id", "number"], &["updated_at"]), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/src/store/relay_dequeue_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::relay::tests::dequeue_tests::dequeue_delivery_identity_is_distinct_and_redelivery_deduplicates"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "dequeue-redelivery"
+guards = "A redelivery deduplicates even if payload content changes; both delivery-key and storage delivery-id defenses must be neutralized"
+edits = [
+  { file = "crates/plexus-core/src/store/relay.rs", old = '"delivery_id":event.delivery_id});', new = '"delivery_id":format!("{}-{}",event.delivery_id,event.seq)}); /* NON-VACUITY BREAK */' },
+  { file = "crates/plexus-core/src/store/relay.rs", old = 'delivery_id: delivery_id.take(),', new = 'delivery_id: delivery_id.take().filter(|_| !dequeued), /* NON-VACUITY BREAK */' }
+]
+test_file = "crates/plexus-core/src/store/relay_dequeue_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::relay::tests::dequeue_tests::dequeue_delivery_identity_is_distinct_and_redelivery_deduplicates"]
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "operator-confirmation-widening-classification"
 guards = "Minting a Direct management grant requires an operation-bound operator confirmation"
 file = "crates/plexus-module/src/operator_confirmation.rs"
@@ -16913,8 +17079,8 @@ timeout_s = 120
 id = "github-review-threads-variable-binding"
 guards = "Review-thread GraphQL variables must name the repository checked by governance"
 file = "crates/plexus-core/src/github/resolver.rs"
-old = 'if request.action == "github.pr.review_threads" {'
-new = 'if false && request.action == "github.pr.review_threads" { /* NON-VACUITY BREAK */'
+old = '"github.pr.review_threads" | "github.pulls.open"'
+new = '"github.pulls.open" /* NON-VACUITY BREAK */'
 test_file = "crates/plexus-core/src/github/resolver.rs"
 runner = "cargo"
 package = "plexus-core"

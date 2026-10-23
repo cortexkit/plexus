@@ -3087,6 +3087,12 @@ fn facade_tool_reply_inner(
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let call_agent = resolve_call_agent(route_scope.as_ref());
+            // This read must select the stamped agent's bot and reserve its read
+            // budget; raw invoke cannot supply those guarantees.
+            if action == "github.pulls.open" {
+                return Ok(json!({"error":{"code":"github_read_required",
+                    "message":"use github_read for github.pulls.open","transmission":"not_sent"}}));
+            }
             let args = arguments.get("args").cloned().unwrap_or_else(|| json!({}));
             let mut request =
                 AuthorizationRequest::new(&principal_key, connection_id, action, args);

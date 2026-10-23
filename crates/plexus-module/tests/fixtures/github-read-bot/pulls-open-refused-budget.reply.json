@@ -1,0 +1,15 @@
+{
+  "content": [
+    {
+      "text": "read_budget_exhausted: this bot's GitHub read budget is spent; retry later (retry after 3595 s)",
+      "type": "text"
+    }
+  ],
+  "error": {
+    "code": "read_budget_exhausted",
+    "message": "this bot's GitHub read budget is spent; retry later",
+    "retry_after_ms": 3594771,
+    "transmission": "not_sent"
+  },
+  "isError": true
+}

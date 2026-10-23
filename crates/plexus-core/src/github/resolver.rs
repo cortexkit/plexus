@@ -115,7 +115,10 @@ where
 {
     // GraphQL's repository selector lives inside variables, while governance
     // uses owner/repo. They must name the same repository on every dispatch.
-    if request.action == "github.pr.review_threads" {
+    if matches!(
+        request.action.as_str(),
+        "github.pr.review_threads" | "github.pulls.open"
+    ) {
         for field in ["owner", "repo"] {
             let outer = request.args[field].as_str();
             let inner = request.args["variables"][field].as_str();

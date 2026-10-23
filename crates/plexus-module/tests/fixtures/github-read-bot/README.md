@@ -49,6 +49,13 @@ under "result">}], "isError": false, "structuredContent": R}` where R is
   null.
 - `github.search.code`, `github.search.issues`:
   `{total_count, incomplete_results, items, next_page}`.
+- `github.pulls.open`: `{repository, prs, truncated}` from one fixed GraphQL
+  snapshot of at most 100 open PRs. Each PR has `number`, `headRefName`,
+  `headRefOid`, `updatedAt`, `mergeable`, `isInMergeQueue`, `unresolved_threads`
+  and `threads_truncated`. `updatedAt` and the mergeability enum (including
+  `UNKNOWN` while GitHub recomputes) are verbatim. Thread counts cover only
+  the first 100 threads. `head_prefix`, when present, must be nonempty and
+  filters those PRs locally; `truncated` still describes the unfiltered snapshot.
 - `github.actions.job_log` (from AFT without `max_bytes`):
   `{body, offset, length, total_bytes}`; `length` counts the raw log bytes
   read, so the next range starts at `offset + length`.

@@ -1,0 +1,13 @@
+{
+  "call": {
+    "arguments": {
+      "action": "github.pulls.open",
+      "args": {},
+      "repository": "o/x"
+    },
+    "name": "github_read"
+  },
+  "scope": {
+    "kind": "worker"
+  }
+}

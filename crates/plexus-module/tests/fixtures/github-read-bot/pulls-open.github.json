@@ -1,0 +1,96 @@
+{
+  "expected_requests": [
+    {
+      "action": "github.pulls.open",
+      "args": {
+        "owner": "o",
+        "repo": "x",
+        "variables": {
+          "owner": "o",
+          "repo": "x"
+        }
+      },
+      "connection_id": "github-handle-app-x"
+    }
+  ],
+  "replies": {
+    "github.pulls.open": {
+      "success": {
+        "data": {
+          "repository": {
+            "pullRequests": {
+              "nodes": [
+                {
+                  "headRefName": "land/fix-parser",
+                  "headRefOid": "abcdef0123456789",
+                  "isInMergeQueue": false,
+                  "mergeable": "CONFLICTING",
+                  "number": 42,
+                  "reviewThreads": {
+                    "nodes": [
+                      {
+                        "isResolved": false
+                      },
+                      {
+                        "isResolved": true
+                      }
+                    ],
+                    "pageInfo": {
+                      "hasNextPage": false
+                    }
+                  },
+                  "updatedAt": "2026-10-23T09:12:34Z"
+                },
+                {
+                  "headRefName": "land/recompute",
+                  "headRefOid": "abcdef0123456789",
+                  "isInMergeQueue": false,
+                  "mergeable": "UNKNOWN",
+                  "number": 43,
+                  "reviewThreads": {
+                    "nodes": [
+                      {
+                        "isResolved": false
+                      },
+                      {
+                        "isResolved": true
+                      }
+                    ],
+                    "pageInfo": {
+                      "hasNextPage": false
+                    }
+                  },
+                  "updatedAt": "2026-10-23T09:12:34Z"
+                },
+                {
+                  "headRefName": "feature",
+                  "headRefOid": "abcdef0123456789",
+                  "isInMergeQueue": true,
+                  "mergeable": "MERGEABLE",
+                  "number": 44,
+                  "reviewThreads": {
+                    "nodes": [
+                      {
+                        "isResolved": false
+                      },
+                      {
+                        "isResolved": true
+                      }
+                    ],
+                    "pageInfo": {
+                      "hasNextPage": false
+                    }
+                  },
+                  "updatedAt": "2026-10-23T09:12:34Z"
+                }
+              ],
+              "pageInfo": {
+                "hasNextPage": false
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

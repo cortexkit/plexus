@@ -9,10 +9,15 @@ mod read_grant_tests {
     include!("bot_read_grant_tests.rs");
 }
 
+mod pulls_open_tests {
+    include!("pulls_open_tests.rs");
+}
+
 const BOT_ACTIONS: &[&str] = &[
     "github.repo.get",
     "github.search.code",
     "github.search.issues",
+    "github.pulls.open",
     "github.actions.job.get",
     "github.actions.job_log",
 ];

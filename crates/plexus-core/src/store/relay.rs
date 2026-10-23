@@ -534,6 +534,13 @@ fn event_shape(event: &Event) -> Result<EventShape, DropReason> {
             "list_issues",
             "updated_at",
         ),
+        "pull_request" if event.action.as_deref() == Some("dequeued") => (
+            GITHUB_PR_DEQUEUED,
+            "pull_request",
+            "pull_request",
+            "list_pull_requests",
+            "updated_at",
+        ),
         "pull_request" | "pull_request_review" | "pull_request_review_comment" => (
             GITHUB_PR_CHANGED,
             "pull_request",
@@ -598,7 +605,10 @@ fn relay_headers(repo: &str, project: Option<String>, kind: &str, payload: &Valu
     EventHeaders {
         repo: repo.into(),
         project,
-        pr: if kind == crate::event_key::GITHUB_PR_CHANGED {
+        pr: if matches!(
+            kind,
+            crate::event_key::GITHUB_PR_CHANGED | crate::event_key::GITHUB_PR_DEQUEUED
+        ) {
             payload.get("number").map(Value::to_string)
         } else {
             prs.filter(|prs| prs.len() == 1)
@@ -690,18 +700,41 @@ fn admit(
     let Some(payload) = event.body.get(item_field).filter(|v| v.is_object()) else {
         return Ok(Err(DropReason::InvalidPayload));
     };
-    let Some(activity) = payload
+    let dequeued = kind == crate::event_key::GITHUB_PR_DEQUEUED;
+    let activity = if dequeued {
+        received
+    } else if let Some(activity) = payload
         .get(timestamp_field)
         .and_then(Value::as_str)
         .and_then(parse_to_millis)
-    else {
+    {
+        activity
+    } else {
         return Ok(Err(DropReason::InvalidPayload));
     };
     let fields = json!({"repo_id":repo_id,"number":payload.get("number"),"updated_at":payload.get("updated_at"),
         "release_id":payload.get("id"),"job_id":payload.get("id"),"run_id":payload.get("id"),
-        "run_attempt":payload.get("run_attempt"),"conclusion":payload.get("conclusion")});
+        "run_attempt":payload.get("run_attempt"),"conclusion":payload.get("conclusion"),
+        "delivery_id":event.delivery_id});
     let Ok(key) = crate::event_key::derive_event_key(kind, &fields) else {
         return Ok(Err(DropReason::InvalidPayload));
+    };
+    let dequeue_body;
+    let payload = if dequeued {
+        if !payload["number"].is_u64()
+            || !payload["head"]["ref"].is_string()
+            || !payload["head"]["sha"].is_string()
+            || !event.body["reason"].is_string()
+            || !event.body["sender"]["login"].is_string()
+        {
+            return Ok(Err(DropReason::InvalidPayload));
+        }
+        dequeue_body = json!({"repo":repo.to_ascii_lowercase(),"number":payload["number"],
+            "head_ref":payload["head"]["ref"],"head_sha":payload["head"]["sha"],
+            "reason":event.body["reason"],"sender":event.body["sender"]["login"]});
+        &dequeue_body
+    } else {
+        payload
     };
     // Pair within one principal and project; independent first-row lookups can
     // combine unrelated owners. Fanout creates visibility rows, not extra notices.
@@ -748,7 +781,8 @@ fn admit(
     } else {
         ActorAttribution::NotEnriched
     };
-    // Webhooks use the same insert as polling, so a change seen both ways is one
+    // Dequeues use delivery identity because queue transitions need not update
+    // the PR timestamp. Changed-item webhooks share polling's identity, so a change seen both ways is one
     // stored event with one row in the publishing outbox. The copy that commits
     // first keeps its body and its actors. The event key is (repository id, item
     // number, updated_at to the second), so two different changes to one item in
@@ -881,6 +915,9 @@ fn insert_review_notice(
 
 #[cfg(test)]
 mod tests {
+    mod dequeue_tests {
+        include!("relay_dequeue_tests.rs");
+    }
     use super::*;
 
     #[test]
