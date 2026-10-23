@@ -648,6 +648,39 @@ fn a_range_read_asks_storage_for_exactly_that_range_without_credentials() {
     assert!(!requests[0].contains("BOT-CREDENTIAL"));
 }
 
+/// The range fields count raw log bytes, so a client resumes at `offset +
+/// length`, while `body` is display text: escape sequences are removed and a
+/// character split by the range edge becomes U+FFFD. The two lengths differ,
+/// and the `github-read-bot/job-log-range-display-text` vector shows the same
+/// reply to AFT.
+#[test]
+fn a_range_read_counts_raw_bytes_while_the_body_is_display_text() {
+    // "\x1b[31m✓ ok\x1b[0m\n" followed by the first two of the three bytes of "✓".
+    let mut window = b"\x1b[31m\xe2\x9c\x93 ok\x1b[0m\n".to_vec();
+    window.extend_from_slice(b"\xe2\x9c");
+    let length = window.len();
+    let storage = Storage::start_bytes(move |_| {
+        let mut reply = format!(
+            "HTTP/1.1 206 Test\r\nContent-Length: {length}\r\nContent-Range: bytes 100-{}/4000\r\nConnection: close\r\n\r\n",
+            100 + length - 1
+        )
+        .into_bytes();
+        reply.extend_from_slice(&window);
+        reply
+    });
+    let result = run_range(&storage.url, 100, length as u64);
+    let reply = result.response.unwrap();
+    assert_eq!(
+        reply,
+        json!({"body":"✓ ok\n\u{fffd}","offset":100,"length":length,"total_bytes":4000})
+    );
+    assert_ne!(
+        reply["body"].as_str().unwrap().len(),
+        length,
+        "body is display text, so its byte length need not equal the raw range length"
+    );
+}
+
 #[test]
 fn a_range_read_that_storage_ignores_keeps_only_the_asked_window() {
     let log = "0123456789abcdef";

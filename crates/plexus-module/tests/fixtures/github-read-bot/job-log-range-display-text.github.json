@@ -1,0 +1,49 @@
+{
+  "replies": {
+    "github.actions.job.get": {
+      "success": {
+        "status": 200,
+        "body": {
+          "id": 42,
+          "status": "completed",
+          "conclusion": "failure"
+        },
+        "next_page": null,
+        "rate_limit": {
+          "remaining": 4000,
+          "reset_at_ms": 4102444800000
+        }
+      }
+    },
+    "github.actions.job_log": {
+      "success": {
+        "body": "✓ ok\n�",
+        "offset": 100,
+        "length": 18,
+        "total_bytes": 4000
+      }
+    }
+  },
+  "expected_requests": [
+    {
+      "connection_id": "github-handle-app-x",
+      "action": "github.actions.job.get",
+      "args": {
+        "owner": "o",
+        "repo": "x",
+        "job_id": 42
+      }
+    },
+    {
+      "connection_id": "github-handle-app-x",
+      "action": "github.actions.job_log",
+      "args": {
+        "owner": "o",
+        "repo": "x",
+        "job_id": 42,
+        "offset": 100,
+        "length": 18
+      }
+    }
+  ]
+}

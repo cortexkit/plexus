@@ -21840,3 +21840,18 @@ expect_red = ["relay::tests::relay_invalid_payload_is_info_and_identity_change_i
 expect_message = "malformed relay payloads must stay visible at INFO"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "job-log-range-length-counts-raw-bytes"
+guards = "A job-log range reply's length counts the raw log bytes read, so a client resumes at offset + length, even though body is cleaned display text"
+file = "crates/plexus-core/src/rest_api/job_log.rs"
+old = "    let read = bytes.len() as u64;"
+new = "    let read = redact(&bytes, &url, credential).len() as u64; /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/rest_api/job_log/tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["rest_api::job_log::tests::a_range_read_counts_raw_bytes_while_the_body_is_display_text"]
+build_timeout_s = 3600
+timeout_s = 120

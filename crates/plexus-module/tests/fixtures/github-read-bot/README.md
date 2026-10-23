@@ -57,8 +57,17 @@ under "result">}], "isError": false, "structuredContent": R}` where R is
   the first 100 threads. `head_prefix`, when present, must be nonempty and
   filters those PRs locally; `truncated` still describes the unfiltered snapshot.
 - `github.actions.job_log` (from AFT without `max_bytes`):
-  `{body, offset, length, total_bytes}`; `length` counts the raw log bytes
-  read, so the next range starts at `offset + length`.
+  `{body, offset, length, total_bytes}`. `offset`, `length` and `total_bytes`
+  count raw log bytes: `length` is the bytes read from storage, so the next
+  range starts at `offset + length`, and `total_bytes` is the log's length from
+  storage's `Content-Range`. `body` is display text, not the raw slice: escape
+  sequences (colour and other terminal codes) are removed, bytes that are not
+  valid UTF-8 (a character split by the range edge) become U+FFFD, and the
+  signed storage URL and the bot credential are redacted. So `body`'s byte
+  length usually differs from `length`; check the range fields against the
+  request and `total_bytes`, never against `body`. The
+  `job-log-range-display-text` vector shows a range that begins with a colour
+  code and ends inside a three-byte character.
 
 A refusal is `{"error": {"code", "message", "transmission", ...}, "content":
 [{"type": "text", "text": "<code>: <message>..."}], "isError": true}` with no
