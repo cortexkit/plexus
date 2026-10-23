@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 
 pub const GITHUB_ISSUE_CHANGED: &str = "github_issue_changed";
 pub const GITHUB_PR_CHANGED: &str = "github_pr_changed";
+pub const GITHUB_PR_DEQUEUED: &str = "github_pr_dequeued";
 pub const GITHUB_PR_REVIEW_SUBMITTED: &str = "github_pr_review_submitted";
 pub const GITHUB_PR_REVIEW_COMMENT_CREATED: &str = "github_pr_review_comment_created";
 pub const GITHUB_RELEASE_PUBLISHED: &str = "github_release_published";
@@ -32,7 +33,7 @@ pub const V2_EVENT_KEY_HEADER: &str = "event_key";
 
 impl PublishedEvent {
     pub fn versions(&self) -> &'static [u8] {
-        if is_review_notice(self.name) {
+        if is_normalized_notice(self.name) {
             &[1]
         } else {
             PUBLISHED_EVENT_VERSIONS
@@ -89,6 +90,11 @@ pub const PUBLISHED_EVENTS: &[PublishedEvent] = &[
         headers: &["repo", "project", "pr"],
         summary: "A review comment was created on a watched GitHub pull request.",
     },
+    PublishedEvent {
+        name: GITHUB_PR_DEQUEUED,
+        headers: &["repo", "project", "pr"],
+        summary: "A pull request left the merge queue in a watched GitHub repository.",
+    },
 ];
 
 pub(crate) fn is_review_notice(kind: &str) -> bool {
@@ -96,6 +102,10 @@ pub(crate) fn is_review_notice(kind: &str) -> bool {
         kind,
         GITHUB_PR_REVIEW_SUBMITTED | GITHUB_PR_REVIEW_COMMENT_CREATED
     )
+}
+
+pub(crate) fn is_normalized_notice(kind: &str) -> bool {
+    is_review_notice(kind) || kind == GITHUB_PR_DEQUEUED
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +166,7 @@ impl GithubEventKind {
 /// Additional fields (action, actor, body, routing hints) have no effect.
 pub fn derive_event_key(kind: &str, fields: &Value) -> Result<String, EventKeyError> {
     let (integers, strings): (&[&'static str], &[&'static str]) = match kind {
+        GITHUB_PR_DEQUEUED => (&[], &["delivery_id"]),
         GITHUB_PR_REVIEW_SUBMITTED => (&["repo_id", "review_id"], &[]),
         GITHUB_PR_REVIEW_COMMENT_CREATED => (&["repo_id", "comment_id"], &[]),
         _ => match GithubEventKind::parse(kind)? {

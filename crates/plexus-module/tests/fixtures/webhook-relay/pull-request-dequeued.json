@@ -1,0 +1,15 @@
+{
+  "action": "dequeued",
+  "number": 42,
+  "reason": "CONFLICT",
+  "pull_request": {
+    "number": 42,
+    "updated_at": "2026-10-23T08:00:00Z",
+    "head": {
+      "ref": "land/fix-parser",
+      "sha": "4dd6bd91bfa7b9fe209f1a67f4a21f76dfcba125"
+    }
+  },
+  "repository": { "id": 101, "full_name": "cortexkit/aft" },
+  "sender": { "login": "queue-bot[bot]" }
+}

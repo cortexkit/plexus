@@ -1,0 +1,8 @@
+{
+  "repo": "cortexkit/aft",
+  "number": 42,
+  "head_ref": "land/fix-parser",
+  "head_sha": "4dd6bd91bfa7b9fe209f1a67f4a21f76dfcba125",
+  "reason": "CONFLICT",
+  "sender": "queue-bot[bot]"
+}

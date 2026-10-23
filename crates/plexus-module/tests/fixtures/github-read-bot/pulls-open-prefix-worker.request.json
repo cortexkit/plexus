@@ -1,0 +1,16 @@
+{
+  "call": {
+    "arguments": {
+      "action": "github.pulls.open",
+      "args": {
+        "head_prefix": "land/"
+      },
+      "repository": "o/x"
+    },
+    "name": "github_read"
+  },
+  "scope": {
+    "kind": "worker",
+    "on_behalf_of_agent": "agent-x"
+  }
+}

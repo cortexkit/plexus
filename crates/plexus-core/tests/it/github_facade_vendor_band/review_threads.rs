@@ -5,7 +5,7 @@ use std::sync::Mutex;
 const ACTION: &str = "github.pr.review_threads";
 const QUERY: &str = "query($owner: String!, $repo: String!, $pr: Int!, $after: String) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr) { reviewThreads(first: 100, after: $after) { nodes { id isResolved isOutdated path line comments(first: 1) { nodes { author { login __typename } body url } } } pageInfo { hasNextPage endCursor } } } } }";
 
-struct ReviewToken;
+pub(super) struct ReviewToken;
 impl HandleCredentialProvider for ReviewToken {
     fn prepare(&self, _: &str, _: i64, _: &str) -> Result<ResolvedCredential, &'static str> {
         Ok(ResolvedCredential::new(

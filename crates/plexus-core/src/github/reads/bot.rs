@@ -27,6 +27,7 @@ pub const ACTIONS: &[&str] = &[
     "github.repo.get",
     "github.search.code",
     "github.search.issues",
+    "github.pulls.open",
 ];
 
 /// The catalog action the bot form of a job log read checks the job with.
@@ -39,6 +40,7 @@ pub const GRANT_ACTIONS: &[&str] = &[
     ACTIONS[0],
     ACTIONS[1],
     ACTIONS[2],
+    ACTIONS[3],
     JOB_GET_ACTION,
     JOB_LOG_ACTION,
 ];
@@ -265,6 +267,16 @@ fn vendor_args(
 ) -> Result<Map<String, Value>, BotReadError> {
     let mut vendor = Map::from_iter([("owner".into(), json!(owner)), ("repo".into(), json!(repo))]);
     match action {
+        "github.pulls.open" => {
+            let fields = arguments(args, &["head_prefix"])?;
+            if let Some(prefix) = fields.get("head_prefix") {
+                prefix
+                    .as_str()
+                    .filter(|prefix| !prefix.is_empty())
+                    .ok_or_else(|| not_allowed("head_prefix"))?;
+            }
+            vendor.insert("variables".into(), json!({"owner":owner,"repo":repo}));
+        }
         "github.repo.get" => {
             let fields = arguments(args, &["path", "query", "accept"])?;
             let path = fields
@@ -516,6 +528,9 @@ pub fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         .map_err(|_| BotReadError::RepositoryNotVisible)?;
     let vendor = vendor_args(action, owner, repo, args)?;
     let response = call.dispatch(action, vendor, 1)?;
+    if action == "github.pulls.open" {
+        return open_pulls::project(&call.repository, args["head_prefix"].as_str(), &response);
+    }
     let next_page = response.get("next_page").cloned().unwrap_or(Value::Null);
     let body = response.get("body").cloned().unwrap_or(Value::Null);
     if action == "github.repo.get" {
@@ -536,6 +551,8 @@ pub fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         "next_page": next_page,
     }))
 }
+
+mod open_pulls;
 
 /// The bot form of `github.actions.job_log`: a byte range of a finished job's
 /// log, read with the bot's installation token. The job is checked first (one

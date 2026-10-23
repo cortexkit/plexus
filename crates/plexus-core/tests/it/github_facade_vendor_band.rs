@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 mod pr_ready;
+mod pulls_open;
 mod regressions;
 mod review_threads;
 

@@ -338,10 +338,10 @@ fn manifest_event_declarations_pass_subc_protocol_validation() {
 #[test]
 fn manifest_events_pin_the_serialized_wire_json() {
     let events = build("plexus").events.expect("events are declared");
-    assert_eq!(events.len(), 14);
+    assert_eq!(events.len(), 15);
     let v1: Vec<_> = events.iter().filter(|event| event.version == 1).collect();
     let v2: Vec<_> = events.iter().filter(|event| event.version == 2).collect();
-    assert_eq!(v1.len(), 8);
+    assert_eq!(v1.len(), 9);
     assert_eq!(v2.len(), 6);
     for (one, two) in v1.iter().zip(&v2) {
         let mut expected = serde_json::to_value(one).unwrap();
@@ -354,7 +354,7 @@ fn manifest_events_pin_the_serialized_wire_json() {
     }
     assert_eq!(
         serde_json::to_string(&v1).expect("events serialize"),
-        r#"[{"name":"github_issue_changed","version":1,"headers":["repo","project"],"summary":"An issue changed in a watched GitHub repository."},{"name":"github_pr_changed","version":1,"headers":["repo","project","pr"],"summary":"A pull request changed in a watched GitHub repository."},{"name":"github_release_published","version":1,"headers":["repo","project"],"summary":"A release was published in a watched GitHub repository."},{"name":"github_ci_job_failed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions job failed in a watched repository."},{"name":"github_ci_job_completed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions job completed in a watched repository."},{"name":"github_ci_run_completed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions workflow run completed in a watched repository."},{"name":"github_pr_review_submitted","version":1,"headers":["repo","project","pr"],"summary":"A review was submitted on a watched GitHub pull request."},{"name":"github_pr_review_comment_created","version":1,"headers":["repo","project","pr"],"summary":"A review comment was created on a watched GitHub pull request."}]"#
+        r#"[{"name":"github_issue_changed","version":1,"headers":["repo","project"],"summary":"An issue changed in a watched GitHub repository."},{"name":"github_pr_changed","version":1,"headers":["repo","project","pr"],"summary":"A pull request changed in a watched GitHub repository."},{"name":"github_release_published","version":1,"headers":["repo","project"],"summary":"A release was published in a watched GitHub repository."},{"name":"github_ci_job_failed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions job failed in a watched repository."},{"name":"github_ci_job_completed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions job completed in a watched repository."},{"name":"github_ci_run_completed","version":1,"headers":["repo","project","pr","branch","conclusion"],"summary":"A GitHub Actions workflow run completed in a watched repository."},{"name":"github_pr_review_submitted","version":1,"headers":["repo","project","pr"],"summary":"A review was submitted on a watched GitHub pull request."},{"name":"github_pr_review_comment_created","version":1,"headers":["repo","project","pr"],"summary":"A review comment was created on a watched GitHub pull request."},{"name":"github_pr_dequeued","version":1,"headers":["repo","project","pr"],"summary":"A pull request left the merge queue in a watched GitHub repository."}]"#
     );
 }
 
@@ -743,7 +743,7 @@ fn github_read_manifest_is_pure_with_a_closed_action_schema() {
             "properties": {
                 "action": {"type": "string", "enum": [
                     "github.issue.get", "github.issue_comments.list", "github.issue.search", "github.pr.review_threads", "github.actions.job_log", "github.actions.artifact_file", "github.actions.run.superseded",
-                    "github.repo.get", "github.search.code", "github.search.issues"
+                    "github.repo.get", "github.search.code", "github.search.issues", "github.pulls.open"
                 ]},
                 "repository": {"oneOf": [
                     {"type": "string"},
@@ -762,6 +762,7 @@ fn github_read_manifest_is_pure_with_a_closed_action_schema() {
                         "application/vnd.github.diff", "application/vnd.github.patch"
                     ]},
                     "q": {"type": "string"},
+                    "head_prefix": {"type": "string", "minLength": 1},
                     "page": {"type": "integer", "minimum": 1},
                     "per_page": {"type": "integer", "minimum": 1, "maximum": 100},
                     "offset": {"type": "integer", "minimum": 0},

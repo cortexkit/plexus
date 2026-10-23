@@ -108,6 +108,29 @@
   // arguments and response correlation are expressed separately.
   "actions_baseline": [
     {
+      // One bounded snapshot; prefix filtering never changes the reviewed query.
+      "name": "github.pulls.open",
+      "risk": "read", "ask_first": false,
+      "http": {
+        "method": "POST", "path": "/graphql",
+        "request_constants": {
+          "query": "query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { pullRequests(first: 100, states: OPEN) { nodes { number headRefName headRefOid updatedAt mergeable isInMergeQueue reviewThreads(first: 100) { nodes { isResolved } pageInfo { hasNextPage } } } pageInfo { hasNextPage } } } }"
+        },
+        "args_schema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "variables": {
+              "type": "object", "additionalProperties": false,
+              "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}},
+              "required": ["owner", "repo"]
+            }
+          },
+          "required": ["owner", "repo", "variables"]
+        }
+      }
+    },
+    {
       // The read facade resolves the repository's bound App handle. Only the
       // reviewed query can run; each cursor page gets its own authorization.
       "name": "github.pr.review_threads",

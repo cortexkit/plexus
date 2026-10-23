@@ -1,0 +1,16 @@
+{
+  "call": {
+    "arguments": {
+      "action": "github.pulls.open",
+      "args": {
+        "head_prefix": ""
+      },
+      "repository": "o/x"
+    },
+    "name": "github_read"
+  },
+  "scope": {
+    "agent_id": "agent-x",
+    "kind": "head"
+  }
+}

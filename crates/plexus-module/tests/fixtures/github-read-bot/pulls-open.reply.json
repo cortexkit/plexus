@@ -1,0 +1,81 @@
+{
+  "content": [
+    {
+      "text": "{\n  \"result\": {\n    \"prs\": [\n      {\n        \"headRefName\": \"land/fix-parser\",\n        \"headRefOid\": \"abcdef0123456789\",\n        \"isInMergeQueue\": false,\n        \"mergeable\": \"CONFLICTING\",\n        \"number\": 42,\n        \"threads_truncated\": false,\n        \"unresolved_threads\": 1,\n        \"updatedAt\": \"2026-10-23T09:12:34Z\"\n      },\n      {\n        \"headRefName\": \"land/recompute\",\n        \"headRefOid\": \"abcdef0123456789\",\n        \"isInMergeQueue\": false,\n        \"mergeable\": \"UNKNOWN\",\n        \"number\": 43,\n        \"threads_truncated\": false,\n        \"unresolved_threads\": 1,\n        \"updatedAt\": \"2026-10-23T09:12:34Z\"\n      },\n      {\n        \"headRefName\": \"feature\",\n        \"headRefOid\": \"abcdef0123456789\",\n        \"isInMergeQueue\": true,\n        \"mergeable\": \"MERGEABLE\",\n        \"number\": 44,\n        \"threads_truncated\": false,\n        \"unresolved_threads\": 1,\n        \"updatedAt\": \"2026-10-23T09:12:34Z\"\n      }\n    ],\n    \"repository\": \"o/x\",\n    \"truncated\": false\n  }\n}",
+      "type": "text"
+    }
+  ],
+  "isError": false,
+  "result": {
+    "prs": [
+      {
+        "headRefName": "land/fix-parser",
+        "headRefOid": "abcdef0123456789",
+        "isInMergeQueue": false,
+        "mergeable": "CONFLICTING",
+        "number": 42,
+        "threads_truncated": false,
+        "unresolved_threads": 1,
+        "updatedAt": "2026-10-23T09:12:34Z"
+      },
+      {
+        "headRefName": "land/recompute",
+        "headRefOid": "abcdef0123456789",
+        "isInMergeQueue": false,
+        "mergeable": "UNKNOWN",
+        "number": 43,
+        "threads_truncated": false,
+        "unresolved_threads": 1,
+        "updatedAt": "2026-10-23T09:12:34Z"
+      },
+      {
+        "headRefName": "feature",
+        "headRefOid": "abcdef0123456789",
+        "isInMergeQueue": true,
+        "mergeable": "MERGEABLE",
+        "number": 44,
+        "threads_truncated": false,
+        "unresolved_threads": 1,
+        "updatedAt": "2026-10-23T09:12:34Z"
+      }
+    ],
+    "repository": "o/x",
+    "truncated": false
+  },
+  "structuredContent": {
+    "prs": [
+      {
+        "headRefName": "land/fix-parser",
+        "headRefOid": "abcdef0123456789",
+        "isInMergeQueue": false,
+        "mergeable": "CONFLICTING",
+        "number": 42,
+        "threads_truncated": false,
+        "unresolved_threads": 1,
+        "updatedAt": "2026-10-23T09:12:34Z"
+      },
+      {
+        "headRefName": "land/recompute",
+        "headRefOid": "abcdef0123456789",
+        "isInMergeQueue": false,
+        "mergeable": "UNKNOWN",
+        "number": 43,
+        "threads_truncated": false,
+        "unresolved_threads": 1,
+        "updatedAt": "2026-10-23T09:12:34Z"
+      },
+      {
+        "headRefName": "feature",
+        "headRefOid": "abcdef0123456789",
+        "isInMergeQueue": true,
+        "mergeable": "MERGEABLE",
+        "number": 44,
+        "threads_truncated": false,
+        "unresolved_threads": 1,
+        "updatedAt": "2026-10-23T09:12:34Z"
+      }
+    ],
+    "repository": "o/x",
+    "truncated": false
+  }
+}

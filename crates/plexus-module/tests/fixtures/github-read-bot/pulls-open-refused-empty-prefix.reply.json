@@ -1,0 +1,15 @@
+{
+  "content": [
+    {
+      "text": "endpoint_not_allowed: this argument is not one GitHub bot reads serve field: head_prefix",
+      "type": "text"
+    }
+  ],
+  "error": {
+    "code": "endpoint_not_allowed",
+    "field": "head_prefix",
+    "message": "this argument is not one GitHub bot reads serve",
+    "transmission": "not_sent"
+  },
+  "isError": true
+}

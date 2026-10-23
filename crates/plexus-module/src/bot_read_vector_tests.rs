@@ -89,6 +89,7 @@ async fn every_bot_read_vector_replays_byte_for_byte() {
             "github.repo.get",
             "github.search.code",
             "github.search.issues",
+            "github.pulls.open",
             "github.actions.job.get",
             "github.actions.job_log",
         ]);
@@ -153,6 +154,7 @@ async fn every_bot_read_vector_replays_byte_for_byte() {
         "github.repo.get",
         "github.search.code",
         "github.search.issues",
+        "github.pulls.open",
         "github.actions.job_log",
         "read_budget_exhausted",
         "repository_not_visible",

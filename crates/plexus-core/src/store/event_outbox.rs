@@ -223,7 +223,8 @@ pub(super) fn insert_marker(
     body_v1: &str,
 ) -> rusqlite::Result<()> {
     let h = identity.headers;
-    let envelope = (!crate::event_key::is_review_notice(identity.event_name)).then_some(envelope);
+    let envelope =
+        (!crate::event_key::is_normalized_notice(identity.event_name)).then_some(envelope);
     // Keep an eager v1 snapshot: retention can move visibility to an overlapping
     // watch with different payload bytes, but published digests must stay valid.
     conn.execute("INSERT INTO event_outbox
