@@ -12,8 +12,8 @@ vector schema: `{"kind":"reserved","moduleId":"plexus"}` or
 
 The fixed role is `x`. The fixture uses clock `700`, incarnation
 `0123456789abcdef`, local author `01010101010101010101010101010101` (named
-`This Mac`), and remote author `02020202020202020202020202020202` (named
-`Other Mac`). Calls are made through served routes: reads and the admission
+`This machine`), and remote author `02020202020202020202020202020202` (named
+`Other machine`). Calls are made through served routes: reads and the admission
 refusal use `reserved:plexus`; the compare-and-set attempt uses `Direct`.
 
 Cases, in order:
@@ -22,7 +22,7 @@ Cases, in order:
    false.
 2. `read_unheld`: a verified absent record after refresh; epoch `0`, `known`
    true, and `stale` false.
-3. `held_here`: a verified claim held by this Mac, with its member name.
+3. `held_here`: a verified claim held by this machine, with its member name.
 4. `held_elsewhere`: a verified claim held by the other author, with that
    member's name.
 5. `stale_after_restart`: a cached held-here claim after the store is reopened.
@@ -41,6 +41,10 @@ Role replies include no read time. A successful reply is the exact UTF-8 JSON
 body, including its `result` envelope; successful object key order and whitespace
 are not normalized before comparison. The role cache's local `source` field is
 present where a claim is known; it is not a remote read timestamp.
+
+Releases after 0.1.44 renamed the member names from `This Mac` and `Other Mac`
+to `This machine` and `Other machine`; codes and keys are unchanged, but
+`records.json` has a new hash, so consumers that pin it must re-pin.
 
 `SHA256SUMS` covers this README and `records.json`.
 

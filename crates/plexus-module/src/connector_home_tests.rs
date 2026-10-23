@@ -38,7 +38,7 @@ fn held() -> Result<Value, ErrorBody> {
 }
 fn role_answer(known: bool, held_here: bool, stale: bool) -> Value {
     json!({"role":"connector_home", "epoch":7, "known":known, "held_here":held_here,
-        "stale":stale, "holder":"device", "holder_name":"Other Mac", "source":"cloud"})
+        "stale":stale, "holder":"device", "holder_name":"Other machine", "source":"cloud"})
 }
 fn fixture(home: Arc<ConnectorHome>) -> (Scratch, Arc<ModuleState>) {
     let scratch = Scratch::database("connector-home");
@@ -137,9 +137,9 @@ fn not_held_refusal_hides_topology_but_operator_status_keeps_it() {
     home.refresh().unwrap();
     let reply = home.refusal().unwrap();
     assert_eq!(reply["error"]["connectorHome"], json!({"state":"not_held"}));
-    assert!(!reply.to_string().contains("Other Mac"));
+    assert!(!reply.to_string().contains("Other machine"));
     assert!(!reply.to_string().contains("cloud"));
-    assert_eq!(home.status()["holder_name"], "Other Mac");
+    assert_eq!(home.status()["holder_name"], "Other machine");
     assert_eq!(home.status()["epoch"], 7);
     assert_eq!(reply["error"]["connectorHome"]["state"], "not_held");
 }
@@ -345,7 +345,7 @@ fn reader_stale_never_replaces_a_confirmed_answer() {
     }
     home.refresh().unwrap();
     assert!(!home.held(), "a fresh not-held answer must stop service");
-    assert_eq!(home.status()["holder_name"], "Other Mac");
+    assert_eq!(home.status()["holder_name"], "Other machine");
 }
 
 #[test]

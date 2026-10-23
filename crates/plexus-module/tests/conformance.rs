@@ -2420,7 +2420,7 @@ async fn vault_route_fixture() {
                 Some(Some(principal)) if *principal == plexus => {
                     if roles {
                         assert_eq!(request["params"], json!({"role":"connector_home"}));
-                        json!({"result":{"role":"connector_home","epoch":1,"known":true,"stale":false,"holder":"test-member","holder_name":"Test Mac","held_here":true,"source":"cloud"}})
+                        json!({"result":{"role":"connector_home","epoch":1,"known":true,"stale":false,"holder":"test-member","holder_name":"Test machine","held_here":true,"source":"cloud"}})
                     } else {
                         json!({"result": {"credential_id": request["params"]["credential_id"], "payload": b"test-vendor-token".to_vec(), "record_version": 1}})
                     }
@@ -2459,7 +2459,7 @@ async fn connector_home_live_management_route_attests_plexus_and_reads_role() {
     .await;
     let status: Value = serde_json::from_slice(&status.body).unwrap();
     assert_eq!(status["result"]["role"]["role"], "connector_home");
-    assert_eq!(status["result"]["role"]["holder_name"], "Test Mac");
+    assert_eq!(status["result"]["role"]["holder_name"], "Test machine");
     assert_eq!(status["result"]["connectorHome"]["state"], "held");
     let removed = send_management_request(
         &mut client,
