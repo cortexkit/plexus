@@ -3002,6 +3002,104 @@ fn relay_marker_logging_counts_committed_watches_and_suppresses_repeats() {
 }
 
 #[tokio::test]
+async fn relay_invalid_payload_is_info_and_identity_change_is_warn() {
+    const TEST: &str = "relay::tests::relay_invalid_payload_is_info_and_identity_change_is_warn";
+    if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
+        let scratch = prepare_relay_log_fixture("relay-exceptional-drop-log");
+        let output = crate::bounded::child_output(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env("PLEXUS_LOG_STDERR_CHILD", "1")
+                .env(PREPARED_RELAY_LOG_STORE, scratch.path()),
+            Duration::from_secs(30),
+            "relay exceptional drop diagnostic child",
+        )
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        crate::test_support::assert_exactly_one_test_passed(TEST, &output);
+        let drops: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.contains("relay event dropped"))
+            .collect();
+        assert_eq!(
+            drops.len(),
+            1,
+            "malformed relay payloads must stay visible at INFO: {stderr}"
+        );
+        diagnostic_logging::assert_diagnostic(
+            drops[0],
+            cortexkit_log::ParsedLevel::Info,
+            "plexus.relay",
+            "relay event dropped reason=InvalidPayload seq=2 event=issues action=Some(\"opened\")",
+        );
+        let identity_warnings: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.contains("repository org/repo identity changed"))
+            .collect();
+        assert_eq!(identity_warnings.len(), 1, "{stderr}");
+        diagnostic_logging::assert_diagnostic(
+            identity_warnings[0],
+            cortexkit_log::ParsedLevel::Warn,
+            "plexus.storage",
+            "repository org/repo identity changed from 101 to 999; suspended 2 watches",
+        );
+        assert!(
+            !stderr.contains("reason=RepositoryIdentityChanged"),
+            "the identity warning must not be duplicated by a per-event INFO line: {stderr}"
+        );
+        assert!(
+            !stderr.contains("reason=UnsupportedEvent"),
+            "routine relay drops must be silent at INFO: {stderr}"
+        );
+        return;
+    }
+    diagnostic_logging::init_child();
+    let (_scratch, store, path) = relay_log_fixture("relay-exceptional-drop-log");
+    let mut malformed: Value = serde_json::from_str(&full_event()).unwrap();
+    malformed["seq"] = json!(2);
+    malformed["delivery_id"] = json!("malformed-issue");
+    malformed["body"]["issue"] = Value::Null;
+    let mut unsupported: Value = serde_json::from_str(&full_event()).unwrap();
+    unsupported["seq"] = json!(3);
+    unsupported["delivery_id"] = json!("unsupported-event");
+    unsupported["event"] = json!("check_run");
+    let mut changed: Value = serde_json::from_str(&full_event()).unwrap();
+    changed["seq"] = json!(4);
+    changed["delivery_id"] = json!("changed-repository");
+    changed["body"]["repository"]["id"] = json!(999);
+    // The first stored event establishes repository 101 before the changed-identity frame arrives.
+    replay(
+        store,
+        vec![
+            hello(),
+            full_event(),
+            malformed.to_string(),
+            unsupported.to_string(),
+            changed.to_string(),
+        ],
+        true,
+    )
+    .await;
+    assert_eq!(count(&path, "trigger_events"), 1);
+    let conn = Connection::open(&path).unwrap();
+    for reason in [
+        "invalid_payload",
+        "unsupported_event",
+        "repository_identity_changed",
+    ] {
+        let dropped: i64 = conn
+            .query_row(
+                "SELECT value FROM event_outbox_counters WHERE name=?1",
+                [format!("relay_drop_{reason}")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dropped, 1, "fixture must reach the {reason} drop branch");
+    }
+}
+
+#[tokio::test]
 async fn relay_drops_are_debug_and_hourly_summary_counts_committed_activity() {
     const TEST: &str =
         "relay::tests::relay_drops_are_debug_and_hourly_summary_counts_committed_activity";

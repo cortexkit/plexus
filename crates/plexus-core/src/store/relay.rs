@@ -433,8 +433,8 @@ impl PlexusStore {
                 None => {
                     if let Err(reason) = admit(conn, event, received, &self.ci_runs, &mut due_watches)? {
                         event_outbox::increment(conn, reason.counter(), 1)?;
-                        // Malformed payloads and repository identity changes need immediate operator visibility.
-                        if matches!(reason, DropReason::InvalidPayload | DropReason::RepositoryIdentityChanged) {
+                        // Malformed payloads need immediate visibility; identity changes already emit a storage warning.
+                        if matches!(reason, DropReason::InvalidPayload) {
                             diag!(info relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action);
                         } else {
                             diag!(debug relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action);

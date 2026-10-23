@@ -21656,3 +21656,19 @@ expect_red = ["tests::wire_success_is_debug_but_refused_bind_is_info"]
 expect_message = "tool frames must be silent at INFO"
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "relay-invalid-payload-drop-info"
+guards = "Malformed vendor payload drops remain immediately visible at INFO while routine drops stay below INFO"
+file = "crates/plexus-core/src/store/relay.rs"
+old = "if matches!(reason, DropReason::InvalidPayload) {"
+new = "if false { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/relay_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["relay::tests::relay_invalid_payload_is_info_and_identity_change_is_warn"]
+expect_message = "malformed relay payloads must stay visible at INFO"
+build_timeout_s = 3600
+timeout_s = 120
