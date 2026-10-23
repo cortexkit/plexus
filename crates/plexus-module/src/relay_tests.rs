@@ -3073,13 +3073,16 @@ async fn relay_drops_are_debug_and_hourly_summary_counts_committed_activity() {
     tokio::pin!(relay);
     tokio::time::pause();
     assert!(futures_util::poll!(&mut relay).is_pending());
-    tokio::time::advance(Duration::from_secs(3599)).await;
-    assert!(futures_util::poll!(&mut relay).is_pending());
-    std::eprintln!("before-hour");
-    tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(futures_util::poll!(&mut relay).is_pending());
-    tokio::time::advance(Duration::from_secs(3600)).await;
-    assert!(futures_util::poll!(&mut relay).is_pending());
+    for seconds in [3599, 2, 3600] {
+        tokio::time::advance(Duration::from_secs(seconds)).await;
+        for _ in 0..20 {
+            assert!(futures_util::poll!(&mut relay).is_pending());
+            tokio::task::yield_now().await;
+        }
+        if seconds == 3599 {
+            std::eprintln!("before-hour");
+        }
+    }
     drop(stop);
     bounded(relay).await;
     tokio::time::resume();

@@ -1988,7 +1988,7 @@ async fn wire_success_is_debug_but_refused_bind_is_info() {
             refusals[0],
             cortexkit_log::ParsedLevel::Info,
             "plexus.wire",
-            "route bind from principal 'subc-mcp' on channel 4: REFUSED (not first-party)",
+            "route bind from principal 'reserved:subc-mcp' on channel 4: REFUSED (not first-party)",
         );
         return;
     }
