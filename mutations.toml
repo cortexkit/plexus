@@ -9725,6 +9725,8 @@ timeout_s = 120
 [[control]]
 id = "ci-empty-shards-not-allocated"
 guards = "A small selection allocates only as many shard runners as it fills"
+hub = "shard_total sizes every mutation run; the planner's own shard-size tests (rounding up, the broad size) exercise the same function."
+hub_targets = ["test_mutation_plan.MutationPlanTests"]
 file = "scripts/mutation-plan.py"
 old = "return min(MAX_SHARDS, max(1, math.ceil(count / per_shard)))"
 new = "return MAX_SHARDS  # NON-VACUITY BREAK"
