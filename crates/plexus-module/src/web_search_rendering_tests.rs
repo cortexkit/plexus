@@ -205,7 +205,7 @@ fn retry_words_round_up_and_keep_singular_units() {
 }
 
 #[test]
-fn content_v1_search_refusals_keep_every_code() {
+fn tool_result_v1_search_refusals_keep_every_code() {
     use cortexkit_role_tool_provider::result::{validate, ToolResult};
     for tool in [WEB_SEARCH_TOOL, crate::manifest::CODE_SEARCH_TOOL] {
         for code in [
@@ -235,7 +235,7 @@ fn content_v1_search_refusals_keep_every_code() {
             let reply = with_call_tool_result(Some(tool), original.clone());
             assert_eq!(
                 reply["errorCode"], code,
-                "content/v1 must preserve every search refusal code: {tool}/{code}"
+                "tool-result/v1 must preserve every search refusal code: {tool}/{code}"
             );
             assert_eq!(reply["isError"], true);
             let typed: ToolResult = serde_json::from_value(reply.clone()).unwrap();
@@ -255,6 +255,7 @@ fn content_v1_search_refusals_keep_every_code() {
 #[test]
 fn oversized_search_content_is_refused_without_invalid_content_or_truncation() {
     use cortexkit_role_tool_provider::result::{validate, ToolResult};
+    let message = "plexus could not produce a valid tool-result/v1 result";
     for tool in [WEB_SEARCH_TOOL, crate::manifest::CODE_SEARCH_TOOL] {
         let reply = with_call_tool_result(
             Some(tool),
@@ -262,6 +263,56 @@ fn oversized_search_content_is_refused_without_invalid_content_or_truncation() {
         );
         assert_eq!(reply["isError"], true);
         assert_eq!(reply["errorCode"], "invalid_answer");
+        assert_eq!(reply["content"], json!([{"type": "text", "text": message}]));
+        if tool == WEB_SEARCH_TOOL {
+            assert_eq!(
+                reply["error"],
+                json!({"code": "invalid_answer", "message": message})
+            );
+        }
         validate(&serde_json::from_value::<ToolResult>(reply).unwrap()).unwrap();
     }
+}
+
+// The whole reply, member by member, for both search tools. Model-facing
+// clients render a tool-result/v1 body as typed `content` parts, with
+// `isError` and, where they apply, `errorCode` or `structuredContent` beside
+// them. A reply that drops back to the plain legacy envelope is shown to the
+// model as JSON.
+#[test]
+fn search_replies_have_the_exact_tool_result_v1_shape() {
+    let found = json!({"results": [{"title": "T", "url": "https://example.com/"}]});
+    assert_eq!(
+        with_call_tool_result(Some(WEB_SEARCH_TOOL), json!({"result": found.clone()})),
+        json!({
+            "content": [{"type": "text", "text": "1 web result:\n\n1. T\n   https://example.com/"}],
+            "isError": false,
+            "structuredContent": found,
+            "result": found,
+        }),
+        "a web_search success must be a tool-result/v1 body beside its legacy result"
+    );
+    let error = json!({"code": "rate_limited", "message": "slow down"});
+    assert_eq!(
+        with_call_tool_result(Some(WEB_SEARCH_TOOL), json!({"error": error.clone()})),
+        json!({
+            "content": [{"type": "text", "text": "web_search was refused (rate_limited): the web search rate limit is reached. Retry in a minute."}],
+            "isError": true,
+            "errorCode": "rate_limited",
+            "error": error,
+        }),
+        "a web_search refusal must be a tool-result/v1 body beside its legacy error"
+    );
+    assert_eq!(
+        with_call_tool_result(
+            Some(crate::manifest::CODE_SEARCH_TOOL),
+            json!({"error": {"code": "rate_limited", "message": "slow down"}}),
+        ),
+        json!({
+            "content": [{"type": "text", "text": "rate_limited: slow down"}],
+            "isError": true,
+            "errorCode": "rate_limited",
+        }),
+        "a code_search refusal must be a bare tool-result/v1 body"
+    );
 }

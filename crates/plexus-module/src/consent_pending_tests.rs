@@ -1,6 +1,6 @@
 use super::*;
 #[test]
-fn pending_consent_has_the_exact_content_v1_shape() {
+fn pending_consent_has_the_exact_tool_result_v1_shape() {
     let reply = with_call_tool_result(
         Some(manifest::INVOKE_TOOL),
         denial_response(&plexus_core::Denial::AccessPending {
