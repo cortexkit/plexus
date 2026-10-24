@@ -140,7 +140,7 @@ fn catalog_tools(definitions: &[Tool]) -> Vec<CatalogTool> {
             check_modes(&tool).expect("facade call modes are valid");
             if search_content {
                 tool = tool.with_result_format(
-                    cortexkit_role_tool_provider::result::ResultFormat::ContentV1,
+                    cortexkit_role_tool_provider::result::ResultFormat::ToolResultV1,
                 );
             }
             tool.description = definition.description.clone();

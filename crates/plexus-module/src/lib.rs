@@ -5330,13 +5330,13 @@ fn search_content_result(tool: &str, mut legacy: Value, code_search_repo: Option
         result
     };
     // Refuse an invalid or oversized result by name rather than sending content
-    // that a content/v1 consumer cannot accept, or silently truncating it.
+    // that a tool-result/v1 consumer cannot accept, or silently truncating it.
     if validate(&result).is_err() {
-        let message = "plexus could not produce a valid content/v1 result";
+        let message = "plexus could not produce a valid tool-result/v1 result";
         result = ToolResult::new(vec![ContentPart::text(message)]).with_error("invalid_answer");
         legacy = tool_error("invalid_answer", message);
     }
-    validate(&result).expect("the bounded content/v1 refusal is valid");
+    validate(&result).expect("the bounded tool-result/v1 refusal is valid");
     let mut body = serde_json::to_value(result).expect("search ToolResult serializes");
     if tool == manifest::WEB_SEARCH_TOOL {
         for key in ["result", "error"] {

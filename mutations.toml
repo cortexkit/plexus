@@ -3465,7 +3465,7 @@ timeout_s = 60
 
 [[control]]
 id = "search-content-error-code"
-guards = "content/v1 search refusals retain their existing errorCode in the actual reply"
+guards = "tool-result/v1 search refusals retain their existing errorCode in the actual reply"
 file = "crates/plexus-module/src/lib.rs"
 old = "let mut body = serde_json::to_value(result).expect(\"search ToolResult serializes\");"
 new = "let mut body = serde_json::to_value(result).expect(\"search ToolResult serializes\");\n    body.as_object_mut().unwrap().remove(\"errorCode\"); // NON-VACUITY BREAK"
@@ -3474,8 +3474,8 @@ runner = "cargo"
 package = "plexus-module"
 target = "--lib"
 select = "expected"
-expect_red = ["web_search_rendering_tests::content_v1_search_refusals_keep_every_code"]
-expect_message = "content/v1 must preserve every search refusal code"
+expect_red = ["web_search_rendering_tests::tool_result_v1_search_refusals_keep_every_code"]
+expect_message = "tool-result/v1 must preserve every search refusal code"
 build_timeout_s = 3600
 timeout_s = 60
 
@@ -3492,6 +3492,38 @@ target = "--lib"
 select = "expected"
 expect_red = ["web_search_rendering_tests::results_render_numbered_with_url_published_day_and_excerpt"]
 expect_message = "web_search must render the published day, not the full timestamp"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "search-result-format-declared"
+guards = "web_search and code_search declare result_format tool-result/v1 in the catalog, never the retired content/v1 name, which heads show as plain JSON"
+file = "crates/plexus-module/src/tool_provider.rs"
+old = "cortexkit_role_tool_provider::result::ResultFormat::ToolResultV1,"
+new = "cortexkit_role_tool_provider::result::ResultFormat::from(\"content/v1\".to_owned()), /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/tool_provider_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tool_provider::tests::only_search_tools_opt_into_tool_result_v1"]
+expect_message = "result format for web_search"
+build_timeout_s = 3600
+timeout_s = 60
+
+[[control]]
+id = "search-result-reply-shape"
+guards = "Search replies are tool-result/v1 bodies (content parts, isError, errorCode, structuredContent), not the plain legacy envelope"
+file = "crates/plexus-module/src/lib.rs"
+old = "let mut body = serde_json::to_value(result).expect(\"search ToolResult serializes\");"
+new = "let _ = result; let mut body = json!({}); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/web_search_rendering_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["web_search_rendering_tests::search_replies_have_the_exact_tool_result_v1_shape"]
+expect_message = "a web_search success must be a tool-result/v1 body beside its legacy result"
 build_timeout_s = 3600
 timeout_s = 60
 
@@ -6482,14 +6514,14 @@ timeout_s = 120
 
 [[control]]
 id = "consent-held-pending-content-shape"
-guards = "Pending consent uses the exact content/v1 structure without errorCode"
+guards = "Pending consent uses the exact tool-result/v1 structure without errorCode"
 file = "crates/plexus-module/src/lib.rs"
 old = "\"structuredContent\": {\"success\": false, \"code\": \"access_pending\", \"message\": text, \"text\": text, \"elicitation_id\": reply[\"error\"][\"elicitation_id\"]}"
 new = "\"errorCode\": \"access_pending\", /* NON-VACUITY BREAK */ \"structuredContent\": {\"success\": false, \"code\": \"access_pending\", \"message\": text, \"text\": text, \"elicitation_id\": reply[\"error\"][\"elicitation_id\"]}"
 test_file = "crates/plexus-module/src/consent_pending_tests.rs"
 package = "plexus-module"
 target = "--lib"
-expect_red = ["consent_pending_tests::pending_consent_has_the_exact_content_v1_shape"]
+expect_red = ["consent_pending_tests::pending_consent_has_the_exact_tool_result_v1_shape"]
 runner = "cargo"
 select = "expected"
 build_timeout_s = 3600

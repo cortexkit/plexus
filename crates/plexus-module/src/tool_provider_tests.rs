@@ -41,11 +41,11 @@ fn catalog_matches_every_advertised_definition() {
 }
 
 #[test]
-fn only_search_tools_opt_into_content_v1() {
+fn only_search_tools_opt_into_tool_result_v1() {
     let answer = catalog(&all_capabilities_request(), &advertised_tools()).unwrap();
     for tool in &answer.tools {
         let expected = if matches!(tool.name.as_str(), "web_search" | "code_search") {
-            Some(cortexkit_role_tool_provider::result::ResultFormat::ContentV1)
+            Some(cortexkit_role_tool_provider::result::ResultFormat::ToolResultV1)
         } else {
             None
         };
@@ -54,6 +54,17 @@ fn only_search_tools_opt_into_content_v1() {
             "result format for {}",
             tool.name
         );
+        // Pin the wire name too: heads render content parts only for a tool
+        // whose catalog entry says exactly `tool-result/v1`, and show any
+        // other value, including the retired `content/v1`, as plain JSON.
+        if expected.is_some() {
+            assert_eq!(
+                serde_json::to_value(&tool.result_format).unwrap(),
+                "tool-result/v1",
+                "search tools must declare tool-result/v1: {}",
+                tool.name
+            );
+        }
         assert_eq!(tool.semantics, if expected.is_some() { 2 } else { 1 });
     }
 }
