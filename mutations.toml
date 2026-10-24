@@ -3497,7 +3497,7 @@ timeout_s = 60
 
 [[control]]
 id = "search-result-format-declared"
-guards = "web_search and code_search declare result_format tool-result/v1 in the catalog, never the retired content/v1 name, which heads show as plain JSON"
+guards = "web_search and code_search declare result_format tool-result/v1 in the catalog; model-facing clients show any other value, including the retired content/v1, as plain JSON"
 file = "crates/plexus-module/src/tool_provider.rs"
 old = "cortexkit_role_tool_provider::result::ResultFormat::ToolResultV1,"
 new = "cortexkit_role_tool_provider::result::ResultFormat::from(\"content/v1\".to_owned()), /* NON-VACUITY BREAK */"

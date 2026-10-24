@@ -274,10 +274,11 @@ fn oversized_search_content_is_refused_without_invalid_content_or_truncation() {
     }
 }
 
-// The whole reply, member by member, for both search tools. A head renders
-// content parts only from a tool-result/v1 body: `content` as a list of typed
-// parts with `isError`, `errorCode` and `structuredContent` beside it. A reply
-// that drops back to the plain legacy envelope is shown to the model as JSON.
+// The whole reply, member by member, for both search tools. Model-facing
+// clients render a tool-result/v1 body as typed `content` parts, with
+// `isError` and, where they apply, `errorCode` or `structuredContent` beside
+// them. A reply that drops back to the plain legacy envelope is shown to the
+// model as JSON.
 #[test]
 fn search_replies_have_the_exact_tool_result_v1_shape() {
     let found = json!({"results": [{"title": "T", "url": "https://example.com/"}]});

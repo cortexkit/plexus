@@ -54,9 +54,10 @@ fn only_search_tools_opt_into_tool_result_v1() {
             "result format for {}",
             tool.name
         );
-        // Pin the wire name too: heads render content parts only for a tool
-        // whose catalog entry says exactly `tool-result/v1`, and show any
-        // other value, including the retired `content/v1`, as plain JSON.
+        // Pin the wire name too: model-facing clients render content parts
+        // only when a tool's catalog entry says exactly `tool-result/v1`, and
+        // show any other value, including the retired `content/v1`, as plain
+        // JSON.
         if expected.is_some() {
             assert_eq!(
                 serde_json::to_value(&tool.result_format).unwrap(),
