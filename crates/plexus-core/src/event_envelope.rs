@@ -72,6 +72,7 @@ pub(crate) fn envelope(
     item: &Value,
     actor: &ActorAttribution,
     context: &EnvelopeContext,
+    observed_at_ms: i64,
 ) -> Result<String, EventKeyError> {
     // Review and dequeue notices start at v1 with a normalized body, unlike the legacy
     // events whose v1 body is the vendor object. Do not reshape that body.
@@ -95,7 +96,8 @@ pub(crate) fn envelope(
         }),
     };
     let mut body = json!({"event_key":event_key,"kind":event_kind.as_str(),"repo":repo.to_ascii_lowercase(),
-        "action":action,"actor_logins":null,"actor_unknown":null});
+        "action":action,"actor_logins":null,"actor_unknown":null,
+        "observed_at":crate::poller::iso8601::format_millis(observed_at_ms)});
     let fields: &[(&str, &str)] = match event_kind {
         GithubEventKind::Issue | GithubEventKind::PullRequest => &[
             ("number", "number"),
@@ -241,9 +243,55 @@ pub(crate) fn envelope(
         .map_err(EventKeyError::Canonicalization)
 }
 
+/// Stamp normalized v1 notices on insertion, never vendor objects or stored bodies on read.
+pub(crate) fn observed_notice(item: &Value, observed_at_ms: i64) -> Value {
+    let mut body = item.clone();
+    body["observed_at"] = json!(crate::poller::iso8601::format_millis(observed_at_ms));
+    body
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OBSERVED_AT_MS: i64 = 1_000_000_000_123;
+    const OBSERVED_AT: &str = "2001-09-09T01:46:40.123Z";
+
+    #[test]
+    fn every_v2_kind_uses_the_injected_observation_time() {
+        for event in [
+            GITHUB_ISSUE_CHANGED,
+            GITHUB_PR_CHANGED,
+            GITHUB_CI_JOB_COMPLETED,
+            GITHUB_CI_JOB_FAILED,
+            GITHUB_CI_RUN_COMPLETED,
+            GITHUB_RELEASE_PUBLISHED,
+        ] {
+            for source in [EnvelopeSource::Poll, EnvelopeSource::Webhook(None)] {
+                let item = json!({"updated_at":"1999-01-01T00:00:00Z"});
+                let original = item.clone();
+                let body = envelope(
+                    KEY,
+                    event,
+                    "org/repo",
+                    &item,
+                    &ActorAttribution::NotEnriched,
+                    &EnvelopeContext {
+                        source,
+                        ..Default::default()
+                    },
+                    OBSERVED_AT_MS,
+                )
+                .unwrap();
+                let body: Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(
+                    body["observed_at"], OBSERVED_AT,
+                    "{event} must use the injected observation time"
+                );
+                assert_eq!(item, original, "v1 vendor objects must stay untouched");
+            }
+        }
+    }
 
     #[test]
     fn large_event_ids_survive_the_envelope() {
@@ -255,6 +303,7 @@ mod tests {
             &json!({"id":id,"run_id":id,"run_attempt":id}),
             &ActorAttribution::NotEnriched,
             &EnvelopeContext::default(),
+            OBSERVED_AT_MS,
         )
         .unwrap();
         let body: Value = serde_json::from_str(&body).unwrap();
@@ -277,6 +326,7 @@ mod tests {
                 &item,
                 &ActorAttribution::NotEnriched,
                 &EnvelopeContext::default(),
+                OBSERVED_AT_MS,
             )
             .unwrap();
             let parsed: Value = serde_json::from_str(&body).unwrap();
@@ -300,6 +350,7 @@ mod tests {
                 &item,
                 &ActorAttribution::NotEnriched,
                 &EnvelopeContext::default(),
+                OBSERVED_AT_MS,
             )
             .unwrap();
             let parsed: Value = serde_json::from_str(&body).unwrap();
@@ -325,6 +376,7 @@ mod tests {
             &item,
             &ActorAttribution::NotEnriched,
             &EnvelopeContext::default(),
+            OBSERVED_AT_MS,
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&body).unwrap();
@@ -342,6 +394,7 @@ mod tests {
                 &item,
                 &ActorAttribution::NotEnriched,
                 &EnvelopeContext::default(),
+                OBSERVED_AT_MS,
             )
             .unwrap();
             let parsed: Value = serde_json::from_str(&body).unwrap();
@@ -367,6 +420,7 @@ mod tests {
             &item,
             &ActorAttribution::NotEnriched,
             &EnvelopeContext::default(),
+            OBSERVED_AT_MS,
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&body).unwrap();
@@ -389,6 +443,7 @@ mod tests {
             &item,
             &ActorAttribution::NotEnriched,
             &EnvelopeContext::default(),
+            OBSERVED_AT_MS,
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&body).unwrap();
@@ -415,6 +470,7 @@ mod tests {
             &item,
             &ActorAttribution::NotEnriched,
             &EnvelopeContext::default(),
+            OBSERVED_AT_MS,
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&body).unwrap();
@@ -440,6 +496,7 @@ mod tests {
                     source,
                     ..Default::default()
                 },
+                OBSERVED_AT_MS,
             )
             .unwrap();
             let parsed: Value = serde_json::from_str(&body).unwrap();
@@ -470,6 +527,7 @@ mod tests {
                     source,
                     ..Default::default()
                 },
+                OBSERVED_AT_MS,
             )
             .unwrap();
             let parsed: Value = serde_json::from_str(&body).unwrap();
@@ -487,7 +545,8 @@ mod tests {
                 "org/repo",
                 &json!({}),
                 &ActorAttribution::NotEnriched,
-                &EnvelopeContext::default()
+                &EnvelopeContext::default(),
+                OBSERVED_AT_MS,
             )
             .is_err(),
             "unknown envelope event must return an error"
@@ -503,6 +562,7 @@ mod tests {
             &capture("poll_release"),
             &ActorAttribution::NotEnriched,
             &EnvelopeContext::default(),
+            OBSERVED_AT_MS,
         )
         .unwrap();
         let body: Value = serde_json::from_str(&body).unwrap();
@@ -576,8 +636,10 @@ mod tests {
             &constructed_wrapper_around_captured_item["item"],
             &actor,
             &context,
+            OBSERVED_AT_MS,
         )
         .unwrap();
+        expected["observed_at"] = json!(OBSERVED_AT);
         expected["event_key"] = json!(KEY);
         expected["kind"] = json!(kind);
         expected["repo"] = json!(repo);
@@ -818,6 +880,7 @@ mod tests {
                 &run,
                 &ActorAttribution::NotEnriched,
                 &EnvelopeContext::default(),
+                OBSERVED_AT_MS,
             )
             .unwrap(),
         )
@@ -833,6 +896,7 @@ mod tests {
                     ci_run: Some(attribution),
                     ..Default::default()
                 },
+                OBSERVED_AT_MS,
             )
             .unwrap(),
         )
@@ -884,6 +948,7 @@ mod tests {
             &json!({"id":7,"actor":{"login":""},"triggering_actor":null,"event":7}),
             &ActorAttribution::NotEnriched,
             &EnvelopeContext::default(),
+            OBSERVED_AT_MS,
         )
         .unwrap();
         for field in ["actor", "triggering_actor", "event", "head_repo_is_fork"] {
@@ -922,6 +987,7 @@ mod tests {
                 &json!({"number":3}),
                 &actor,
                 &Default::default(),
+                OBSERVED_AT_MS,
             )
             .unwrap(),
         )
@@ -968,6 +1034,7 @@ mod tests {
                 &json!({"number":1}),
                 &ActorAttribution::NotEnriched,
                 &context,
+                OBSERVED_AT_MS,
             )
             .unwrap(),
         )

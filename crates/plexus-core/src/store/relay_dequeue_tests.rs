@@ -30,6 +30,67 @@ fn setup() -> (PlexusStore, Event) {
 }
 
 #[test]
+fn delayed_webhook_keeps_relay_observation_time() {
+    for dequeue in [false, true] {
+        let (store, mut event) = setup();
+        event.received_at = "2026-10-23T09:00:00.123Z".into();
+        if !dequeue {
+            event.action = Some("enqueued".into());
+        }
+        store
+            .commit_relay_event("github", "stream", &event)
+            .unwrap();
+        let row = store.drain_event_outbox(10).unwrap().remove(0);
+        let inserted_at: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT created_at_ms FROM event_outbox WHERE event_key=?1",
+                    [&row.event_key],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_ne!(
+            inserted_at,
+            parse_to_millis(&event.received_at).unwrap(),
+            "fixture must model a delayed relay delivery"
+        );
+        let body: Value =
+            serde_json::from_str(row.envelope_v2.as_deref().unwrap_or(&row.body)).unwrap();
+        assert_eq!(
+            body["observed_at"], event.received_at,
+            "delayed webhook must keep relay receipt time, not insert or publish time"
+        );
+        if !dequeue {
+            assert_eq!(
+                row.body,
+                serde_json::to_string(&event.body["pull_request"]).unwrap()
+            );
+        }
+        store
+            .mark_event_published(&row.event_key, now_ms())
+            .unwrap();
+        store
+            .mark_event_version_published(&row.event_key, 2, now_ms())
+            .unwrap();
+        event.seq += 1;
+        event.received_at = "2026-10-24T21:00:00.456Z".into();
+        store
+            .commit_relay_event("github", "stream", &event)
+            .unwrap();
+        let after = store
+            .canonical_event_by_key(&row.event_key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.body, row.body);
+        assert_eq!(after.digest, row.digest);
+        assert_eq!(after.envelope_v2, row.envelope_v2);
+        assert_eq!(after.digest_v2, row.digest_v2);
+    }
+}
+
+#[test]
 fn dequeue_delivery_identity_is_distinct_and_redelivery_deduplicates() {
     let (store, mut event) = setup();
     // A normal PR change with the same timestamp must not swallow the dequeue.

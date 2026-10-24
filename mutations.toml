@@ -1,6 +1,38 @@
 # Mutation controls; see docs/mutations.md. Edits are temporary and must fail the named tests.
 
 [[control]]
+id = "observed-at-delayed-webhook"
+guards = "A delayed webhook keeps the relay receipt time rather than the late Plexus insert time"
+file = "crates/plexus-core/src/storage.rs"
+old = "            &keyed.envelope_context,\n            observed_at_ms,"
+new = "            &keyed.envelope_context,\n            created_at_ms, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/src/store/relay_dequeue_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["storage::relay::tests::dequeue_tests::delayed_webhook_keeps_relay_observation_time"]
+expect_message = "delayed webhook must keep relay receipt time, not insert or publish time"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "observed-at-release-presence"
+guards = "Every v2 kind, including releases, carries the injected observation timestamp"
+file = "crates/plexus-core/src/event_envelope.rs"
+old = "    for &(target, source) in fields {"
+new = '    if matches!(event_kind, GithubEventKind::Release) { body.as_object_mut().unwrap().remove("observed_at"); } /* NON-VACUITY BREAK */ for &(target, source) in fields {'
+test_file = "crates/plexus-core/src/event_envelope.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--lib"
+select = "expected"
+expect_red = ["event_envelope::tests::every_v2_kind_uses_the_injected_observation_time"]
+expect_message = "github_release_published must use the injected observation time"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "operator-summary-length-guard"
 guards = "An oversized confirmation summary is refused locally before sending or applying and its refusal is audited"
 file = "crates/plexus-module/src/operator_confirmation.rs"

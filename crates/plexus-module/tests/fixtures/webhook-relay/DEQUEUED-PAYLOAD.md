@@ -16,7 +16,13 @@ string without translating or restricting it.
 `pull-request-dequeued.body-v1.json` pins the fetch body. This webhook-only
 event uses the existing PR-watch visibility rules. It is published only as
 `github_pr_dequeued.v1`; fetch it with `events_get` (default `version: 1`).
-Unlike legacy change events, this new body is a compact projection with six
-fields rather than the general changed-item envelope. `sender` is GitHub's
+Unlike legacy change events, this body is a compact projection with seven
+fields rather than the general changed-item envelope. `observed_at` is the
+relay receipt time, when the item first reached CortexKit, in RFC 3339 UTC with
+millisecond precision. It is added by Plexus, not taken from the GitHub payload.
+Bodies stored before this field was introduced lack it and retain their exact
+bytes and digests. Comparing observation and activity times distinguishes a
+delivery delay from old news; publication time is not observation time.
+`sender` is GitHub's
 login, not proof of a human actor. Delivery identity is in the notice's
 `event_key` header; identical timestamps do not collapse separate dequeues.

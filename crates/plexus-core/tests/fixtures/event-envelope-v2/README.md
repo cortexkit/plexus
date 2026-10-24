@@ -30,3 +30,11 @@ normalizer. The same-change test aligns the PR update timestamp between two
 captures eight seconds apart to model a shared identity, without claiming the
 captures themselves are the same delivery. Constructed comment metadata in that
 test witnesses the allowed comment-field differences.
+
+Envelope goldens inject `observed_at_ms` and expect `observed_at` as an RFC 3339
+UTC string with millisecond precision. That timestamp is normalization metadata,
+not a captured GitHub field: it records when the item first reached CortexKit
+(relay receipt for webhooks, poll observation time for polling). Comparing it to
+the activity time distinguishes a delivery delay from old news. Events stored
+before this field was introduced remain byte-identical and lack `observed_at`;
+the store regressions also pin their original digests.

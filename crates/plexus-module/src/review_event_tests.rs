@@ -50,6 +50,7 @@ async fn review_notices_preserve_pr_projection_and_deduplicate_redeliveries() {
         );
         assert_eq!(store.drain_event_outbox_version(10, 2).unwrap().len(), 1);
         let body: Value = serde_json::from_str(&notice.body).unwrap();
+        assert_eq!(body["observed_at"], TIME);
         assert_eq!(body["repo"], "org/repo");
         assert_eq!(body["pr"], 7);
         assert_eq!(body["head_sha"], "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
@@ -63,7 +64,7 @@ async fn review_notices_preserve_pr_projection_and_deduplicate_redeliveries() {
                     "author_login":"synthetic-human","author_is_bot":false,"path":"src/example.rs",
                     "line":17,"original_line":15,"side":"RIGHT","comment_id":601,"review_id":501,"in_reply_to_id":600,
                     "comment_url":"https://github.com/org/repo/pull/7#discussion_r601","created_at":"2030-10-08T09:00:00Z",
-                    "body_excerpt":"Could this use the existing helper?","body_truncated":false
+                    "body_excerpt":"Could this use the existing helper?","body_truncated":false,"observed_at":TIME
                 })
             );
         } else {
@@ -74,7 +75,7 @@ async fn review_notices_preserve_pr_projection_and_deduplicate_redeliveries() {
                     "head_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     "reviewer_login":"synthetic-reviewer[bot]","reviewer_is_bot":true,"state":"changes_requested",
                     "review_id":501,"review_url":"https://github.com/org/repo/pull/7#pullrequestreview-501",
-                    "submitted_at":"2030-10-08T09:00:00Z","body_excerpt":"Please handle the error before returning.","body_truncated":false
+                    "submitted_at":"2030-10-08T09:00:00Z","body_excerpt":"Please handle the error before returning.","body_truncated":false,"observed_at":TIME
                 })
             );
         }
@@ -177,11 +178,12 @@ async fn review_notice_unicode_excerpt_and_nullable_fields() {
         let body: Value = serde_json::from_str(&row.body).unwrap();
         assert_eq!(
             body.as_object().unwrap().len(),
-            if comment { 18 } else { 13 }
+            if comment { 19 } else { 14 }
         );
         for (key, value) in body.as_object().unwrap() {
             if ![
                 "event_key",
+                "observed_at",
                 "kind",
                 "repo",
                 "pr",

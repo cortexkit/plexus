@@ -10408,6 +10408,19 @@ fn insert_keyed_event_row(
         activity_at_ms,
         actor,
     } = keyed.event;
+    // Only normalized notices get a stamped v1 body. Legacy v1 vendor objects
+    // stay untouched; the first committed outbox snapshot owns the timestamp.
+    let notice;
+    let payload = if keyed
+        .identity
+        .as_ref()
+        .is_some_and(|identity| crate::event_key::is_normalized_notice(identity.event_name))
+    {
+        notice = crate::event_envelope::observed_notice(payload, observed_at_ms);
+        &notice
+    } else {
+        payload
+    };
     // Only the bare reason code is stored, never enrichment's diagnostic
     // detail, which can carry vendor error text.
     let (actor_logins, actor_unknown_reason) = match actor {
@@ -10503,6 +10516,7 @@ fn insert_keyed_event_row(
             payload,
             actor,
             &keyed.envelope_context,
+            observed_at_ms,
         )
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         event_outbox::insert_marker(

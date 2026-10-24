@@ -10,7 +10,9 @@ deduplicates ids across an entire stream, not per subject; equal ids would silen
 suppress the second version. V2 consumers must fetch using its `event_key` header,
 not the version-qualified transport id. The manifest declares this v2-only header
 beside the unchanged per-event filter labels.
-V1 subjects, stored bodies, list responses, and the default fetch remain unchanged.
+V1 subjects, previously stored bodies, list responses, and the default fetch remain
+unchanged. Legacy v1 vendor objects are not enriched; normalized v1 notices have
+the observation timestamp described below.
 
 ## Publish receipts and retries
 
@@ -51,6 +53,10 @@ Previously stored CI-job envelopes likewise do not acquire the subsequently
 added `runner_name` or `steps_run` fields; their stored bytes and digests remain
 unchanged.
 
+Events stored before the release that introduced `observed_at` do not acquire
+that field. Both normalized v1 notices and v2 envelopes retain their exact stored
+bytes and digests; reads, retries, and redeliveries never backfill timestamps.
+
 ## Fields
 
 All kinds contain:
@@ -60,9 +66,35 @@ All kinds contain:
 | `event_key` | string | Stable shared event key |
 | `kind` | string | `issue`, `pull_request`, `ci_job`, `ci_run`, or `release` |
 | `repo` | string | Lowercase `owner/name` |
+| `observed_at` | string | When the item first reached CortexKit: webhook relay receipt time, or Plexus poll time. RFC 3339 UTC with exactly three fractional digits, e.g. `2026-10-24T02:28:14.123Z`. |
 | `action` | string or null | Source action, as described below |
 | `actor_logins` | array of strings or null | Issue/PR actor attribution; null for CI and release |
 | `actor_unknown` | object or null | Issue/PR unknown-actor reason; null for CI and release |
+
+### Observation time and delivery delay
+
+`observed_at` is the event's `observed_at_ms` formatted at insertion, not the
+outbox insertion or publication time. Webhooks use the relay's `received_at`,
+including when a relay replay reaches Plexus much later. Polls use the poll's
+observation time. The first committed copy owns this value; a later poll,
+redelivery, or publication retry cannot replace it.
+
+A consumer can compare `observed_at` to the activity time (`updated_at`,
+`completed_at`, `published_at`, `submitted_at`, or `created_at`, as appropriate)
+to distinguish delivery delay from old news. For example, an activity-to-observation
+gap greater than six hours indicates an item first observed late; an item observed
+promptly but published six hours later was delayed in delivery and need not be
+dropped as old news. If an older stored event lacks `observed_at`, consumers must
+handle the missing value rather than treating it as the current time.
+
+### Normalized v1 notices
+
+`github_pr_review_submitted`, `github_pr_review_comment_created`, and
+`github_pr_dequeued` publish normalized **v1-only** bodies, not v2 envelopes.
+Newly stored bodies carry the same non-null string `observed_at`, sourced from
+the relay receipt time. It is absent on bodies stored before this release.
+This does not add fields to legacy v1 bodies that are GitHub's own objects,
+and it does not change any event key.
 
 ### Issue and pull request
 

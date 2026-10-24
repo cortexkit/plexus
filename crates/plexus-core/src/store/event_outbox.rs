@@ -2858,6 +2858,102 @@ mod tests {
     }
 
     #[test]
+    fn polled_envelope_keeps_first_observation_time() {
+        let store = store();
+        subscription(&store, "a", "sorted_head");
+        let item = json!({"number":7,"updated_at":"2026-10-24T01:00:00Z"});
+        let event_headers = headers("owner/repo");
+        let make = |observed_at_ms| {
+            let mut keyed = input(&item, KEY, &event_headers);
+            keyed.event.observed_at_ms = observed_at_ms;
+            keyed
+        };
+        commit(&store, "a", &[make(1_000_000_000_123)]);
+        let first = store.canonical_event_by_key(KEY).unwrap().unwrap();
+        let body: Value = serde_json::from_str(first.envelope_v2.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            body["observed_at"], "2001-09-09T01:46:40.123Z",
+            "poll insertion must use the event's injected observation time"
+        );
+        assert_eq!(first.body, serde_json::to_string(&item).unwrap());
+        store.mark_event_published(KEY, now_ms()).unwrap();
+        store
+            .mark_event_version_published(KEY, 2, now_ms())
+            .unwrap();
+        commit(&store, "a", &[make(1_000_086_400_123)]);
+        let after = store.canonical_event_by_key(KEY).unwrap().unwrap();
+        assert_eq!(after.envelope_v2, first.envelope_v2);
+        assert_eq!(after.digest_v2, first.digest_v2);
+        assert_eq!(after.body, first.body);
+        assert_eq!(after.digest, first.digest);
+    }
+
+    #[test]
+    fn normalized_notices_stored_before_observed_at_keep_their_bytes_and_digests() {
+        for event_name in [
+            crate::event_key::GITHUB_PR_REVIEW_SUBMITTED,
+            crate::event_key::GITHUB_PR_REVIEW_COMMENT_CREATED,
+            crate::event_key::GITHUB_PR_DEQUEUED,
+        ] {
+            let store = store();
+            subscription(&store, "a", "sorted_head");
+            let item = json!({"pr":7,"repo":"owner/repo"});
+            let event_headers = headers("owner/repo");
+            let make = |observed_at_ms| {
+                let mut keyed = input(&item, KEY, &event_headers);
+                keyed.event.observed_at_ms = observed_at_ms;
+                keyed.identity.as_mut().unwrap().event_name = event_name;
+                keyed
+            };
+            commit(&store, "a", &[make(1_000_000_000_123)]);
+            let inserted = store.canonical_event_by_key(KEY).unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&inserted.body).unwrap()["observed_at"],
+                "2001-09-09T01:46:40.123Z"
+            );
+            // Model a snapshot stored before observation timestamps were added.
+            let old_body = "{\"repo\":\"owner/repo\",\"pr\":7}";
+            let old_digest = hex::encode(sha2::Sha256::digest(old_body.as_bytes()));
+            store
+                .inner
+                .with_conn_fenced(|conn| {
+                    conn.execute(
+                        "UPDATE event_outbox SET body_v1=?1,digest_v1=?2 WHERE event_key=?3",
+                        (old_body, &old_digest, KEY),
+                    )
+                })
+                .unwrap();
+            commit(&store, "a", &[make(1_000_086_400_123)]);
+            grant(
+                &store,
+                "consume-a",
+                "consumer",
+                "a",
+                "direct",
+                "[\"list_issues\"]",
+                None,
+            );
+            let EventLookupOutcome::Found(served) = store
+                .event_by_key_version(
+                    KEY,
+                    EventReader::Consumer {
+                        principal: "consumer",
+                    },
+                    now_ms(),
+                    1,
+                )
+                .unwrap()
+            else {
+                panic!("old normalized notice must remain visible");
+            };
+            assert_eq!(served.body, old_body);
+            assert_eq!(served.digest, old_digest);
+            assert_eq!(served.event_key, inserted.event_key);
+            assert!(served.envelope_v2.is_none());
+        }
+    }
+
+    #[test]
     fn older_stored_ci_run_envelope_is_served_byte_identical() {
         let store = store();
         subscription(&store, "a", "ci_runs");
@@ -2875,12 +2971,12 @@ mod tests {
         let new_envelope: Value =
             serde_json::from_str(inserted.envelope_v2.as_ref().unwrap()).unwrap();
         assert_eq!(new_envelope["completed_at"], "2026-10-15T23:52:00Z");
+        assert_eq!(new_envelope["observed_at"], "1970-01-01T00:00:00.100Z");
         assert_eq!(inserted.body, serde_json::to_string(&item).unwrap());
 
-        // A ci_run envelope stored before plexus filled `completed_at` from a
-        // finished run's `updated_at`. Its v1 body carries `updated_at`, so
-        // rebuilding the envelope on read would now fill the field and change
-        // the bytes; fetching must return the stored bytes instead.
+        // Older ci_run envelopes lack observed_at and have no completion time.
+        // Rebuilding them on read would fill those fields and change the bytes;
+        // fetching must return the stored bytes and digests instead.
         let old_envelope = String::from_utf8(
             crate::jcs::canonicalize_exact_integers(&json!({
                 "event_key":KEY,"kind":"ci_run","repo":"owner/repo","action":"updated",
@@ -2925,6 +3021,12 @@ mod tests {
             panic!("stored CI run must remain visible");
         };
         assert_eq!(served.envelope_v2.as_deref(), Some(old_envelope.as_str()));
+        assert!(
+            serde_json::from_str::<Value>(served.envelope_v2.as_ref().unwrap())
+                .unwrap()
+                .get("observed_at")
+                .is_none()
+        );
         assert_eq!(served.digest_v2.as_deref(), Some(old_digest.as_str()));
         assert_eq!(served.body, inserted.body);
         assert_eq!(served.digest, inserted.digest);
