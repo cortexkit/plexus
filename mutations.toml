@@ -21951,3 +21951,19 @@ select = "expected"
 expect_red = ["rest_api::job_log::tests::a_range_read_counts_raw_bytes_while_the_body_is_display_text"]
 build_timeout_s = 3600
 timeout_s = 120
+
+[[control]]
+id = "events-list-default-page-bounded"
+guards = "events op:list without a limit returns one bounded page of DEFAULT_EVENTS_LIST_LIMIT events and a next_after cursor, not the whole unacknowledged backlog"
+file = "crates/plexus-module/src/lib.rs"
+old = "None => Some(DEFAULT_EVENTS_LIST_LIMIT),"
+new = "None => None, /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-module/src/events_get_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["events_get_tests::event_list_without_limit_returns_a_bounded_page_and_a_cursor"]
+expect_message = "an omitted limit must return one bounded page"
+build_timeout_s = 3600
+timeout_s = 120

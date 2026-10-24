@@ -565,7 +565,7 @@ fn events_tool() -> Tool {
                 "subscription_id": {"type": "string"},
                 "subscription": {"type": "string"},
                 "event_ids": {"type": "array", "items": {"type": "string"}},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "op list: page size, default 500. The reply carries next_after while more events remain; pass it back as after to read the next page."},
                 "after": {"type": "object", "properties": {
                     "created_at_ms": {"type": "integer"}, "event_id": {"type": "string", "minLength": 1}
                 }, "required": ["created_at_ms", "event_id"], "additionalProperties": false},

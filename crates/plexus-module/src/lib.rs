@@ -3890,13 +3890,19 @@ fn facade_events_resume(call: &FacadeArguments<'_>) -> Result<Value, ModuleError
     })
 }
 
+/// Page size `events op:list` uses when the caller gives no `limit`. A reply
+/// carrying every unacknowledged event could outgrow a frame once a backlog
+/// builds up, so an omitted limit returns this many and a `next_after` cursor
+/// while more remain.
+const DEFAULT_EVENTS_LIST_LIMIT: usize = 500;
+
 fn facade_events_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
     let state = call.state;
     let arguments = call.arguments;
     let principal_key = call.principal_key;
     Ok({
         let limit = match arguments.get("limit") {
-            None => None,
+            None => Some(DEFAULT_EVENTS_LIST_LIMIT),
             Some(value) => match value.as_u64().filter(|size| (1..=1000).contains(size)) {
                 Some(size) => Some(size as usize),
                 None => {

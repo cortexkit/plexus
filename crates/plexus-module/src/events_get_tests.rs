@@ -244,6 +244,84 @@ async fn event_pages_preserve_full_listing_and_stable_ties() {
     assert_eq!(invalid["error"]["code"], "invalid_request");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn event_list_without_limit_returns_a_bounded_page_and_a_cursor() {
+    let (_scratch, store, path) = test_store("event_default_page");
+    seed_test_events(&path, &store);
+    // Bring the backlog to 600 unacked events. Several events share each
+    // created_at_ms so the cursor's event_id tie-break is exercised too.
+    let mut conn = rusqlite::Connection::open(&path).unwrap();
+    let tx = conn.transaction().unwrap();
+    for n in 0..598 {
+        tx.execute(
+            "INSERT INTO trigger_events(event_id,principal,connection_id,subscription_id,vendor_event_id,payload_hash,payload,kind,observed_at_ms,created_at_ms)
+             VALUES (?1,'direct','conn-github','issue-sub-1',?1,?1,'{}','event',1,?2)",
+            rusqlite::params![format!("bulk-{n:04}"), (n / 7) as i64],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let expected = store.list_events("direct", None, None).unwrap();
+    assert_eq!(expected.len(), 600);
+
+    let first = execute_tool_call(
+        store.clone(),
+        Principal::Direct,
+        None,
+        manifest::EVENTS_TOOL,
+        json!({"op":"list"}),
+    )
+    .await;
+    let first_events = first["result"]["events"].as_array().unwrap().clone();
+    assert_eq!(
+        first_events.len(),
+        DEFAULT_EVENTS_LIST_LIMIT,
+        "an omitted limit must return one bounded page"
+    );
+    assert_eq!(DEFAULT_EVENTS_LIST_LIMIT, 500);
+    assert!(first["result"]["next_after"].is_object());
+
+    let second = execute_tool_call(
+        store.clone(),
+        Principal::Direct,
+        None,
+        manifest::EVENTS_TOOL,
+        json!({"op":"list","after":first["result"]["next_after"]}),
+    )
+    .await;
+    let second_events = second["result"]["events"].as_array().unwrap().clone();
+    assert_eq!(second_events.len(), 100);
+    assert!(second["result"].get("next_after").is_none());
+
+    // The two pages together are the whole backlog in order: nothing is
+    // repeated and nothing is skipped.
+    let mut collected = first_events;
+    collected.extend(second_events);
+    assert_eq!(json!(collected), json!(expected));
+
+    // An explicit limit still sets the page size, up to the 1000 maximum.
+    let explicit = execute_tool_call(
+        store.clone(),
+        Principal::Direct,
+        None,
+        manifest::EVENTS_TOOL,
+        json!({"op":"list","limit":550}),
+    )
+    .await;
+    assert_eq!(explicit["result"]["events"].as_array().unwrap().len(), 550);
+    assert!(explicit["result"]["next_after"].is_object());
+    let maximum = execute_tool_call(
+        store,
+        Principal::Direct,
+        None,
+        manifest::EVENTS_TOOL,
+        json!({"op":"list","limit":1000}),
+    )
+    .await;
+    assert_eq!(json!(maximum["result"]["events"]), json!(expected));
+    assert!(maximum["result"].get("next_after").is_none());
+}
+
 fn basal_flow_scope(agent_id: Option<&str>) -> CallScope {
     CallScope {
         owner: "basal".to_string(),
