@@ -699,45 +699,6 @@ impl Step {
             }),
         }
     }
-
-    /// The step's part of the confirmation prompt.
-    fn summary(&self) -> String {
-        match self {
-            Self::Grant {
-                grantee,
-                kind,
-                risk,
-                actions,
-            } => format!(
-                "grant {kind} {risk} on {} to {}",
-                prompt_list(actions),
-                prompt_label(grantee)
-            ),
-            Self::Filters { stored, .. } => {
-                let mut parts = Vec::new();
-                if let Some(keys) = stored["write_enabling"].as_array() {
-                    let keys = keys
-                        .iter()
-                        .map(|key| key.as_str().unwrap_or_default())
-                        .collect::<Vec<_>>();
-                    parts.push(format!("write_enabling {}", prompt_list(&keys)));
-                }
-                if let Some(values) = stored["values"].as_object() {
-                    for (key, value) in values {
-                        let value = match value {
-                            Value::String(text) => text.clone(),
-                            other => other.to_string(),
-                        };
-                        parts.push(format!("{}={}", prompt_label(key), prompt_label(&value)));
-                    }
-                }
-                format!("set resource filters {}", parts.join(" "))
-            }
-            Self::AllowPolicy { action } => {
-                format!("allow {} without asking", prompt_label(action))
-            }
-        }
-    }
 }
 
 fn pending_label(step: &Step) -> &'static str {
@@ -797,42 +758,62 @@ impl Composite for Plan {
         self.json(rows)
     }
 
-    /// One line naming every change: the connection, how it authenticates,
-    /// its ceiling and every later step. It never names the vault reference.
+    /// Name the connection and app, and count the authority changes. The
+    /// preview carries action, grantee, filter and policy details.
     fn summary(&self) -> String {
         let connect = match self.step {
             ConnectionStep::Create => "connect",
-            ConnectionStep::Reenroll => "re-enroll and connect",
+            ConnectionStep::Reenroll => "re-enroll",
             ConnectionStep::Reuse => "reuse",
         };
         let auth = match self.credential {
-            Some(_) => "using your stored credential",
+            Some(_) => "stored credential",
             None => "anonymous",
         };
         let ceiling = if self.step == ConnectionStep::Reuse {
             "keeping its ceiling".to_string()
         } else {
             format!(
-                "ceiling {} on {}",
+                "ceiling {} on {} actions",
                 self.ceiling_risk,
-                prompt_list(&self.ceiling_actions)
+                self.ceiling_actions.len()
             )
         };
-        let steps = self
-            .steps
-            .iter()
-            .zip(&self.statuses)
-            .map(|(step, status)| match status {
-                Status::ToDo => step.summary(),
-                Status::AlreadyDone => format!("{} (already done)", step.summary()),
-            })
+        let mut grants = std::collections::BTreeMap::new();
+        let mut filters = 0;
+        let mut policies = 0;
+        for step in &self.steps {
+            match step {
+                Step::Grant { kind, risk, .. } => {
+                    let kind = match *kind {
+                        "connection_admin" => "admin",
+                        "events_consume" => "consumer",
+                        other => other,
+                    };
+                    *grants.entry((kind, risk.as_str())).or_insert(0) += 1;
+                }
+                Step::Filters { .. } => filters += 1,
+                Step::AllowPolicy { .. } => policies += 1,
+            }
+        }
+        let grants = grants
+            .into_iter()
+            .map(|((kind, risk), count)| format!("{count} {kind}({risk})"))
             .collect::<Vec<_>>()
-            .join("; ");
+            .join(", ");
+        let mut steps = vec![format!("grant {grants}")];
+        if filters > 0 {
+            steps.push(format!("{filters} filter config"));
+        }
+        if policies > 0 {
+            steps.push(format!("allow {policies} without asking"));
+        }
         format!(
-            "{} {}: {connect} for {}, {auth}, {ceiling}; {steps}",
+            "{} {} for {}: {connect}, {auth}; {ceiling}; {}",
             self.purpose.operation().replace('_', " "),
             prompt_label(&self.connection_id),
             prompt_label(&self.app_key),
+            steps.join("; "),
         )
     }
 }

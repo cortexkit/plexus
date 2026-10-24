@@ -503,42 +503,26 @@ impl Composite for Plan {
         self.json()
     }
 
-    /// One line for the operator's presence prompt naming every effect: the
-    /// provider, the connection, how it authenticates, its ceiling and every
-    /// grantee. It names no vault reference, because prompts carry only
-    /// authority identifiers, and never the instance address.
+    /// Name the provider and connection, but count callers so the prompt does
+    /// not grow with the grant list. Credentials and instance addresses stay out.
     fn summary(&self) -> String {
         let provider = self.provider;
         let connect = match self.step {
             ConnectionStep::Create => "connect",
-            ConnectionStep::Reenroll => "re-enroll and connect",
+            ConnectionStep::Reenroll => "re-enroll",
             ConnectionStep::Reuse => "reuse",
         };
         let auth = match self.credential {
-            Some(_) => format!("using your stored {} key", provider.name),
-            None => "anonymous".to_string(),
+            Some(_) => "stored key",
+            None => "anonymous",
         };
-        let grantees = self
-            .grantees
-            .iter()
-            .map(|grantee| {
-                let label = prompt_label(grantee);
-                if self.present.contains(grantee) {
-                    format!("{label} (already granted)")
-                } else {
-                    label
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
         format!(
-            "add web search provider {}: {connect} {} for {}, {auth}, ceiling {} on {}; grant {GRANT_KIND} {} to {grantees}",
+            "add web search provider {}: {connect} {}, {auth}; ceiling {} on {}; grant {GRANT_KIND} read to {} callers",
             provider.name,
             prompt_label(&self.connection_id),
-            provider.app_key,
             GRANT_RISK,
             provider.action,
-            provider.action,
+            self.grantees.len(),
         )
     }
 }

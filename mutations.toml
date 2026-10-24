@@ -1,6 +1,38 @@
 # Mutation controls; see docs/mutations.md. Edits are temporary and must fail the named tests.
 
 [[control]]
+id = "operator-summary-length-guard"
+guards = "An oversized confirmation summary is refused locally before sending or applying and its refusal is audited"
+file = "crates/plexus-module/src/operator_confirmation.rs"
+old = 'if !valid_summary(summary) {'
+new = 'if false && !valid_summary(summary) { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/operator_confirmation_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::operator_confirmation_tests::oversized_summary_is_refused_locally_without_sending_or_applying"]
+expect_message = "invalid summary must be refused locally"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "onboarding-summary-action-counts"
+guards = "Full onboarding action lists stay in the preview, not the bounded operator summary"
+file = "crates/plexus-module/src/github_bot_admin.rs"
+old = '"{count} writes via {} ({})",'
+new = '"{count} writes {} via {} ({})", prompt_list(&grant.params["actions"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>()), /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-module/src/composite_admin_tests.rs"
+runner = "cargo"
+package = "plexus-module"
+target = "--lib"
+select = "expected"
+expect_red = ["tests::composite_admin_tests::full_onboarding_summary_fits_and_preview_lists_every_action"]
+expect_message = "full onboarding summary must satisfy daemon rules"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "dequeue-admission"
 guards = "Dequeue webhooks are distinct from PR-changed events even when updated_at is unchanged"
 file = "crates/plexus-core/src/store/relay.rs"

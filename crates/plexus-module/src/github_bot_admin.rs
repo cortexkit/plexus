@@ -359,55 +359,56 @@ impl Composite for Plan {
         self.json(steps)
     }
 
-    /// One line naming every change: the handle and agent, what is bound,
-    /// every grant, and the operator's statement about the gh shim. It never
-    /// names the handle's vault credential.
+    /// Keep the handle, agent and shim-manifest statement in the prompt;
+    /// action lists remain in the preview and repositories are counted if needed.
     fn summary(&self) -> String {
         let handle = prompt_label(&self.handle.app_handle_id);
         let agent = prompt_label(&self.handle.agent_id);
         let mut parts = vec![if self.reuse {
-            "reuse the imported handle".to_string()
+            "reuse app".to_string()
         } else {
-            format!(
-                "import the handle (app {}) with its inventory grants on {}",
-                self.handle.app_id,
-                prompt_list(&self.imported_repositories)
-            )
+            format!("import app {}", self.handle.app_id)
         }];
-        parts.push("prove its installation".to_string());
-        if !self.repositories.is_empty() {
-            parts.push(format!("bind {}", prompt_list(&self.repositories)));
-        }
+        let repositories = self
+            .imported_repositories
+            .iter()
+            .chain(&self.repositories)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut grants = Vec::new();
         for grant in &self.grants {
-            let actions = grant.params["actions"]
-                .as_array()
-                .map(|actions| actions.iter().filter_map(Value::as_str).collect::<Vec<_>>())
-                .unwrap_or_default();
-            parts.push(match grant.kind {
-                "read" => format!(
-                    "grant reads {} to {}",
-                    prompt_list(&actions),
-                    prompt_label(grant.params["module"].as_str().unwrap_or_default())
-                ),
-                "poll" => format!("grant poll reads {}", prompt_list(&actions)),
+            let count = grant.params["actions"].as_array().map_or(0, Vec::len);
+            grants.push(match grant.kind {
+                "read" => format!("{count} reads"),
+                "poll" => format!("{count} poll read"),
                 _ => format!(
-                    "grant writes {} carried by {} at effect {}",
-                    prompt_list(&actions),
+                    "{count} writes via {} ({})",
                     prompt_label(grant.params["module"].as_str().unwrap_or_default()),
                     prompt_label(grant.params["effect"].as_str().unwrap_or_default())
                 ),
             });
         }
-        if !self.newly_bound.is_empty() {
-            parts.push(format!(
-                "you state AFT's gh shim manifest maps {} to agent {agent}",
-                prompt_list(&self.newly_bound)
-            ));
+        let repo_index = parts.len();
+        if !repositories.is_empty() {
+            parts.push(format!("bind {}", prompt_list(&repositories)));
         }
-        format!(
-            "onboard GitHub bot {handle} for agent {agent}: {}",
-            parts.join("; ")
-        )
+        parts.push(format!("grant {}", grants.join(", ")));
+        if !self.newly_bound.is_empty() {
+            parts.push("you state AFT's manifest maps it".to_string());
+        }
+        let render = |parts: &[String]| {
+            format!(
+                "onboard bot {handle} for agent {agent}: {}",
+                parts.join("; ")
+            )
+        };
+        let named = render(&parts);
+        if named.chars().count() <= 200 || repositories.is_empty() {
+            return named;
+        }
+        parts[repo_index] = format!("bind {} repositories", repositories.len());
+        render(&parts)
     }
 }
 

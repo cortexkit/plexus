@@ -82,6 +82,12 @@ async fn forward(mut module: TcpStream, connection: ConnectionInfo, approvals: A
                 && frame.header.ty == FrameType::Request
                 && serde_json::from_slice::<OperatorConfirmRequest>(&frame.body).is_ok()
             {
+                let request: OperatorConfirmRequest = serde_json::from_slice(&frame.body).unwrap();
+                assert!(
+                    plexus_module::operator_confirmation::valid_summary(&request.summary),
+                    "invalid operator summary: {}",
+                    request.summary
+                );
                 let reply = Frame::build_with_version(
                     frame.header.ver,
                     FrameType::Response,

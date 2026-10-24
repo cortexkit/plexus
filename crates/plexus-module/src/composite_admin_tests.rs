@@ -153,13 +153,11 @@ async fn an_applied_write_connection_asks_once_and_writes_what_the_manual_comman
     for named in [
         WRITE_CONNECTION,
         WRITE_APP,
-        "using your stored credential",
-        "ceiling write on held_write",
-        "grant connection_admin write on held_write to direct",
-        "set resource filters write_enabling team team=core",
-        "grant invoke write on held_write to reserved:broca",
-        "grant invoke write on held_write to reserved:basal",
-        "allow held_write without asking",
+        "stored credential",
+        "ceiling write on 1 actions",
+        "grant 1 admin(write), 2 invoke(write)",
+        "1 filter config",
+        "allow 1 without asking",
     ] {
         assert!(summary.contains(named), "{named} missing from {summary}");
     }
@@ -482,9 +480,8 @@ async fn an_applied_poll_connection_asks_once_and_writes_what_the_manual_command
     );
     for named in [
         "conn-github-actions",
-        "ceiling read on list_workflow_runs,get_workflow_run",
-        "grant poll read on list_workflow_runs,get_workflow_run,list_jobs_for_workflow_run_attempt,get_repository to direct",
-        "grant events_consume read on list_workflow_runs to reserved:basal",
+        "ceiling read on 4 actions",
+        "grant 1 consumer(read), 1 poll(read)",
     ] {
         assert!(
             outcome.prompts[0].contains(named),
@@ -701,8 +698,8 @@ async fn an_applied_widen_and_grant_asks_once_and_writes_what_the_manual_command
     );
     for named in [
         "conn-github-actions",
-        "widen the ceiling by get_job,github.actions.job_log at its read risk",
-        "grant invoke read on get_job,github.actions.job_log to reserved:basal",
+        "add 2 ceiling actions at read risk",
+        "grant invoke read on 2 actions to 1 callers",
     ] {
         assert!(
             outcome.prompts[0].contains(named),
@@ -833,6 +830,7 @@ async fn a_rerun_of_widen_and_grant_reuses_the_ceiling_and_the_grant() {
 /// read so a test can prove when GitHub is contacted.
 struct CountingInstallation {
     reads: Arc<AtomicUsize>,
+    repositories: &'static [&'static str],
 }
 
 impl plexus_core::github::control::InstallationReader for CountingInstallation {
@@ -843,8 +841,8 @@ impl plexus_core::github::control::InstallationReader for CountingInstallation {
         _: usize,
     ) -> Result<Value, String> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        Ok(json!({"total_count": 2,
-            "repositories": [{"full_name": "org/one"}, {"full_name": "org/two"}]}))
+        Ok(json!({"total_count": self.repositories.len(),
+            "repositories": self.repositories.iter().map(|name| json!({"full_name": name})).collect::<Vec<_>>()}))
     }
 }
 
@@ -864,6 +862,7 @@ fn github_state(
     runtime.github_handle_credentials = Some(Arc::new(AnyHandleToken));
     runtime.github_control_reader = Some(Arc::new(CountingInstallation {
         reads: Arc::clone(reads),
+        repositories: &["org/one", "org/two"],
     }));
     if !home {
         runtime.connector_home = Arc::new(crate::connector_home::ConnectorHome::unavailable());
@@ -912,6 +911,147 @@ fn onboard_params(dry_run: bool) -> Value {
     })
 }
 
+#[tokio::test]
+async fn full_onboarding_summary_fits_and_preview_lists_every_action() {
+    let mut fixture = github_fixture("full-onboard-summary");
+    const REPOS: &[&str] = &[
+        "cortexkit/motor",
+        "cortexkit/prefrontal",
+        "cortexkit/plexus",
+    ];
+    const WRITES: &[&str] = &[
+        "add_issue_comment",
+        "add_pr_review",
+        "add_reaction",
+        "create_issue",
+        "create_pull_request",
+        "edit_issue",
+        "update_issue_comment",
+        "close_issue",
+        "reopen_issue",
+        "mark_pull_request_ready",
+        "convert_pull_request_to_draft",
+    ];
+    let reads = plexus_core::github::reads::bot::GRANT_ACTIONS;
+    Arc::get_mut(&mut fixture.state)
+        .unwrap()
+        .runtime
+        .github_control_reader = Some(Arc::new(CountingInstallation {
+        reads: fixture.reads.clone(),
+        repositories: REPOS,
+    }));
+    let mut params = onboard_params(true);
+    params["inventory"]["handles"][0]["app_handle_id"] = json!("motor-alfonso");
+    params["inventory"]["handles"][0]["credential_id"] = json!("github_app:motor-alfonso");
+    params["inventory"]["handles"][0]["agent_id"] = json!("agent_ef98bc82ef005a63");
+    params["inventory"]["handles"][0]["app_id"] = json!(5453881);
+    params["inventory"]["handles"][0]["grants"][0]["repository"] = json!(REPOS[0]);
+    params["repositories"] = json!(REPOS);
+    params["actions"] = json!(WRITES);
+    params["read_actions"] = json!(reads);
+    let preview = call(&fixture.state, &fixture.path, ONBOARD, params.clone()).await;
+    let result = &preview.reply["result"];
+    let summary = result["summary"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", preview.reply));
+    assert!(
+        operator_confirmation::valid_summary(summary),
+        "full onboarding summary must satisfy daemon rules: {summary}"
+    );
+    assert_eq!(summary, "onboard bot motor-alfonso for agent agent_ef98bc82ef005a63: import app 5453881; bind 3 repositories; grant 11 writes via reserved:aft (allow), 6 reads, 1 poll read; you state AFT's manifest maps it");
+    let steps = result["steps"].as_array().unwrap();
+    for (step, expected) in [
+        ("grant_writes", json!(WRITES)),
+        ("grant_reads", json!(reads)),
+        ("grant_poll", json!(["github.issue.get"])),
+    ] {
+        let row = steps
+            .iter()
+            .find(|row| row["step"] == step)
+            .unwrap_or_else(|| panic!("missing {step} in {result}"));
+        let actual = row["params"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = expected
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, expected, "preview must list every {step} action");
+    }
+    assert_eq!(
+        result["installation_repositories"],
+        json!([
+            "cortexkit/motor",
+            "cortexkit/plexus",
+            "cortexkit/prefrontal"
+        ])
+    );
+    assert!(preview.prompts.is_empty());
+    params["dry_run"] = json!(false);
+    let declined = call_with(
+        &fixture.state,
+        &fixture.path,
+        ONBOARD,
+        params,
+        Err(subc_protocol::error_codes::OPERATOR_DECLINED),
+    )
+    .await;
+    assert_eq!(declined.prompts, [summary]);
+    assert_eq!(
+        declined.reply["error"]["code"],
+        "operator_confirmation_declined"
+    );
+}
+
+#[tokio::test]
+async fn large_connection_and_widen_plans_have_daemon_valid_summaries() {
+    let callers = (0..128)
+        .map(|i| format!("reserved:agent_{i:016x}"))
+        .collect::<Vec<_>>();
+    let write = write_fixture("large-write-summary", None);
+    let poll = poll_fixture("large-poll-summary", None);
+    let widen = widen_fixture("large-widen-summary");
+    let mut write_request = write_params(true);
+    write_request["grantees"] = json!(callers);
+    write_request["resource_filters"] =
+        json!({"write_enabling": ["team"], "values": {"team": "x".repeat(512)}});
+    let mut poll_request = poll_params(true);
+    poll_request["consumers"] = json!(callers);
+    let mut widen_request = widen_params(true);
+    widen_request["grantees"] = json!(callers);
+    widen_request["actions"] = json!(POLL_READS.iter().chain(&CI_FLOW).collect::<Vec<_>>());
+    for (fixture, method, params) in [
+        (&write, WRITE, write_request),
+        (&poll, POLL, poll_request),
+        (&widen, WIDEN, widen_request),
+    ] {
+        let outcome = call(&fixture.state, &fixture.path, method, params).await;
+        let summary = outcome.reply["result"]["summary"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{}", outcome.reply));
+        assert!(
+            operator_confirmation::valid_summary(summary),
+            "{method}: {summary}"
+        );
+        assert!(
+            summary.contains("128"),
+            "{method} must count callers: {summary}"
+        );
+        assert!(outcome.prompts.is_empty());
+    }
+}
+
+#[test]
+fn prompt_labels_preserve_full_subject_identifiers() {
+    let subject = format!("connection_{}", "a".repeat(80));
+    assert_eq!(crate::composite_admin::prompt_label(&subject), subject);
+}
+
 const GITHUB_TABLES: [(&str, &str); 8] = [
     ("github_app_handle", ""),
     ("github_repo_binding", ""),
@@ -943,13 +1083,10 @@ async fn an_applied_onboarding_asks_once_and_writes_what_the_manual_commands_wri
     for named in [
         HANDLE,
         AGENT,
-        "import the handle (app 42) with its inventory grants on org/one",
-        "prove its installation",
-        "bind org/two",
-        "grant writes add_issue_comment carried by reserved:aft at effect allow",
-        "grant reads github.repo.get to reserved:aft",
-        "grant poll reads github.issue.get",
-        "you state AFT's gh shim manifest maps org/one,org/two to agent agent-onboard",
+        "import app 42",
+        "bind org/one,org/two",
+        "grant 1 writes via reserved:aft (allow), 1 reads, 1 poll read",
+        "you state AFT's manifest maps it",
     ] {
         assert!(summary.contains(named), "{named} missing from {summary}");
     }

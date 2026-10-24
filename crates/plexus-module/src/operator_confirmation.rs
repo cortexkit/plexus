@@ -12,6 +12,24 @@ use crate::{manifest, scope_reader::PendingControlReplies, RouteFrameContext};
 
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(290);
 
+/// Copied from subc-daemon 0.37.0, src/operator_confirm.rs::valid_summary.
+/// Target the deployed daemon's contract, independently of the test daemon version.
+pub fn valid_summary(summary: &str) -> bool {
+    !summary.is_empty()
+        && summary.chars().count() <= 200
+        && summary.trim() == summary
+        && !summary.chars().any(|c| {
+            c.is_control()
+                || matches!(c,
+                    '\u{200b}'..='\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2028}' | '\u{2029}'
+                    | '\u{2060}'..='\u{2069}'
+                    | '\u{feff}'
+                )
+        })
+}
+
 #[derive(Debug)]
 pub(crate) struct Refusal {
     pub code: &'static str,
@@ -201,6 +219,12 @@ pub(crate) async fn confirm_with_timeout(
     pending: &Arc<PendingControlReplies>,
     timeout: Duration,
 ) -> Result<(), Refusal> {
+    if !valid_summary(summary) {
+        return Err(Refusal {
+            code: "operator_summary_invalid",
+            reason: "operator confirmation summary must be 1–200 characters, with no surrounding whitespace, control characters or invisible formatting characters".to_string(),
+        });
+    }
     let deadline = tokio::time::Instant::now() + timeout;
     let body = serde_json::to_vec(&OperatorConfirmRequest::new(
         summary,
@@ -283,8 +307,13 @@ pub(crate) async fn approving_test_peer(
         .expect("test peer request deadline")
     {
         if frame.header.channel == 0 && frame.header.ty == FrameType::Request {
-            let _: OperatorConfirmRequest =
+            let request: OperatorConfirmRequest =
                 serde_json::from_slice(&frame.body).expect("confirmation request");
+            assert!(
+                valid_summary(&request.summary),
+                "invalid operator summary: {}",
+                request.summary
+            );
             assert!(pending.complete(
                 Frame::build_with_version(
                     frame.header.ver,

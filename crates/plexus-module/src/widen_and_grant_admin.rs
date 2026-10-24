@@ -20,8 +20,7 @@ use subc_protocol::Frame;
 use tokio::sync::mpsc;
 
 use crate::composite_admin::{
-    self, named_actions, named_principals, prompt_label, prompt_list, refusal, Caller, Composite,
-    ConnectorHome,
+    self, named_actions, named_principals, prompt_label, refusal, Caller, Composite, ConnectorHome,
 };
 use crate::{ceremony, manifest, ModuleError, ModuleState, RouteBindings, RouteFrameContext};
 
@@ -271,7 +270,7 @@ impl Composite for Plan {
         self.json(&self.widening, &[])
     }
 
-    /// One line naming the actions added to the ceiling and every grantee.
+    /// Count actions and callers; the preview retains their full lists.
     fn summary(&self) -> String {
         let added = self.widening["added_actions"]
             .as_array()
@@ -281,30 +280,18 @@ impl Composite for Plan {
             "the ceiling already holds every action".to_string()
         } else {
             format!(
-                "widen the ceiling by {} at its {} risk",
-                prompt_list(&added),
+                "add {} ceiling actions at {} risk",
+                added.len(),
                 prompt_label(self.widening["ceiling_risk"].as_str().unwrap_or("recorded"))
             )
         };
-        let grantees = self
-            .grantees
-            .iter()
-            .map(|grantee| {
-                let label = prompt_label(grantee);
-                if self.present.contains(grantee) {
-                    format!("{label} (already granted)")
-                } else {
-                    label
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
         format!(
-            "widen and grant on {}: {widen}; grant {} {} on {} to {grantees}",
+            "widen and grant on {}: {widen}; grant {} {} on {} actions to {} callers",
             prompt_label(&self.connection_id),
             prompt_label(&self.kind),
             prompt_label(&self.risk),
-            prompt_list(&self.actions),
+            self.actions.len(),
+            self.grantees.len(),
         )
     }
 }

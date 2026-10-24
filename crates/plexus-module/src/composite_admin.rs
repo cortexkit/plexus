@@ -5,7 +5,7 @@
 //! management operations, and each one that widens authority asks the
 //! operator for presence. A composite command instead plans every step,
 //! refuses before asking when anything in the plan is wrong, asks exactly
-//! once with a summary naming every change, and then runs the same code paths
+//! once with a compact summary of the change, and then runs the same code paths
 //! the manual commands use, so it writes the same rows. Without `dry_run:
 //! false` it only previews: nothing is written and no vendor is contacted
 //! beyond what planning itself must read.
@@ -32,8 +32,9 @@ pub(crate) trait Composite {
     fn dry_run(&self) -> bool;
     /// Everything an apply would do, for the preview reply.
     fn preview(&self) -> Value;
-    /// The one-line confirmation prompt. It names every change and never a
-    /// vault credential name, an instance address or a secret.
+    /// The compact confirmation prompt names the change; the preview lists
+    /// every item. The prompt never names a vault credential, instance address
+    /// or secret.
     fn summary(&self) -> String;
 }
 
@@ -147,7 +148,6 @@ pub(crate) fn prompt_label(value: &str) -> String {
                 '_'
             }
         })
-        .take(60)
         .collect()
 }
 

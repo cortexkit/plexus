@@ -180,6 +180,12 @@ pub(super) fn count(path: &Path, query: &str) -> i64 {
 }
 
 fn answer(frame: &Frame, decision: Result<(), &str>) -> Frame {
+    let request: OperatorConfirmRequest = serde_json::from_slice(&frame.body).unwrap();
+    assert!(
+        operator_confirmation::valid_summary(&request.summary),
+        "invalid operator summary: {}",
+        request.summary
+    );
     let (ty, body) = match decision {
         Ok(()) => (
             FrameType::Response,
@@ -301,6 +307,31 @@ fn grantees(reply: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
+#[tokio::test]
+async fn longest_provider_with_all_callers_has_a_daemon_valid_summary() {
+    let fixture = fixture("longest-provider-summary");
+    let provider = plexus_core::web_search::providers::PROVIDER_NAMES
+        .iter()
+        .max_by_key(|p| p.name.len())
+        .unwrap();
+    install(&fixture.store, provider.app_key);
+    let outcome = add(
+        &fixture.state,
+        &fixture.path,
+        json!({"provider": provider.name, "grantees": CALLERS}),
+        Ok(()),
+    )
+    .await;
+    let summary = outcome.reply["result"]["summary"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{}", outcome.reply));
+    assert!(operator_confirmation::valid_summary(summary), "{summary}");
+    assert!(summary.contains(provider.name));
+    assert!(summary.contains("3 callers"));
+    assert!(!summary.contains("private-instance"));
+    assert!(!summary.contains("apikey:"));
+}
+
 /// A vendor that counts every connection and closes it at once, so MCP
 /// discovery against it fails fast and every contact is visible.
 pub(super) struct CountingVendor {
@@ -374,12 +405,10 @@ async fn an_applied_add_asks_once_and_writes_what_the_manual_commands_write() {
     for named in [
         "tavily",
         "conn-web-search-tavily",
-        "using your stored tavily key",
+        "stored key",
         "ceiling read on search",
-    ]
-    .into_iter()
-    .chain(CALLERS)
-    {
+        "grant invoke read to 3 callers",
+    ] {
         assert!(summary.contains(named), "{named} missing from {summary}");
     }
     let result = &outcome.reply["result"];

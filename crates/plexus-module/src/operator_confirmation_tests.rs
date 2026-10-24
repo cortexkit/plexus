@@ -242,7 +242,122 @@ fn route() -> RouteFrameContext {
     }
 }
 
+#[test]
+fn summary_validator_matches_daemon_boundaries() {
+    use operator_confirmation::valid_summary;
+    assert!(valid_summary("a"));
+    assert!(valid_summary(&"é".repeat(200)));
+    assert!(!valid_summary(&"é".repeat(201)));
+    for text in [
+        "",
+        " leading",
+        "trailing ",
+        "\u{a0}leading",
+        "trailing\u{3000}",
+    ] {
+        assert!(!valid_summary(text), "accepted {text:?}");
+    }
+    for c in (0..=0x9f)
+        .filter_map(char::from_u32)
+        .filter(|c| c.is_control())
+        .chain((0x200b..=0x200f).filter_map(char::from_u32))
+        .chain((0x202a..=0x202e).filter_map(char::from_u32))
+        .chain((0x2060..=0x2069).filter_map(char::from_u32))
+        .chain(['\u{2028}', '\u{2029}', '\u{feff}'])
+    {
+        assert!(!valid_summary(&format!("before{c}after")), "accepted {c:?}");
+    }
+    for c in [
+        '\u{200a}', '\u{2010}', '\u{2027}', '\u{202f}', '\u{205f}', '\u{206a}', '\u{fefe}',
+    ] {
+        assert!(valid_summary(&format!("before{c}after")), "rejected {c:?}");
+    }
+}
+
+#[tokio::test]
+async fn oversized_summary_is_refused_locally_without_sending_or_applying() {
+    use crate::composite_admin::{self, Caller, Composite, ConnectorHome};
+    struct Oversized;
+    impl Composite for Oversized {
+        fn dry_run(&self) -> bool {
+            false
+        }
+        fn preview(&self) -> Value {
+            json!({})
+        }
+        fn summary(&self) -> String {
+            "x".repeat(201)
+        }
+    }
+    let case = Case::new(manifest::ADMIN_GRANT_OP);
+    let before = case.snapshot(false);
+    let (writer, mut frames) = mpsc::channel(4);
+    let bindings = Arc::new(RouteBindings::new());
+    bindings
+        .insert(route().channel, route().epoch, Principal::Direct)
+        .unwrap();
+    let applied = std::sync::atomic::AtomicBool::new(false);
+    let run = composite_admin::run(
+        Caller {
+            route: route(),
+            writer: &writer,
+            state: &case.state,
+            route_bindings: &bindings,
+            method: case.method,
+        },
+        ConnectorHome::BeforeApplying,
+        || Ok(Oversized),
+        |_| {
+            applied.store(true, std::sync::atomic::Ordering::SeqCst);
+            json!({"applied": true})
+        },
+    );
+    // Even a peer willing to approve invalid text must never receive it.
+    let peer = async {
+        if let Ok(Some(frame)) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), frames.recv()).await
+        {
+            let reply = Frame::build_with_version(
+                frame.header.ver,
+                FrameType::Response,
+                wire::control_flags(),
+                0,
+                0,
+                frame.header.corr,
+                serde_json::to_vec(&OperatorConfirmReply::confirmed()).unwrap(),
+            )
+            .unwrap();
+            assert!(bindings.control_replies.complete(reply));
+            true
+        } else {
+            false
+        }
+    };
+    let (result, sent) = tokio::join!(run, peer);
+    let response = result.unwrap();
+    assert_eq!(
+        response["error"]["code"], "operator_summary_invalid",
+        "invalid summary must be refused locally"
+    );
+    assert!(!sent, "invalid summary must not be sent");
+    assert!(!applied.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        case.snapshot(false),
+        before,
+        "invalid summary must write no authority rows"
+    );
+    let db = rusqlite::Connection::open(&case.path).unwrap();
+    let audits: i64 = db.query_row("SELECT COUNT(*) FROM audit_journal WHERE gate = 'operator_confirmation' AND reason_code = 'operator_summary_invalid' AND decision = 'deny' AND outcome = 'refused'", [], |row| row.get(0)).unwrap();
+    assert_eq!(audits, 1, "local summary refusal must be audited");
+}
+
 fn answer(frame: &Frame, response: Result<(), &str>) -> Frame {
+    let request: OperatorConfirmRequest = serde_json::from_slice(&frame.body).unwrap();
+    assert!(
+        operator_confirmation::valid_summary(&request.summary),
+        "invalid operator summary: {}",
+        request.summary
+    );
     let (ty, body) = match response {
         Ok(()) => (
             FrameType::Response,
