@@ -318,18 +318,22 @@ async fn longest_provider_with_all_callers_has_a_daemon_valid_summary() {
     let outcome = add(
         &fixture.state,
         &fixture.path,
-        json!({"provider": provider.name, "grantees": CALLERS}),
-        Ok(()),
+        json!({"provider": provider.name, "grantees": CALLERS, "dry_run": false}),
+        Err(subc_protocol::error_codes::OPERATOR_DECLINED),
     )
     .await;
-    let summary = outcome.reply["result"]["summary"]
-        .as_str()
+    let summary = outcome
+        .prompts
+        .first()
         .unwrap_or_else(|| panic!("{}", outcome.reply));
     assert!(operator_confirmation::valid_summary(summary), "{summary}");
     assert!(summary.contains(provider.name));
     assert!(summary.contains("3 callers"));
-    assert!(!summary.contains("private-instance"));
     assert!(!summary.contains("apikey:"));
+    assert_eq!(
+        outcome.reply["error"]["code"],
+        "operator_confirmation_declined"
+    );
 }
 
 /// A vendor that counts every connection and closes it at once, so MCP
