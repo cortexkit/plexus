@@ -3,7 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use cortexkit_project_identity::{
+    EnumerateParams, EnumerateReply, Outcome, Request, ResolveRemoteParams, ResolveRemoteReply,
+    ResolveRemoteStatus,
+};
 use cortexkit_store::StoreError;
+#[cfg(test)]
 use serde_json::{json, Value};
 
 use crate::github_identity::PrefrontalRoutePeer;
@@ -24,7 +29,7 @@ pub enum RemoteResolution {
 /// to call external services.
 pub trait RepositoryRegistry: Send + Sync {
     fn resolve_remote(&self, owner: &str, repo: &str) -> RemoteResolution;
-    fn enumerate(&self) -> Option<Value>;
+    fn enumerate(&self) -> Option<EnumerateReply>;
 }
 
 /// Entorhinal uses management requests with `method` and `params`, and wraps
@@ -39,33 +44,44 @@ impl EntorhinalRepositoryRegistry {
 }
 impl RepositoryRegistry for EntorhinalRepositoryRegistry {
     fn resolve_remote(&self, owner: &str, repo: &str) -> RemoteResolution {
-        let Ok(reply) = self
-            .peer
-            .call("resolve_remote", json!({"owner":owner,"repo":repo}))
+        let request = Request::new(
+            "resolve_remote",
+            ResolveRemoteParams::new(owner.into(), repo.into()),
+        );
+        let Ok(reply) = self.peer.call(
+            &request.method,
+            serde_json::to_value(request.params).expect("remote params serialize"),
+        ) else {
+            return RemoteResolution::Unavailable;
+        };
+        let Ok(Outcome::Success(reply)) =
+            serde_json::from_value::<Outcome<ResolveRemoteReply>>(reply)
         else {
             return RemoteResolution::Unavailable;
         };
-        let Some(reply) = reply.get("result") else {
-            return RemoteResolution::Unavailable;
-        };
-        match reply.get("status").and_then(Value::as_str) {
-            Some("found") => reply
-                .get("projectId")
-                .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-                .map(|id| RemoteResolution::Found(id.into()))
-                .unwrap_or(RemoteResolution::Unavailable),
-            Some("none") => RemoteResolution::None,
-            Some("ambiguous") => RemoteResolution::Ambiguous,
+        match reply.result.status {
+            ResolveRemoteStatus::Found(found) if !found.project_id.trim().is_empty() => {
+                RemoteResolution::Found(found.project_id)
+            }
+            ResolveRemoteStatus::None => RemoteResolution::None,
+            ResolveRemoteStatus::Ambiguous(_) => RemoteResolution::Ambiguous,
+            ResolveRemoteStatus::Other(_) => RemoteResolution::Unavailable,
             _ => RemoteResolution::Unavailable,
         }
     }
-    fn enumerate(&self) -> Option<Value> {
-        self.peer
-            .call("enumerate", json!({}))
-            .ok()?
-            .get("result")
-            .cloned()
+    fn enumerate(&self) -> Option<EnumerateReply> {
+        let request = Request::new("enumerate", EnumerateParams::new(None));
+        let reply = self
+            .peer
+            .call(
+                &request.method,
+                serde_json::to_value(request.params).expect("enumerate params serialize"),
+            )
+            .ok()?;
+        match serde_json::from_value::<Outcome<EnumerateReply>>(reply).ok()? {
+            Outcome::Success(reply) => Some(reply.result),
+            _ => None,
+        }
     }
 }
 
@@ -227,10 +243,7 @@ fn reconcile_with_budget(
     report.unconfirmed_hand.sort();
     report.deferred_hand = hand.into_iter().collect();
     if !report.unanswered {
-        match registry
-            .enumerate()
-            .and_then(|reply| owned_repositories(&reply))
-        {
+        match registry.enumerate().and_then(owned_repositories) {
             Some(remotes) => {
                 let mut remotes: Vec<_> = remotes.into_iter().collect();
                 resume_order(&mut remotes, resume_after);
@@ -319,45 +332,33 @@ fn reconcile_with_budget(
     Ok(report)
 }
 
-fn owned_repositories(reply: &Value) -> Option<BTreeMap<(String, String), BTreeSet<String>>> {
+fn owned_repositories(
+    reply: EnumerateReply,
+) -> Option<BTreeMap<(String, String), BTreeSet<String>>> {
     let mut owned = BTreeMap::<_, BTreeSet<String>>::new();
-    for project in reply.get("projects")?.as_array()? {
-        let Some(id) = project
-            .get("projectId")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-        else {
+    for project in reply.projects {
+        let id = project.project_id;
+        if id.is_empty() {
             continue;
-        };
-        let Some(roots) = project.get("rootRecords").and_then(Value::as_array) else {
+        }
+        let Some(roots) = project.root_records else {
             continue;
         };
         for root in roots {
-            let Some(remotes) = root.get("remotes").and_then(Value::as_array) else {
-                continue;
-            };
-            for remote in remotes {
-                if remote.get("owned").and_then(Value::as_bool) != Some(true) {
+            for remote in root.remotes {
+                if !remote.owned {
                     continue;
                 }
-                let Some(owner) = remote
-                    .get("owner")
-                    .and_then(Value::as_str)
-                    .filter(|v| !v.is_empty())
-                else {
+                if remote.owner.is_empty() || remote.repo.is_empty() {
                     continue;
-                };
-                let Some(repo) = remote
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .filter(|v| !v.is_empty())
-                else {
-                    continue;
-                };
+                }
                 owned
-                    .entry((owner.to_ascii_lowercase(), repo.to_ascii_lowercase()))
+                    .entry((
+                        remote.owner.to_ascii_lowercase(),
+                        remote.repo.to_ascii_lowercase(),
+                    ))
                     .or_default()
-                    .insert(id.into());
+                    .insert(id.clone());
             }
         }
     }
@@ -419,8 +420,8 @@ mod resume_tests {
                 RemoteResolution::Found(format!("project-{repo}"))
             }
         }
-        fn enumerate(&self) -> Option<Value> {
-            Some(json!({"projects": []}))
+        fn enumerate(&self) -> Option<EnumerateReply> {
+            Some(EnumerateReply::new(vec![], vec![], 0, "test".into()))
         }
     }
 
