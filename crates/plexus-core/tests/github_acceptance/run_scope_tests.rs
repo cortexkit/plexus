@@ -148,7 +148,16 @@ fn run_scope_described_before_each_unsent_leg() {
     let close =
         json!({"verb":"issue close", "repository":"org/repo", "number":"42", "comment":"done"});
     let reply = send(&f, &close, "between", Some(&run()));
-    refusal(&reply, "scope_ended", json!(["add_issue_comment"]));
+    assert!(
+        reply["result"].get("transmission").is_none(),
+        "partial run refusal must not claim nothing was sent: {reply}"
+    );
+    assert_eq!(
+        reply["result"],
+        json!({"status":"refused", "refusal_code":"scope_ended", "scope_role":"run",
+            "legs_sent":["add_issue_comment"]}),
+        "run scope must refuse the unsent write: {reply}"
+    );
     assert_eq!(f.github.actions(), ["add_issue_comment"]);
     assert_eq!(*f.github.comments.lock().unwrap(), ["done"]);
     let row = f

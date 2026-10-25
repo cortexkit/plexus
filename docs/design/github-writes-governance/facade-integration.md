@@ -54,9 +54,10 @@ epoch, and its structured live parent must match the route's owner, ref and epoc
 Plexus also checks its own clock against the live stamp's `expires_at_ms`, when
 present; a daemon reply that still says live cannot extend an expired run.
 
-Run refusals carry `scope_role: run` and `transmission: not_sent`, with `legs_sent`
-listing any earlier writes that remain sent. Ended, replaced, expired or absent
-after owner sync means `scope_ended`; a different parent means
+Run refusals carry `scope_role: run`, with `legs_sent` listing any earlier writes
+that remain sent. `transmission: not_sent` is included only when `legs_sent` is
+empty; a partial refusal omits `transmission` because earlier writes were sent.
+Ended, replaced, expired or absent after owner sync means `scope_ended`; a different parent means
 `run_scope_not_child`. A missing parent or stamp, a failed read or an unconfigured
 owner means `scope_unverifiable`. An owner not yet synced means `scope_not_synced`.
 The latter two release the claim, allowing an explicit same-nonce retry to resume

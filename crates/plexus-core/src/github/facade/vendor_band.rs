@@ -294,7 +294,7 @@ fn stop_for_scope(
     let legs_sent: Vec<&str> = sent.iter().map(|(action, _)| *action).collect();
     let mut value = json!({"status":"refused", "refusal_code":code, "legs_sent":legs_sent,
         "scope_role":scope_role});
-    if scope_role == "run" {
+    if scope_role == "run" && sent.is_empty() {
         value["transmission"] = json!("not_sent");
     }
     if matches!(

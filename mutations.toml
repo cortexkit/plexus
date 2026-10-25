@@ -1,6 +1,22 @@
 # Mutation controls; see docs/mutations.md. Edits are temporary and must fail the named tests.
 
 [[control]]
+id = "bot-run-scope-partial-transmission"
+guards = "A partial run-scope refusal cannot claim no GitHub writes were sent"
+file = "crates/plexus-core/src/github/facade/vendor_band.rs"
+old = 'if scope_role == "run" && sent.is_empty() {'
+new = 'if scope_role == "run" { /* NON-VACUITY BREAK */'
+test_file = "crates/plexus-core/tests/github_acceptance/run_scope_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test github_acceptance"
+select = "expected"
+expect_red = ["run_scope_tests::run_scope_described_before_each_unsent_leg"]
+expect_message = "partial run refusal must not claim nothing was sent"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "bot-run-scope-per-leg"
 guards = "Every unsent write describes the caller run even while the authoritative route remains live"
 file = "crates/plexus-core/src/github/facade/vendor_band.rs"
