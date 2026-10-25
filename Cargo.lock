@@ -358,6 +358,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d14cf5bd9d4b76fcf4d5380550dd11f9191598309ecaacc4805e317b2d6deb90"
 
 [[package]]
+name = "cortexkit-project-identity"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f81d986473917405bcbc2fcec6dfc0e6c37f33804ccf23448d1ecb25a594435e"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cortexkit-role-tool-provider"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1638,6 +1648,7 @@ dependencies = [
  "base64",
  "chrono",
  "cortexkit-log",
+ "cortexkit-project-identity",
  "cortexkit-store",
  "cortexkit-store-types",
  "getrandom 0.3.4",
