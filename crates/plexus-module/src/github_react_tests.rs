@@ -230,6 +230,61 @@ fn bot_request(nonce: &str, reaction: &str) -> Value {
     }})
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_bot_request_forwards_top_level_expectation() {
+    let (state, transport, scratch) = runtime("expect", "aft");
+    let generation = state.store().github_repo_binding_generation().unwrap();
+    let expected = json!({"app_handle_id":"app-fixture", "repo_binding_generation":generation});
+    for (nonce, expect, code) in [
+        (
+            "handle",
+            json!({"app_handle_id":"old-app", "repo_binding_generation":generation}),
+            "stale_authority{dimension: expected_handle}",
+        ),
+        (
+            "binding",
+            json!({"app_handle_id":"app-fixture", "repo_binding_generation":generation + 1}),
+            "stale_authority{dimension: expected_binding}",
+        ),
+        (
+            "invalid",
+            json!({"app_handle_id":"app-fixture", "repo_binding_generation":generation,"unexpected":true}),
+            "invalid_request",
+        ),
+    ] {
+        let mut arguments = bot_request(nonce, "eyes");
+        arguments["expect"] = expect;
+        let reply = call(&state, Some(stamp(true, false)), "github", arguments).await;
+        assert_eq!(reply["result"]["refusal_code"], code, "{reply}");
+        assert_eq!(reply["result"]["transmission"], "not_sent");
+        if nonce == "invalid" {
+            assert_eq!(reply["result"]["field"], "expect.unexpected");
+        }
+        assert!(transport.requests().is_empty());
+        assert_eq!(receipts(&scratch), 0);
+    }
+    let mut arguments = bot_request("match", "eyes");
+    arguments["expect"] = expected;
+    let reply = call(
+        &state,
+        Some(stamp(true, false)),
+        "github",
+        arguments.clone(),
+    )
+    .await;
+    assert_eq!(reply["result"]["status"], "completed", "{reply}");
+    assert_eq!(transport.requests().len(), 1);
+    assert_eq!(transport.requests()[0].action, "add_reaction");
+    assert!(transport.requests()[0].args.get("expect").is_none());
+    arguments["expect"]["repo_binding_generation"] = json!(generation + 1);
+    let changed = call(&state, Some(stamp(true, false)), "github", arguments).await;
+    assert_eq!(
+        changed["result"]["refusal_code"], "nonce_payload_mismatch",
+        "{changed}"
+    );
+    assert_eq!(transport.requests().len(), 1);
+}
+
 fn receipts(scratch: &Scratch) -> i64 {
     Connection::open(scratch.as_ref() as &Path)
         .unwrap()

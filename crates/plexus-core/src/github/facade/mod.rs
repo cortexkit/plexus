@@ -1,5 +1,6 @@
 //! GitHub bot request ingress; only calls with an owned receipt may reach the GitHub API.
 pub mod effects;
+mod expectation;
 pub mod gates;
 pub mod request_map;
 pub mod taxonomy;
@@ -33,6 +34,35 @@ pub fn bot_request_scoped<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     claim_owner: &str,
     now: i64,
 ) -> Value {
+    bot_request_scoped_with_expect(
+        store,
+        engine,
+        caller_principal,
+        scope,
+        request,
+        nonce,
+        None,
+        request_id,
+        claim_owner,
+        now,
+    )
+}
+
+/// Like [`bot_request_scoped`], with an optional caller-pinned bot handle and
+/// repository-binding generation. `expect` is not sent to GitHub.
+#[allow(clippy::too_many_arguments)]
+pub fn bot_request_scoped_with_expect<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+    store: &PlexusStore,
+    engine: &GovernanceEngine<C, T>,
+    caller_principal: &str,
+    scope: Option<&crate::scope::CallScope>,
+    request: &Value,
+    nonce: &str,
+    expect: Option<&Value>,
+    request_id: &str,
+    claim_owner: &str,
+    now: i64,
+) -> Value {
     let generation = match store.github_repo_binding_generation() {
         Ok(generation) => generation,
         Err(error) => {
@@ -43,6 +73,7 @@ pub fn bot_request_scoped<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 scope,
                 request,
                 nonce,
+                expect,
                 request_id,
                 claim_owner,
                 now,
@@ -63,12 +94,13 @@ pub fn bot_request_scoped<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             return json!({"result":outcome});
         }
     };
-    let mut reply = gates::run_scoped(
+    let mut reply = gates::run_scoped_with_expect(
         store,
         caller_principal,
         scope,
         request,
         nonce,
+        expect,
         request_id,
         claim_owner,
         now,
@@ -103,6 +135,20 @@ fn replay_or_refusal(reply: &gates::GateReply) -> Value {
             "message":format!("consent_unavailable for action '{}': flows cannot request consent", reply.action)});
     }
     let mut value = json!({"status":"refused","refusal_code":code});
+    if let Some(field) = &reply.invalid_request_field {
+        value["code"] = json!("invalid_request");
+        value["field"] = json!(field);
+        value["transmission"] = json!("not_sent");
+    }
+    if let Some(dimension) = match code.as_deref() {
+        Some("stale_authority{dimension: expected_handle}") => Some("expected_handle"),
+        Some("stale_authority{dimension: expected_binding}") => Some("expected_binding"),
+        _ => None,
+    } {
+        value["code"] = json!("stale_authority");
+        value["dimension"] = json!(dimension);
+        value["transmission"] = json!("not_sent");
+    }
     if let Some(refusal) = &reply.grant_refusal {
         value["code"] = json!(refusal.code());
         value["detail"] = json!(refusal.detail());

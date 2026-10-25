@@ -699,6 +699,16 @@ fn tool(name: &str, description: &str, execution_mode: ExecutionMode, operations
             properties.insert("connection_id".into(), json!({"type":"string"}));
             properties.insert("request".into(), json!({"type":"object"}));
             properties.insert("request_nonce".into(), json!({"type":"string"}));
+            properties.insert("expect".into(), json!({
+                "type":"object",
+                "description":"For bot_request, refuse unsent writes if the acting bot or repository binding differs from this expectation.",
+                "properties": {
+                    "app_handle_id":{"type":"string"},
+                    "repo_binding_generation":{"type":"integer","minimum":0}
+                },
+                "required":["app_handle_id","repo_binding_generation"],
+                "additionalProperties":false
+            }));
         }
         CONNECTIONS_TOOL => {
             properties.insert("resource_filters".into(), json!({}));

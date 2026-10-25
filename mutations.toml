@@ -1,6 +1,54 @@
 # Mutation controls; see docs/mutations.md. Edits are temporary and must fail the named tests.
 
 [[control]]
+id = "bot-expect-handle"
+guards = "A caller-pinned bot handle mismatch refuses before a receipt claim or GitHub contact"
+file = "crates/plexus-core/src/github/facade/gates.rs"
+old = "if expect.app_handle_id != handle.app_handle_id {"
+new = "if false && expect.app_handle_id != handle.app_handle_id { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/github_acceptance/expectation_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test github_acceptance"
+select = "expected"
+expect_red = ["expectation_tests::expected_handle_mismatch_refuses_before_claim_or_contact"]
+expect_message = "caller-pinned handle must refuse before claiming or contacting GitHub"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-expect-binding"
+guards = "A caller-pinned binding generation mismatch refuses before a receipt claim or GitHub contact"
+file = "crates/plexus-core/src/github/facade/gates.rs"
+old = "if Some(expect.repo_binding_generation)"
+new = "if false && Some(expect.repo_binding_generation) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/github_acceptance/expectation_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test github_acceptance"
+select = "expected"
+expect_red = ["expectation_tests::expected_binding_mismatch_refuses_before_claim_or_contact"]
+expect_message = "caller-pinned binding must refuse before claiming or contacting GitHub"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-new-nonce-scope-describe"
+guards = "The first GitHub write re-describes scope both after ownership reads and on a new nonce with no pre-reads and a changed epoch"
+file = "crates/plexus-core/src/github/facade/vendor_band.rs"
+old = "let answer = engine.describe_scope(&scope.owner, &scope.scope_ref);"
+new = "let answer = Ok(crate::scope::ScopeDescription { status: crate::scope::ScopeStatus::Live, owner_synced: true, owner_configured: true, live: Some(scope.clone()) }); /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/github_acceptance/expectation_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test github_acceptance --test it"
+select = "expected"
+expect_red = ["expectation_tests::new_nonce_without_prereads_rechecks_changed_scope_epoch_before_first_write", "github_facade_vendor_band::scoped::a_scope_ended_after_the_read_stops_the_write_and_the_refusal_replays"]
+expect_message = "scope_ended"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "observed-at-delayed-webhook"
 guards = "A delayed webhook keeps the relay receipt time rather than the late Plexus insert time"
 file = "crates/plexus-core/src/storage.rs"

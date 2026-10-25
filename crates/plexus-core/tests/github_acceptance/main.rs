@@ -18,6 +18,7 @@ use scope_support::{delegating_scope, LiveScopeReader};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
+mod expectation_tests;
 #[path = "../support/facade_rows.rs"]
 mod facade_rows;
 #[path = "../support/logging.rs"]
@@ -387,6 +388,8 @@ const CLOSED_CODES: &[&str] = &[
     "issue_edit_not_own",
     "pr_head_cross_repository",
     "store_failure",
+    "invalid_request",
+    "scope_ended",
 ];
 fn comment() -> Value {
     json!({"action":"issue comment","repository":"org/repo","target":{"number":"42"},"body":{"body":"hello"}})

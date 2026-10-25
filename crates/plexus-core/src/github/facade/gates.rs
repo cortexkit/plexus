@@ -80,6 +80,7 @@ pub struct GateReply {
     pub gate: &'static str,
     pub refusal_code: Option<String>,
     pub grant_refusal: Option<crate::grant_refusal::GrantRefusal>,
+    pub invalid_request_field: Option<String>,
     pub claimed_agent_id: Option<String>,
     pub app_handle_id: Option<String>,
     pub action: String,
@@ -153,6 +154,7 @@ fn terminal_binding_replay(
     agent: &str,
     nonce: &str,
     request: &Value,
+    expect: Option<&super::expectation::Expectation>,
     repository: &str,
     handle: &Handle,
 ) -> Result<Option<(Receipt, MappedRequest)>, String> {
@@ -173,9 +175,12 @@ fn terminal_binding_replay(
         repositories: vec![repository.into()],
         binding: binding.clone(),
     };
-    let Ok(mapped) = request_map::map(request, &resolved, repository) else {
+    let Ok(mut mapped) = request_map::map(request, &resolved, repository) else {
         return Ok(None);
     };
+    if let Some(expect) = expect {
+        expect.fingerprint(&mut mapped);
+    }
     if let Some(outcome) = super::vendor_band::recover_completed(&row, &mapped.request_kind) {
         row.state = "completed".into();
         row.outcome = Some(outcome);
@@ -189,6 +194,11 @@ fn terminal_binding_replay(
     .is_err()
     {
         return Ok(None);
+    }
+    if row.request_fingerprint != mapped.fingerprint
+        && (expect.is_some() || row.request_fingerprint.starts_with("exact-json-expect-v1:"))
+    {
+        return Err("nonce_payload_mismatch".into());
     }
     Ok((row.request_fingerprint == mapped.fingerprint).then_some((row, mapped)))
 }
@@ -218,12 +228,41 @@ pub fn run_scoped(
     now: i64,
     lease_seconds: i64,
 ) -> GateReply {
+    run_scoped_with_expect(
+        store,
+        caller_principal,
+        scope,
+        request,
+        nonce,
+        None,
+        request_id,
+        claim_owner,
+        now,
+        lease_seconds,
+    )
+}
+
+/// Admission with an optional caller-pinned authority expectation.
+#[allow(clippy::too_many_arguments)]
+pub fn run_scoped_with_expect(
+    store: &impl GateStore,
+    caller_principal: &str,
+    scope: Option<&crate::scope::CallScope>,
+    request: &Value,
+    nonce: &str,
+    expect: Option<&Value>,
+    request_id: &str,
+    claim_owner: &str,
+    now: i64,
+    lease_seconds: i64,
+) -> GateReply {
     run_scoped_mode(
         store,
         caller_principal,
         scope,
         request,
         nonce,
+        expect,
         request_id,
         claim_owner,
         now,
@@ -239,6 +278,7 @@ pub(crate) fn replay_scoped(
     scope: Option<&crate::scope::CallScope>,
     request: &Value,
     nonce: &str,
+    expect: Option<&Value>,
     request_id: &str,
     claim_owner: &str,
     now: i64,
@@ -250,6 +290,7 @@ pub(crate) fn replay_scoped(
         scope,
         request,
         nonce,
+        expect,
         request_id,
         claim_owner,
         now,
@@ -265,6 +306,7 @@ fn run_scoped_mode(
     scope: Option<&crate::scope::CallScope>,
     request: &Value,
     nonce: &str,
+    expect: Option<&Value>,
     request_id: &str,
     claim_owner: &str,
     now: i64,
@@ -283,6 +325,7 @@ fn run_scoped_mode(
         gate: "G1",
         refusal_code: None,
         grant_refusal: None,
+        invalid_request_field: None,
         claimed_agent_id: None,
         app_handle_id: None,
         action: "github.bot_request".into(),
@@ -297,6 +340,16 @@ fn run_scoped_mode(
         return reply.refuse("G1", "delegating_scope_required");
     };
     reply.claimed_agent_id = Some(agent.to_string());
+    let expect = match expect
+        .map(super::expectation::Expectation::parse)
+        .transpose()
+    {
+        Ok(expect) => expect,
+        Err(field) => {
+            reply.invalid_request_field = Some(field);
+            return reply.refuse("G3", "invalid_request");
+        }
+    };
     let handle = match store.handle_for_agent(agent) {
         Ok(Some(row)) => row,
         Ok(None) => return reply.refuse_g2("agent_handle_unknown"),
@@ -318,7 +371,15 @@ fn run_scoped_mode(
     let (binding, bound_agent) = match store.binding(repository) {
         Ok(Some(binding)) => binding,
         Ok(None) => {
-            match terminal_binding_replay(store, &agent, nonce, request, repository, &handle) {
+            match terminal_binding_replay(
+                store,
+                &agent,
+                nonce,
+                request,
+                expect.as_ref(),
+                repository,
+                &handle,
+            ) {
                 Ok(Some((row, mapped))) => return reply.replay(row, mapped),
                 Err(code) => return reply.refuse("G4", code),
                 Ok(None) => {}
@@ -328,7 +389,15 @@ fn run_scoped_mode(
         Err(code) => return reply.refuse_g2(code),
     };
     if binding.app_handle_id != handle.app_handle_id {
-        match terminal_binding_replay(store, &agent, nonce, request, repository, &handle) {
+        match terminal_binding_replay(
+            store,
+            &agent,
+            nonce,
+            request,
+            expect.as_ref(),
+            repository,
+            &handle,
+        ) {
             Ok(Some((row, mapped))) => return reply.replay(row, mapped),
             Err(code) => return reply.refuse("G4", code),
             Ok(None) => {}
@@ -345,10 +414,13 @@ fn run_scoped_mode(
     if nonce.is_empty() {
         return reply.refuse("G3", "request_field_forbidden{field: request_nonce}");
     }
-    let mapped = match request_map::map(request, &resolved, repository) {
+    let mut mapped = match request_map::map(request, &resolved, repository) {
         Ok(mapped) => mapped,
         Err(code) => return reply.refuse("G3", code),
     };
+    if let Some(expect) = &expect {
+        expect.fingerprint(&mut mapped);
+    }
     // Reject alternate repository fields before a receipt lookup can replay a request.
     if let Err(error) = resolver::resolve(request, &handle.connection_id, |name| {
         store
@@ -446,6 +518,24 @@ fn run_scoped_mode(
         }
         Err(code) => return reply.refuse("G6", code),
     };
+    // Compare with the authority baseline that the receipt will pin, not the
+    // facade's earlier generation preflight. G2 must first establish that the
+    // agent's handle is bound to this repository; terminal nonce replay above
+    // must still return its recorded outcome even after authority has moved.
+    // No claim, ownership pre-read or credential preparation has happened yet.
+    if let Some(expect) = &expect {
+        if expect.app_handle_id != handle.app_handle_id {
+            return reply.refuse("G6", "stale_authority{dimension: expected_handle}");
+        }
+        if Some(expect.repo_binding_generation)
+            != authority
+                .baseline
+                .get("repo_binding_generation")
+                .and_then(Value::as_u64)
+        {
+            return reply.refuse("G6", "stale_authority{dimension: expected_binding}");
+        }
+    }
     if !authority.module_grant {
         return reply.refuse_grant(
             crate::grant_refusal::GrantTarget::new(

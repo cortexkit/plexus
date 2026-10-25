@@ -13,6 +13,31 @@ The GitHub facade (`github.bot_request`) combines repository binding, authorizat
 - Use `crate::github::resolver` for repository-to-handle resolution. Its outcomes map onto `repository_unbound`, `agent_repository_conflict` and `request_field_forbidden`.
 - Build every vendor call's arguments with the resolver's per-kind allowlist (`mapped_args`), never by copying request fields. Governance checks the pinned argument schema and REST serializes non-path arguments, so each leg must receive only its own declared fields.
 
+### Caller-pinned authority
+
+`github` / `bot_request` accepts an optional top-level `expect` beside `request`
+and `request_nonce`:
+
+```json
+{"app_handle_id":"app-example","repo_binding_generation":7}
+```
+
+Both fields are required, the handle is a string, and the generation is a
+non-negative integer. Other keys and malformed values refuse `invalid_request`
+with the offending `expect` field named and `transmission: not_sent`.
+
+After selecting the agent's handle and checking its repository binding, the facade
+first checks for a terminal nonce replay. For a new or resumable write, the expectation
+is compared at authority-baseline capture: the handle must match G2's selected
+handle, and the generation must match the baseline's `repo_binding_generation`,
+not the earlier reply-generation preflight. A mismatch refuses
+`stale_authority{dimension: expected_handle}` or
+`stale_authority{dimension: expected_binding}`, with `transmission: not_sent`,
+before any claim, ownership pre-read, credential preparation or GitHub contact.
+The baseline subsequently pinned by the receipt is still rechecked before and
+after pre-dispatch reads and after credential preparation. The expectation is
+never a credential or a substitute for grants, binding checks or live scope checks.
+
 ## Governance wiring
 
 - `GithubGovernanceSeams` holds `Arc<PlexusStore>` and the scoped credential provider. The daemon installs it in its governance engine.
@@ -30,6 +55,8 @@ The GitHub facade (`github.bot_request`) combines repository binding, authorizat
 - The store sweeper records expired uncertain effects in reconciliation before returning them for diagnostics. Callers must not enqueue those effects again.
 - Pagination and receipt claims share `github::receipt::DEFAULT_CLAIM_LEASE_SECONDS` (120 seconds).
 - Integration tests exercise terminal replay, uncertainty, claim ownership and takeover through the real facade path.
+- With `expect`, the fingerprint hashes sorted exact-integer JSON containing the canonical request and expectation under `exact-json-expect-v1`. Changing or removing the expectation on the same nonce refuses `nonce_payload_mismatch`. A retry with the same canonical request and expectation replays a terminal receipt's recorded outcome, even if the repository binding has since moved. Without `expect`, request fingerprint bytes remain exactly `exact-json-v1` as before, including for existing receipts.
+- A route stamp is not liveness: even a new nonce on a cached, delegating route must pass an uncached daemon scope description before its first unsent write. An ended scope or a changed epoch refuses `scope_ended` with zero GitHub writes.
 
 ## Request kinds
 
