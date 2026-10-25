@@ -23,6 +23,7 @@ mod expectation_tests;
 mod facade_rows;
 #[path = "../support/logging.rs"]
 mod logging;
+mod run_scope_tests;
 
 /// The shipped reviewed GitHub REST manifest, parsed from its JSONC source.
 fn github_manifest() -> plexus_core::AppManifest {
@@ -390,6 +391,9 @@ const CLOSED_CODES: &[&str] = &[
     "store_failure",
     "invalid_request",
     "scope_ended",
+    "scope_not_synced",
+    "scope_unverifiable",
+    "run_scope_not_child",
 ];
 fn comment() -> Value {
     json!({"action":"issue comment","repository":"org/repo","target":{"number":"42"},"body":{"body":"hello"}})

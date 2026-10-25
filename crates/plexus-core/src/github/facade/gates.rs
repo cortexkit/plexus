@@ -96,6 +96,8 @@ pub struct GateReply {
     /// agent of a request, and a scoped request
     /// re-checks its scope before each write it sends.
     pub scope: Option<crate::scope::CallScope>,
+    /// An extra liveness constraint; the route scope still supplies authority.
+    pub run_scope: Option<super::run_scope::RunScope>,
 }
 
 impl GateReply {
@@ -256,6 +258,36 @@ pub fn run_scoped_with_expect(
     now: i64,
     lease_seconds: i64,
 ) -> GateReply {
+    run_scoped_with_preconditions(
+        store,
+        caller_principal,
+        scope,
+        request,
+        nonce,
+        expect,
+        None,
+        request_id,
+        claim_owner,
+        now,
+        lease_seconds,
+    )
+}
+
+/// Admission with optional authority and run-liveness preconditions.
+#[allow(clippy::too_many_arguments)]
+pub fn run_scoped_with_preconditions(
+    store: &impl GateStore,
+    caller_principal: &str,
+    scope: Option<&crate::scope::CallScope>,
+    request: &Value,
+    nonce: &str,
+    expect: Option<&Value>,
+    run_scope: Option<&Value>,
+    request_id: &str,
+    claim_owner: &str,
+    now: i64,
+    lease_seconds: i64,
+) -> GateReply {
     run_scoped_mode(
         store,
         caller_principal,
@@ -263,6 +295,7 @@ pub fn run_scoped_with_expect(
         request,
         nonce,
         expect,
+        run_scope,
         request_id,
         claim_owner,
         now,
@@ -279,6 +312,7 @@ pub(crate) fn replay_scoped(
     request: &Value,
     nonce: &str,
     expect: Option<&Value>,
+    run_scope: Option<&Value>,
     request_id: &str,
     claim_owner: &str,
     now: i64,
@@ -291,6 +325,7 @@ pub(crate) fn replay_scoped(
         request,
         nonce,
         expect,
+        run_scope,
         request_id,
         claim_owner,
         now,
@@ -307,6 +342,7 @@ fn run_scoped_mode(
     request: &Value,
     nonce: &str,
     expect: Option<&Value>,
+    run_scope: Option<&Value>,
     request_id: &str,
     claim_owner: &str,
     now: i64,
@@ -335,6 +371,7 @@ fn run_scoped_mode(
         handle: None,
         caller_principal: caller_principal.into(),
         scope: scope.cloned(),
+        run_scope: None,
     };
     let Some(agent) = scope.and_then(crate::scope::CallScope::acting_agent) else {
         return reply.refuse("G1", "delegating_scope_required");
@@ -345,6 +382,13 @@ fn run_scoped_mode(
         .transpose()
     {
         Ok(expect) => expect,
+        Err(field) => {
+            reply.invalid_request_field = Some(field);
+            return reply.refuse("G3", "invalid_request");
+        }
+    };
+    reply.run_scope = match run_scope.map(super::run_scope::RunScope::parse).transpose() {
+        Ok(run_scope) => run_scope,
         Err(field) => {
             reply.invalid_request_field = Some(field);
             return reply.refuse("G3", "invalid_request");
@@ -421,6 +465,7 @@ fn run_scoped_mode(
     if let Some(expect) = &expect {
         expect.fingerprint(&mut mapped);
     }
+    // run_scope constrains liveness, not the payload identified by this hash.
     // Reject alternate repository fields before a receipt lookup can replay a request.
     if let Err(error) = resolver::resolve(request, &handle.connection_id, |name| {
         store

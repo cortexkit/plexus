@@ -3032,7 +3032,7 @@ fn facade_tool_reply_inner(
             let owner = request_id.clone();
             let now = plexus_core::now_ms();
             blocking_section(|| {
-                plexus_core::github::facade::bot_request_scoped_with_expect(
+                plexus_core::github::facade::bot_request_scoped_with_preconditions(
                     state.store(),
                     &state.runtime.engine,
                     &principal_key,
@@ -3041,6 +3041,9 @@ fn facade_tool_reply_inner(
                     nonce,
                     arguments
                         .get("expect")
+                        .filter(|_| reaction_request.is_none()),
+                    arguments
+                        .get("run_scope")
                         .filter(|_| reaction_request.is_none()),
                     &request_id,
                     &owner,

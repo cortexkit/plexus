@@ -240,6 +240,11 @@ pub struct ScopeDescription {
     pub owner_configured: bool,
     /// The current stamp fields, present only when `status` is `Live`.
     pub live: Option<CallScope>,
+    /// The live stamp's structured parent; unlike the audit label, this keeps
+    /// owner and ref separate even when either contains punctuation.
+    pub parent: Option<subc_protocol::scope::ScopeParent>,
+    /// The live stamp's absolute Unix deadline, checked with Plexus's clock.
+    pub expires_at_ms: Option<u64>,
 }
 
 /// The daemon did not answer `scope.describe`: the request failed, timed out,
@@ -393,6 +398,8 @@ mod tests {
 
     fn live(scope: CallScope) -> ScopeDescription {
         ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::Live,
             owner_synced: true,
             owner_configured: true,
@@ -402,6 +409,8 @@ mod tests {
 
     fn not_live(owner_synced: bool, owner_configured: bool) -> ScopeDescription {
         ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::NotLive,
             owner_synced,
             owner_configured,
@@ -476,6 +485,8 @@ mod tests {
             ApprovalScopeVerdict::Refuse(DELEGATION_WITHDRAWN)
         );
         let ended = ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::Ended,
             owner_synced: true,
             owner_configured: true,

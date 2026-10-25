@@ -281,6 +281,7 @@ fn stop_for_scope(
     claim_owner: &str,
     _now: i64,
     code: &str,
+    scope_role: &str,
     sent: &[(&str, Value)],
 ) -> Value {
     eprintln!(warn governance:
@@ -291,7 +292,11 @@ fn stop_for_scope(
     reply.gate = "G10";
     reply.refusal_code = Some(code.to_string());
     let legs_sent: Vec<&str> = sent.iter().map(|(action, _)| *action).collect();
-    let value = json!({"status":"refused", "refusal_code":code, "legs_sent":legs_sent});
+    let mut value = json!({"status":"refused", "refusal_code":code, "legs_sent":legs_sent,
+        "scope_role":scope_role});
+    if scope_role == "run" {
+        value["transmission"] = json!("not_sent");
+    }
     if matches!(
         code,
         crate::scope::SCOPE_UNVERIFIABLE | crate::scope::SCOPE_NOT_SYNCED
@@ -663,8 +668,27 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                     claim_owner,
                     now,
                     code,
+                    "route",
                     &responses,
                 );
+            }
+            if let Some(run_scope) = reply.run_scope.as_ref() {
+                let answer = engine.describe_scope(&run_scope.owner, &run_scope.scope_ref);
+                if let Err(code) =
+                    run_scope.recheck(&scope, answer.as_ref(), crate::storage::now_ms())
+                {
+                    return stop_for_scope(
+                        store,
+                        reply,
+                        &agent,
+                        nonce,
+                        claim_owner,
+                        now,
+                        code,
+                        "run",
+                        &responses,
+                    );
+                }
             }
         }
         let request =

@@ -437,6 +437,8 @@ impl ScopeReader for Scopes {
     fn describe(&self, _: &str, _: &str) -> Result<ScopeDescription, ScopeReadError> {
         let scope = self.0.lock().unwrap().clone();
         Ok(ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::Live,
             owner_synced: true,
             owner_configured: true,

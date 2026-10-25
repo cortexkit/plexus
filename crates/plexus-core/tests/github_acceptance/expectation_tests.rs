@@ -203,6 +203,8 @@ impl ScopeReader for ChangedEpochScopeReader {
         let mut live = self.stamp.clone();
         live.scope_epoch += 1;
         Ok(ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::Live,
             live: Some(live),
             owner_synced: true,

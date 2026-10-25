@@ -209,6 +209,8 @@ fn describe_reply(reply: &Frame) -> Result<ScopeDescription, ScopeReadError> {
             scope,
             ..
         }) => Ok(ScopeDescription {
+            parent: scope.as_ref().and_then(|stamp| stamp.parent.clone()),
+            expires_at_ms: scope.as_ref().and_then(|stamp| stamp.expires_at_ms),
             status: match status {
                 subc_protocol::scope::ScopeStatus::Live => ScopeStatus::Live,
                 subc_protocol::scope::ScopeStatus::Ended => ScopeStatus::Ended,

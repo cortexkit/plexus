@@ -62,6 +62,8 @@ fn scope(delegates: bool) -> CallScope {
 
 fn live(scope: CallScope) -> ScopeDescription {
     ScopeDescription {
+        parent: None,
+        expires_at_ms: None,
         status: ScopeStatus::Live,
         owner_synced: true,
         owner_configured: true,
@@ -71,6 +73,8 @@ fn live(scope: CallScope) -> ScopeDescription {
 
 fn ended() -> ScopeDescription {
     ScopeDescription {
+        parent: None,
+        expires_at_ms: None,
         status: ScopeStatus::Ended,
         owner_synced: true,
         owner_configured: true,
@@ -82,6 +86,8 @@ fn ended() -> ScopeDescription {
 /// (re)started, so the daemon cannot yet say whether the scope is live.
 fn not_resynced() -> ScopeDescription {
     ScopeDescription {
+        parent: None,
+        expires_at_ms: None,
         status: ScopeStatus::NotLive,
         owner_synced: false,
         owner_configured: true,

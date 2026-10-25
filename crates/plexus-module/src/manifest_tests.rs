@@ -104,10 +104,28 @@ fn regression_github_and_connection_schemas_admit_handler_fields() {
     for call in [
         aft,
         reaction,
+        json!({"op":"bot_request", "request_nonce":"run", "request":{},
+            "run_scope":{"owner":"reserved:aft","ref":"run-1","epoch":0}}),
         json!({"op":"bindings.read", "connection_id":"github-bot"}),
     ] {
         assert_object_schema_accepts(&github.schema, &call);
     }
+    assert_eq!(
+        github.schema["properties"]["run_scope"]["required"],
+        json!(["owner", "ref", "epoch"])
+    );
+    assert_eq!(
+        github.schema["properties"]["run_scope"]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        github.schema["properties"]["run_scope"]["properties"]["epoch"],
+        json!({"type":"integer", "minimum":0})
+    );
+    assert!(!github.schema["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("run_scope")));
     assert_object_schema_accepts(
         &connections.schema,
         &json!({"op":"configure", "connection":"github-bot", "resource_filters":{"repositories":["org/repo"]}}),

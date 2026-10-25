@@ -24,6 +24,8 @@ impl ScopeReader for LiveScopeReader {
         assert_eq!(owner, self.0.owner);
         assert_eq!(scope_ref, self.0.scope_ref);
         Ok(ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::Live,
             owner_synced: true,
             owner_configured: true,

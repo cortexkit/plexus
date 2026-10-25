@@ -4,6 +4,7 @@
     "repo_binding_generation": 1,
     "result": {
       "refusal_code": "delegating_scope_required",
+      "scope_role": "route",
       "status": "refused"
     }
   },
@@ -28,6 +29,15 @@
     },
     "request_nonce": "seen-marker-nonce"
   },
+  "scope": {
+    "agent_id": "agent-fixture",
+    "delegates": true,
+    "kind": "head",
+    "owner": "reserved:prefrontal-core",
+    "owner_authorized": true,
+    "ref": "fixture-session",
+    "scope_epoch": 1
+  },
   "success": {
     "repo_binding_generation": 1,
     "result": {
@@ -37,14 +47,5 @@
       },
       "status": "completed"
     }
-  },
-  "scope": {
-    "owner": "reserved:prefrontal-core",
-    "ref": "fixture-session",
-    "scope_epoch": 1,
-    "kind": "head",
-    "agent_id": "agent-fixture",
-    "delegates": true,
-    "owner_authorized": true
   }
 }

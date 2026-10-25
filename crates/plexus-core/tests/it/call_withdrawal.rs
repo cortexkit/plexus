@@ -62,6 +62,8 @@ fn scope() -> CallScope {
 
 fn live() -> ScopeDescription {
     ScopeDescription {
+        parent: None,
+        expires_at_ms: None,
         status: ScopeStatus::Live,
         owner_synced: true,
         owner_configured: true,
@@ -72,6 +74,8 @@ fn live() -> ScopeDescription {
 /// The owner has not re-synced since the daemon started: approvals are held.
 fn not_resynced() -> ScopeDescription {
     ScopeDescription {
+        parent: None,
+        expires_at_ms: None,
         status: ScopeStatus::NotLive,
         owner_synced: false,
         owner_configured: true,

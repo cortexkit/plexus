@@ -295,6 +295,31 @@ fn receipts(scratch: &Scratch) -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_bot_request_forwards_top_level_run_scope() {
+    let (state, transport, scratch) = runtime("run-scope", "aft");
+    let mut arguments = bot_request("invalid-run", "eyes");
+    arguments["run_scope"] = json!({"owner":"reserved:aft", "ref":"run-1", "epoch":-1});
+    let reply = call(&state, Some(stamp(true, false)), "github", arguments).await;
+    assert_eq!(
+        reply["result"]["refusal_code"], "invalid_request",
+        "{reply}"
+    );
+    assert_eq!(reply["result"]["field"], "run_scope.epoch");
+    assert_eq!(reply["result"]["transmission"], "not_sent");
+    assert_eq!(receipts(&scratch), 0);
+    let mut arguments = bot_request("unverifiable-run", "eyes");
+    arguments["run_scope"] = json!({"owner":"reserved:aft", "ref":"run-1", "epoch":0});
+    let reply = call(&state, Some(stamp(true, false)), "github", arguments).await;
+    assert_eq!(
+        reply["result"]["refusal_code"], "scope_unverifiable",
+        "{reply}"
+    );
+    assert_eq!(reply["result"]["scope_role"], "run");
+    assert_eq!(reply["result"]["transmission"], "not_sent");
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn github_react_adds_the_reaction_as_the_agents_bot() {
     for (kind, action) in [("issue", "issue reaction"), ("pr", "pr reaction")] {
         let (state, transport, _scratch) = runtime(&format!("success-{kind}"), "aft");

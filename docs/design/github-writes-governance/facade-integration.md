@@ -38,6 +38,36 @@ The baseline subsequently pinned by the receipt is still rechecked before and
 after pre-dispatch reads and after credential preparation. The expectation is
 never a credential or a substitute for grants, binding checks or live scope checks.
 
+### Caller-run liveness
+
+`bot_request` also accepts an optional top-level
+`run_scope: {"owner":"reserved:aft","ref":"run-1","epoch":11}` beside
+`request`, `request_nonce` and `expect`. All three members are required: owner
+and ref are strings, epoch is a non-negative integer, and extra keys are refused.
+Malformed values refuse `invalid_request`, naming the `run_scope` field, with
+`transmission: not_sent` before claiming a receipt or contacting GitHub.
+
+The route's stamped scope remains the sole source of bot authority. Before every
+unsent write leg, after rechecking that route scope, the facade describes the run
+through the same uncached daemon reader. The run must be live at the supplied
+epoch, and its structured live parent must match the route's owner, ref and epoch.
+Plexus also checks its own clock against the live stamp's `expires_at_ms`, when
+present; a daemon reply that still says live cannot extend an expired run.
+
+Run refusals carry `scope_role: run` and `transmission: not_sent`, with `legs_sent`
+listing any earlier writes that remain sent. Ended, replaced, expired or absent
+after owner sync means `scope_ended`; a different parent means
+`run_scope_not_child`. A missing parent or stamp, a failed read or an unconfigured
+owner means `scope_unverifiable`. An owner not yet synced means `scope_not_synced`.
+The latter two release the claim, allowing an explicit same-nonce retry to resume
+unsent legs without repeating completed writes. Route-scope refusals instead carry
+`scope_role: route`, with their other fields unchanged.
+
+Unlike `expect`, `run_scope` is excluded from the request fingerprint: it only
+narrows liveness. A terminal same-nonce receipt replays its recorded outcome even
+when the run constraint changes or ends. Omitting `run_scope` preserves the
+existing behavior except for the additive route-refusal role.
+
 ## Governance wiring
 
 - `GithubGovernanceSeams` holds `Arc<PlexusStore>` and the scoped credential provider. The daemon installs it in its governance engine.

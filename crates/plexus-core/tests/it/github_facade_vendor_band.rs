@@ -3059,6 +3059,8 @@ mod scoped {
 
     fn live(scope: CallScope) -> ScopeDescription {
         ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::Live,
             owner_synced: true,
             owner_configured: true,
@@ -3068,6 +3070,8 @@ mod scoped {
 
     fn ended() -> Answer {
         Ok(ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::Ended,
             owner_synced: true,
             owner_configured: true,
@@ -3077,6 +3081,8 @@ mod scoped {
 
     fn not_synced() -> Answer {
         Ok(ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::NotLive,
             owner_synced: false,
             owner_configured: true,
@@ -3316,7 +3322,7 @@ mod scoped {
         let first = fixture.send(&scope, &close, "ended-close", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_ended","legs_sent":[]}),
+            json!({"status":"refused","refusal_code":"scope_ended","legs_sent":[],"scope_role":"route"}),
             "{first}"
         );
         assert_eq!(
@@ -3391,7 +3397,7 @@ mod scoped {
         let first = fixture.send(&scope, &close, "ended-between", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_ended","legs_sent":["add_issue_comment"]}),
+            json!({"status":"refused","refusal_code":"scope_ended","legs_sent":["add_issue_comment"],"scope_role":"route"}),
             "{first}"
         );
         assert_eq!(fixture.actions(), ["add_issue_comment"]);
@@ -3439,7 +3445,7 @@ mod scoped {
         let first = fixture.send(&scope, &reaction(), "not-synced", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_not_synced","legs_sent":[]}),
+            json!({"status":"refused","refusal_code":"scope_not_synced","legs_sent":[],"scope_role":"route"}),
             "{first}"
         );
         assert!(fixture.transport.requests().is_empty());
@@ -3471,7 +3477,7 @@ mod scoped {
         let first = fixture.send(&scope, &close, "not-synced-between", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_not_synced","legs_sent":["add_issue_comment"]}),
+            json!({"status":"refused","refusal_code":"scope_not_synced","legs_sent":["add_issue_comment"],"scope_role":"route"}),
             "{first}"
         );
         assert_eq!(fixture.actions(), ["add_issue_comment"]);
@@ -3511,7 +3517,7 @@ mod scoped {
         let first = fixture.send(&scope, &reaction(), "unverifiable", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_unverifiable","legs_sent":[]}),
+            json!({"status":"refused","refusal_code":"scope_unverifiable","legs_sent":[],"scope_role":"route"}),
             "{first}"
         );
         assert!(fixture.transport.requests().is_empty());
@@ -3541,7 +3547,7 @@ mod scoped {
         let first = fixture.send(&scope, &close, "unverifiable-between", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_unverifiable","legs_sent":["add_issue_comment"]}),
+            json!({"status":"refused","refusal_code":"scope_unverifiable","legs_sent":["add_issue_comment"],"scope_role":"route"}),
             "{first}"
         );
         let retry = fixture.send(&scope, &close, "unverifiable-between", now() + 1);

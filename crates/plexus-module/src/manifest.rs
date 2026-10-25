@@ -709,6 +709,17 @@ fn tool(name: &str, description: &str, execution_mode: ExecutionMode, operations
                 "required":["app_handle_id","repo_binding_generation"],
                 "additionalProperties":false
             }));
+            properties.insert("run_scope".into(), json!({
+                "type":"object",
+                "description":"For bot_request, require this run to remain live and a child of the route scope before each unsent write. Adds no authority.",
+                "properties": {
+                    "owner":{"type":"string"},
+                    "ref":{"type":"string"},
+                    "epoch":{"type":"integer","minimum":0}
+                },
+                "required":["owner","ref","epoch"],
+                "additionalProperties":false
+            }));
         }
         CONNECTIONS_TOOL => {
             properties.insert("resource_filters".into(), json!({}));

@@ -97,6 +97,8 @@ async fn plexus_reads_live_ended_unknown_and_unsynced_scopes_from_a_real_daemon(
     assert_eq!(
         live,
         ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::Live,
 
             owner_synced: true,
@@ -136,6 +138,8 @@ async fn plexus_reads_live_ended_unknown_and_unsynced_scopes_from_a_real_daemon(
     assert_eq!(
         ended,
         ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::Ended,
 
             owner_synced: true,
@@ -162,6 +166,8 @@ async fn plexus_reads_live_ended_unknown_and_unsynced_scopes_from_a_real_daemon(
     assert_eq!(
         unknown,
         ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::NotLive,
 
             owner_synced: true,
@@ -183,6 +189,8 @@ async fn plexus_reads_live_ended_unknown_and_unsynced_scopes_from_a_real_daemon(
     assert_eq!(
         not_synced,
         ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::NotLive,
 
             owner_synced: false,
@@ -207,6 +215,8 @@ async fn plexus_reads_live_ended_unknown_and_unsynced_scopes_from_a_real_daemon(
     assert_eq!(
         unconfigured,
         ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::NotLive,
 
             owner_synced: false,
@@ -346,6 +356,8 @@ impl ReaderModule {
             described,
             ScopeDescription {
                 status: decoded_status,
+                parent: scope.as_ref().and_then(|stamp| stamp.parent.clone()),
+                expires_at_ms: scope.as_ref().and_then(|stamp| stamp.expires_at_ms),
                 owner_synced,
                 owner_configured,
                 live: scope.as_ref().map(CallScope::from_stamp),

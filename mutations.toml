@@ -1,6 +1,86 @@
 # Mutation controls; see docs/mutations.md. Edits are temporary and must fail the named tests.
 
 [[control]]
+id = "bot-run-scope-per-leg"
+guards = "Every unsent write describes the caller run even while the authoritative route remains live"
+file = "crates/plexus-core/src/github/facade/vendor_band.rs"
+old = "if let Some(run_scope) = reply.run_scope.as_ref() {"
+new = "if let Some(run_scope) = reply.run_scope.as_ref().filter(|_| false) { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/github_acceptance/run_scope_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test github_acceptance"
+select = "expected"
+expect_red = ["run_scope_tests::run_scope_described_before_each_unsent_leg"]
+expect_message = "run scope must refuse the unsent write"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-run-scope-parent"
+guards = "The run's live parent must match the route owner, ref and epoch"
+file = "crates/plexus-core/src/github/facade/run_scope.rs"
+old = "if principal_label(&parent.owner) != route.owner\n            || parent.scope_ref != route.scope_ref\n            || parent.scope_epoch != route.scope_epoch"
+new = "if false && (principal_label(&parent.owner) != route.owner\n            || parent.scope_ref != route.scope_ref\n            || parent.scope_epoch != route.scope_epoch) /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/github_acceptance/run_scope_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test github_acceptance"
+select = "expected"
+expect_red = ["run_scope_tests::run_parent_must_match_route_owner_ref_and_epoch"]
+expect_message = "run scope must refuse the unsent write"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-run-scope-epoch"
+guards = "A replacement run session cannot satisfy the caller's pinned epoch"
+file = "crates/plexus-core/src/github/facade/run_scope.rs"
+old = "if live.scope_epoch != self.epoch {"
+new = "if false && live.scope_epoch != self.epoch { /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/github_acceptance/run_scope_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test github_acceptance"
+select = "expected"
+expect_red = ["run_scope_tests::run_epoch_mismatch_is_ended"]
+expect_message = "run scope must refuse the unsent write"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-run-scope-expiry"
+guards = "Plexus refuses an expired run even if scope.describe still reports it live"
+file = "crates/plexus-core/src/github/facade/run_scope.rs"
+old = "if described\n            .expires_at_ms"
+new = "if false && described /* NON-VACUITY BREAK */\n            .expires_at_ms"
+test_file = "crates/plexus-core/tests/github_acceptance/run_scope_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test github_acceptance"
+select = "expected"
+expect_red = ["run_scope_tests::run_expiry_is_checked_even_when_daemon_reports_live"]
+expect_message = "run scope must refuse the unsent write"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
+id = "bot-run-scope-fingerprint"
+guards = "Changing a run liveness constraint cannot change the request fingerprint or prevent terminal replay"
+file = "crates/plexus-core/src/github/facade/gates.rs"
+old = "// run_scope constrains liveness, not the payload identified by this hash."
+new = "if let Some(run_scope) = &reply.run_scope { mapped.fingerprint.push_str(&serde_json::to_string(run_scope).unwrap()); } /* NON-VACUITY BREAK */"
+test_file = "crates/plexus-core/tests/github_acceptance/run_scope_tests.rs"
+runner = "cargo"
+package = "plexus-core"
+target = "--test github_acceptance"
+select = "expected"
+expect_red = ["run_scope_tests::different_run_scope_replays_terminal_nonce_without_payload_mismatch"]
+expect_message = "run_scope must not enter the request fingerprint"
+build_timeout_s = 3600
+timeout_s = 120
+
+[[control]]
 id = "bot-expect-handle"
 guards = "A caller-pinned bot handle mismatch refuses before a receipt claim or GitHub contact"
 file = "crates/plexus-core/src/github/facade/gates.rs"
@@ -37,7 +117,7 @@ id = "bot-new-nonce-scope-describe"
 guards = "The first GitHub write re-describes scope both after ownership reads and on a new nonce with no pre-reads and a changed epoch"
 file = "crates/plexus-core/src/github/facade/vendor_band.rs"
 old = "let answer = engine.describe_scope(&scope.owner, &scope.scope_ref);"
-new = "let answer = Ok(crate::scope::ScopeDescription { status: crate::scope::ScopeStatus::Live, owner_synced: true, owner_configured: true, live: Some(scope.clone()) }); /* NON-VACUITY BREAK */"
+new = "let answer = Ok(crate::scope::ScopeDescription { status: crate::scope::ScopeStatus::Live, owner_synced: true, owner_configured: true, live: Some(scope.clone()), parent: None, expires_at_ms: None }); /* NON-VACUITY BREAK */"
 test_file = "crates/plexus-core/tests/github_acceptance/expectation_tests.rs"
 runner = "cargo"
 package = "plexus-core"

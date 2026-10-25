@@ -3,6 +3,7 @@ pub mod effects;
 mod expectation;
 pub mod gates;
 pub mod request_map;
+pub mod run_scope;
 pub mod taxonomy;
 pub(crate) mod validation;
 pub mod vendor_band;
@@ -63,6 +64,40 @@ pub fn bot_request_scoped_with_expect<C: CredentialSource + ?Sized, T: Transport
     claim_owner: &str,
     now: i64,
 ) -> Value {
+    bot_request_scoped_with_preconditions(
+        store,
+        engine,
+        caller_principal,
+        scope,
+        request,
+        nonce,
+        expect,
+        None,
+        request_id,
+        claim_owner,
+        now,
+    )
+}
+
+/// Like [`bot_request_scoped_with_expect`], with an optional run scope that
+/// must remain a live child of the authoritative route scope before each write.
+#[allow(clippy::too_many_arguments)]
+pub fn bot_request_scoped_with_preconditions<
+    C: CredentialSource + ?Sized,
+    T: Transport + ?Sized,
+>(
+    store: &PlexusStore,
+    engine: &GovernanceEngine<C, T>,
+    caller_principal: &str,
+    scope: Option<&crate::scope::CallScope>,
+    request: &Value,
+    nonce: &str,
+    expect: Option<&Value>,
+    run_scope: Option<&Value>,
+    request_id: &str,
+    claim_owner: &str,
+    now: i64,
+) -> Value {
     let generation = match store.github_repo_binding_generation() {
         Ok(generation) => generation,
         Err(error) => {
@@ -74,6 +109,7 @@ pub fn bot_request_scoped_with_expect<C: CredentialSource + ?Sized, T: Transport
                 request,
                 nonce,
                 expect,
+                run_scope,
                 request_id,
                 claim_owner,
                 now,
@@ -94,13 +130,14 @@ pub fn bot_request_scoped_with_expect<C: CredentialSource + ?Sized, T: Transport
             return json!({"result":outcome});
         }
     };
-    let mut reply = gates::run_scoped_with_expect(
+    let mut reply = gates::run_scoped_with_preconditions(
         store,
         caller_principal,
         scope,
         request,
         nonce,
         expect,
+        run_scope,
         request_id,
         claim_owner,
         now,
@@ -152,6 +189,9 @@ fn replay_or_refusal(reply: &gates::GateReply) -> Value {
     if let Some(refusal) = &reply.grant_refusal {
         value["code"] = json!(refusal.code());
         value["detail"] = json!(refusal.detail());
+    }
+    if code.as_deref() == Some("delegating_scope_required") {
+        value["scope_role"] = json!("route");
     }
     value
 }

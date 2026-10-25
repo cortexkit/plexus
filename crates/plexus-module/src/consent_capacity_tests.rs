@@ -100,6 +100,8 @@ impl ScopeReader for LiveScopes {
             &self.held
         };
         Ok(ScopeDescription {
+            parent: None,
+            expires_at_ms: None,
             status: ScopeStatus::Live,
             owner_synced: true,
             owner_configured: true,

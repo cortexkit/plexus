@@ -76,6 +76,8 @@ pub(super) fn live_reader(scope: CallScope) -> Arc<dyn plexus_core::scope::Scope
         ) -> Result<plexus_core::scope::ScopeDescription, plexus_core::scope::ScopeReadError>
         {
             Ok(plexus_core::scope::ScopeDescription {
+                parent: None,
+                expires_at_ms: None,
                 status: plexus_core::scope::ScopeStatus::Live,
                 owner_synced: true,
                 owner_configured: true,

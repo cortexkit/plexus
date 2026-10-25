@@ -65,7 +65,15 @@ async fn describe_sends_one_request_and_reads_the_matching_reply() {
                             .with_agent_id(Some("agent-a".into()))
                             .with_delegates(true),
                     )
-                    .with_owner_authorized(true),
+                    .with_owner_authorized(true)
+                    .with_parent(Some(subc_protocol::scope::ScopeParent::new(
+                        Principal::Reserved {
+                            module_id: "prefrontal-core".into(),
+                        },
+                        "outer-head",
+                        3,
+                    )))
+                    .with_expires_at_ms(Some(123456)),
                 ),
             })
             .expect("reply body");
@@ -84,6 +92,17 @@ async fn describe_sends_one_request_and_reads_the_matching_reply() {
     .expect("described");
     answer.await.expect("responder");
     assert_eq!(described.status, ScopeStatus::Live);
+    assert_eq!(
+        described.parent,
+        Some(subc_protocol::scope::ScopeParent::new(
+            Principal::Reserved {
+                module_id: "prefrontal-core".into()
+            },
+            "outer-head",
+            3,
+        ))
+    );
+    assert_eq!(described.expires_at_ms, Some(123456));
     let live = described.live.expect("live stamp");
     assert_eq!(live.scope_epoch, 7);
     assert_eq!(live.acting_agent(), Some("agent-a"));

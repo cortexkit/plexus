@@ -48,6 +48,8 @@ fn stamp_at(scope_epoch: u64) -> ScopeStamp {
 
 fn live() -> ScopeDescription {
     ScopeDescription {
+        parent: None,
+        expires_at_ms: None,
         status: ScopeStatus::Live,
         owner_synced: true,
         owner_configured: true,
@@ -57,6 +59,8 @@ fn live() -> ScopeDescription {
 
 fn ended() -> ScopeDescription {
     ScopeDescription {
+        parent: None,
+        expires_at_ms: None,
         status: ScopeStatus::Ended,
         owner_synced: true,
         owner_configured: true,
