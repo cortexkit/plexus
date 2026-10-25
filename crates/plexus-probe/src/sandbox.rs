@@ -588,9 +588,9 @@ fn build_wasi_context(
         }
         #[cfg(test)]
         WasiPolicy::PreopenCurrentDirectory => {
-            use wasmtime_wasi::{DirPerms, FilePerms};
+            use wasmtime_wasi::FsPerms;
             builder
-                .preopened_dir(".", ".", DirPerms::READ, FilePerms::READ)
+                .preopened_dir(".", ".", FsPerms::ReadOnly)
                 .map_err(sandbox_error)?;
         }
     }

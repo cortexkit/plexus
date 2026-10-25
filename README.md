@@ -36,8 +36,8 @@ computer and browser plane, for services with no structured interface.
 
 ## Prerequisites
 
-- Rust 1.94 or newer, with `rustfmt` and `clippy`. The repository has no
-  `rust-toolchain` file; CI uses the current stable toolchain. 1.94 is the
+- Rust 1.95 or newer, with `rustfmt` and `clippy`. The repository has no
+  `rust-toolchain` file; CI uses the current stable toolchain. 1.95 is the
   minimum the locked Wasmtime release requires.
 - Python 3.11 or newer, for the operator-script tests the gate runs.
 - `nats-server` 2.15.0 on `PATH`, the version CI installs. One bus test starts
