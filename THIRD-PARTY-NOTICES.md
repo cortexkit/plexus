@@ -29,6 +29,12 @@ Repeat with `--manifest-path crates/plexus-probe/guest/Cargo.toml` for the guest
 graph. The `license` field is the crate's declaration; the crate's published
 source carries the license and copyright files themselves.
 
+The probe host uses Wasmtime and wasmtime-wasi 48.0.7, licensed under
+`Apache-2.0 WITH LLVM-exception`. Source: https://github.com/bytecodealliance/wasmtime.
+The host compiles the embedded WASI Preview 1 guest to portable bytecode for
+Wasmtime's Pulley interpreter at startup; the guest is not a serialized
+Wasmtime module and is unchanged by host upgrades.
+
 Where a declaration joins licenses with `AND`, both apply. The ones that matter
 for a binary distribution are recorded in the sections below: `ring`
 (`Apache-2.0 AND ISC`), `encoding_rs` (`(Apache-2.0 OR MIT) AND BSD-3-Clause`)
