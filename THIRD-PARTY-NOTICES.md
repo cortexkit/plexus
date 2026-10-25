@@ -340,6 +340,18 @@ The copies are:
 The README or SOURCE file in each directory, or the entry above, records the
 exact source path.
 
+### Copies from commons: MIT
+
+`crates/plexus-core/tests/fixtures/project-resolve-v1/` contains the unmodified
+`resolve-remote.json` and `enumerate.json` samples from
+`crates/cortexkit-project-identity/test-vectors/project-resolve-v1/` in
+[commons](https://github.com/cortexkit/commons), commit
+`9834c6652abd47d62d49e91d73e64dd07f67d94f`. The fixture README records their
+SHA-256 hashes and the omitted operations. Commons is MIT licensed with
+`Copyright (c) 2026 Ufuk Altinok`, the same notice and license text as this
+repository's [LICENSE](LICENSE). The shared crate itself is resolved through
+Cargo and retains its own license as described under Cargo dependencies.
+
 ### Copies from Cingulate: MIT
 
 Cingulate (https://github.com/cortexkit/cingulate) is licensed under the MIT

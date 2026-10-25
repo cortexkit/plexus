@@ -670,13 +670,19 @@ mod tests {
         fn resolve_remote(&self, _: &str, _: &str) -> RemoteResolution {
             self.resolution.lock().unwrap().clone()
         }
-        fn enumerate(&self) -> Option<Value> {
-            Some(if self.owned {
-                json!({"projects":[{"projectId":"P","rootRecords":[{"remotes":[
-                    {"owner":"owner","repo":"repo","owned":true}]}]}]})
+        fn enumerate(&self) -> Option<cortexkit_project_identity::EnumerateReply> {
+            let projects = if self.owned {
+                json!([{"projectId":"P","name":"test","roots":[],"implicit":false,"refKind":"local",
+                    "rootRecords":[{"root":"/test","identity":"unbound","approval":{"state":"unapproved"},
+                    "remotes":[{"name":"origin","owner":"owner","repo":"repo","owned":true}]}]}])
             } else {
-                json!({"projects":[]})
-            })
+                json!([])
+            };
+            Some(
+                serde_json::from_value(json!({"projects":projects,"workspaces":[],
+                "generation":0,"incarnation":"test"}))
+                .unwrap(),
+            )
         }
     }
 

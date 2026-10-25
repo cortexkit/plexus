@@ -16,7 +16,9 @@ struct Registry {
 impl Registry {
     fn empty() -> Self {
         Self {
-            projects: Mutex::new(json!({"projects":[]})),
+            projects: Mutex::new(
+                json!({"projects":[],"workspaces":[],"generation":0,"incarnation":"test"}),
+            ),
             ..Default::default()
         }
     }
@@ -32,9 +34,7 @@ impl Registry {
             &repo.to_ascii_lowercase(),
             RemoteResolution::Found("project".into()),
         );
-        *self.projects.lock().unwrap() = json!({"projects":[{"projectId":"project","rootRecords":[
-            {"root":"/test","remotes":[{"name":"origin","owner":owner,"repo":repo,"owned":true},
-            {"name":"upstream","owner":"other","repo":"not-owned","owned":false}]}]}]});
+        *self.projects.lock().unwrap() = owned_enumeration(owner, repo);
     }
 }
 impl RepositoryRegistry for Registry {
@@ -47,8 +47,8 @@ impl RepositoryRegistry for Registry {
             .cloned()
             .unwrap_or(RemoteResolution::Unavailable)
     }
-    fn enumerate(&self) -> Option<Value> {
-        Some(self.projects.lock().unwrap().clone())
+    fn enumerate(&self) -> Option<EnumerateReply> {
+        Some(serde_json::from_value(self.projects.lock().unwrap().clone()).unwrap())
     }
 }
 
@@ -547,60 +547,520 @@ fn seeded_pair_real_poller_excludes_history_then_emits_later_activity() {
         .any(|r| r.action == "list_issues" && r.args.get("since").is_some()));
 }
 
-#[test]
-fn entorhinal_adapter_uses_management_ops_and_result_envelope() {
-    struct Peer {
-        calls: Mutex<Vec<(String, Value)>>,
-        reply: Mutex<Result<Value, crate::github_identity::PrefrontalRouteError>>,
-    }
-    impl PrefrontalRoutePeer for Peer {
-        fn call(
-            &self,
-            op: &str,
-            params: Value,
-        ) -> Result<Value, crate::github_identity::PrefrontalRouteError> {
-            self.calls.lock().unwrap().push((op.into(), params));
-            self.reply.lock().unwrap().clone()
+type WireReply = Result<Value, crate::github_identity::PrefrontalRouteError>;
+
+struct EntorhinalPeer {
+    calls: Mutex<Vec<(String, Value)>>,
+    remote: WireReply,
+    enumeration: WireReply,
+}
+impl PrefrontalRoutePeer for EntorhinalPeer {
+    fn call(&self, op: &str, params: Value) -> WireReply {
+        self.calls.lock().unwrap().push((op.into(), params));
+        match op {
+            "resolve_remote" => self.remote.clone(),
+            "enumerate" => self.enumeration.clone(),
+            _ => panic!("unexpected management operation: {op}"),
         }
     }
-    let peer = Arc::new(Peer {
+}
+
+fn wire_registry(
+    remote: WireReply,
+    enumeration: WireReply,
+) -> (EntorhinalRepositoryRegistry, Arc<EntorhinalPeer>) {
+    let peer = Arc::new(EntorhinalPeer {
         calls: Mutex::new(vec![]),
-        reply: Mutex::new(Ok(json!({"result":{
-        "status":"found","projectId":"project","root":"/root","generation":2,"incarnation":"one"}}))),
+        remote,
+        enumeration,
     });
-    let adapter = EntorhinalRepositoryRegistry::new(peer.clone());
-    assert_eq!(
-        adapter.resolve_remote("Owner", "Repo"),
-        RemoteResolution::Found("project".into())
-    );
-    assert_eq!(
-        peer.calls.lock().unwrap()[0],
-        (
-            "resolve_remote".into(),
-            json!({"owner":"Owner","repo":"Repo"})
-        )
-    );
-    for (status, expected) in [
-        ("none", RemoteResolution::None),
-        ("ambiguous", RemoteResolution::Ambiguous),
-        ("unknown", RemoteResolution::Unavailable),
-    ] {
-        *peer.reply.lock().unwrap() =
-            Ok(json!({"result":{"status":status,"generation":3,"incarnation":"one"}}));
-        assert_eq!(adapter.resolve_remote("Owner", "Repo"), expected);
+    (EntorhinalRepositoryRegistry::new(peer.clone()), peer)
+}
+
+fn found_reply(project: &str) -> Value {
+    json!({"result":{"status":"found","projectId":project,"root":"/root",
+        "generation":2,"incarnation":"one"}})
+}
+
+fn owned_enumeration(owner: &str, repo: &str) -> Value {
+    json!({"projects":[{"projectId":"project","name":"test","roots":["/test"],
+        "implicit":false,"refKind":"local","rootRecords":[{"root":"/test",
+        "identity":"unbound","approval":{"state":"unapproved"},
+        "remotes":[{"name":"origin","owner":owner,"repo":repo,"owned":true},
+            {"name":"upstream","owner":"other","repo":"not-owned","owned":false}]}]}],
+        "workspaces":[],"generation":0,"incarnation":"test"})
+}
+
+fn assert_wire_resolution(reply: WireReply, expected: RemoteResolution, message: &str) {
+    let mut enumeration = owned_enumeration("owner", "repo");
+    if let RemoteResolution::Found(project) = &expected {
+        enumeration["projects"][0]["projectId"] = json!(project);
     }
-    *peer.reply.lock().unwrap() = Err(crate::github_identity::PrefrontalRouteError::Transport);
+    let (adapter, _) = wire_registry(reply, Ok(json!({"result":enumeration})));
     assert_eq!(
-        adapter.resolve_remote("Owner", "Repo"),
-        RemoteResolution::Unavailable
+        adapter.resolve_remote("owner", "repo"),
+        expected,
+        "{message}"
     );
-    *peer.reply.lock().unwrap() =
-        Ok(json!({"result":{"projects":[],"generation":3,"incarnation":"one"}}));
-    assert_eq!(adapter.enumerate().unwrap()["projects"], json!([]));
+
+    let (store, _, _) = fixture();
+    let watch = watch(&store, "owner", "repo");
+    let seed = Registry::empty();
+    seed.answer("owner", "repo", RemoteResolution::Found("old".into()));
+    reconcile(&store, &seed, crate::now_ms()).unwrap();
+    let report = reconcile(&store, &adapter, crate::now_ms()).unwrap();
+    let (project, source) = match &expected {
+        RemoteResolution::Found(project) => (Some(project.clone()), Some("entorhinal".into())),
+        RemoteResolution::None | RemoteResolution::Ambiguous => (None, None),
+        RemoteResolution::Unavailable => (Some("old".into()), Some("entorhinal".into())),
+    };
     assert_eq!(
-        peer.calls.lock().unwrap().last().unwrap(),
-        &("enumerate".into(), json!({}))
+        stamps(&store),
+        vec![(watch.subscription_id, project, source)],
+        "{message}"
     );
+    assert_eq!(
+        report.unanswered,
+        expected == RemoteResolution::Unavailable,
+        "{message}"
+    );
+
+    let (store, _, _) = fixture();
+    bind(&store, "owner/repo");
+    let report = reconcile(&store, &adapter, crate::now_ms()).unwrap();
+    let creates_pair = matches!(expected, RemoteResolution::Found(_));
+    assert_eq!(
+        report.created,
+        if creates_pair { 2 } else { 0 },
+        "{message}"
+    );
+    assert_eq!(
+        stamps(&store).len(),
+        if creates_pair { 2 } else { 0 },
+        "{message}"
+    );
+    assert_eq!(
+        report.unanswered,
+        expected == RemoteResolution::Unavailable,
+        "{message}"
+    );
+}
+
+#[test]
+fn entorhinal_requests_keep_exact_management_params() {
+    let (adapter, peer) = wire_registry(
+        Ok(found_reply("project")),
+        Ok(json!({"result":owned_enumeration("owner", "repo")})),
+    );
+    adapter.resolve_remote(" Owner/\"雪 ", "Repo\\Name");
+    adapter.enumerate().unwrap();
+    let calls = peer.calls.lock().unwrap();
+    assert_eq!(calls[0].0, "resolve_remote");
+    assert_eq!(
+        serde_json::to_vec(&calls[0].1).unwrap(),
+        r#"{"owner":" Owner/\"雪 ","repo":"Repo\\Name"}"#.as_bytes()
+    );
+    assert_eq!(calls[1].0, "enumerate");
+    assert_eq!(serde_json::to_vec(&calls[1].1).unwrap(), b"{}");
+}
+
+#[test]
+fn entorhinal_found_confirms_project_and_creates_watches() {
+    assert_wire_resolution(
+        Ok(found_reply("project")),
+        RemoteResolution::Found("project".into()),
+        "found must confirm ownership",
+    );
+}
+
+#[test]
+fn entorhinal_none_clears_automatic_project_without_creating_watches() {
+    assert_wire_resolution(
+        Ok(json!({"result":{"status":"none","generation":2,"incarnation":"one"}})),
+        RemoteResolution::None,
+        "none must not confirm ownership",
+    );
+}
+
+#[test]
+fn entorhinal_ambiguous_does_not_confirm_ownership() {
+    assert_wire_resolution(
+        Ok(
+            json!({"result":{"status":"ambiguous","projectIds":["project","other"],"generation":2,"incarnation":"one"}}),
+        ),
+        RemoteResolution::Ambiguous,
+        "ambiguous status must not confirm ownership",
+    );
+}
+
+#[test]
+fn entorhinal_other_status_is_unanswered() {
+    assert_wire_resolution(
+        Ok(
+            json!({"result":{"status":"future_value","projectId":"project","root":"/root","generation":2,"incarnation":"one"}}),
+        ),
+        RemoteResolution::Unavailable,
+        "future status must remain unanswered",
+    );
+}
+
+#[test]
+fn entorhinal_refusals_are_unanswered() {
+    for code in [
+        "invalid_request",
+        "invalid_params",
+        "storage_unavailable",
+        "store_unavailable",
+        "storage_error",
+        "encode_failed",
+        "module_draining",
+        "unknown_method",
+    ] {
+        assert_wire_resolution(
+            Ok(json!({"code":code,"message":"refused","detail":{"reason":"test"}})),
+            RemoteResolution::Unavailable,
+            code,
+        );
+    }
+}
+
+#[test]
+fn entorhinal_unknown_refusal_is_unanswered() {
+    assert_wire_resolution(
+        Ok(json!({"code":"future_value","message":"refused"})),
+        RemoteResolution::Unavailable,
+        "unknown refusal must remain unanswered",
+    );
+}
+
+#[test]
+fn entorhinal_remote_decode_failures_are_unanswered() {
+    for reply in [
+        json!({}),
+        json!({"result":null}),
+        json!({"status":"found","projectId":"project"}),
+        json!({"result":{"status":true}}),
+    ] {
+        assert_wire_resolution(
+            Ok(reply),
+            RemoteResolution::Unavailable,
+            "malformed reply must remain unanswered",
+        );
+    }
+    for field in ["projectId", "root", "generation", "incarnation"] {
+        for replacement in [None, Some(Value::Null), Some(json!([]))] {
+            let mut reply = found_reply("project");
+            if let Some(value) = replacement {
+                reply["result"][field] = value;
+            } else {
+                reply["result"].as_object_mut().unwrap().remove(field);
+            }
+            assert_wire_resolution(Ok(reply), RemoteResolution::Unavailable, field);
+        }
+    }
+    assert_wire_resolution(
+        Ok(json!({"result":{"status":"ambiguous","generation":2,"incarnation":"one"}})),
+        RemoteResolution::Unavailable,
+        "ambiguous requires projectIds",
+    );
+    for project in ["", " \t\n"] {
+        assert_wire_resolution(
+            Ok(found_reply(project)),
+            RemoteResolution::Unavailable,
+            "blank project must remain unanswered",
+        );
+    }
+}
+
+#[test]
+fn entorhinal_remote_transport_error_is_unanswered() {
+    assert_wire_resolution(
+        Err(crate::github_identity::PrefrontalRouteError::Transport),
+        RemoteResolution::Unavailable,
+        "transport error must remain unanswered",
+    );
+}
+
+#[test]
+fn entorhinal_unknown_extra_members_do_not_change_found() {
+    let mut reply = found_reply("project");
+    reply["future_member"] = json!({"status":"future_value"});
+    reply["result"]["future_member"] = json!([1, 2]);
+    assert_wire_resolution(
+        Ok(reply),
+        RemoteResolution::Found("project".into()),
+        "extra members must be ignored",
+    );
+}
+
+fn assert_enumeration_unanswered(reply: WireReply) {
+    let (adapter, _) = wire_registry(Ok(found_reply("project")), reply);
+    let (store, _, _) = fixture();
+    bind(&store, "owner/repo");
+    let report = reconcile(&store, &adapter, crate::now_ms()).unwrap();
+    assert!(
+        report.unanswered,
+        "unsafe enumeration must remain unanswered"
+    );
+    assert_eq!(report.created, 0);
+    assert!(stamps(&store).is_empty());
+}
+
+#[test]
+fn entorhinal_enumeration_ignores_unknown_extra_members() {
+    let mut reply = owned_enumeration("OWNER", "REPO");
+    reply["future_member"] = json!("future_value");
+    reply["projects"][0]["future_member"] = json!({});
+    reply["projects"][0]["rootRecords"][0]["future_member"] = json!(false);
+    reply["projects"][0]["rootRecords"][0]["remotes"][0]["future_member"] = json!([]);
+    let (adapter, _) = wire_registry(
+        Ok(found_reply("project")),
+        Ok(json!({"result":reply,"future_member":null})),
+    );
+    let (store, _, _) = fixture();
+    bind(&store, "owner/repo");
+    let report = reconcile(&store, &adapter, crate::now_ms()).unwrap();
+    assert!(!report.unanswered);
+    assert_eq!(report.created, 2);
+    assert_eq!(stamps(&store).len(), 2);
+}
+
+#[test]
+fn entorhinal_enumeration_refusal_is_unanswered() {
+    for code in ["invalid_params", "future_value"] {
+        assert_enumeration_unanswered(Ok(json!({"code":code,"message":"refused","detail":null})));
+    }
+}
+
+#[test]
+fn entorhinal_enumeration_transport_error_is_unanswered() {
+    assert_enumeration_unanswered(Err(crate::github_identity::PrefrontalRouteError::Transport));
+}
+
+#[test]
+fn entorhinal_enumeration_decode_failure_rejects_the_whole_snapshot() {
+    for pointer in [
+        "/workspaces",
+        "/projects",
+        "/generation",
+        "/incarnation",
+        "/projects/0/projectId",
+        "/projects/0/name",
+        "/projects/0/roots",
+        "/projects/0/implicit",
+        "/projects/0/refKind",
+        "/projects/0/rootRecords",
+        "/projects/0/rootRecords/0/root",
+        "/projects/0/rootRecords/0/remotes",
+        "/projects/0/rootRecords/0/identity",
+        "/projects/0/rootRecords/0/approval",
+        "/projects/0/rootRecords/0/remotes/0/name",
+        "/projects/0/rootRecords/0/remotes/0/owner",
+        "/projects/0/rootRecords/0/remotes/0/repo",
+        "/projects/0/rootRecords/0/remotes/0/owned",
+    ] {
+        let mut reply = owned_enumeration("owner", "repo");
+        *reply.pointer_mut(pointer).unwrap() = json!({});
+        assert_enumeration_unanswered(Ok(json!({"result":reply})));
+    }
+    let mut reply = owned_enumeration("owner", "repo");
+    reply["projects"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"projectId":"malformed"}));
+    assert_enumeration_unanswered(Ok(json!({"result":reply})));
+    for reply in [
+        json!({}),
+        json!({"result":null}),
+        json!({"result":{"projects":[]}}),
+    ] {
+        assert_enumeration_unanswered(Ok(reply));
+    }
+}
+
+#[test]
+fn entorhinal_enumeration_ignores_unknown_vocabulary() {
+    let mut baseline = owned_enumeration("OWNER", "REPO");
+    baseline["projects"][0]["rootRecords"][0]["rootKey"] = json!({"kind":"remote","rootKey":"key"});
+    baseline["projects"][0]["rootRecords"][0]["incarnation"] =
+        json!({"kind":"token","value":"token"});
+    let fields = [
+        "/projects/0/refKind",
+        "/projects/0/rootRecords/0/identity",
+        "/projects/0/rootRecords/0/approval/state",
+        "/projects/0/rootRecords/0/rootKey/kind",
+        "/projects/0/rootRecords/0/incarnation/kind",
+    ];
+    let expected = BTreeMap::from([(
+        ("owner".into(), "repo".into()),
+        BTreeSet::from(["project".into()]),
+    )]);
+    // Check known values, each unknown value independently, then all unknown values together.
+    for changed in std::iter::once(vec![])
+        .chain(fields.iter().map(|field| vec![*field]))
+        .chain(std::iter::once(fields.to_vec()))
+    {
+        let mut reply = baseline.clone();
+        for field in &changed {
+            *reply.pointer_mut(field).unwrap() = json!("future_value");
+        }
+        let (adapter, _) = wire_registry(Ok(found_reply("project")), Ok(json!({"result":reply})));
+        let ownership = adapter.enumerate().and_then(owned_repositories);
+        assert_eq!(
+            ownership,
+            Some(expected.clone()),
+            "ignored enumeration vocabulary must not change ownership: {changed:?}"
+        );
+        let (store, _, _) = fixture();
+        bind(&store, "owner/repo");
+        let report = reconcile(&store, &adapter, crate::now_ms()).unwrap();
+        assert!(
+            !report.unanswered,
+            "ignored metadata must remain answered: {changed:?}"
+        );
+        assert_eq!(report.created, 2);
+        assert!(stamps(&store)
+            .iter()
+            .all(|(_, project, source)| project.as_deref() == Some("project")
+                && source.as_deref() == Some("entorhinal")));
+    }
+}
+
+#[test]
+fn entorhinal_enumeration_skips_projects_without_root_records() {
+    for roots in [None, Some(Value::Null)] {
+        let mut reply = owned_enumeration("owner", "repo");
+        let mut project = reply["projects"][0].clone();
+        project["projectId"] = json!("without-roots");
+        if let Some(roots) = roots {
+            project["rootRecords"] = roots;
+        } else {
+            project.as_object_mut().unwrap().remove("rootRecords");
+        }
+        reply["projects"].as_array_mut().unwrap().insert(0, project);
+        let (adapter, _) = wire_registry(Ok(found_reply("project")), Ok(json!({"result":reply})));
+        assert_eq!(
+            adapter.enumerate().and_then(owned_repositories),
+            Some(BTreeMap::from([(
+                ("owner".into(), "repo".into()),
+                BTreeSet::from(["project".into()]),
+            )]))
+        );
+    }
+}
+
+#[test]
+fn entorhinal_enumeration_keeps_empty_components_unowned() {
+    for pointer in [
+        "/projects/0/projectId",
+        "/projects/0/rootRecords/0/remotes/0/owner",
+        "/projects/0/rootRecords/0/remotes/0/repo",
+    ] {
+        let mut reply = owned_enumeration("owner", "repo");
+        *reply.pointer_mut(pointer).unwrap() = json!("");
+        let (adapter, _) = wire_registry(Ok(found_reply("project")), Ok(json!({"result":reply})));
+        assert!(owned_repositories(adapter.enumerate().unwrap())
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[test]
+fn entorhinal_vendored_samples_replay_through_the_registry() {
+    use sha2::{Digest, Sha256};
+    let remote_bytes = include_bytes!("../tests/fixtures/project-resolve-v1/resolve-remote.json");
+    let enumerate_bytes = include_bytes!("../tests/fixtures/project-resolve-v1/enumerate.json");
+    assert_eq!(
+        hex::encode(Sha256::digest(remote_bytes)),
+        "e0504720dc0f4a81b532fbe4e0cfa4a43d0fa1b218f703cbc3efca5387e17cba"
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(enumerate_bytes)),
+        "89afedb88fa4ddec219f4932df22f26ca8395022c5c1dd399e3e50c9d50b94dd"
+    );
+    let samples: Vec<Value> = serde_json::from_slice(remote_bytes).unwrap();
+    let expected = [
+        (
+            json!({"owner":"example-org","repo":"widgets"}),
+            RemoteResolution::Found("pj-widgets".into()),
+        ),
+        (
+            json!({"owner":"example-org","repo":"missing"}),
+            RemoteResolution::None,
+        ),
+        (
+            json!({"owner":"example-org","repo":"shared"}),
+            RemoteResolution::Ambiguous,
+        ),
+        (
+            json!({"owner":"EXAMPLE-ORG","repo":"WiDgEtS"}),
+            RemoteResolution::Found("pj-widgets".into()),
+        ),
+        (
+            json!({"owner":"example-org","repo":"hidden"}),
+            RemoteResolution::Found("pj-unreadable".into()),
+        ),
+        (
+            json!({"owner":"example-org","repo":"hidden"}),
+            RemoteResolution::None,
+        ),
+        (
+            json!({"owner":"example-org","repo":"widgets"}),
+            RemoteResolution::Found("pj-widgets".into()),
+        ),
+        (json!({}), RemoteResolution::Unavailable),
+    ];
+    assert_eq!(
+        samples.len(),
+        expected.len(),
+        "unrecognised resolve_remote sample"
+    );
+    for (sample, (params, decision)) in samples.iter().zip(expected) {
+        assert_eq!(
+            sample["request"],
+            json!({"method":"resolve_remote","params":params}),
+            "unrecognised resolve_remote sample"
+        );
+        let (adapter, peer) = wire_registry(
+            Ok(sample["reply"].clone()),
+            Ok(json!({"result":owned_enumeration("owner", "repo")})),
+        );
+        // The malformed-request vector supplies a refusal; Plexus always sends both params.
+        let owner = params["owner"].as_str().unwrap_or("");
+        let repo = params["repo"].as_str().unwrap_or("");
+        assert_eq!(adapter.resolve_remote(owner, repo), decision);
+        if params.get("owner").is_some() {
+            assert_eq!(peer.calls.lock().unwrap()[0].1, params);
+        }
+        assert_wire_resolution(
+            Ok(sample["reply"].clone()),
+            decision,
+            "vendored resolve_remote decision",
+        );
+    }
+    let samples: Vec<Value> = serde_json::from_slice(enumerate_bytes).unwrap();
+    assert_eq!(samples.len(), 1, "unrecognised enumerate sample");
+    assert_eq!(
+        samples[0]["request"],
+        json!({"method":"enumerate","params":{}})
+    );
+    let (adapter, _) = wire_registry(Ok(found_reply("project")), Ok(samples[0]["reply"].clone()));
+    let snapshot = adapter.enumerate().unwrap();
+    assert_eq!(
+        snapshot
+            .projects
+            .iter()
+            .map(|p| p.project_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pj-dashboard-editor", "pj-dashboard-terminal"]
+    );
+    assert!(owned_repositories(snapshot).unwrap().is_empty());
+    let (store, _, _) = fixture();
+    bind(&store, "owner/repo");
+    let report = reconcile(&store, &adapter, crate::now_ms()).unwrap();
+    assert!(!report.unanswered);
+    assert_eq!(report.created, 0);
+    assert!(stamps(&store).is_empty());
 }
 
 #[test]
