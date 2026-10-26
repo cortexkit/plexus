@@ -73,11 +73,6 @@ target/debug/plexus-conformance list
 target/debug/plexus-conformance run --fixture <name>
 ```
 
-[`mutations.toml`](mutations.toml) records deliberate source breaks, each paired
-with the existing tests that must catch it. [docs/mutations.md](docs/mutations.md)
-explains the catalogue, how to install its pinned runner and how to add a
-control.
-
 ## Running against a local subconscious daemon
 
 Without a daemon, `ck-plexus` answers three checks and exits:
@@ -158,7 +153,6 @@ target the maintainer's own installation and are not that recipe.
   triggers, probes, GitHub bot writes and the rules that bite.
 - [STRUCTURE.md](STRUCTURE.md): directory layout and where new code goes.
 - [docs/design/](docs/design/): design notes and the contracts plexus serves.
-- [docs/mutations.md](docs/mutations.md): the mutation catalogue and its runner.
 - [CONTRIBUTING.md](CONTRIBUTING.md): the issue-first workflow and the checks to run.
 - [SECURITY.md](SECURITY.md): private vulnerability reporting and the threat model.
 - [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md): embedded components, license

@@ -74,8 +74,6 @@ rustc --version
 cargo test --locked -p plexus-core --lib -- web_search
 cargo run --locked -p plexus-module --bin ck-plexus -- --check-catalog catalog
 git diff --exit-code 33223121e9fcbbe6d63d0596ce68f3bfbb9a0f32 -- catalog/tavily.jsonc catalog/firecrawl.jsonc
-ckdev-mutate --version
-ckdev-mutate check
 bash scripts/rust-test-gate.sh
 ```
 
@@ -83,8 +81,8 @@ bash scripts/rust-test-gate.sh
 the provider-name binding test passes, and the complete catalog check accepts
 34 manifests with zero refusals/I/O errors (including all 14 new manifests).
 The legacy MCP diff is empty against the initial-public-release commit: neither
-`catalog/tavily.jsonc` nor `catalog/firecrawl.jsonc` changed. The mutation catalog
-and repository gate must pass before release; record any infrastructure failure
+`catalog/tavily.jsonc` nor `catalog/firecrawl.jsonc` changed. The repository gate
+must pass before release; record any infrastructure failure
 as a stop, not a successful gate. Offline acceptance never completes a live step.
 
 ### Recorded offline verification (not deployment evidence)
@@ -95,10 +93,9 @@ includes every listed provider's fixture and capability tests and the provider
 name/binding test; all 15 have a passing capability declaration. The new binary's
 repository catalog check accepted **34/34**, including every new manifest.
 The two legacy MCP manifests are unchanged against the recorded baseline.
-The four runbook contract tests pass, and all four appended mutation controls catch
-their named documentation breaks without collateral failures in the four-test
-suite. These are offline checks only; old-binary boot, deployed-catalog checks,
-all credentials/connections/grants, provider probes, order and allowances remain
+The four runbook contract tests pass. These are offline checks only; old-binary
+boot, deployed-catalog checks, all credentials/connections/grants, provider
+probes, order and allowances remain
 **pending: run at deploy**.
 
 The mandatory repository gate was attempted on Linux but stopped at the existing
@@ -514,9 +511,8 @@ deploy); **pass:** that exact grant is revoked and unrelated grants remain.
 
 These five documentation tests inspect the actual command blocks and provider
 inventory above. They do not execute shell blocks or prove live deployment.
-Run from the repository root on Linux; mutation replay uses the same entry point
-with a single test name. `--list <pattern>` prints a JSON array of selected names for the mutation
-catalog. Keep the tests here so the fenced runbook and its checks travel together.
+Run from the repository root on Linux. Keep the tests here so the fenced runbook
+and its checks travel together.
 
 ```sh
 python3 -B -c 'from pathlib import Path; text = Path("docs/design/web-search-provider-chain-rollout.md").read_text(); exec(text.split("<!-- rollout-contract-tests -->\n```python\n", 1)[1].split("\n```", 1)[0])'
@@ -525,10 +521,7 @@ python3 -B -c 'from pathlib import Path; text = Path("docs/design/web-search-pro
 <!-- rollout-contract-tests -->
 ```python
 import re
-import sys
 import unittest
-import fnmatch
-import json
 from pathlib import Path
 
 DOCUMENT = Path("docs/design/web-search-provider-chain-rollout.md")
@@ -616,10 +609,5 @@ class RolloutContract(unittest.TestCase):
         self.assertIn('an anonymous check', TEXT.lower())
 
 
-if "--list" in sys.argv:
-    names = ["RolloutContract." + name
-             for name in unittest.defaultTestLoader.getTestCaseNames(RolloutContract)]
-    print(json.dumps([name for name in names if fnmatch.fnmatchcase(name, sys.argv[-1])]))
-else:
-    unittest.main(verbosity=2)
+unittest.main(verbosity=2)
 ```

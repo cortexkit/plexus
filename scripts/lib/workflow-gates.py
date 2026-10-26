@@ -42,10 +42,7 @@ Usage:
 each one that no longer holds: the push trigger runs on train branches
 (including nested names such as train/a/b) and on main, no job or step `if:`
 changes the gates between train and main pushes, and the concurrency group is
-per-ref. The planner-driven mutation job reads only the planner's output. It selects
-changed rows for train pushes, all rows for a main push without a verified train
-run, and none for a main push whose same sha already passed on a train ref. The
-test job has one additional exact exception: it can skip only after the
+per-ref. The test job has one exact exception: it can skip only after the
 read-only Actions lookup confirms that same-sha train run. Other conditions
 that distinguish train from main remain forbidden.
 """
@@ -368,14 +365,11 @@ PER_REF_GROUP = re.compile(r"\bgithub\.(?:ref|ref_name)\b")
 
 def classify(condition: str) -> str | None:
     """ref = provably dead under trains, warn = depends on the landing path."""
-    # These exact output conditions are safe: planning selects touched rows on
-    # train pushes, and only reuses a main test result after verifying that the
-    # same sha passed on a train ref. Do not allow arbitrary event expressions:
+    # This exact output condition is safe: it only reuses a main test result
+    # after verifying that the same sha passed on a train ref. Do not allow
+    # arbitrary event expressions:
     # an OR or a ref clause could silently skip a gate the landing flow relies on.
-    if condition in {
-        "needs.plan.outputs.has-mutations == 'true'",
-        "needs.plan.outputs.skip-test != 'true'",
-    }:
+    if condition == "needs.plan.outputs.skip-test != 'true'":
         return None
     if REF_CONTEXT.search(condition):
         if "train/" in condition:
@@ -473,9 +467,9 @@ def precondition_failures(workflow: dict[str, Any]) -> list[str]:
     # Arm 2: a workflow can fire on a train push while a job or step gated on
     # the ref, or on the event that started the run, is skipped - and the run
     # still reports green, so the gate everyone relies on is silently absent.
-    # Such conditions fail here except the exact planner-driven mutation and
-    # proven-main-test conditions above. This is stricter than the scan
-    # train-push.sh runs before each push (main() below without
+    # Such conditions fail here except the exact proven-main-test condition
+    # above. This is stricter than the scan train-push.sh runs before each push
+    # (main() below without
     # --preconditions), which only warns on event conditions, because CI and
     # the preflight must keep train and main runs identical.
     refs, warns = condition_findings(workflow)

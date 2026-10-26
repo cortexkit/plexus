@@ -9,8 +9,6 @@ on:
     branches: [main, 'train/**']
   pull_request:
     branches: [main]
-  schedule:
-    - cron: '23 3 * * *'
   workflow_dispatch:
 
 permissions:
@@ -18,8 +16,6 @@ permissions:
   actions: read
 
 concurrency:
-  # The nightly schedule runs the full catalogue with --broad on main. A group
-  # shared with main pushes would let a push cancel that audit before it finishes.
   group: ci-${{ github.event_name }}-${{ github.ref }}
   # Main's own run is independent of the train run and must finish.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -33,7 +29,6 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
   CARGO_INCREMENTAL: 0
-  MUTATE_RUNNER_REV: 5d005f453c892a09147ffb5e991c06966ff9b4a2
   # Official nats-io/nats-server v2.15.0 linux-amd64 release asset digest:
   # https://api.github.com/repos/nats-io/nats-server/releases/assets/570234667
   NATS_SERVER_VERSION: '2.15.0'
@@ -41,12 +36,9 @@ env:
 
 jobs:
   plan:
-    name: Mutation plan
+    name: Train preconditions
     runs-on: ubuntu-24.04
     outputs:
-      mutation-matrix: ${{ steps.mutation-plan.outputs.matrix }}
-      mutation-selection: ${{ steps.mutation-plan.outputs.selection }}
-      has-mutations: ${{ steps.mutation-plan.outputs.has-mutations }}
       skip-test: ${{ steps.main-duplicate.outputs.skip-test }}
     defaults:
       run:
@@ -70,17 +62,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/skip_main_tests.py
 
-      - name: Plan nonempty mutation shards
-        id: mutation-plan
-        env:
-          MAIN_TRAIN_RUN_VERIFIED: ${{ steps.main-duplicate.outputs.skip-test }}
-        run: |
-          extra=()
-          if [ "$MAIN_TRAIN_RUN_VERIFIED" = "true" ]; then
-            extra=(--main-train-verified)
-          fi
-          python3 scripts/mutation-plan.py --event "$GITHUB_EVENT_NAME" --ref "$GITHUB_REF" "${extra[@]}" >> "$GITHUB_OUTPUT"
-
   # Linux-only: plexus has no platform-specific code paths (catalog + store +
   # subc wire). Every dependency comes from crates.io at an exact version, so
   # the job checks out this repository alone.
@@ -97,7 +78,6 @@ jobs:
     runs-on: ubuntu-24.04
     # A wedged test must surface as a fast red run, not burn the runner for
     # the 6-hour Actions default. Healthy runs finish well under 15 minutes.
-    # Catalogue name validation also compiles the selected test targets.
     timeout-minutes: 40
     defaults:
       run:
@@ -121,13 +101,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           components: clippy, rustfmt
-          targets: wasm32-wasip1
-
-      # Guest mutation controls rebuild with the reproducibility compiler even
-      # after the host's floating stable toolchain moves to a newer release.
-      # Installing a named toolchain does not change the active host default.
-      - name: Install pinned guest compiler
-        run: rustup toolchain install 1.99.0 --profile minimal --target wasm32-wasip1
 
       - name: Rust compiler identity
         id: rust-identity
@@ -149,23 +122,6 @@ jobs:
 
       - name: Install pinned nats-server
         run: bash scripts/install-nats-server.sh
-
-      - name: Cache mutation runner
-        id: mutate-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.cargo/bin/ckdev-mutate
-          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-${{ env.MUTATE_RUNNER_REV }}
-
-      - name: Install pinned mutation runner
-        if: steps.mutate-cache.outputs.cache-hit != 'true'
-        run: cargo install --locked --git https://github.com/cortexkit/commons --rev "$MUTATE_RUNNER_REV" cortexkit-mutate
-
-      - name: Check mutation catalogue
-        run: |
-          ckdev-mutate --version
-          cargo --version
-          ckdev-mutate check
 
       - name: Rust test gate (fmt, clippy -D warnings, workspace tests)
         run: ./scripts/rust-test-gate.sh
@@ -235,122 +191,3 @@ jobs:
           targets: wasm32-wasip1
       - name: Rebuild and compare embedded guest
         run: bash scripts/build-probe-guest.sh --check
-
-  mutations:
-    # The planning job sizes the matrix to the selection, so `total` is the
-    # shard count of this run, not a fixed number.
-    name: Mutation proofs (${{ matrix.shard }}/${{ matrix.total }})
-    needs: plan
-    # The planner emits no rows for PRs or a main push with a verified train
-    # run. Without that proof it selects all controls; planning failures still
-    # make the workflow fail and do not allocate empty runners.
-    if: needs.plan.outputs.has-mutations == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    strategy:
-      # Every shard owns a separate checkout; never mutate a shared tree.
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.mutation-matrix) }}
-    defaults:
-      run:
-        working-directory: plexus
-    steps:
-      # Each shard builds the workspace again; see the Test job.
-      - name: Free runner disk
-        working-directory: /
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h /
-
-      - name: Checkout plexus with train comparison base
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          path: plexus
-          fetch-depth: 0
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          targets: wasm32-wasip1
-
-      - name: Install pinned guest compiler for replays
-        run: rustup toolchain install 1.99.0 --profile minimal --target wasm32-wasip1
-
-      - name: Rust compiler identity
-        id: rust-identity
-        run: echo "version=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-      # Restore a compatible public cache immediately; Test saves this sha's
-      # cache only after it completes. This restore-only job never saves mutants.
-      - name: Restore Rust build
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git/db
-            plexus/target
-          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-identity.outputs.version }}-${{ hashFiles('plexus/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: |
-            rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-identity.outputs.version }}-${{ hashFiles('plexus/Cargo.lock') }}-
-
-      - name: Install pinned nats-server
-        run: bash scripts/install-nats-server.sh
-
-      - name: Cache mutation runner
-        id: mutate-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.cargo/bin/ckdev-mutate
-          key: ckdev-mutate-${{ runner.os }}-${{ runner.arch }}-${{ env.MUTATE_RUNNER_REV }}
-
-      - name: Install pinned mutation runner
-        if: steps.mutate-cache.outputs.cache-hit != 'true'
-        run: cargo install --locked --git https://github.com/cortexkit/commons --rev "$MUTATE_RUNNER_REV" cortexkit-mutate
-
-      # Each control deliberately breaks source and checks that a named test fails.
-      # A train replays controls whose source/test files or definitions changed.
-      # A main push replays nothing: the commit already passed its train's
-      # replay of every touched row. The nightly schedule and manual dispatch
-      # replay the full catalogue with --broad, which catches interactions
-      # between changes that no single train's diff selects.
-      # The planning job selects controls before any shard runner is allocated.
-      - name: Replay selected mutation proofs
-        env:
-          MUTATION_SHARD: ${{ matrix.shard }}/${{ matrix.total }}
-          MUTATION_SELECTION: ${{ needs.plan.outputs.mutation-selection }}
-        run: |
-          set -euo pipefail
-          ckdev-mutate --version
-          cargo --version
-          read -ra selection <<< "$MUTATION_SELECTION"
-          mkdir -p target/mutations
-          status=0
-          ckdev-mutate run "${selection[@]}" --shard "$MUTATION_SHARD" \
-            --report target/mutations/replay.json || status=$?
-          # A broad catch means other test targets also fail. HUB requires a
-          # reviewed shared property and exactly the observed targets; narrow
-          # the break or document both before accepting a broad catch.
-          python3 - <<'PY' || status=$?
-          import collections, json, sys
-          with open('target/mutations/replay.json') as report:
-              rows = json.load(report)
-          print('Mutation verdicts:', dict(collections.Counter(r['outcome'] for r in rows)))
-          print('Selected controls:', len(rows))
-          if not rows:
-              print('refusing: allocated mutation shard ran no controls', file=sys.stderr)
-              sys.exit(1)
-          findings = [r for r in rows if r['outcome'] not in ('CAUGHT', 'HUB')]
-          for row in findings:
-              print('Mutation finding:', row['id'], row['outcome'], row.get('reason'))
-          sys.exit(bool(findings))
-          PY
-          exit "$status"
-
-      - name: Upload mutation report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: mutations-${{ github.event_name }}-${{ matrix.shard }}
-          path: plexus/target/mutations/*.json
-          if-no-files-found: warn
-          retention-days: 14

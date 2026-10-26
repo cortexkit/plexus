@@ -1,7 +1,5 @@
 # Build artifacts
 /target
-# ckdev-mutate proof, replay and broad-audit reports live under target/mutations/.
-/target/mutations/
 **/*.rs.bk
 # Cargo.lock is COMMITTED, deliberately — this workspace produces binaries
 # (ck-plexus, ck-plexus-admin), not a library.

@@ -258,7 +258,7 @@ requires `nats-server` on PATH (JetStream support, version 2.10 or newer). It
 starts a temporary server bound only to loopback, creates an isolated event
 stream, and reads its stored messages after publishing through the production
 NATS adapter. CI installs the pinned, checksum-verified release declared in its
-workflow before module tests and mutation shards. The test checks that both
+workflow before module tests. The test checks that both
 versions are stored under distinct ids, and that publishing those same notices
 again yields duplicate receipts with their original stream sequences and no
 additional entries. The in-memory regression

@@ -577,35 +577,6 @@ retained `.backup`, first archive the post-upgrade database consistently, stop
 all writers, and explicitly accept losing post-backup events. No database
 restore is automatic in this runbook.
 
-## Offline mutation catalogue and real paths
-
-The mutation catalogue, `mutations.toml` at the repository root, already held
-controls for these subsystems before this rollout. This rollout keeps them and
-adds the controls listed in the last column. IDs are the exact catalogue keys, without rollout-stage prefixes. A control deliberately breaks one
-line of production code and names the test that must fail because of it. Each
-new control names the production line it breaks, the test that must catch the
-break, `runner = "cargo"`, and a 3,600-second build deadline. The coverage is
-additive:
-
-| Property family | What the controls check | Existing controls | Controls added by this rollout |
-| --- | --- | --- | --- |
-| Exactly-once/canonical identity | Each event is stored once under one canonical key. Notices have stable per-version ids (v1: `event_key`, v2: `<event_key>.v2`); within the stream's deduplication window a publish-before-stamp retry adds no second entry. The outbox stamps both new and duplicate bus receipts, logging acknowledged duplicates at DEBUG, because each id identifies one immutable notice. Outside that window the same retry may create another entry. See [publish receipts and retries](../design/github-event-envelope-v2.md#publish-receipts-and-retries). Migration 45 keeps every subscription. | `key-collision-dedup`, `first-canonical-row`, `key-index`, `delivery-index`, `legacy-body-unchanged`, `ci-marker-discovery-dedup`, `bus-adapter-poll-and-ack` | `drain-after-ack`, `drain-pending-only`, `notice-subject-v1`, `migration-preserves-subscriptions` |
-| Retention/deletion | Event bodies and pending markers are kept while they may still be delivered, and are deleted with their subscription or connection. Pruning undelivered rows records a coverage gap. | `body-floor`, `pending-marker-retention`, `full-resume-window`, `published-rows-no-gap`, `unsubscribe-marker-delete`, `connection-marker-delete`, `orphan-marker-retention`, `ack-body-retained` | `sorted-head-boundary-retention`, `retention-gap-observed-interval` |
-| Quota/admission | No GitHub Actions request is sent without a committed reservation under the 600-an-hour ceiling. A CI cycle sends at most 8 requests, and watch cadence follows the active-watch count. | `quota-limit`, `quota-name-headroom`, `quota-hour-expiry`, `identity-committed-quota`, `deferred-health-not-attempted`, `ci-committed-quota`, `ci-request-cap`, `ci-fleet-cadence`, `ci-cadence-active-count` | None. The existing controls in the preceding column already cover this family. |
-| Authorization | Only admitted callers reach `events.get`. A caller sees an event body only if the repository is bound to its agent, or it holds a live `events_consume` grant on the event's connection. Missing and invisible keys get the same reply. | `agent-binding-owner`, `consumer-action-selector`, `bus-scoped-core-grant`, `bus-denied-metadata-only`, `bus-stamped-agent-identity`, `identity-current-schema`, `ci-pinned-schema`, `ci-all-action-authority` | `events-get-carrier`, `basal-flow-required`, `flow-carrier-admission`, `flow-events-get-only`, `event-name-mismatch`, `invisible-and-missing-uniform`, `agent-binding-case`, `consumer-grant-owner`, `consumer-grant-connection`, `consumer-grant-live` |
-
-Use `ckdev-mutate check` for anchors/exact names and `ckdev-mutate run --only
-<control-id> --report <private-evidence-file>` for replay from a clean reviewed
-checkout. Ordinary gates are still `cargo fmt --all` and
-`bash scripts/rust-test-gate.sh`; a red mutant is not a passing baseline test.
-
-CI keeps the replay results. The `mutations` job in `.github/workflows/ci.yml`
-uploads its replay report as the artifact `mutations-<event>-<shard>` on every
-run that replays controls: pushes to `main` and `train/**` branches, the nightly
-schedule and manual runs. Pull request runs replay nothing; they only run
-`ckdev-mutate check` in the Test job. No dependency report or synthetic test
-substitutes for the live hour.
-
 ## Operator report to complete (pending: run at deploy)
 
 The operator fills in this table after running the steps above. Each Result

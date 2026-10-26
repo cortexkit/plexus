@@ -76,8 +76,6 @@ They are the checks CI's test job runs on a pull request.
 
 - `cargo run --locked -p plexus-module --bin ck-plexus -- --check-catalog catalog`
   when you change a vendor manifest.
-- The mutation catalogue check, `ckdev-mutate check`, after installing the
-  pinned runner as shown in [docs/mutations.md](docs/mutations.md).
 
 The train, staging, release and deployment-acceptance scripts under `scripts/`
 are maintainer tooling. They need repository push rights or a live operator
@@ -103,5 +101,3 @@ installation, and a pull request never needs them.
   bite, and a code map.
 - [STRUCTURE.md](STRUCTURE.md): the directory layout and where new code goes.
 - [docs/design/](docs/design/): design notes and the contracts plexus serves.
-- [docs/mutations.md](docs/mutations.md): the checked-in mutation catalogue and
-  its runner.

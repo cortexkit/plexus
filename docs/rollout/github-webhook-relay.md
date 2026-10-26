@@ -84,15 +84,6 @@ then re-forwards and verifies both the cursor and old-schema writes survive.
 The module tests replay the vendored JSONL frame bytes through loopback
 WebSockets, substituting only the three permitted placeholders. Supplemental
 GitHub payloads exercise projection, deduplication, transactional failure,
-redelivery, ordering and the 64-frame window. `mutations.toml` includes named
-controls for source refusal, stream reset, gaps, commit-before-ack, poll dedup,
-each stub and binding rule, vault-report isolation, both connector-home checks
-and credential-safe error reporting. Run crate tests and all-target clippy on Linux, then
-`ckdev-mutate check`. The new controls all have `relay-` ids in `mutations.toml`:
-`hello-source`, `stream-reset`, `gap-reconcile`, `ack-after-commit`, `poll-dedup`,
-`oversized-reread`, `rate-limited-reread`, `overflow-reconcile`,
-`bound-list-reconcile`, `bound-null-reconcile`, `4001-no-vault-report`,
-`home-before-dial`, `home-on-4009`, `credential-error-redaction` and
-`null-repository-id-seed` (each with the `relay-` prefix). For example, replay
-the last control with `ckdev-mutate run --only relay-null-repository-id-seed`.
+redelivery, ordering and the 64-frame window. Run crate tests and all-target
+clippy on Linux.
 The full CI gate remains separate.

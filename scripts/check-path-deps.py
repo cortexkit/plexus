@@ -280,7 +280,7 @@ def _prepare_lock(root: Path) -> str | None:
     return None
 
 
-def self_test(selected_case: str | None = None) -> int:
+def self_test() -> int:
     failures = 0
     cases_run = 0
 
@@ -291,8 +291,6 @@ def self_test(selected_case: str | None = None) -> int:
         expected_errors: tuple[tuple[str, ...], ...] = (),
     ) -> None:
         nonlocal failures, cases_run
-        if selected_case is not None and name != selected_case:
-            return
         cases_run += 1
         with tempfile.TemporaryDirectory(prefix="check-path-deps-") as temporary:
             temporary_root = Path(temporary)
@@ -456,9 +454,6 @@ def self_test(selected_case: str | None = None) -> int:
         expected_errors=(("not hierarchically below the workspace root",),),
     )
 
-    if selected_case is not None and cases_run == 0:
-        print(f"check-path-deps self-test: unknown case {selected_case!r}", file=sys.stderr)
-        return 2
     if failures:
         print(f"check-path-deps self-test: {failures} check(s) failed", file=sys.stderr)
         return 1
@@ -470,12 +465,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, help="repository root to check (defaults to this script's repository)")
     parser.add_argument("--self-test", action="store_true", help="run fixture-based self-tests")
-    parser.add_argument("--self-test-case", help="run one named self-test case for mutation checks")
     args = parser.parse_args()
-    if args.self_test or args.self_test_case:
-        if args.root is not None or (args.self_test_case and not args.self_test):
-            parser.error("self-test options cannot be combined with --root, and --self-test-case requires --self-test")
-        return self_test(args.self_test_case)
+    if args.self_test:
+        if args.root is not None:
+            parser.error("self-test options cannot be combined with --root")
+        return self_test()
 
     root = args.root if args.root is not None else Path(__file__).resolve().parent.parent
     try:

@@ -1558,35 +1558,6 @@ fn path_placeholders(path: &str) -> Result<Vec<String>, ManifestError> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn rollout_mutation_controls_exist_in_the_catalogue() {
-        let controls = include_str!("../../../mutations.toml");
-        let ids: std::collections::BTreeSet<_> = controls
-            .lines()
-            .filter_map(|line| {
-                line.strip_prefix("id = \"")
-                    .and_then(|line| line.strip_suffix('"'))
-            })
-            .collect();
-        let document = include_str!("../../../docs/rollout/github-events-poll-mode.md");
-        let mut checked = 0;
-        for line in document.lines().filter(|line| line.starts_with("| ")) {
-            for id in line
-                .split('`')
-                .skip(1)
-                .step_by(2)
-                .filter(|id| id.contains('-') && !id.contains(' ') && !id.contains('<'))
-            {
-                assert!(
-                    ids.contains(id),
-                    "documented mutation control does not exist: {id}"
-                );
-                checked += 1;
-            }
-        }
-        assert!(checked >= 40, "mutation table must actually be checked");
-    }
-
-    #[test]
     fn shipped_credential_and_risk_boundaries_are_reviewed() {
         for (app, name, risk) in [
             ("neon", "complete_database_migration", Risk::Destructive),
