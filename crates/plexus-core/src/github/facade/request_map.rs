@@ -59,6 +59,93 @@ fn check_pr_create(object: &Map<String, Value>) -> Result<(), String> {
     Ok(())
 }
 
+fn positive_id(value: Option<&Value>, field: &str) -> Result<u64, String> {
+    value
+        .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
+        .filter(|number| *number > 0)
+        .ok_or_else(|| format!("request_field_forbidden{{field: {field}}}"))
+}
+
+/// These nested wire shapes have no caller-supplied transport arguments. Even
+/// fields ignored by the transport are refused so a typo cannot appear to work.
+fn check_nested(object: &Map<String, Value>, kind: &str) -> Result<(), String> {
+    for field in object.keys() {
+        if !matches!(
+            field.as_str(),
+            "action" | "repository" | "manifest_version" | "target" | "body"
+        ) && !(kind == "pr_edit" && field == "author_scope")
+        {
+            return Err(format!("request_field_forbidden{{field: {field}}}"));
+        }
+    }
+    if kind == "pr_edit" && object.get("author_scope").and_then(Value::as_str) != Some("own") {
+        return Err("request_field_forbidden{field: author_scope}".into());
+    }
+    let target = object
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or("request_field_forbidden{field: target}")?;
+    let fields = object
+        .get("body")
+        .and_then(Value::as_object)
+        .ok_or("request_field_forbidden{field: body}")?;
+    let (targets, allowed): (&[&str], &[&str]) = match kind {
+        "pr_edit" => (&["number"], &["title", "body", "base"]),
+        "review_reply" => (&["number", "comment_id"], &["body"]),
+        "resolve_thread" | "unresolve_thread" => (&["thread_id"], &[]),
+        "stack_create" => (&[], &["pull_requests"]),
+        "stack_add" => (&["stack_number"], &["pull_requests"]),
+        "stack_unstack" => (&["stack_number"], &[]),
+        _ => unreachable!("closed nested request kinds"),
+    };
+    for field in target.keys() {
+        if !targets.contains(&field.as_str()) {
+            return Err(format!("request_field_forbidden{{field: {field}}}"));
+        }
+    }
+    for field in targets {
+        if *field == "thread_id" {
+            if !target
+                .get(*field)
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+            {
+                return Err(format!("request_field_forbidden{{field: {field}}}"));
+            }
+        } else {
+            positive_id(target.get(*field), field)?;
+        }
+    }
+    for (field, value) in fields {
+        if !allowed.contains(&field.as_str()) || (field != "pull_requests" && !value.is_string()) {
+            return Err(format!("request_field_forbidden{{field: {field}}}"));
+        }
+    }
+    if kind == "pr_edit" && fields.is_empty() {
+        return Err("request_field_forbidden{field: body}".into());
+    }
+    if kind == "review_reply" && !fields.contains_key("body") {
+        return Err("request_field_forbidden{field: body}".into());
+    }
+    if matches!(kind, "stack_create" | "stack_add") {
+        let valid = fields
+            .get("pull_requests")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                let mut seen = std::collections::BTreeSet::new();
+                !items.is_empty()
+                    && items.len() <= 50
+                    && items
+                        .iter()
+                        .all(|item| item.as_u64().is_some_and(|n| n > 0 && seen.insert(n)))
+            });
+        if !valid {
+            return Err("request_field_forbidden{field: pull_requests}".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn map(
     request: &Value,
     resolved: &ResolvedRepositories,
@@ -117,6 +204,21 @@ pub fn map(
         (Some("issue create"), _, _) => ("issue_create", RequestKind::IssueCreate),
         (Some("pr create"), _, _) => ("pr_create", RequestKind::PrCreate),
         (Some("issue edit"), _, _) => ("issue_edit", RequestKind::IssueEdit),
+        (Some("pr edit"), _, _) => ("pr_edit", RequestKind::PrEdit),
+        (Some("api:POST:/repos/*/*/pulls/*/comments/*/replies"), _, _) => {
+            ("review_reply", RequestKind::ReviewReply)
+        }
+        (Some("graphql resolvereviewthread"), _, _) => {
+            ("resolve_thread", RequestKind::ReviewThread)
+        }
+        (Some("graphql unresolvereviewthread"), _, _) => {
+            ("unresolve_thread", RequestKind::ReviewThread)
+        }
+        (Some("api:POST:/repos/*/*/stacks"), _, _) => ("stack_create", RequestKind::StackCreate),
+        (Some("api:POST:/repos/*/*/stacks/*/add"), _, _) => ("stack_add", RequestKind::StackAdd),
+        (Some("api:POST:/repos/*/*/stacks/*/unstack"), _, _) => {
+            ("stack_unstack", RequestKind::StackUnstack)
+        }
         (Some("api:PATCH:/repos/*/*/issues/comments/*"), _, _) => {
             ("comment_edit", RequestKind::CommentEdit)
         }
@@ -153,6 +255,18 @@ pub fn map(
     }
     if kind == "pr_create" {
         check_pr_create(object)?;
+    }
+    if matches!(
+        kind,
+        "pr_edit"
+            | "review_reply"
+            | "resolve_thread"
+            | "unresolve_thread"
+            | "stack_create"
+            | "stack_add"
+            | "stack_unstack"
+    ) {
+        check_nested(object, kind)?;
     }
     if object.get("body").is_some_and(|body| !body.is_object()) {
         return Err("request_field_forbidden{field: body}".into());
@@ -263,7 +377,10 @@ pub fn map(
             .or_else(|| number.as_str().and_then(|s| s.parse().ok()))
             .ok_or("request_kind_unmapped")?;
         // The review endpoint addresses the pull request as pull_number.
-        let field = if matches!(kind, "pr_review" | "pr_ready" | "pr_draft") {
+        let field = if matches!(
+            kind,
+            "pr_review" | "pr_ready" | "pr_draft" | "pr_edit" | "review_reply"
+        ) {
             "pull_number"
         } else {
             "issue_number"
@@ -276,6 +393,15 @@ pub fn map(
             .or_else(|| id.as_str().and_then(|s| s.parse().ok()))
             .ok_or("request_kind_unmapped")?;
         body.insert("comment_id".into(), Value::from(parsed));
+    }
+    if let Some(id) = request.pointer("/target/thread_id") {
+        body.insert("thread_id".into(), id.clone());
+    }
+    if let Some(number) = request.pointer("/target/stack_number") {
+        body.insert(
+            "stack_number".into(),
+            Value::from(positive_id(Some(number), "stack_number")?),
+        );
     }
     let args = resolver::mapped_args(resolved, repository, &Value::Object(body), allowed_kind)
         .map_err(|_| "repository_unbound")?;

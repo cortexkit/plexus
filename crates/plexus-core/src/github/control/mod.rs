@@ -26,6 +26,13 @@ const WRITES: &[&str] = &[
     "reopen_issue",
     "mark_pull_request_ready",
     "convert_pull_request_to_draft",
+    "edit_pull_request",
+    "reply_to_review_comment",
+    "resolve_review_thread",
+    "unresolve_review_thread",
+    "create_pull_request_stack",
+    "add_to_pull_request_stack",
+    "unstack_pull_requests",
 ];
 const READS: &[&str] = &[
     "github.issue.get",

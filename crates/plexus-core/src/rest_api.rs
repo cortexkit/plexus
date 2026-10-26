@@ -658,7 +658,13 @@ impl RestTransport {
                 return local_not_sent();
             }
         };
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        let accept =
+            if github_facade && github_stack_status(prepared_method, prepared_path).is_some() {
+                "application/vnd.github+json"
+            } else {
+                "application/json"
+            };
+        headers.insert(ACCEPT, HeaderValue::from_static(accept));
         // Ingest refuses a header parameter that names a credential or
         // transport header; refuse here too rather than let an argument
         // replace either.
@@ -1313,6 +1319,22 @@ fn classify_response_with_privacy(
         }
         return result.with_error_signal(signal);
     }
+    // Stacks are a public preview. Validate the status/body pairing while the
+    // HTTP status is still available: a 200 null is not a dissolved stack.
+    if let Some(expected) = github_facade
+        .then(|| github_stack_status(method, path))
+        .flatten()
+    {
+        let unstack = path.ends_with("/unstack");
+        let valid = if unstack && status == 204 {
+            text.is_empty()
+        } else {
+            status == expected && serde_json::from_str::<Value>(&text).is_ok_and(|v| v.is_object())
+        };
+        if !valid {
+            return TransportResponse::unknown_with_error("github_stack_response_invalid");
+        }
+    }
     let body = if text.is_empty() {
         Value::Null
     } else {
@@ -1323,6 +1345,20 @@ fn classify_response_with_privacy(
     // Vendor payloads stay verbatim. Guessing secrets from vendor field names
     // destroys ordinary result data; credentials travel separately in headers.
     TransportResponse::success(body)
+}
+
+/// The reviewed stack routes are the only facade endpoints whose preview
+/// replies require an HTTP status check as well as the facade's body checks.
+fn github_stack_status(method: &reqwest::Method, path: &str) -> Option<u16> {
+    let parts: Vec<_> = path.split('/').collect();
+    match parts.as_slice() {
+        ["", "repos", _, _, "stacks"] if method == reqwest::Method::POST => Some(201),
+        ["", "repos", _, _, "stacks", _] if method == reqwest::Method::GET => Some(200),
+        ["", "repos", _, _, "stacks", _, "add" | "unstack"] if method == reqwest::Method::POST => {
+            Some(200)
+        }
+        _ => None,
+    }
 }
 
 fn local_not_sent() -> TransportResponse {

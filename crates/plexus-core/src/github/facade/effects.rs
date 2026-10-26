@@ -45,6 +45,13 @@ pub const REQUEST_KINDS: &[&str] = &[
     "reopen",
     "pr_ready",
     "pr_draft",
+    "pr_edit",
+    "review_reply",
+    "resolve_thread",
+    "unresolve_thread",
+    "stack_create",
+    "stack_add",
+    "stack_unstack",
 ];
 
 /// The catalog action that names a request kind: the write an agent must be
@@ -62,6 +69,13 @@ pub fn primary_action(kind: &str) -> Option<&'static str> {
         "reopen" => "reopen_issue",
         "pr_ready" => "mark_pull_request_ready",
         "pr_draft" => "convert_pull_request_to_draft",
+        "pr_edit" => "edit_pull_request",
+        "review_reply" => "reply_to_review_comment",
+        "resolve_thread" => "resolve_review_thread",
+        "unresolve_thread" => "unresolve_review_thread",
+        "stack_create" => "create_pull_request_stack",
+        "stack_add" => "add_to_pull_request_stack",
+        "stack_unstack" => "unstack_pull_requests",
         _ => return None,
     })
 }
@@ -73,9 +87,13 @@ pub fn reads_for_kind(kind: &str) -> Option<&'static [&'static str]> {
         "comment_edit_last" => &["github.issue_comments.list", "github.issue_comment.get"],
         "comment_edit" => &["github.issue_comment.get"],
         "issue_edit" => &["github.issue.get"],
-        "pr_ready" | "pr_draft" => &["github.pull_request.get"],
+        "pr_ready" | "pr_draft" | "pr_edit" | "stack_create" | "stack_add" => {
+            &["github.pull_request.get"]
+        }
+        "resolve_thread" | "unresolve_thread" => &["github.review_thread.get"],
+        "stack_unstack" => &["github.stack.get"],
         "comment" | "pr_review" | "reaction" | "issue_create" | "pr_create" | "close"
-        | "reopen" => &[],
+        | "reopen" | "review_reply" => &[],
         _ => return None,
     })
 }
@@ -115,6 +133,13 @@ fn effects_for_kind(kind: &str) -> &'static [&'static str] {
         "reopen" => &["add_issue_comment", "reopen_issue"],
         "pr_ready" => &["mark_pull_request_ready"],
         "pr_draft" => &["convert_pull_request_to_draft"],
+        "pr_edit" => &["edit_pull_request"],
+        "review_reply" => &["reply_to_review_comment"],
+        "resolve_thread" => &["resolve_review_thread"],
+        "unresolve_thread" => &["unresolve_review_thread"],
+        "stack_create" => &["create_pull_request_stack"],
+        "stack_add" => &["add_to_pull_request_stack"],
+        "stack_unstack" => &["unstack_pull_requests"],
         "issue_edit" => &[
             "edit_issue",
             "add_issue_labels",

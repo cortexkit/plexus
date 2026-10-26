@@ -206,7 +206,15 @@ fn github_manifest_catalog_classifies_every_routed_action() {
         "remove_issue_assignees",
         "mark_pull_request_ready",
         "convert_pull_request_to_draft",
+        "edit_pull_request",
+        "reply_to_review_comment",
+        "resolve_review_thread",
+        "unresolve_review_thread",
+        "create_pull_request_stack",
+        "add_to_pull_request_stack",
+        "unstack_pull_requests",
     ];
+    let facade_reads = ["github.review_thread.get"];
     let reads = [
         "github.issue.get",
         "github.issue_comment.get",
@@ -214,6 +222,7 @@ fn github_manifest_catalog_classifies_every_routed_action() {
         "github.issue_timeline.list",
         "github.issue.search",
         "github.pull_request.get",
+        "github.stack.get",
     ];
     assert_eq!(ingested.manifest.resource_filters.write_enabling, ["repo"]);
     assert_eq!(
@@ -223,9 +232,9 @@ fn github_manifest_catalog_classifies_every_routed_action() {
             .iter()
             .filter(|action| action.facade_only)
             .count(),
-        writes.len()
+        writes.len() + facade_reads.len()
     );
-    for name in writes {
+    for name in writes.into_iter().chain(facade_reads) {
         let action = store
             .catalog_action("direct", "github-connection", name)
             .unwrap()
@@ -363,9 +372,9 @@ fn github_issue_edit_goldens_expose_all_six_mutation_fields() {
 }
 
 #[test]
-fn ordinary_invokes_of_each_facade_write_refuse_before_contact_or_reservation() {
+fn ordinary_invokes_of_each_facade_action_refuse_before_contact_or_reservation() {
     let (store, manifest) = installed_catalog();
-    let writes: Vec<_> = manifest
+    let facade_actions: Vec<_> = manifest
         .manifest
         .actions_baseline
         .iter()
@@ -379,7 +388,7 @@ fn ordinary_invokes_of_each_facade_write_refuse_before_contact_or_reservation() 
         transport.clone(),
     )
     .with_governance_seams(Arc::new(ReviewedSeams(store.clone())));
-    for name in writes {
+    for name in facade_actions {
         for principal in ["direct", plexus_core::github::AFT_PRINCIPAL] {
             for with_assertion in [false, true] {
                 let mut request = AuthorizationRequest::new(

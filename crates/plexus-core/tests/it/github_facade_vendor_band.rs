@@ -16,6 +16,7 @@ mod pr_ready;
 mod pulls_open;
 mod regressions;
 mod review_threads;
+mod v22;
 
 struct Token;
 impl HandleCredentialProvider for Token {

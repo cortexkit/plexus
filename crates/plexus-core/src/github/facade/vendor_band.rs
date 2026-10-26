@@ -244,6 +244,16 @@ pub(crate) fn projection(kind: &str, legs: &[(&str, Value)], issue_read: Option<
                 ("draft", "draft"),
             ],
         ),
+        "pr_edit" => pick(last, &[("html_url", "url"), ("number", "number")]),
+        "resolve_thread" | "unresolve_thread" => {
+            json!({"id":last["id"], "resolved":last["isResolved"]})
+        }
+        "stack_create" | "stack_add" => pick(last, &[("url", "url"), ("number", "number")]),
+        "stack_unstack" => {
+            let mut result = pick(last, &[("url", "url"), ("number", "number")]);
+            result["dissolved"] = json!(last.is_null());
+            result
+        }
         "pr_ready" | "pr_draft" => match legs.last() {
             Some((_, body)) => pick(
                 body,
@@ -337,6 +347,106 @@ fn owned(value: &Value, login: &str) -> bool {
         .and_then(Value::as_str)
         .is_some_and(|actual| actual.eq_ignore_ascii_case(login))
         && value.pointer("/user/type").and_then(Value::as_str) == Some("Bot")
+}
+
+const PR_EDIT_NOT_OWN_MESSAGE: &str = "'pr edit' changes only pull requests this repository's bot opened ({bot}); #{number} was opened by {author}. Ask the author, or run it as the operator with GH_SHIM_BYPASS=operator.";
+
+fn graphql_errors(value: &Value) -> Result<(), String> {
+    if value.get("errors").is_some() {
+        let errors = super::validation::errors(&value.to_string());
+        return Err(if errors.is_empty() {
+            "vendor_rejected{status: 422}".into()
+        } else {
+            format!(
+                "vendor_rejected{{status: 422, errors: {}}}",
+                serde_json::to_string(&errors).expect("validation errors are JSON")
+            )
+        });
+    }
+    Ok(())
+}
+
+fn thread_kind(kind: &str) -> bool {
+    matches!(kind, "resolve_thread" | "unresolve_thread")
+}
+
+fn stack_shape(value: &Value, args: &Value) -> Result<(), String> {
+    let expected = format!(
+        "https://api.github.com/repos/{}/{}/stacks/",
+        args["owner"].as_str().unwrap_or(""),
+        args["repo"].as_str().unwrap_or("")
+    );
+    let number = value["number"]
+        .as_u64()
+        .filter(|n| *n > 0)
+        .ok_or("pre_dispatch_read_incomplete{reason: invalid_response}")?;
+    if !value["url"]
+        .as_str()
+        .is_some_and(|url| url.eq_ignore_ascii_case(&format!("{expected}{number}")))
+    {
+        return Err("agent_repository_conflict".into());
+    }
+    if args
+        .get("stack_number")
+        .is_some_and(|n| *n != value["number"])
+    {
+        return Err("pre_dispatch_read_incomplete{reason: invalid_response}".into());
+    }
+    let members = value["pull_requests"]
+        .as_array()
+        .ok_or("pre_dispatch_read_incomplete{reason: invalid_response}")?;
+    let mut seen = std::collections::BTreeSet::new();
+    for pr in members {
+        if !pr["number"]
+            .as_u64()
+            .is_some_and(|n| n > 0 && seen.insert(n))
+            || !pr["user"]["login"].is_string()
+            || !pr["user"]["type"].is_string()
+        {
+            return Err("pre_dispatch_read_incomplete{reason: invalid_response}".into());
+        }
+        let repo = format!(
+            "https://api.github.com/repos/{}/{}",
+            args["owner"].as_str().unwrap_or(""),
+            args["repo"].as_str().unwrap_or("")
+        );
+        if !pr
+            .pointer("/base/repo/url")
+            .and_then(Value::as_str)
+            .is_some_and(|url| url.eq_ignore_ascii_case(&repo))
+        {
+            return Err("agent_repository_conflict".into());
+        }
+    }
+    Ok(())
+}
+
+fn write_response(kind: &str, value: Value, args: &Value) -> Result<Value, String> {
+    if pr_state_kind(kind) {
+        return pr_state_response(kind, value);
+    }
+    if thread_kind(kind) {
+        graphql_errors(&value)?;
+        let mutation = if kind == "resolve_thread" {
+            "resolveReviewThread"
+        } else {
+            "unresolveReviewThread"
+        };
+        let thread = &value["data"][mutation]["thread"];
+        if thread["id"] != args["variables"]["threadId"]
+            || thread["isResolved"].as_bool() != Some(kind == "resolve_thread")
+        {
+            return Err("outcome_unknown".into());
+        }
+        return Ok(thread.clone());
+    }
+    if matches!(kind, "stack_create" | "stack_add" | "stack_unstack") {
+        if kind == "stack_unstack" && value.is_null() {
+            return Ok(value);
+        }
+        stack_shape(&value, args).map_err(|_| "outcome_unknown".to_owned())?;
+    }
+    Ok(value)
 }
 
 fn pr_state_kind(kind: &str) -> bool {
@@ -540,11 +650,36 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         completed.push("github.issue_comments.list");
     }
     let mut issue_read = None;
+    if matches!(mapped.request_kind.as_str(), "stack_create" | "stack_add") {
+        for number in args["pull_requests"].as_array().expect("validated PR list") {
+            let value = match read(
+                engine,
+                reply,
+                &row,
+                "github.pull_request.get",
+                json!({"owner":args["owner"], "repo":args["repo"], "pull_number":number}),
+            ) {
+                Ok(value) => value,
+                Err(code) => return fail(reply, "G8", code),
+            };
+            if !owned(&value, &login) {
+                return fail(reply, "G8", "pr_edit_not_own".into());
+            }
+        }
+        completed.push("github.pull_request.get");
+    }
     for &action in mapped.reads {
-        if action == "github.issue_comments.list" {
+        if action == "github.issue_comments.list"
+            || matches!(mapped.request_kind.as_str(), "stack_create" | "stack_add")
+        {
             continue;
         }
-        let value = match read(engine, reply, &row, action, args.clone()) {
+        let read_args = if thread_kind(&mapped.request_kind) {
+            json!({"owner":args["owner"], "repo":args["repo"], "variables":{"threadId":args["thread_id"]}})
+        } else {
+            args.clone()
+        };
+        let value = match read(engine, reply, &row, action, read_args) {
             Ok(value) => value,
             Err(code)
                 if mapped.request_kind == "issue_edit"
@@ -555,6 +690,58 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             Err(code) => return fail(reply, "G8", code),
         };
         completed.push(action);
+        if thread_kind(&mapped.request_kind) {
+            if let Err(code) = graphql_errors(&value) {
+                return fail(reply, "G8", code.into());
+            }
+            let node = &value["data"]["node"];
+            let Some(repository) = node
+                .pointer("/pullRequest/repository/nameWithOwner")
+                .and_then(Value::as_str)
+            else {
+                return fail(reply, "G8", "not_present".into());
+            };
+            if node["id"] != args["thread_id"] {
+                return fail(reply, "G8", "not_present".into());
+            }
+            let expected = format!(
+                "{}/{}",
+                args["owner"].as_str().unwrap_or(""),
+                args["repo"].as_str().unwrap_or("")
+            );
+            if !repository.eq_ignore_ascii_case(&expected) {
+                return fail(reply, "G8", "agent_repository_conflict".into());
+            }
+        }
+        if mapped.request_kind == "stack_unstack" {
+            if let Err(code) = stack_shape(&value, &args) {
+                return fail(reply, "G8", code.into());
+            }
+            if value["pull_requests"]
+                .as_array()
+                .expect("validated stack")
+                .iter()
+                .any(|pr| !owned(pr, &login))
+            {
+                return fail(reply, "G8", "pr_edit_not_own".into());
+            }
+        }
+        if mapped.request_kind == "pr_edit" && !owned(&value, &login) {
+            let message = PR_EDIT_NOT_OWN_MESSAGE
+                .replace("{bot}", &login)
+                .replace("{number}", &args["pull_number"].to_string())
+                .replace(
+                    "{author}",
+                    value["user"]["login"].as_str().unwrap_or("unknown"),
+                );
+            return fail(
+                reply,
+                "G8",
+                json!({"code":"pr_edit_not_own", "detail":{"message":message}})
+                    .to_string()
+                    .into(),
+            );
+        }
         if action == "github.issue.get" || action == "github.pull_request.get" {
             issue_read = Some(value.clone());
         }
@@ -588,6 +775,12 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     }
     let proof = effects::OwnershipProof::new(&mapped.request_kind, completed);
     let mut legs = effects::plan(&mapped);
+    if thread_kind(&mapped.request_kind) {
+        legs = vec![(
+            mapped.action,
+            json!({"owner":args["owner"], "repo":args["repo"], "variables":{"threadId":args["thread_id"]}}),
+        )];
+    }
     if pr_state_kind(&mapped.request_kind) {
         let pr = issue_read.as_ref().unwrap_or(&Value::Null);
         let (Some(draft), Some(node_id)) = (
@@ -691,6 +884,7 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 }
             }
         }
+        let response_args = args.clone();
         let request =
             AuthorizationRequest::new(&reply.caller_principal, &handle.connection_id, action, args)
                 .with_bound_agent(&row.agent_id, &handle.app_handle_id);
@@ -732,8 +926,8 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         }
         match taxonomy::dispatched(dispatch) {
             Ok(value) => {
-                let value = if pr_state_kind(&mapped.request_kind) {
-                    match pr_state_response(&mapped.request_kind, value) {
+                let value = {
+                    match write_response(&mapped.request_kind, value, &response_args) {
                         Ok(value) => value,
                         Err(code) if code == "outcome_unknown" => {
                             receipt_update(
@@ -751,8 +945,6 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                         }
                         Err(code) => return fail(reply, "G10", code.into()),
                     }
-                } else {
-                    value
                 };
                 let durable_value = if mapped.request_kind == "issue_edit" {
                     json!({"__plexus_response":value,"__plexus_issue_read":issue_read})

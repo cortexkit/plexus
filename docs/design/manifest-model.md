@@ -18,6 +18,12 @@ semantics.
   `input_schema`; a discovery mismatch quarantines them. Do not invent a partial
   schema merely to make validation pass: it is compared with the whole vendor
   input schema.
+- REST actions may declare `facade_only` at read, write or destructive risk.
+  Governance refuses ordinary invokes of these actions, even with a matching
+  grant. A reviewed read can be facade-only when its result must stay internal,
+  such as a node lookup whose repository the facade must verify before writing.
+  No other transport supports this flag; existing reads remain ordinary unless
+  their reviewed manifest explicitly declares it.
 - Resource-filter keys are dot-delimited object-property paths, such as `owner`
   or `scope.repo`, in at least one reviewed input schema. Dynamic map keys and
   array traversal are not supported. Ingest refuses paths with no reviewed

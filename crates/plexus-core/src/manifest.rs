@@ -960,9 +960,9 @@ fn validate(manifest: &AppManifest) -> Result<(), ManifestError> {
                 action.name
             )));
         }
-        if action.facade_only && (action.risk == Risk::Read || !is_rest) {
+        if action.facade_only && !is_rest {
             return Err(ManifestError::InvalidField(format!(
-                "facade_only requires a REST write action: '{}'",
+                "facade_only requires a REST action: '{}'",
                 action.name
             )));
         }
@@ -2178,6 +2178,26 @@ mod tests {
             "defaults": {"ask_first_risk": ["write"], "rate_limit": {"calls_per_min": 60}},
             "availability": "ga"
         })
+    }
+
+    #[test]
+    fn facade_only_allows_rest_reads_writes_and_destructive_but_not_other_transports() {
+        for risk in ["read", "write", "destructive"] {
+            let mut value = rest_manifest_value();
+            value["actions_baseline"][0]["risk"] = serde_json::json!(risk);
+            value["actions_baseline"][0]["facade_only"] = serde_json::json!(true);
+            assert!(ingest_value(value.clone()).is_ok(), "{risk}");
+            value["transport"] =
+                serde_json::json!({"kind":"mcp_remote", "url":"https://example.com/mcp"});
+            for action in value["actions_baseline"].as_array_mut().unwrap() {
+                action.as_object_mut().unwrap().remove("http");
+            }
+            let error = ingest_value(value).unwrap_err().to_string();
+            assert!(
+                error.contains("facade_only requires a REST action"),
+                "{risk}: {error}"
+            );
+        }
     }
 
     /// `defaults.rate_limit` is optional and ignored: plexus enforces no

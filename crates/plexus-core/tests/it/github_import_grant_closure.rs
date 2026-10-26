@@ -361,6 +361,96 @@ fn imported_agent_completes_pr_review() {
 }
 
 #[test]
+fn imported_agent_completes_each_v22_write_with_only_its_implied_reads() {
+    let bot = json!({"login":"app-fixture[bot]", "type":"Bot"});
+    let stack = json!({"url":"https://api.github.com/repos/org/repo/stacks/3", "number":3,
+        "pull_requests":[{"number":7,"user":bot,"base":{"repo":{"url":"https://api.github.com/repos/org/repo"}}}]});
+    for (action, wire_action, target, body, read, read_value, response) in [
+        (
+            "edit_pull_request",
+            "pr edit",
+            json!({"number":"7"}),
+            json!({"title":"T"}),
+            Some("github.pull_request.get"),
+            json!({"number":7,"user":bot}),
+            json!({"number":7}),
+        ),
+        (
+            "reply_to_review_comment",
+            "api:POST:/repos/*/*/pulls/*/comments/*/replies",
+            json!({"number":"7","comment_id":"99"}),
+            json!({"body":"B"}),
+            None,
+            Value::Null,
+            json!({"id":100}),
+        ),
+        (
+            "resolve_review_thread",
+            "graphql resolvereviewthread",
+            json!({"thread_id":"PRRT_7"}),
+            json!({}),
+            Some("github.review_thread.get"),
+            json!({"data":{"node":{"id":"PRRT_7","pullRequest":{"repository":{"nameWithOwner":"org/repo"}}}}}),
+            json!({"data":{"resolveReviewThread":{"thread":{"id":"PRRT_7","isResolved":true}}}}),
+        ),
+        (
+            "unresolve_review_thread",
+            "graphql unresolvereviewthread",
+            json!({"thread_id":"PRRT_7"}),
+            json!({}),
+            Some("github.review_thread.get"),
+            json!({"data":{"node":{"id":"PRRT_7","pullRequest":{"repository":{"nameWithOwner":"org/repo"}}}}}),
+            json!({"data":{"unresolveReviewThread":{"thread":{"id":"PRRT_7","isResolved":false}}}}),
+        ),
+        (
+            "create_pull_request_stack",
+            "api:POST:/repos/*/*/stacks",
+            json!({}),
+            json!({"pull_requests":[7]}),
+            Some("github.pull_request.get"),
+            json!({"number":7,"user":bot}),
+            stack.clone(),
+        ),
+        (
+            "add_to_pull_request_stack",
+            "api:POST:/repos/*/*/stacks/*/add",
+            json!({"stack_number":"3"}),
+            json!({"pull_requests":[7]}),
+            Some("github.pull_request.get"),
+            json!({"number":7,"user":bot}),
+            stack.clone(),
+        ),
+        (
+            "unstack_pull_requests",
+            "api:POST:/repos/*/*/stacks/*/unstack",
+            json!({"stack_number":"3"}),
+            json!({}),
+            Some("github.stack.get"),
+            stack.clone(),
+            Value::Null,
+        ),
+    ] {
+        let fixture = imported("v22-import", &[action]);
+        if let Some(read) = read {
+            fixture
+                .transport
+                .set_response_for_method(read, "", MockResponse::Success(read_value));
+        }
+        fixture
+            .transport
+            .set_response_for_method(action, "", MockResponse::Success(response));
+        let mut request = json!({"action":wire_action,"repository":"org/repo","manifest_version":22,"target":target,"body":body});
+        if wire_action == "pr edit" {
+            request["author_scope"] = json!("own");
+        }
+        let (reply, calls) = send(&fixture, "v22-import", request);
+        assert_eq!(reply["result"]["status"], "completed", "{action}: {reply}");
+        let expected: Vec<_> = read.into_iter().chain(std::iter::once(action)).collect();
+        assert_eq!(actions(&calls), expected, "{action}");
+    }
+}
+
+#[test]
 fn imported_agent_completes_reaction() {
     let calls = drive("closure-reaction", wire("v1-issue-reaction"));
     assert_eq!(actions(&calls), ["add_reaction"]);
