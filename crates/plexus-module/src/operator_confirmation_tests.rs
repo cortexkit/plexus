@@ -1,6 +1,9 @@
 use super::*;
 use subc_protocol::session::{OperatorConfirmReply, OperatorConfirmRequest};
 
+#[path = "operator_confirmation_tests/bulk_invoke.rs"]
+mod bulk_invoke;
+
 const CONNECTION: &str = "conn-retire-rest";
 const HANDLE: &str = "app-confirm";
 
@@ -414,6 +417,15 @@ async fn ceremony_with_peer(case: &Case, decision: Result<(), &str>, expect_prom
             );
             assert_eq!((frame.header.channel, frame.header.epoch), (0, 0));
             let request: OperatorConfirmRequest = serde_json::from_slice(&frame.body).unwrap();
+            assert!(operator_confirmation::valid_summary(&request.summary));
+            if case.params["all_handles"] == true && case.params["kind"] == "invoke" {
+                assert!(request.summary.contains("7 writes"));
+                assert!(request.summary.contains("10 expanded"));
+                assert!(request
+                    .summary
+                    .contains("all enabled GitHub handles (26 planned)"));
+                assert!(!request.summary.contains("edit_pull_request"));
+            }
             assert_eq!(
                 (request.route_channel, request.route_epoch),
                 (route().channel, route().epoch)

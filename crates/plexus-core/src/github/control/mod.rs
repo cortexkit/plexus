@@ -636,6 +636,43 @@ pub fn grant(
     effect: &str,
     dry_run: bool,
 ) -> Result<Value, String> {
+    let request = grant_request(principal, app_handle_id, actions, module, effect, dry_run)?;
+    store
+        .grant_github_handle(&request)
+        .map_err(|error| format!("grant_failed: {error}"))?
+}
+
+/// Upgrade all enabled handles with the same explicit write intent. The store
+/// validates the reviewed facade actions and applies every plan atomically.
+pub fn grant_all(
+    store: &PlexusStore,
+    principal: &str,
+    actions: &[String],
+    module: &str,
+    effect: &str,
+    dry_run: bool,
+) -> Result<Value, String> {
+    let request = grant_request(
+        principal,
+        "all enabled handles",
+        actions,
+        module,
+        effect,
+        dry_run,
+    )?;
+    store
+        .grant_all_github_handles(&request)
+        .map_err(|error| format!("grant_failed: {error}"))?
+}
+
+fn grant_request(
+    principal: &str,
+    app_handle_id: &str,
+    actions: &[String],
+    module: &str,
+    effect: &str,
+    dry_run: bool,
+) -> Result<crate::storage::github_store::GithubHandleGrant, String> {
     if principal != "direct" {
         return Err("operator_authority_required".into());
     }
@@ -667,7 +704,7 @@ pub fn grant(
     for action in &listed {
         expanded.extend(effects::implied_by_write(action, WRITES));
     }
-    let request = crate::storage::github_store::GithubHandleGrant {
+    Ok(crate::storage::github_store::GithubHandleGrant {
         app_handle_id: app_handle_id.to_owned(),
         module: module.to_owned(),
         actions: listed.iter().map(|action| (*action).to_owned()).collect(),
@@ -679,10 +716,7 @@ pub fn grant(
             .collect(),
         effect: effect.to_owned(),
         dry_run,
-    };
-    store
-        .grant_github_handle(&request)
-        .map_err(|error| format!("grant_failed: {error}"))?
+    })
 }
 
 pub fn bindings_read(

@@ -228,13 +228,17 @@ repin-action --connection <id> --action <name> --expected-hash <hash>
     Re-pinning asserts that the operator has reviewed the current schema change.
     The expected hash must be the current hash shown by review-action.
 
-handle-grant --handle <app_handle_id> --actions a,b,c --carrier <principal>
+handle-grant (--handle <app_handle_id> | --all-handles) --actions a,b,c --carrier <principal>
              --effect allow|ask_first|block [--apply]
     Adds the listed writes, plus every read and leg they imply, to the handle's
     connection ceiling, its agent's grants and the named module's grant (e.g.
     reserved:aft), with policies at the given effect. Without --apply this is a
     dry run that prints the plan and writes nothing. Remove authority with
-    revoke-grant and remove-policy.
+    revoke-grant and remove-policy. The default kind is invoke. --all-handles
+    selects enabled handles and accepts only explicit reviewed facade writes,
+    never wildcards. It seeds missing reviewed catalog rows without reactivating
+    disabled/quarantined rows, and applies the whole plan in one audited
+    transaction with one operator confirmation. Rerunning is a no-op.
 
 handle-grant --handle <app_handle_id> --actions a,b --kind poll [--apply]
     Grants scheduled-poll authority for the listed reviewed reads (for example
@@ -1121,13 +1125,16 @@ fn handle_grant_request(flags: &Flags) -> Result<(&'static str, Value), Failure>
         }
         return Ok((plexus_module::manifest::GITHUB_GRANT_OP, params));
     }
-    if flags.has("--all-handles") {
-        return Err(Failure::usage("--all-handles requires --kind read"));
-    }
-    let handle = flags.required("--handle")?;
+    let all = flags.has("--all-handles");
     match flags.value("--kind") {
         None | Some("invoke") => {}
         Some("poll") => {
+            if all {
+                return Err(Failure::usage(
+                    "--all-handles requires --kind read or invoke",
+                ));
+            }
+            let handle = flags.required("--handle")?;
             // The poll grant's grantee is the handle connection's own
             // principal and it mints no policy, so a carrier or effect would
             // be ignored; refuse them instead.
@@ -1150,6 +1157,17 @@ fn handle_grant_request(flags: &Flags) -> Result<(&'static str, Value), Failure>
         }
         Some(_) => return Err(Failure::usage("--kind must be invoke, poll or read")),
     }
+    let handle = flags.value("--handle");
+    if all == handle.is_some() || handle == Some("") {
+        return Err(Failure::usage(
+            "invoke requires exactly one of --handle or --all-handles",
+        ));
+    }
+    if all && actions.iter().any(|action| action.contains('*')) {
+        return Err(Failure::usage(
+            "--all-handles requires explicit actions, not wildcards",
+        ));
+    }
     // `--carrier`, not `--module`: `--module` is the common flag naming the
     // plexus module to call, so reusing it sent this op to a module named
     // after the carrier principal.
@@ -1160,16 +1178,20 @@ fn handle_grant_request(flags: &Flags) -> Result<(&'static str, Value), Failure>
             "--effect must be one of: allow, ask_first, block",
         ));
     }
-    Ok((
-        plexus_module::manifest::GITHUB_GRANT_OP,
-        json!({
-            "app_handle_id": handle,
-            "actions": actions,
-            "module": module,
-            "effect": effect,
-            "dry_run": !flags.has("--apply"),
-        }),
-    ))
+    let mut params = json!({
+        "actions": actions,
+        "module": module,
+        "effect": effect,
+        "dry_run": !flags.has("--apply"),
+    });
+    if let Some(handle) = handle {
+        params["app_handle_id"] = json!(handle);
+    }
+    if all {
+        params["all_handles"] = json!(true);
+        params["kind"] = json!("invoke");
+    }
+    Ok((plexus_module::manifest::GITHUB_GRANT_OP, params))
 }
 
 fn handle_unbind_request(flags: &Flags) -> Result<(&'static str, Value), Failure> {
@@ -3862,6 +3884,91 @@ mod bot_read_grant_cli_tests {
         assert!(lines.contains("app-x"));
         assert!(lines.contains("catalog additions (reviewed, AddMissing): github.repo.get"));
         assert!(USAGE.contains("--all-handles) --kind read"));
+    }
+
+    #[test]
+    fn invoke_bulk_requires_explicit_actions_and_previews_by_default() {
+        for explicit_kind in [false, true] {
+            let mut args = vec!["--all-handles", "--actions",
+                "edit_pull_request,reply_to_review_comment,resolve_review_thread,unresolve_review_thread,create_pull_request_stack,add_to_pull_request_stack,unstack_pull_requests",
+                "--carrier","reserved:aft","--effect","allow"];
+            if explicit_kind {
+                args.extend(["--kind", "invoke"]);
+            }
+            let preview = flags(&args);
+            preview
+                .refuse_unknown(accepted_flags("handle-grant").unwrap(), &[])
+                .unwrap();
+            let (method, params) = handle_grant_request(&preview).unwrap();
+            assert_eq!(method, plexus_module::manifest::GITHUB_GRANT_OP);
+            assert_eq!(params["all_handles"], true);
+            assert_eq!(params["kind"], "invoke");
+            assert_eq!(params["module"], "reserved:aft");
+            assert_eq!(params["effect"], "allow");
+            assert_eq!(params["dry_run"], true);
+            assert_eq!(params["actions"].as_array().unwrap().len(), 7);
+            assert!(params.get("app_handle_id").is_none());
+            args.push("--apply");
+            assert_eq!(
+                handle_grant_request(&flags(&args)).unwrap().1["dry_run"],
+                false
+            );
+        }
+        for args in [
+            vec![
+                "--all-handles",
+                "--handle",
+                "app-x",
+                "--actions",
+                "edit_pull_request",
+                "--carrier",
+                "reserved:aft",
+                "--effect",
+                "allow",
+            ],
+            vec![
+                "--actions",
+                "edit_pull_request",
+                "--carrier",
+                "reserved:aft",
+                "--effect",
+                "allow",
+            ],
+            vec![
+                "--all-handles",
+                "--actions",
+                "*",
+                "--carrier",
+                "reserved:aft",
+                "--effect",
+                "allow",
+            ],
+            vec![
+                "--all-handles",
+                "--actions",
+                "edit_*",
+                "--carrier",
+                "reserved:aft",
+                "--effect",
+                "allow",
+            ],
+            vec![
+                "--all-handles",
+                "--carrier",
+                "reserved:aft",
+                "--effect",
+                "allow",
+            ],
+            vec![
+                "--all-handles",
+                "--actions",
+                "edit_pull_request",
+                "--carrier",
+                "reserved:aft",
+            ],
+        ] {
+            assert!(handle_grant_request(&flags(&args)).is_err(), "{args:?}");
+        }
     }
 }
 

@@ -1862,7 +1862,44 @@ async fn handle_management_request(
             return send_tool_response(writer, version, channel, epoch, correlation, refusal).await;
         }
     }
-    if let Some(summary) = operator_confirmation::summary(method, params) {
+    let bulk_invoke_grant = method == manifest::GITHUB_GRANT_OP
+        && params["all_handles"] == true
+        && params["kind"] != "read";
+    let summary = if bulk_invoke_grant {
+        let mut preview = params.clone();
+        preview["dry_run"] = json!(true);
+        let plan = github_handle_grant(state, &principal_key, &preview);
+        if plan.get("error").is_some() {
+            return send_tool_response(writer, version, channel, epoch, correlation, plan).await;
+        }
+        if params["dry_run"] != false {
+            return send_tool_response(writer, version, channel, epoch, correlation, plan).await;
+        }
+        let module: String = params["module"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "-_:./".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(60)
+            .collect();
+        Some(format!(
+            "grant {} writes ({} expanded) to {} ({}) on all enabled GitHub handles ({} planned)",
+            plan["result"]["actions"].as_array().map_or(0, Vec::len),
+            plan["result"]["expanded"].as_array().map_or(0, Vec::len),
+            module,
+            params["effect"].as_str().unwrap_or(""),
+            plan["result"]["handles"].as_array().map_or(0, Vec::len)
+        ))
+    } else {
+        operator_confirmation::summary(method, params)
+    };
+    if let Some(summary) = summary {
         if let Err(refusal) =
             operator_confirmation::confirm(&summary, route, writer, &route_bindings.control_replies)
                 .await
@@ -2041,9 +2078,10 @@ async fn handle_management_request(
             | manifest::GITHUB_PROBE_OP
             | manifest::GITHUB_GRANT_OP
             | manifest::GITHUB_BIND_OP
-    ) && !(method == manifest::GITHUB_GRANT_OP && params["kind"] == "read")
+    ) && !(method == manifest::GITHUB_GRANT_OP
+        && (params["kind"] == "read" || bulk_invoke_grant))
     {
-        // Read upgrades audit changes inside their transaction and leave previews
+        // Bulk and read upgrades audit changes inside their transaction and leave previews
         // and no-ops untouched, rather than appending a second control audit here.
         // The op has run (an applied bind or grant has changed the store), so
         // a failed audit row is reported alongside its reply, not in place of it.
@@ -2171,11 +2209,28 @@ fn github_handle_grant(state: &ModuleState, principal_key: &str, params: &Value)
                 "message":"kind must be \"invoke\", \"poll\" or \"read\""}})
         }
     }
-    let (Some(app_handle_id), Some(module), Some(effect)) =
-        (text("app_handle_id"), text("module"), text("effect"))
-    else {
+    let all_handles = params
+        .get("all_handles")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if params
+        .get("all_handles")
+        .is_some_and(|value| !value.is_boolean())
+        || all_handles == params.get("app_handle_id").is_some()
+    {
+        return json!({"error":{"code":"invalid_request","message":"invoke requires exactly one of app_handle_id or all_handles: true"}});
+    }
+    let (Some(module), Some(effect)) = (text("module"), text("effect")) else {
         return json!({"error":{"code":"invalid_request",
             "message":"app_handle_id, actions, module and effect are required"}});
+    };
+    let app_handle_id = if all_handles {
+        "all enabled handles"
+    } else {
+        let Some(handle) = text("app_handle_id") else {
+            return json!({"error":{"code":"invalid_request"}});
+        };
+        handle
     };
     let actions: Option<Vec<String>> =
         params
@@ -2195,15 +2250,27 @@ fn github_handle_grant(state: &ModuleState, principal_key: &str, params: &Value)
         .get("dry_run")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    match plexus_core::github::control::grant(
-        state.store(),
-        principal_key,
-        app_handle_id,
-        &actions,
-        module,
-        effect,
-        dry_run,
-    ) {
+    let result = if all_handles {
+        plexus_core::github::control::grant_all(
+            state.store(),
+            principal_key,
+            &actions,
+            module,
+            effect,
+            dry_run,
+        )
+    } else {
+        plexus_core::github::control::grant(
+            state.store(),
+            principal_key,
+            app_handle_id,
+            &actions,
+            module,
+            effect,
+            dry_run,
+        )
+    };
+    match result {
         Ok(plan) => json!({"result":plan}),
         Err(code) => github_handle_refusal(&code, app_handle_id),
     }

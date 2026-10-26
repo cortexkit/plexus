@@ -398,13 +398,24 @@ fn v22_ownership_and_repository_refusals_send_no_mutation_and_replay() {
             let run = Run::new(responses);
             let first = run.call(&request);
             assert_eq!(
-                first["result"]["refusal_code"], "pr_edit_not_own",
+                first["result"]["refusal_code"],
+                if request["action"] == "pr edit" {
+                    "pr_edit_not_own"
+                } else {
+                    "stack_pr_not_own"
+                },
                 "{first}"
             );
             if request["action"] == "pr edit" {
                 let message = first["result"]["detail"]["message"].as_str().unwrap();
                 assert!(message.contains("#7 was opened by "));
                 assert!(message.contains("GH_SHIM_BYPASS=operator"));
+            } else {
+                assert_eq!(first["result"]["detail"]["number"], 7);
+                assert_eq!(
+                    first["result"]["detail"]["author_login"],
+                    human["user"]["login"]
+                );
             }
             assert_eq!(run.call(&request)["result"], first["result"]);
             assert_eq!(run.wire().len(), 1);
@@ -669,9 +680,15 @@ fn v22_stack_create_and_add_stop_at_first_non_bot_pr() {
         let request = request(action, target, json!({"pull_requests":[7,8,9]}));
         let reply = run.call(&request);
         assert_eq!(
-            reply["result"]["refusal_code"], "pr_edit_not_own",
+            reply["result"]["refusal_code"], "stack_pr_not_own",
             "{reply}"
         );
+        assert_eq!(reply["result"]["detail"]["number"], 8);
+        assert_eq!(reply["result"]["detail"]["author_login"], "human");
+        assert!(!reply["result"]["detail"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("pr edit"));
         assert_eq!(
             run.wire(),
             vec![
@@ -706,4 +723,37 @@ fn v22_pr_edit_accepts_each_nonempty_subset_of_edit_fields() {
         );
         run.server.join().unwrap();
     }
+}
+
+#[test]
+fn v22_unstack_names_the_first_non_bot_member_and_replays_without_writing() {
+    let mut first = pr(8);
+    first["user"] = json!({"login":"first-author", "type":"User"});
+    let mut second = pr(9);
+    second["user"] = json!({"login":"second-author", "type":"User"});
+    let mut response = stack();
+    response["pull_requests"] = json!([pr(7), first, second]);
+    let run = Run::new(vec![response]);
+    let request = request(
+        "api:POST:/repos/*/*/stacks/*/unstack",
+        json!({"stack_number":"3"}),
+        json!({}),
+    );
+    let reply = run.call(&request);
+    assert_eq!(
+        reply["result"]["refusal_code"], "stack_pr_not_own",
+        "{reply}"
+    );
+    assert_eq!(reply["result"]["detail"]["number"], 8);
+    assert_eq!(reply["result"]["detail"]["author_login"], "first-author");
+    assert!(!reply["result"]["detail"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("pr edit"));
+    assert_eq!(run.call(&request)["result"], reply["result"]);
+    assert_eq!(
+        run.wire(),
+        vec![("GET /repos/org/repo/stacks/3 HTTP/1.1".into(), Value::Null)]
+    );
+    run.server.join().unwrap();
 }

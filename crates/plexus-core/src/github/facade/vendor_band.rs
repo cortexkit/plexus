@@ -351,6 +351,14 @@ fn owned(value: &Value, login: &str) -> bool {
 
 const PR_EDIT_NOT_OWN_MESSAGE: &str = "'pr edit' changes only pull requests this repository's bot opened ({bot}); #{number} was opened by {author}. Ask the author, or run it as the operator with GH_SHIM_BYPASS=operator.";
 
+fn stack_not_own(pr: &Value, number: &Value, login: &str) -> taxonomy::Failure {
+    let author = pr["user"]["login"].as_str().unwrap_or("unknown");
+    json!({"code":"stack_pr_not_own", "detail":{
+        "number":number, "author_login":author,
+        "message":format!("Stack operations change only pull requests this repository's bot opened ({login}); #{number} was opened by {author}.")
+    }}).to_string().into()
+}
+
 fn graphql_errors(value: &Value) -> Result<(), String> {
     if value.get("errors").is_some() {
         let errors = super::validation::errors(&value.to_string());
@@ -663,7 +671,7 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 Err(code) => return fail(reply, "G8", code),
             };
             if !owned(&value, &login) {
-                return fail(reply, "G8", "pr_edit_not_own".into());
+                return fail(reply, "G8", stack_not_own(&value, number, &login));
             }
         }
         completed.push("github.pull_request.get");
@@ -717,13 +725,13 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             if let Err(code) = stack_shape(&value, &args) {
                 return fail(reply, "G8", code.into());
             }
-            if value["pull_requests"]
+            if let Some(pr) = value["pull_requests"]
                 .as_array()
                 .expect("validated stack")
                 .iter()
-                .any(|pr| !owned(pr, &login))
+                .find(|pr| !owned(pr, &login))
             {
-                return fail(reply, "G8", "pr_edit_not_own".into());
+                return fail(reply, "G8", stack_not_own(pr, &pr["number"], &login));
             }
         }
         if mapped.request_kind == "pr_edit" && !owned(&value, &login) {

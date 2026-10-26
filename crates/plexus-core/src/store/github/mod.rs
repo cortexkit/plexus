@@ -18,6 +18,7 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 use std::sync::Arc;
 
+mod invoke_grant;
 mod read_grant;
 pub use read_grant::GithubHandleReadGrant;
 
@@ -1864,37 +1865,57 @@ impl PlexusStore {
         &self,
         grant: &GithubHandleGrant,
     ) -> Result<Result<Value, String>, StoreError> {
-        use serde_json::json;
         let refusal = std::sync::Mutex::new(None::<String>);
+        let result = self
+            .inner
+            .with_conn_fenced(|tx| Self::grant_github_handle_on_conn(tx, grant, &refusal));
+        match result {
+            Ok(plan) => Ok(Ok(plan)),
+            Err(error) => match refusal
+                .into_inner()
+                .unwrap_or_else(|poison| poison.into_inner())
+            {
+                Some(code) => Ok(Err(code)),
+                None => Err(error),
+            },
+        }
+    }
+
+    fn grant_github_handle_on_conn(
+        tx: &rusqlite::Connection,
+        grant: &GithubHandleGrant,
+        refusal: &std::sync::Mutex<Option<String>>,
+    ) -> rusqlite::Result<Value> {
+        use serde_json::json;
         let to_json = |value: &Vec<String>| {
             serde_json::to_string(value)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
         };
-        let result = self.inner.with_conn_fenced(|tx| {
-            // A refusal rolls the transaction back through an error and leaves
-            // its code here for the caller.
-            let refuse = |code: String| -> rusqlite::Result<Value> {
-                *refusal.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(code);
-                Err(rusqlite::Error::QueryReturnedNoRows)
-            };
-            let handle: Option<(String, String, String, String)> = tx
-                .query_row(
-                    "SELECT agent_id,status,connection_principal,connection_id
+        // A refusal rolls the transaction back through an error and leaves
+        // its code here for the caller.
+        let refuse = |code: String| -> rusqlite::Result<Value> {
+            *refusal.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(code);
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        };
+        let handle: Option<(String, String, String, String)> = tx
+            .query_row(
+                "SELECT agent_id,status,connection_principal,connection_id
                      FROM github_app_handle WHERE app_handle_id=?1",
-                    [&grant.app_handle_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .optional()?;
-            let Some((agent, status, principal, connection_id)) = handle else {
-                return refuse("agent_handle_unknown".into());
-            };
-            if status != "enabled" {
-                return refuse(format!(
-                    "agent_handle_disabled{{app_handle_id: {}}}",
-                    grant.app_handle_id
-                ));
-            }
-            let read_ceiling = |tx: &rusqlite::Connection| -> rusqlite::Result<Option<(String, Vec<String>)>> {
+                [&grant.app_handle_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((agent, status, principal, connection_id)) = handle else {
+            return refuse("agent_handle_unknown".into());
+        };
+        if status != "enabled" {
+            return refuse(format!(
+                "agent_handle_disabled{{app_handle_id: {}}}",
+                grant.app_handle_id
+            ));
+        }
+        let read_ceiling =
+            |tx: &rusqlite::Connection| -> rusqlite::Result<Option<(String, Vec<String>)>> {
                 let row: Option<(Option<String>, Option<String>)> = tx
                     .query_row(
                         "SELECT ceiling_risk,ceiling_selectors FROM connections
@@ -1907,199 +1928,229 @@ impl PlexusStore {
                     return Ok(None);
                 };
                 let selectors: Vec<String> = serde_json::from_str(&selectors).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, error.into())
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
                 })?;
                 Ok(Some((risk, selectors)))
             };
-            let Some((_, ceiling)) = read_ceiling(tx)? else {
-                return refuse(format!("connection_ceiling_absent{{connection_id: {connection_id}}}"));
-            };
-            let ceiling_is_open = ceiling.iter().any(|selector| selector == "*");
-            let ceiling_additions: Vec<String> = if ceiling_is_open {
-                Vec::new()
-            } else {
-                grant
-                    .expanded
-                    .iter()
-                    .filter(|action| !ceiling.contains(action))
-                    .cloned()
-                    .collect()
-            };
-            let now = now_ms();
-            // Live invoke grants on the handle connection: (id, grantee, agent, selectors).
-            let mut statement = tx.prepare(
-                "SELECT grant_id,grantee_principal,agent_id,action_selectors FROM grants
+        let Some((_, ceiling)) = read_ceiling(tx)? else {
+            return refuse(format!(
+                "connection_ceiling_absent{{connection_id: {connection_id}}}"
+            ));
+        };
+        let ceiling_is_open = ceiling.iter().any(|selector| selector == "*");
+        let ceiling_additions: Vec<String> = if ceiling_is_open {
+            Vec::new()
+        } else {
+            grant
+                .expanded
+                .iter()
+                .filter(|action| !ceiling.contains(action))
+                .cloned()
+                .collect()
+        };
+        let now = now_ms();
+        // Live invoke grants on the handle connection: (id, grantee, agent, selectors).
+        let mut statement = tx.prepare(
+            "SELECT grant_id,grantee_principal,agent_id,action_selectors FROM grants
                  WHERE principal=?1 AND connection_id=?2 AND authority_kind='invoke'
                    AND (expires_at IS NULL OR expires_at>?3) ORDER BY grant_id",
-            )?;
-            let rows = statement
-                .query_map(params![principal, connection_id, now], |row| {
-                    let selectors: String = row.get(3)?;
-                    let selectors: Vec<String> = serde_json::from_str(&selectors).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, error.into())
-                    })?;
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        selectors,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(statement);
-            let names = |selectors: &[String], action: &str| {
-                selectors.iter().any(|selector| selector == action || selector == "*")
-            };
-            let agent_missing: Vec<String> = grant
-                .expanded
+        )?;
+        let rows = statement
+            .query_map(params![principal, connection_id, now], |row| {
+                let selectors: String = row.get(3)?;
+                let selectors: Vec<String> = serde_json::from_str(&selectors).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    selectors,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let names = |selectors: &[String], action: &str| {
+            selectors
                 .iter()
-                .filter(|action| {
-                    !rows.iter().any(|(_, _, row_agent, selectors)| {
-                        row_agent.as_deref() == Some(agent.as_str()) && names(selectors, action)
-                    })
+                .any(|selector| selector == action || selector == "*")
+        };
+        let agent_missing: Vec<String> = grant
+            .expanded
+            .iter()
+            .filter(|action| {
+                !rows.iter().any(|(_, _, row_agent, selectors)| {
+                    row_agent.as_deref() == Some(agent.as_str()) && names(selectors, action)
                 })
-                .cloned()
-                .collect();
-            let module_row = rows
-                .iter()
-                .find(|(_, grantee, row_agent, _)| row_agent.is_none() && grantee == &grant.module);
-            let module_added: Vec<String> = grant
-                .expanded
-                .iter()
-                .filter(|action| module_row.is_none_or(|(_, _, _, selectors)| !names(selectors, action)))
-                .cloned()
-                .collect();
-            let agent_grant_id = |action: &str| {
-                format!("github-grant:{}:agent:{action}:{now}", grant.app_handle_id)
-            };
-            let module_grant_id = module_row.map(|(id, ..)| id.clone()).unwrap_or_else(|| {
-                format!("github-grant:{}:module:{}:{now}", grant.app_handle_id, grant.module)
-            });
-            let mut grant_plan: Vec<Value> = agent_missing
-                .iter()
-                .map(|action| json!({"level":"agent","op":"insert","grant_id":agent_grant_id(action),
-                    "agent_id":agent,"action":action}))
-                .collect();
-            if !module_added.is_empty() {
-                grant_plan.push(json!({"level":"module",
+            })
+            .cloned()
+            .collect();
+        let module_row = rows
+            .iter()
+            .find(|(_, grantee, row_agent, _)| row_agent.is_none() && grantee == &grant.module);
+        let module_added: Vec<String> = grant
+            .expanded
+            .iter()
+            .filter(|action| {
+                module_row.is_none_or(|(_, _, _, selectors)| !names(selectors, action))
+            })
+            .cloned()
+            .collect();
+        let agent_grant_id =
+            |action: &str| format!("github-grant:{}:agent:{action}:{now}", grant.app_handle_id);
+        let module_grant_id = module_row.map(|(id, ..)| id.clone()).unwrap_or_else(|| {
+            format!(
+                "github-grant:{}:module:{}:{now}",
+                grant.app_handle_id, grant.module
+            )
+        });
+        let mut grant_plan: Vec<Value> = agent_missing
+            .iter()
+            .map(|action| {
+                json!({"level":"agent","op":"insert","grant_id":agent_grant_id(action),
+                    "agent_id":agent,"action":action})
+            })
+            .collect();
+        if !module_added.is_empty() {
+            grant_plan.push(json!({"level":"module",
                     "op": if module_row.is_some() {"extend"} else {"insert"},
                     "grant_id":module_grant_id,"grantee_principal":grant.module,"actions":module_added}));
-            }
-            // (owner, level, action, existing policy id when there is one).
-            let mut policy_rows = Vec::new();
-            for (level, owner) in [("module", principal.as_str()), ("agent", agent.as_str())] {
-                for action in &grant.policy_actions {
-                    let existing: Option<(String, String, Option<i64>)> = tx
-                        .query_row(
-                            "SELECT policy_id,effect,expires_at FROM policies
+        }
+        // (owner, level, action, existing policy id when there is one).
+        let mut policy_rows = Vec::new();
+        for (level, owner) in [("module", principal.as_str()), ("agent", agent.as_str())] {
+            for action in &grant.policy_actions {
+                let existing: Option<(String, String, Option<i64>)> = tx
+                    .query_row(
+                        "SELECT policy_id,effect,expires_at FROM policies
                              WHERE principal=?1 AND connection_id=?2 AND action_selector=?3
                              ORDER BY policy_id LIMIT 1",
-                            params![owner, connection_id, action],
-                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                        )
-                        .optional()?;
-                    let op = match &existing {
-                        None => "insert",
-                        Some((_, effect, None)) if effect == &grant.effect => "unchanged",
-                        Some(_) => "update",
-                    };
-                    policy_rows.push((owner.to_owned(), level, action.clone(), op, existing.map(|row| row.0)));
-                }
+                        params![owner, connection_id, action],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?;
+                let op = match &existing {
+                    None => "insert",
+                    Some((_, effect, None)) if effect == &grant.effect => "unchanged",
+                    Some(_) => "update",
+                };
+                policy_rows.push((
+                    owner.to_owned(),
+                    level,
+                    action.clone(),
+                    op,
+                    existing.map(|row| row.0),
+                ));
             }
-            let plan = json!({
-                "app_handle_id": grant.app_handle_id,
-                "connection_id": connection_id,
-                "agent_id": agent,
-                "module": grant.module,
-                "actions": grant.actions,
-                "expanded": grant.expanded,
-                "dry_run": grant.dry_run,
-                "ceiling_additions": ceiling_additions,
-                "grants": grant_plan,
-                "policies": policy_rows.iter().map(|(_, level, action, op, _)| json!({
-                    "level":level,"action":action,"effect":grant.effect,"op":op})).collect::<Vec<_>>(),
-            });
-            if grant.dry_run {
-                return Ok(plan);
-            }
-            if !ceiling_additions.is_empty() {
-                super::ceiling_store::extend_connection_ceiling_on_conn(
-                    tx, &principal, &connection_id, &ceiling, &ceiling_additions, now,
-                )?;
-            }
-            // Mint-time bound, as for every other grant: each action a row is
-            // about to carry must sit inside the connection ceiling as stored.
-            let Some((risk, stored)) = read_ceiling(tx)? else {
-                return refuse(format!("connection_ceiling_absent{{connection_id: {connection_id}}}"));
-            };
-            if !crate::manifest::Risk::parse(&risk)
-                .is_some_and(|risk| crate::manifest::Risk::Write.within(risk))
+        }
+        let plan = json!({
+            "app_handle_id": grant.app_handle_id,
+            "connection_id": connection_id,
+            "agent_id": agent,
+            "module": grant.module,
+            "actions": grant.actions,
+            "expanded": grant.expanded,
+            "dry_run": grant.dry_run,
+            "ceiling_additions": ceiling_additions,
+            "grants": grant_plan,
+            "policies": policy_rows.iter().map(|(_, level, action, op, _)| json!({
+                "level":level,"action":action,"effect":grant.effect,"op":op})).collect::<Vec<_>>(),
+        });
+        if grant.dry_run {
+            return Ok(plan);
+        }
+        if !ceiling_additions.is_empty() {
+            super::ceiling_store::extend_connection_ceiling_on_conn(
+                tx,
+                &principal,
+                &connection_id,
+                &ceiling,
+                &ceiling_additions,
+                now,
+            )?;
+        }
+        // Mint-time bound, as for every other grant: each action a row is
+        // about to carry must sit inside the connection ceiling as stored.
+        let Some((risk, stored)) = read_ceiling(tx)? else {
+            return refuse(format!(
+                "connection_ceiling_absent{{connection_id: {connection_id}}}"
+            ));
+        };
+        if !crate::manifest::Risk::parse(&risk)
+            .is_some_and(|risk| crate::manifest::Risk::Write.within(risk))
+        {
+            return refuse(format!(
+                "risk_above_ceiling{{requested: write, ceiling: {risk}}}"
+            ));
+        }
+        if !stored.iter().any(|selector| selector == "*") {
+            if let Some(outside) = agent_missing
+                .iter()
+                .chain(&module_added)
+                .find(|action| !stored.contains(action))
             {
-                return refuse(format!("risk_above_ceiling{{requested: write, ceiling: {risk}}}"));
+                return refuse(format!("outside_connection_ceiling{{action: {outside}}}"));
             }
-            if !stored.iter().any(|selector| selector == "*") {
-                if let Some(outside) = agent_missing
-                    .iter()
-                    .chain(&module_added)
-                    .find(|action| !stored.contains(action))
-                {
-                    return refuse(format!("outside_connection_ceiling{{action: {outside}}}"));
-                }
-            }
-            for action in &agent_missing {
-                tx.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,action_selectors,authority_kind,expires_at,generation,created_at_ms,agent_id)
+        }
+        for action in &agent_missing {
+            tx.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,action_selectors,authority_kind,expires_at,generation,created_at_ms,agent_id)
                     VALUES (?1,?2,?3,?4,?5,?6,'invoke',NULL,1,?7,?8)",
                     params![agent_grant_id(action), principal, connection_id, grant.module,
                         if action.starts_with("github.") {"read"} else {"write"},
                         json!([action]).to_string(), now, agent])?;
-            }
-            if !module_added.is_empty() {
-                match module_row {
-                    Some((id, _, _, selectors)) => {
-                        let mut extended = selectors.clone();
-                        extended.extend(module_added.iter().cloned());
-                        tx.execute("UPDATE grants SET action_selectors=?3 WHERE principal=?1 AND grant_id=?2",
-                            params![principal, id, to_json(&extended)?])?;
-                    }
-                    None => {
-                        tx.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,action_selectors,authority_kind,expires_at,generation,created_at_ms)
+        }
+        if !module_added.is_empty() {
+            match module_row {
+                Some((id, _, _, selectors)) => {
+                    let mut extended = selectors.clone();
+                    extended.extend(module_added.iter().cloned());
+                    tx.execute(
+                        "UPDATE grants SET action_selectors=?3 WHERE principal=?1 AND grant_id=?2",
+                        params![principal, id, to_json(&extended)?],
+                    )?;
+                }
+                None => {
+                    tx.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,action_selectors,authority_kind,expires_at,generation,created_at_ms)
                             VALUES (?1,?2,?3,?4,'write',?5,'invoke',NULL,1,?6)",
                             params![module_grant_id, principal, connection_id, grant.module,
                                 to_json(&module_added)?, now])?;
-                    }
                 }
             }
-            for (owner, level, action, op, existing) in &policy_rows {
-                match (*op, existing) {
-                    ("update", Some(id)) => {
-                        // A changed effect bumps the generation, as set_policy
-                        // does, so reservations pinned to the old effect lapse.
-                        tx.execute("UPDATE policies SET effect=?3, expires_at=NULL, generation=generation+1, updated_at_ms=?4
+        }
+        for (owner, level, action, op, existing) in &policy_rows {
+            match (*op, existing) {
+                ("update", Some(id)) => {
+                    // A changed effect bumps the generation, as set_policy
+                    // does, so reservations pinned to the old effect lapse.
+                    tx.execute("UPDATE policies SET effect=?3, expires_at=NULL, generation=generation+1, updated_at_ms=?4
                             WHERE principal=?1 AND policy_id=?2", params![owner, id, grant.effect, now])?;
-                    }
-                    ("insert", _) => insert_policy_on_conn(tx, &crate::storage::PolicyInput {
-                        policy_id: format!("github-grant:{}:{level}-policy:{action}", grant.app_handle_id),
+                }
+                ("insert", _) => insert_policy_on_conn(
+                    tx,
+                    &crate::storage::PolicyInput {
+                        policy_id: format!(
+                            "github-grant:{}:{level}-policy:{action}",
+                            grant.app_handle_id
+                        ),
                         principal: owner.clone(),
                         connection_id: connection_id.clone(),
                         action_selector: action.clone(),
                         effect: grant.effect.clone(),
                         expires_at: None,
-                    })?,
-                    _ => {}
-                }
+                    },
+                )?,
+                _ => {}
             }
-            Ok(plan)
-        });
-        match result {
-            Ok(plan) => Ok(Ok(plan)),
-            Err(error) => match refusal
-                .into_inner()
-                .unwrap_or_else(|poison| poison.into_inner())
-            {
-                Some(code) => Ok(Err(code)),
-                None => Err(error),
-            },
         }
+        Ok(plan)
     }
 
     /// Grant scheduled-poll authority for reviewed reads on one imported
