@@ -373,9 +373,17 @@ async fn search_is_fenced_to_the_bound_repository() {
 async fn a_spent_read_budget_refuses_before_anything_is_sent() {
     let (runtime, store, transport, scratch) = bot_runtime();
     let now = plexus_core::now_ms();
-    for _ in 0..plexus_core::storage::github_bot_reads_store::BOT_READ_HOURLY_CAP {
-        store.reserve_github_bot_read("app-x", 1, now).unwrap();
+    let cap = plexus_core::storage::github_bot_reads_store::BOT_READ_HOURLY_CAP;
+    for _ in 0..cap / 16 {
+        store.reserve_github_bot_read("app-x", 16, now).unwrap();
     }
+    store
+        .reserve_github_bot_read("app-x", cap % 16, now)
+        .unwrap();
+    assert_eq!(
+        store.github_bot_reads_in_window("app-x", now).unwrap(),
+        3_500
+    );
     transport.set_response(envelope(json!({})));
     let reply = read(
         &runtime,

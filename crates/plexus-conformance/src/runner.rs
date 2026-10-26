@@ -1909,26 +1909,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mcp_stub_checks_the_wire_credential_name_and_arguments() {
-        let evidence = run_fixture(&ConnectorFixture::stub()).unwrap();
-        assert!(
-            evidence.passed,
-            "MCP wire contract failed: {}",
-            evidence.human_summary()
-        );
-    }
-
-    #[test]
-    fn rest_stub_checks_the_wire_project_and_query_arguments() {
-        let evidence = run_fixture(&ConnectorFixture::posthog_rest()).unwrap();
-        assert!(
-            evidence.passed,
-            "REST wire contract failed: {}",
-            evidence.human_summary()
-        );
-    }
-
-    #[test]
     fn skipped_resource_probes_are_not_reported_as_exercised() {
         let evidence = run_fixture(&ConnectorFixture::exa()).unwrap();
         assert!(evidence.passed, "{}", evidence.human_summary());

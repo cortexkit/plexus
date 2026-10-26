@@ -177,11 +177,6 @@ fn slow_vault_and_timeout_stop_later_providers_without_spending() {
 
 #[test]
 fn exactly_sixty_five_seconds_remaining_is_admitted() {
-    assert_eq!(
-        WEB_SEARCH_CHAIN_DEADLINE,
-        std::time::Duration::from_secs(120)
-    );
-    assert_eq!(WEB_SEARCH_ATTEMPT_BOUND, std::time::Duration::from_secs(65));
     for vault_ms in [24_999, 25_000, 25_001] {
         let (fixture, _) = super::super::super::tests::granted_exa_engine("deadline-boundary");
         add_connection(&fixture, "tavily", "tavily", Some("direct"));

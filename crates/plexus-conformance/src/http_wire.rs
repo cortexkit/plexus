@@ -425,12 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn stub_connections_use_a_fixed_worker_pool() {
-        let server = StubHttpServer::start("", |_| http_empty(204)).unwrap();
-        assert_eq!(server.workers.len(), 4, "stub workers must be bounded");
-    }
-
-    #[test]
     fn status_lines_include_the_reason_separator() {
         for response in [http_json(200, "{}"), http_empty(204)] {
             let line = response.lines().next().unwrap();

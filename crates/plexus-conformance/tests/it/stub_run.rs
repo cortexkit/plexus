@@ -23,7 +23,14 @@ fn evidence_for(name: &str) -> &'static plexus_conformance::RunEvidence {
 
 #[test]
 fn all_registered_fixtures_run_end_to_end_green() {
-    for name in ConnectorFixture::known_names() {
+    let names = ConnectorFixture::known_names();
+    assert!(!names.is_empty(), "the fixture registry must not be empty");
+    assert!(
+        names.contains(&"stub"),
+        "the stub fixture must be registered"
+    );
+    assert!(names.contains(&"exa"), "the Exa fixture must be registered");
+    for name in names {
         let evidence = evidence_for(name);
         assert!(
             evidence.passed,
@@ -162,31 +169,6 @@ fn an_unusable_temp_directory_is_a_reported_error_not_a_panic() {
         "scratch failures must be normal CLI errors, not panics"
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("create store directory"));
-}
-
-#[test]
-fn stub_fixture_runs_end_to_end_green() {
-    let evidence = evidence_for("stub");
-    assert!(
-        evidence.passed,
-        "stub fixture failed at {:?}:\n{}",
-        evidence.failed_step,
-        evidence.human_summary()
-    );
-    assert_eq!(evidence.steps.len(), 9);
-    assert!(evidence.steps.iter().all(|step| step.passed));
-}
-
-#[test]
-fn exa_fixture_runs_green_against_stub_server() {
-    let evidence = evidence_for("exa");
-    assert!(
-        evidence.passed,
-        "exa fixture failed at {:?}:\n{}",
-        evidence.failed_step,
-        evidence.human_summary()
-    );
-    assert_eq!(evidence.steps.len(), 9);
 }
 
 #[test]

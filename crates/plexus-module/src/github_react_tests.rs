@@ -753,11 +753,21 @@ async fn a_spent_bot_read_budget_never_refuses_a_bot_write() {
     let (state, transport, _scratch) = runtime("read-budget-write", "aft");
     let now = plexus_core::now_ms();
     let store = state.store();
-    for _ in 0..plexus_core::storage::github_bot_reads_store::BOT_READ_HOURLY_CAP {
+    let cap = plexus_core::storage::github_bot_reads_store::BOT_READ_HOURLY_CAP;
+    for _ in 0..cap / 16 {
         store
-            .reserve_github_bot_read("app-fixture", 1, now)
+            .reserve_github_bot_read("app-fixture", 16, now)
             .unwrap();
     }
+    store
+        .reserve_github_bot_read("app-fixture", cap % 16, now)
+        .unwrap();
+    assert_eq!(
+        store
+            .github_bot_reads_in_window("app-fixture", now)
+            .unwrap(),
+        3_500
+    );
     store
         .record_github_bot_rate_limit(
             "app-fixture",
