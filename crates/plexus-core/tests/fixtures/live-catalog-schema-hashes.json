@@ -59,7 +59,16 @@
     "github.search.code": "sha256:29f7e73cb1cfa250ec6aaf0bb9a05a5c0151dfb0c8c93dbd580ea0d9c4ad0e10",
     "github.search.issues": "sha256:29f7e73cb1cfa250ec6aaf0bb9a05a5c0151dfb0c8c93dbd580ea0d9c4ad0e10",
     "github.actions.job.get": "sha256:ff27d1ba019b1bb0a4ed352675f11843b6cb7ca366e6d80bd91b56fd2f0af447",
-    "github.actions.job_log": "sha256:47228675be3a8f8f10fc094093725c6be1ad530616d46df0d8dbdb4fbc28c817"
+    "github.actions.job_log": "sha256:47228675be3a8f8f10fc094093725c6be1ad530616d46df0d8dbdb4fbc28c817",
+    "edit_pull_request": "sha256:d6bc88f7b78beacc2925dd81337365783c35b6a6982d806072dfc056fffe0be7",
+    "reply_to_review_comment": "sha256:9e07da4c1b912e949a6d7f375a7a9af96fea29c0642e7095e14b303b3f37496c",
+    "github.review_thread.get": "sha256:02a353c7d27d5fe3db93d0bf0be82e11121db1f6390fc4c88b6d5fb9f8a4dc49",
+    "resolve_review_thread": "sha256:02a353c7d27d5fe3db93d0bf0be82e11121db1f6390fc4c88b6d5fb9f8a4dc49",
+    "unresolve_review_thread": "sha256:02a353c7d27d5fe3db93d0bf0be82e11121db1f6390fc4c88b6d5fb9f8a4dc49",
+    "github.stack.get": "sha256:acb5a25bb8bc269828947ba7b0300f47bae455631bad810c3839fa7c8ceb90a0",
+    "create_pull_request_stack": "sha256:c9f1b92f308dfd52cc903cdb6beebac06c6a5176c55b494ad7e7b53cf439c162",
+    "add_to_pull_request_stack": "sha256:f1446e9710d87e5852ac511c1a563e6717be0b0b5e5bb7dd1d2f6c7794eb41c2",
+    "unstack_pull_requests": "sha256:acb5a25bb8bc269828947ba7b0300f47bae455631bad810c3839fa7c8ceb90a0"
   },
   "github_actions": {
     "get_job": "sha256:ff27d1ba019b1bb0a4ed352675f11843b6cb7ca366e6d80bd91b56fd2f0af447",
