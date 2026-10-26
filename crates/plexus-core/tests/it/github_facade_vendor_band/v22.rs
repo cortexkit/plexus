@@ -155,14 +155,14 @@ fn cases() -> Vec<Case> {
             request(
                 "pr edit",
                 json!({"number":"7"}),
-                json!({"title":"T", "body":"B", "base":"stack/parent"}),
+                json!({"title":"T", "body":"B"}),
             ),
             vec![pr(7), pr(7)],
             vec![
                 ("GET /repos/org/repo/pulls/7 HTTP/1.1".into(), Value::Null),
                 (
                     "PATCH /repos/org/repo/pulls/7 HTTP/1.1".into(),
-                    json!({"title":"T", "body":"B", "base":"stack/parent"}),
+                    json!({"title":"T", "body":"B"}),
                 ),
             ],
             json!({"url":"https://github.com/org/repo/pull/7", "number":7}),
@@ -559,6 +559,16 @@ fn v22_refuses_bad_ids_lists_empty_edits_and_caller_queries_without_contact() {
             "query",
         ));
     }
+    // Retargeting a PR's base changes what it merges into, so pr edit refuses
+    // it by name even alongside fields it does admit.
+    invalid.push((
+        request(
+            "pr edit",
+            json!({"number":"7"}),
+            json!({"title":"T", "base":"stack/parent"}),
+        ),
+        "base",
+    ));
     for (request, field) in invalid {
         let run = Run::new(vec![]);
         let reply = run.call(&request);
@@ -702,13 +712,9 @@ fn v22_stack_create_and_add_stop_at_first_non_bot_pr() {
 
 #[test]
 fn v22_pr_edit_accepts_each_nonempty_subset_of_edit_fields() {
-    for mask in 1..8 {
+    for mask in 1..4 {
         let mut body = json!({});
-        for (bit, field, value) in [
-            (1, "title", "T"),
-            (2, "body", "B"),
-            (4, "base", "stack/parent"),
-        ] {
+        for (bit, field, value) in [(1, "title", "T"), (2, "body", "B")] {
             if mask & bit != 0 {
                 body[field] = json!(value);
             }

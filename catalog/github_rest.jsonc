@@ -288,8 +288,11 @@
     },
     {
       // https://docs.github.com/en/rest/pulls/pulls#update-a-pull-request
-      // Only title, text and base are editable here, after reading the pull
-      // request and checking that its author is the bound bot.
+      // Only title and text are editable, after reading the pull request and
+      // checking that its author is the bound bot. The facade refuses `base`:
+      // retargeting changes what a PR merges into, which is not speech. The
+      // schema still lists it so this action's reviewed hash, already pinned on
+      // live connections, doesn't change; facade_only keeps direct calls out.
       "name": "edit_pull_request", "risk": "write", "facade_only": true,
       "http": {
         "method": "PATCH", "path": "/repos/{owner}/{repo}/pulls/{pull_number}",

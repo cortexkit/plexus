@@ -90,7 +90,9 @@ fn check_nested(object: &Map<String, Value>, kind: &str) -> Result<(), String> {
         .and_then(Value::as_object)
         .ok_or("request_field_forbidden{field: body}")?;
     let (targets, allowed): (&[&str], &[&str]) = match kind {
-        "pr_edit" => (&["number"], &["title", "body", "base"]),
+        // Changing a PR's base retargets what it merges into, which is not
+        // speech, so pr edit admits only title and body.
+        "pr_edit" => (&["number"], &["title", "body"]),
         "review_reply" => (&["number", "comment_id"], &["body"]),
         "resolve_thread" | "unresolve_thread" => (&["thread_id"], &[]),
         "stack_create" => (&[], &["pull_requests"]),
