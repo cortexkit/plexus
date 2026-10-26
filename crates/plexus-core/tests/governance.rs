@@ -1942,34 +1942,6 @@ fn configure_refuses_filter_keys_the_manifest_never_declared() {
 }
 
 #[test]
-fn read_with_allowlisted_resource_value_passes_resource_gate() {
-    let (_path, engine) = seed("read-allowlist-pass");
-    engine
-        .store()
-        .set_connection_filters(
-            "direct",
-            "conn-1",
-            &json!({
-                "required": ["calendar_allowlist"],
-                "optional": [],
-                "write_enabling": [],
-                "values": { "calendar_allowlist": ["primary", "work"] }
-            }),
-        )
-        .expect("set filters");
-    add_action_with_policy(&engine, "list_events", "read", "allow", "read");
-    let request = AuthorizationRequest::new(
-        "direct",
-        "conn-1",
-        "list_events",
-        json!({"calendar_allowlist": "primary"}),
-    );
-    engine
-        .authorize(request)
-        .expect("allowlisted read value must pass resource gate");
-}
-
-#[test]
 fn read_with_non_allowlisted_resource_value_denies_value_not_allowed() {
     let (_path, engine) = seed("read-allowlist-deny");
     engine
@@ -1986,17 +1958,30 @@ fn read_with_non_allowlisted_resource_value_denies_value_not_allowed() {
         )
         .expect("set filters");
     add_action_with_policy(&engine, "list_events", "read", "allow", "read");
-    let request = AuthorizationRequest::new(
-        "direct",
-        "conn-1",
-        "list_events",
-        json!({"calendar_allowlist": "forbidden"}),
-    );
-    assert!(matches!(
-        engine.authorize(request),
-        Err(Denial::ResourceFilter(ResourceDenial::ValueNotAllowed(ref key)))
-            if key == "calendar_allowlist"
-    ));
+    for (value, allowed) in [("primary", true), ("forbidden", false)] {
+        let request = AuthorizationRequest::new(
+            "direct",
+            "conn-1",
+            "list_events",
+            json!({"calendar_allowlist": value}),
+        );
+        let result = engine.authorize(request);
+        if allowed {
+            assert!(
+                result.is_ok(),
+                "{value}: allowlisted read must pass: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(Denial::ResourceFilter(ResourceDenial::ValueNotAllowed(ref key)))
+                        if key == "calendar_allowlist"
+                ),
+                "{value}: non-allowlisted read must be refused: {result:?}"
+            );
+        }
+    }
 }
 
 /// An omitted allowlisted key must not select an unreviewed vendor default.
@@ -2151,83 +2136,34 @@ fn reference_permanent_error_refuses_dispatch_without_authority_mutation() {
 }
 
 /// A recovery must not overwrite an authority change that lands while the
-/// credential source is resolving. The source changes the row to `revoked` and
-/// returns a credential, so this drives the same successful resolution path as
-/// a real recovery instead of calling the store method directly.
+/// credential source is resolving. The source changes the row to an inactive
+/// authority state and returns a credential, so successful resolution must not
+/// make a revoked, pending or disabled connection callable again.
 ///
 /// The vault reference resolves at dispatch, after reservation creation.
 #[test]
 fn a_successful_credential_resolution_does_not_clear_a_revoked_connection() {
-    let (_path, engine) = engine_with_authority_change_during_credential_resolution(
-        "auth-required-recovery-revoked",
-        "revoked",
-    );
+    for state in ["revoked", "pending", "disabled"] {
+        let (_path, engine) = engine_with_authority_change_during_credential_resolution(
+            &format!("auth-required-recovery-{state}"),
+            state,
+        );
 
-    let reservation = engine
-        .authorize(write_request())
-        .expect("authorize reference");
-    engine.revalidate_and_dispatch(&reservation);
-    assert_eq!(
-        engine
-            .store()
-            .connection("direct", "conn-1")
-            .expect("connection")
-            .expect("record")
-            .status,
-        "revoked"
-    );
-}
-
-/// `pending` is an authority state as well. A credential that resolves after
-/// the transition must not make the connection callable again.
-///
-/// The vault reference resolves at dispatch, after reservation creation.
-#[test]
-fn a_successful_credential_resolution_does_not_clear_a_pending_connection() {
-    let (_path, engine) = engine_with_authority_change_during_credential_resolution(
-        "auth-required-recovery-pending",
-        "pending",
-    );
-
-    let reservation = engine
-        .authorize(write_request())
-        .expect("authorize reference");
-    engine.revalidate_and_dispatch(&reservation);
-    assert_eq!(
-        engine
-            .store()
-            .connection("direct", "conn-1")
-            .expect("connection")
-            .expect("record")
-            .status,
-        "pending"
-    );
-}
-
-/// `disabled` is an authority state as well. A credential that resolves after
-/// the transition must not make the connection callable again.
-///
-/// The vault reference resolves at dispatch, after reservation creation.
-#[test]
-fn a_successful_credential_resolution_does_not_clear_a_disabled_connection() {
-    let (_path, engine) = engine_with_authority_change_during_credential_resolution(
-        "auth-required-recovery-disabled",
-        "disabled",
-    );
-
-    let reservation = engine
-        .authorize(write_request())
-        .expect("authorize reference");
-    engine.revalidate_and_dispatch(&reservation);
-    assert_eq!(
-        engine
-            .store()
-            .connection("direct", "conn-1")
-            .expect("connection")
-            .expect("record")
-            .status,
-        "disabled"
-    );
+        let reservation = engine
+            .authorize(write_request())
+            .unwrap_or_else(|error| panic!("{state}: authorize reference: {error:?}"));
+        engine.revalidate_and_dispatch(&reservation);
+        assert_eq!(
+            engine
+                .store()
+                .connection("direct", "conn-1")
+                .expect("connection")
+                .expect("record")
+                .status,
+            state,
+            "{state}: successful credential resolution must preserve authority"
+        );
+    }
 }
 
 #[test]

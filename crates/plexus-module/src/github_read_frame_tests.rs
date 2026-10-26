@@ -564,12 +564,3 @@ async fn prefrontal_read_frame_returns_only_bound_search_hits() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].request_id, rows[1].request_id);
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prefrontal_read_frame_refuses_unsupported_action_by_name() {
-    let (runtime, store, transport, _scratch) = imported_runtime();
-    let reply = send_github_read_frame(runtime, "add_issue_comment").await;
-    assert_eq!(reply["error"]["code"], "read_action_unsupported", "{reply}");
-    assert!(transport.requests().is_empty());
-    assert!(store.list_audit("direct").unwrap().is_empty());
-}

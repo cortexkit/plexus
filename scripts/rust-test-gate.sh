@@ -676,10 +676,10 @@ run_phase "cargo clippy --locked -p plexus-module --bins (shipped features) -- -
 run_phase "cargo test --workspace --locked --quiet" \
   cargo test --workspace --locked --quiet
 
-# Example diagnostics carry their own credential-redaction contract; Cargo's
-# default test selection compiles examples but does not run their unit tests.
-run_phase "cargo test --workspace --examples --locked --quiet" \
-  cargo test --workspace --examples --locked --quiet
+# Module example diagnostics carry their own credential-redaction contract.
+# The default workspace run already executes core's test=true migration example.
+run_phase "cargo test -p plexus-module --examples --locked --quiet" \
+  cargo test -p plexus-module --examples --locked --quiet
 
 # Ignored measurement tests, run once so they cannot rot.
 #

@@ -138,24 +138,6 @@ fn catalog_emits_events_is_false_on_github_react_only() {
 }
 
 #[test]
-fn catalog_code_search_has_its_capability() {
-    let answer = catalog(&all_capabilities_request(), &advertised_tools()).unwrap();
-    let tool = answer
-        .tools
-        .iter()
-        .find(|tool| tool.name == "code_search")
-        .expect("code_search capability must be published");
-    assert_eq!(
-        tool.capabilities,
-        ["code.search.public/v1", "plexus:code.search/v1"],
-        "code_search capability must be published"
-    );
-    for tag in &tool.capabilities {
-        cortexkit_role_tool_provider::check_capability_tag(tag).unwrap();
-    }
-}
-
-#[test]
 fn catalog_capability_table_matches_every_advertised_tool() {
     let expected: &[(&str, &[&str])] = &[
         ("connections", &["plexus:connections/v1"]),

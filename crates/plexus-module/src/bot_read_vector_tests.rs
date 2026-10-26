@@ -95,9 +95,19 @@ async fn every_bot_read_vector_replays_byte_for_byte() {
         ]);
         if let Some(spent) = github["setup"]["reads_spent"].as_i64() {
             let now = plexus_core::now_ms();
-            for _ in 0..spent {
-                store.reserve_github_bot_read("app-x", 1, now).unwrap();
+            for _ in 0..spent / 16 {
+                store.reserve_github_bot_read("app-x", 16, now).unwrap();
             }
+            if spent % 16 != 0 {
+                store
+                    .reserve_github_bot_read("app-x", spent % 16, now)
+                    .unwrap();
+            }
+            assert_eq!(
+                store.github_bot_reads_in_window("app-x", now).unwrap(),
+                3_500,
+                "{name}: the hourly read budget must be fully spent"
+            );
         }
         for (action, reply) in github["replies"].as_object().unwrap() {
             transport.set_response_for_method(action, "", mock(reply));
