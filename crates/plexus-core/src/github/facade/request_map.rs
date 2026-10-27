@@ -66,14 +66,26 @@ fn positive_id(value: Option<&Value>, field: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("request_field_forbidden{{field: {field}}}"))
 }
 
+/// The gh shim stamps these envelope fields on every `gh.route` request,
+/// whatever its kind. They describe the wire and the caller (wire schema
+/// version, signed manifest version, trust rung time, process metadata) and
+/// never become GitHub arguments, so the closed-shape kinds accept them
+/// alongside their own fields.
+const SHIM_ENVELOPE_FIELDS: [&str; 5] = [
+    "operation",
+    "gh_route_schema",
+    "manifest_version",
+    "rung_as_of_unix_secs",
+    "metadata",
+];
+
 /// These nested wire shapes have no caller-supplied transport arguments. Even
 /// fields ignored by the transport are refused so a typo cannot appear to work.
 fn check_nested(object: &Map<String, Value>, kind: &str) -> Result<(), String> {
     for field in object.keys() {
-        if !matches!(
-            field.as_str(),
-            "action" | "repository" | "manifest_version" | "target" | "body"
-        ) && !(kind == "pr_edit" && field == "author_scope")
+        if !matches!(field.as_str(), "action" | "repository" | "target" | "body")
+            && !SHIM_ENVELOPE_FIELDS.contains(&field.as_str())
+            && !(kind == "pr_edit" && field == "author_scope")
         {
             return Err(format!("request_field_forbidden{{field: {field}}}"));
         }
@@ -170,18 +182,9 @@ pub fn map(
     let verb = object.get("verb").and_then(Value::as_str);
     if verb == Some("pr ready") {
         for field in object.keys() {
-            if !matches!(
-                field.as_str(),
-                "operation"
-                    | "gh_route_schema"
-                    | "verb"
-                    | "repository"
-                    | "number"
-                    | "undo"
-                    | "manifest_version"
-                    | "rung_as_of_unix_secs"
-                    | "metadata"
-            ) {
+            if !matches!(field.as_str(), "verb" | "repository" | "number" | "undo")
+                && !SHIM_ENVELOPE_FIELDS.contains(&field.as_str())
+            {
                 return Err(format!("request_field_forbidden{{field: {field}}}"));
             }
         }

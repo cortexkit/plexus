@@ -126,8 +126,13 @@ impl Run {
     }
 }
 
+/// Every request carries the envelope the real gh shim stamps on each
+/// `gh.route` call, so these cases exercise the wire AFT sends, not a
+/// payload-only shape that production never receives.
 fn request(action: &str, target: Value, body: Value) -> Value {
-    let mut value = json!({"action":action, "repository":"org/repo", "manifest_version":22, "target":target, "body":body});
+    let mut value = json!({"operation":"gh.route", "gh_route_schema":1, "action":action,
+        "repository":"org/repo", "manifest_version":22, "rung_as_of_unix_secs":1793066213,
+        "metadata":{"agent_id":"alfonso-aft", "pid":4242}, "target":target, "body":body});
     if action == "pr edit" {
         value["author_scope"] = json!("own");
     }
