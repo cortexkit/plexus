@@ -387,7 +387,12 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         return Ok(());
     }
     if command == "--version" {
-        println!("ck-plexus-admin {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "ck-plexus-admin {} (commit {}, lock {})",
+            env!("CARGO_PKG_VERSION"),
+            env!("PLEXUS_BUILD_COMMIT"),
+            env!("PLEXUS_LOCK_DIGEST")
+        );
         return Ok(());
     }
     let connector_position = if command == "connector-home" {

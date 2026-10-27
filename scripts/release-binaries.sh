@@ -52,20 +52,21 @@ cargo build --release --locked -p plexus-module --bin ck-plexus --bin ck-plexus-
 # stamp is worse than an absent one: absent fails loudly, stale passes every
 # check while naming the wrong source.
 #
-# Only ck-plexus embeds the commit; ck-plexus-admin does not link the build
-# script's environment, which is why its LC_UUID is unchanged across a rebuild
-# that moves the daemon's.
+# Both binaries embed the same build-script commit, so verify each before signing
+# or staging either one.
 head_sha=$(git rev-parse HEAD)
 # A private executable copy reports the same build identity as health. Matching
 # that field exactly rejects dirty builds and incidental hashes in binary data.
-if ! bash scripts/lib/verify-build-commit.sh target/release/ck-plexus "$head_sha"; then
-  echo "REFUSED: ck-plexus does not carry HEAD $head_sha" >&2
-  echo "  The build script did not re-run, so its embedded commit is stale." >&2
-  echo "  Remedy: touch .git/HEAD and the ref under .git/refs/heads/, then" >&2
-  echo "  re-run this script. Do not sign or stage this binary." >&2
-  exit 1
-fi
-echo "==> provenance: ck-plexus carries HEAD $(echo "$head_sha" | cut -c1-12)"
+for binary in ck-plexus ck-plexus-admin; do
+  if ! bash scripts/lib/verify-build-commit.sh "target/release/$binary" "$head_sha"; then
+    echo "REFUSED: $binary does not carry HEAD $head_sha" >&2
+    echo "  The build script did not re-run, so its embedded commit is stale." >&2
+    echo "  Remedy: touch .git/HEAD and the ref under .git/refs/heads/, then" >&2
+    echo "  re-run this script. Do not sign or stage this binary." >&2
+    exit 1
+  fi
+  echo "==> provenance: $binary carries HEAD $(echo "$head_sha" | cut -c1-12)"
+done
 
 for binary in ck-plexus ck-plexus-admin; do
   path="target/release/$binary"

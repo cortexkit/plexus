@@ -80,12 +80,13 @@ esac
     def test_provenance_requires_the_exact_clean_reported_commit(self):
         sha = 'a' * 40
         binary = self.tmp / 'candidate'
-        for stamp, accepted in [(sha, True), (sha + '-dirty', False), ('b' * 40, False),
-                                ('fixture-revision', False), (sha + '0', False), (sha[:12], False)]:
-            with self.subTest(stamp=stamp):
-                write_executable(binary, f'#!/bin/sh\necho "ck-plexus 0.1.0 (commit {stamp}, lock 123abc)"\n')
-                result = run(['bash', SCRIPTS / 'lib/verify-build-commit.sh', binary, sha])
-                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+        for name in ['ck-plexus', 'ck-plexus-admin']:
+            for stamp, accepted in [(sha, True), (sha + '-dirty', False), ('b' * 40, False),
+                                    ('fixture-revision', False), (sha + '0', False), (sha[:12], False)]:
+                with self.subTest(binary=name, stamp=stamp):
+                    write_executable(binary, f'#!/bin/sh\necho "{name} 0.1.0 (commit {stamp}, lock 123abc)"\n')
+                    result = run(['bash', SCRIPTS / 'lib/verify-build-commit.sh', binary, sha])
+                    self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
 
     def test_conformance_list_failure_cannot_be_hidden_by_partial_output(self):
         from test_scripts import load_gates_module

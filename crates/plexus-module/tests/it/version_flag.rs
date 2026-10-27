@@ -38,6 +38,27 @@ fn version_answers_with_no_supervisor_environment() {
 }
 
 #[test]
+fn admin_version_reports_the_daemon_build_identity() {
+    let binary = ckdev_binary(env!("CARGO_BIN_EXE_ck-plexus-admin"));
+    let output = bounded::child_output(
+        Command::new(&binary).arg("--version").env_clear(),
+        std::time::Duration::from_secs(60),
+        "test binary command",
+    )
+    .expect("run ck-plexus-admin --version");
+    assert!(
+        output.status.success(),
+        "--version exited {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        plexus_module::version_line().replacen("ck-plexus ", "ck-plexus-admin ", 1)
+    );
+}
+
+#[test]
 fn a_normal_launch_still_requires_the_supervisor_environment() {
     let binary = ckdev_binary(env!("CARGO_BIN_EXE_ck-plexus"));
     let output = bounded::child_output(
