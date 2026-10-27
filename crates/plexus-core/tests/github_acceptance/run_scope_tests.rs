@@ -88,11 +88,16 @@ fn ended(reader: &Reader) {
 }
 
 fn refusal(reply: &Value, code: &str, legs: Value) {
+    // scope_not_synced and scope_unverifiable release the claim so the same
+    // nonce can resume at the first unsent write; scope_ended and
+    // run_scope_not_child finish the receipt so the same nonce replays.
+    let retry_same_nonce = matches!(code, "scope_not_synced" | "scope_unverifiable");
     assert_eq!(
         reply["result"],
         json!({
             "status":"refused", "refusal_code":code, "scope_role":"run",
             "transmission":"not_sent", "legs_sent":legs,
+            "retry_same_nonce":retry_same_nonce,
         }),
         "run scope must refuse the unsent write: {reply}"
     );
@@ -155,7 +160,7 @@ fn run_scope_described_before_each_unsent_leg() {
     assert_eq!(
         reply["result"],
         json!({"status":"refused", "refusal_code":"scope_ended", "scope_role":"run",
-            "legs_sent":["add_issue_comment"]}),
+            "legs_sent":["add_issue_comment"], "retry_same_nonce":false}),
         "run scope must refuse the unsent write: {reply}"
     );
     assert_eq!(f.github.actions(), ["add_issue_comment"]);
@@ -380,7 +385,8 @@ fn malformed_run_fields_are_named_before_claim_or_contact() {
         assert_eq!(
             reply["result"],
             json!({"status":"refused", "refusal_code":"invalid_request",
-            "code":"invalid_request", "field":field, "transmission":"not_sent"}),
+            "code":"invalid_request", "field":field, "transmission":"not_sent",
+            "retry_same_nonce":true}),
             "{value}: {reply}"
         );
         assert!(f
@@ -448,7 +454,7 @@ fn forged_run_cannot_supply_missing_route_authority() {
     let reply = send(&f, &comment(), "no-authority", Some(&run()));
     assert_eq!(
         reply["result"],
-        json!({"status":"refused", "refusal_code":"delegating_scope_required", "scope_role":"route"})
+        json!({"status":"refused", "refusal_code":"delegating_scope_required", "scope_role":"route", "retry_same_nonce":true})
     );
     f.github.zero_contacts();
 }

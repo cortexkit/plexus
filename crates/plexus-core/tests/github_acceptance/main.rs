@@ -312,7 +312,10 @@ impl Fixture {
         handle: Option<&str>,
     ) {
         let reply = self.call(scope, request, "case", self.now);
-        let mut expected = json!({"status":"refused","refusal_code":code});
+        // All refusals through this helper are pre-claim admission refusals
+        // (G2, G3, G5, G6), which never claim the receipt so the same nonce
+        // stays safe to retry.
+        let mut expected = json!({"status":"refused","refusal_code":code, "retry_same_nonce":true});
         if matches!(code, "module_grant_absent" | "agent_grant_absent") {
             let detail = &reply["result"]["detail"];
             let layer = if code == "module_grant_absent" {
@@ -1208,9 +1211,12 @@ fn vault_failure_class_reaches_the_facade_refusal_code() {
             json!({"result": {"error": {"code": code, "class": class}}}),
         );
         let reply = f.request(&comment(), label);
+        // Only the transient class releases the claim for a same-nonce retry;
+        // auth_required and permanent finish the receipt as refused.
+        let retry_same_nonce = class == "transient";
         assert_eq!(
             reply["result"],
-            json!({"status":"refused","refusal_code":expected}),
+            json!({"status":"refused","refusal_code":expected, "retry_same_nonce":retry_same_nonce}),
             "{label}: {reply}"
         );
         f.github.zero_contacts();
@@ -1238,7 +1244,7 @@ fn vault_resolving_a_different_credential_is_a_permanent_refusal() {
     let reply = f.request(&comment(), "vault-mismatch");
     assert_eq!(
         reply["result"],
-        json!({"status":"refused","refusal_code":"handle_credential_unresolvable{class: permanent}"}),
+        json!({"status":"refused","refusal_code":"handle_credential_unresolvable{class: permanent}", "retry_same_nonce":false}),
         "{reply}"
     );
     f.github.zero_contacts();
@@ -1254,7 +1260,7 @@ fn transient_credential_refusal_is_released_for_a_same_nonce_retry() {
     let first = f.request(&comment(), "retry-transient");
     assert_eq!(
         first["result"],
-        json!({"status":"refused","refusal_code":"handle_credential_unresolvable{class: transient}"}),
+        json!({"status":"refused","refusal_code":"handle_credential_unresolvable{class: transient}", "retry_same_nonce":true}),
         "{first}"
     );
     f.github.zero_contacts();
@@ -1283,7 +1289,7 @@ fn auth_required_credential_refusal_stays_sticky_for_a_same_nonce_retry() {
     let first = f.request(&comment(), "retry-auth");
     assert_eq!(
         first["result"],
-        json!({"status":"refused","refusal_code":"handle_credential_unresolvable{class: auth_required}"}),
+        json!({"status":"refused","refusal_code":"handle_credential_unresolvable{class: auth_required}", "retry_same_nonce":false}),
         "{first}"
     );
     *vault.0.lock().unwrap() = vault_token("github_app:app-fixture");
