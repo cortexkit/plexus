@@ -1,8 +1,9 @@
 //! Proves the `gh.route` request contract vectors in
 //! `tests/fixtures/gh_shim_wire/requests-contract/` against the real
 //! `request_map::map`, the step of the bot-request facade that decides whether
-//! a request's shape is accepted. AFT pins its gh shim tests to these files,
-//! so a vector whose expectation disagrees with plexus must fail here.
+//! a request's shape is accepted. AFT, the repository whose `gh` shim sends
+//! these requests, pins its shim tests to these files, so a vector whose
+//! expectation disagrees with plexus must fail here.
 use plexus_core::github::facade::{effects, request_map};
 use plexus_core::github::resolver::{Binding, ResolvedRepositories};
 use serde_json::Value;
@@ -21,7 +22,8 @@ const SHIM_ENVELOPE: [&str; 5] = [
 ];
 
 /// Repository selectors `map` refuses on every request kind. A vector for
-/// each must exist, so AFT learns each one is refused by its exact code.
+/// each must exist, so the gh shim's tests in AFT see each one refused by its
+/// exact code.
 const UNIVERSALLY_FORBIDDEN: [&str; 6] = [
     "owner",
     "repo",

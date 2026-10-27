@@ -181,7 +181,7 @@ whether a request's shape is accepted, with no GitHub contact) and asserts:
   string.
 
 Coverage: one accepted vector for every request kind in
-`effects::REQUEST_KINDS` (the list `map` reads its kinds from), with both the
+`effects::REQUEST_KINDS` (the facade's list of every kind it routes), with both the
 `issue` and `pr` spellings where `map` takes both; for the closed-shape kinds
 (`pr ready` / its `undo` draft form, `pr edit`, the review-comment reply,
 thread resolve/unresolve, stack create/add/unstack) one refused vector per
