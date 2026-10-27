@@ -9,6 +9,7 @@ mod system_manifest;
 
 mod call_withdrawal;
 mod ceremony;
+mod gh_route_request_contract;
 mod github_catalog;
 mod github_control_surface;
 mod github_credential;
