@@ -500,6 +500,14 @@ fn apply_steps(state: &Arc<ModuleState>, principal: &str, plan: &Plan) -> Value 
         if imported.get("error").is_some() {
             return failure("import", &imported, &completed, &warnings);
         }
+        // The new connection row commits without running discovery, so its
+        // REST transport has no config until this runs. A failure is logged
+        // with the connection id and the import is kept.
+        crate::register_handle_connection_transports(
+            state,
+            principal,
+            &[format!("github-handle-{id}")],
+        );
         completed.push(json!({"step": "import", "status": "imported", "plan": imported["result"]}));
     }
     let probed = wrap(control::probe_listed(

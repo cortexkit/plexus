@@ -1938,6 +1938,10 @@ async fn handle_management_request(
                     // The reader owns a blocking HTTP client whose runtime may
                     // only be built and dropped off the async worker, so it
                     // lives inside the section.
+                    let dry_run = params
+                        .get("dry_run")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
                     match blocking_section(|| {
                         let reader = github_control_reader(state);
                         plexus_core::github::control::import(
@@ -1947,13 +1951,24 @@ async fn handle_management_request(
                             provider.as_ref(),
                             reader.as_ref(),
                             plexus_core::storage::now_ms(),
-                            params
-                                .get("dry_run")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(true),
+                            dry_run,
                         )
                     }) {
-                        Ok(plan) => json!({"result":plan}),
+                        Ok(plan) => {
+                            if !dry_run {
+                                let connection_ids = inventory
+                                    .handles
+                                    .iter()
+                                    .map(|handle| format!("github-handle-{}", handle.app_handle_id))
+                                    .collect::<Vec<_>>();
+                                register_handle_connection_transports(
+                                    state,
+                                    &principal_key,
+                                    &connection_ids,
+                                );
+                            }
+                            json!({"result":plan})
+                        }
                         Err(code) => json!({"error":{"code":code}}),
                     }
                 }
@@ -2140,6 +2155,30 @@ fn github_control_reader(
         .github_control_reader
         .clone()
         .unwrap_or_else(|| Arc::new(plexus_core::github::control::GithubApiReader::default()))
+}
+
+/// Register each newly imported handle connection's REST transport from its
+/// reviewed manifest, through the same connection-loading path boot uses to
+/// re-register every stored connection. A handle import commits its
+/// connection row without running discovery, so the in-memory transport map
+/// has no config for it until this runs: without it the dispatch router falls
+/// through to MCP and the first write reports `mcp_transport_error`.
+/// A registration failure is logged at error level with the connection id
+/// and the import is kept; a restart still recovers it.
+pub(crate) fn register_handle_connection_transports(
+    state: &ModuleState,
+    principal_key: &str,
+    connection_ids: &[String],
+) {
+    for connection_id in connection_ids {
+        if let Err(error) = state.runtime.reconciler.register_connection_transport(
+            principal_key,
+            connection_id,
+            state.runtime.endpoint_override.as_deref(),
+        ) {
+            eprintln!(error catalog: "handle transport registration failed for connection {principal_key}/{connection_id}: {error}");
+        }
+    }
 }
 
 /// Decode `github.handle.bind` parameters and run the bind against the

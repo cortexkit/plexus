@@ -1143,6 +1143,99 @@ async fn an_applied_onboarding_asks_once_and_writes_what_the_manual_commands_wri
     assert_same_rows(&combined.path, &manual.path, &GITHUB_TABLES);
 }
 
+/// An onboarded handle serves its first write with no restart. The applied
+/// import commits the handle connection without running discovery, so the
+/// in-memory REST config is missing until something registers it; the import
+/// registers it from the reviewed manifest, and the dispatch router then
+/// sends to REST instead of falling through to MCP. Without that step the
+/// first write reports `mcp_transport_error` and never reaches GitHub.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_onboarded_handle_serves_its_first_write_without_a_restart() {
+    use plexus_core::Transport as _;
+    use std::sync::Mutex;
+
+    // The fake GitHub API: records the request line and answers the creation.
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (endpoint, server) = crate::test_http::FixedRequestServer::start(
+        1,
+        "github-create-issue",
+        {
+            let seen = Arc::clone(&seen);
+            move |_, raw| {
+                let head = raw.split("\r\n").next().unwrap_or("").to_owned();
+                seen.lock().unwrap().push(head);
+                let body = json!({"id": 1, "number": 7,
+                    "html_url": "https://github.com/org/one/issues/7"})
+                .to_string();
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            }
+        },
+    );
+    let mut fixture = github_fixture("onboard-first-write-no-restart");
+    // Discovery and the new registration both point at the fake server. No
+    // restart runs between the import below and the write: a restart would
+    // re-register every transport at boot and hide the defect.
+    Arc::get_mut(&mut fixture.state)
+        .unwrap()
+        .runtime
+        .endpoint_override = Some(endpoint);
+    let outcome = call(
+        &fixture.state,
+        &fixture.path,
+        ONBOARD,
+        onboard_params(false),
+    )
+    .await;
+    assert_eq!(
+        outcome.reply["result"]["applied"], true,
+        "onboarding must apply: {}",
+        outcome.reply
+    );
+    let connection_id = format!("github-handle-{HANDLE}");
+    assert!(
+        fixture
+            .state
+            .runtime
+            .rest_transport
+            .has_connection(&connection_id),
+        "the applied import must register the handle connection's REST transport"
+    );
+    let credential =
+        plexus_core::credentials::ResolvedCredential::new(b"handle-token".to_vec(), None, 1);
+    let response = crate::blocking_section(|| {
+        fixture.state.runtime.rest_transport.dispatch_github_facade(
+            plexus_core::TransportRequest {
+                request_id: "first-write".to_string(),
+                connection_id: connection_id.clone(),
+                action: "create_issue".to_string(),
+                args: json!({"owner": "org", "repo": "one", "title": "hello"}),
+                credential_fingerprint: "test".to_string(),
+            },
+            &credential,
+        )
+    });
+    assert_eq!(
+        response.transmission,
+        plexus_core::TransmissionState::Sent,
+        "the first write must send: {response:?}"
+    );
+    assert!(
+        response.response.is_some(),
+        "the fake server's answer must come back: {response:?}"
+    );
+    server
+        .join()
+        .expect("the first write must reach the fake GitHub server");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["POST /repos/org/one/issues HTTP/1.1".to_string()],
+        "the write must arrive as the reviewed create_issue request"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declined_onboarding_writes_nothing_and_reads_github_only_while_planning() {
     let fixture = github_fixture("onboard-declined");

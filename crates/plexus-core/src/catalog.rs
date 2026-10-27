@@ -262,6 +262,24 @@ impl CatalogReconciler {
         registered
     }
 
+    /// Register one connection's endpoint on its transport from the stored
+    /// row and its reviewed manifest, with no vendor contact and no
+    /// credential resolution. This is the per-connection form of
+    /// [`Self::register_transports`]: a handle import commits a new
+    /// connection at runtime without running discovery, so without this the
+    /// router has no REST config for it until a restart or health probe
+    /// re-registers it. Failures propagate so the caller can log the
+    /// connection id and keep the committed import.
+    pub fn register_connection_transport(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        endpoint_override: Option<&str>,
+    ) -> Result<(), CatalogError> {
+        self.load_connection(principal, connection_id, endpoint_override)
+            .map(|_| ())
+    }
+
     /// Health-probe refresh for one stored connection.
     pub fn health_probe_connection(
         &self,
