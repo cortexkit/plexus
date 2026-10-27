@@ -123,6 +123,19 @@ fn unknown_refuses_every_facade_effect_before_dispatch() {
     );
 }
 #[test]
+fn bot_request_connector_home_refusal_carries_retry_true() {
+    let (_scratch, state) = fixture(Arc::new(ConnectorHome::unavailable()));
+    // The `github` bot write never claimed a receipt, so the same nonce stays
+    // safe to retry once the hold is restored.
+    let reply = call_tool(&state, "github", "bot_request");
+    assert_eq!(reply["error"]["code"], "connector_home_not_held");
+    assert_eq!(reply["error"]["retry_same_nonce"], json!(true));
+    // The flag is only for bot writes; other tools keep their bare refusal.
+    let other = call_tool(&state, "invoke", "call");
+    assert_eq!(other["error"]["code"], "connector_home_not_held");
+    assert!(other["error"].get("retry_same_nonce").is_none());
+}
+#[test]
 fn held_admits_facade_dispatch_boundary() {
     let home = Arc::new(ConnectorHome::new(Double::new(vec![held()])));
     home.refresh().unwrap();

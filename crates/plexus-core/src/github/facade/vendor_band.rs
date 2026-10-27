@@ -307,10 +307,14 @@ fn stop_for_scope(
     if scope_role == "run" && sent.is_empty() {
         value["transmission"] = json!("not_sent");
     }
-    if matches!(
+    // The flag mirrors the receipt action below: released claims stay safe to
+    // retry with the same nonce, finished refusals replay and need a new nonce.
+    let retry_same_nonce = matches!(
         code,
         crate::scope::SCOPE_UNVERIFIABLE | crate::scope::SCOPE_NOT_SYNCED
-    ) {
+    );
+    value["retry_same_nonce"] = json!(retry_same_nonce);
+    if retry_same_nonce {
         receipt_update(
             store.release_github_claim_between_legs(
                 agent,
@@ -534,6 +538,12 @@ fn refuse(
         value["code"] = typed["code"].clone();
         value["detail"] = typed["detail"].clone();
     }
+    // The flag mirrors the receipt action taken below, not a table of code
+    // names: released claims (including the wait-and-retry `nonce_in_flight`)
+    // stay safe to retry with the same nonce, while finished refusals replay
+    // that refusal and need a new nonce for a new attempt.
+    let retry_same_nonce = code == "nonce_in_flight" || failure.retryable;
+    value["retry_same_nonce"] = json!(retry_same_nonce);
     if code == "nonce_in_flight" {
         // Another worker may still complete the write for this nonce.
         // Keep the receipt pending for a later owner to resume unfinished effects.

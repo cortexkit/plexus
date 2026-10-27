@@ -4,6 +4,7 @@
     "repo_binding_generation": 1,
     "result": {
       "refusal_code": "delegating_scope_required",
+      "retry_same_nonce": true,
       "scope_role": "route",
       "status": "refused"
     }

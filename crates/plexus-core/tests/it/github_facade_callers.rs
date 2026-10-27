@@ -227,7 +227,7 @@ fn comment() -> Value {
 }
 
 fn refused(reply: &Value, code: &str) {
-    let mut expected = json!({"status":"refused","refusal_code":code});
+    let mut expected = json!({"status":"refused","refusal_code":code, "retry_same_nonce": true});
     if matches!(code, "module_grant_absent" | "agent_grant_absent") {
         let detail = &reply["result"]["detail"];
         assert_eq!(detail["connection"], CONNECTION);

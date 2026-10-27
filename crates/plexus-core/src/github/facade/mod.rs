@@ -122,7 +122,9 @@ pub fn bot_request_scoped_with_preconditions<
                 replay_or_refusal(&reply)
             } else {
                 reply.refusal_code = Some("store_failure".into());
-                json!({"status":"refused","refusal_code":"store_failure"})
+                // No receipt was claimed on this attempt, so resending the
+                // identical request with the same nonce is safe.
+                json!({"status":"refused","refusal_code":"store_failure","retry_same_nonce":true})
             };
             if let Err(error) = store.audit_github_facade(&reply) {
                 eprintln!(error storage: "GitHub facade audit failed for nonce {nonce}, request {}: {error}", reply.request_id);
@@ -160,18 +162,33 @@ pub fn bot_request_scoped_with_preconditions<
 
 fn replay_or_refusal(reply: &gates::GateReply) -> Value {
     if let Some(Claim::Replay(row) | Claim::Unknown(row)) = &reply.claim {
-        return row
+        let mut outcome = row
             .outcome
             .clone()
             .unwrap_or_else(|| json!({"status":row.state,"refusal_code":row.refusal_code}));
+        // Stored terminal refusals were finished as refused, so the same nonce
+        // replays the refusal and a new attempt needs a new nonce. Older stored
+        // outcomes written before the flag existed gain it here from that
+        // terminal receipt state.
+        if outcome.get("status").and_then(Value::as_str) == Some("refused")
+            && outcome.get("retry_same_nonce").is_none()
+        {
+            outcome["retry_same_nonce"] = json!(false);
+        }
+        return outcome;
     }
     let code = reply.refusal_code.clone();
+    // Every admission refusal here happens before the receipt is claimed,
+    // including `nonce_in_flight`, which waits for the current owner, so
+    // resending the identical request with the same nonce is safe. For
+    // `nonce_in_flight` that means waiting for the current owner to resolve
+    // the request, then retrying the same nonce.
     if code.as_deref() == Some("consent_unavailable") {
         return json!({"status":"refused","refusal_code":code,"code":code,
-            "action":reply.action,"transmission":"not_sent",
+            "action":reply.action,"transmission":"not_sent","retry_same_nonce":true,
             "message":format!("consent_unavailable for action '{}': flows cannot request consent", reply.action)});
     }
-    let mut value = json!({"status":"refused","refusal_code":code});
+    let mut value = json!({"status":"refused","refusal_code":code, "retry_same_nonce":true});
     if let Some(field) = &reply.invalid_request_field {
         value["code"] = json!("invalid_request");
         value["field"] = json!(field);
