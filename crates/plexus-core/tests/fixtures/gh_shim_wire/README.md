@@ -147,3 +147,112 @@ comment`, v10 `issue comment --edit-last`, v12 `issue close`, v14 `issue
 create`, `issue edit` and PATCH for refusal, plus the holder's
 `issue_edit_not_own` refusal for both `issue edit` requests); upstream error, unbound identity and the
 partial state change are exercised once each.
+
+## Request and reply contract vectors (plexus's own)
+
+`requests-contract/` and `replies-contract/` are written and proven by
+plexus, not captured from AFT. They pin what plexus's `gh.route` facade
+accepts and how it answers, so AFT's gh shim tests can fail on a new verb's
+shape before a live write does. Each file is proven on every plexus test run
+against the real code; nothing in either directory is typed as an
+expectation without a test reading it.
+
+### `requests-contract/<name>.json`
+
+```json
+{"name": "<file name without .json>",
+ "request": { <the full gh.route request> },
+ "expect": {"accepted": true} | {"refused": "<refusal code>"}}
+```
+
+`request` is the whole request the shim writes, including its envelope
+(`operation`, `gh_route_schema`, `manifest_version`, `rung_as_of_unix_secs`,
+`metadata`) and `repository`. Every vector carries the full envelope, so a
+refused vector differs from an accepted one only in the field its name
+describes. `tests/it/gh_route_request_contract.rs` runs each request through
+`plexus_core::github::facade::request_map::map` (the facade step that decides
+whether a request's shape is accepted, with no GitHub contact) and asserts:
+
+- `{"accepted": true}`: `map` accepts the request;
+- `{"refused": code}`: `map` refuses it with exactly `code`, compared as a
+  whole string. `request_field_forbidden{field: base}` is a different code
+  from `request_field_forbidden{field: title}`; the field name is part of it.
+  When the facade refuses a request here, the reply's `refusal_code` is this
+  string.
+
+Coverage: one accepted vector for every request kind in
+`effects::REQUEST_KINDS` (the list `map` reads its kinds from), with both the
+`issue` and `pr` spellings where `map` takes both; for the closed-shape kinds
+(`pr ready` / its `undo` draft form, `pr edit`, the review-comment reply,
+thread resolve/unresolve, stack create/add/unstack) one refused vector per
+rule: an unknown top-level, target and body field, each missing required
+field, each wrong type, and the kind's own rules (`pr edit` refuses `body.base`
+and needs `author_scope: "own"`; the stack `pull_requests` list must be 1-50
+distinct positive integers); the `pr create` head and base rules; the reaction
+vocabulary; `pr review` events; `issue edit`'s `state`, `milestone` and list
+fields; close/reopen `comment`, `body` and `title`; the six repository
+selectors refused on every kind (`owner`, `repo`, `full_name`,
+`repositories`, `target_repository`, `path_repository`); and unmapped kinds.
+
+Two things a reader might not expect. There are no unknown-field vectors for
+the speech kinds (comments, review, reaction, issue create and edit,
+close/reopen) or for `pr create`'s body: `map` has no closed field list for
+them and copies only each kind's declared fields towards GitHub
+(`resolver::RequestKind::body_fields`), so an unknown field there is dropped,
+not refused. And a target number that is not a number refuses as
+`request_kind_unmapped` on the speech and `pr ready` kinds, but as
+`request_field_forbidden{field: number}` on the closed nested kinds.
+
+What `map` does not decide is not here: the facade looks up the binding for
+`repository` before calling `map`, so an unbound repository refuses earlier
+(`repository_unbound`), and the request nonce is checked outside the request
+body.
+
+**A new request kind must add vectors.** The test derives the kind list from
+`effects::REQUEST_KINDS` and fails while any kind lacks an accepted vector; a
+closed-shape kind should also get its refused vectors. An empty or missing
+directory fails the test too.
+
+### `replies-contract/<name>.json`
+
+```json
+{"name": "<file name without .json>",
+ "request": { <the full gh.route request> },
+ "github_reads": [{"request_line": "GET /repos/org/repo/pulls/7 HTTP/1.1",
+                   "request_body": null | { <GraphQL body> },
+                   "status": 200, "response": { <GitHub's answer> }}, ...],
+ "reply": { <the facade's full reply> }}
+```
+
+These are the refusals that happen after a GitHub pre-read, which `map` alone
+cannot reach. `tests/it/github_facade_vendor_band/v22.rs`
+(`v22_reply_contract_files_match_the_facade`) sends each request through the
+real facade (`bot_request_scoped`) with a fake GitHub server answering the
+reads in `github_reads` order, then compares the rendered file to the stored
+one byte for byte. `request_line` and `request_body` are what the facade sent;
+no write is ever sent in these cases. The bound repository in this harness is
+`org/repo` and the bot is `app-fixture[bot]`.
+
+`reply` is exactly what the facade returns:
+`{"repo_binding_generation": <n>, "result": {...}}`, where `result` has
+`status: "refused"`, `refusal_code`, `retry_same_nonce`, and, for the typed
+refusals, `code` and `detail`:
+
+- `pr_edit_not_own`: `detail.message`;
+- `stack_pr_not_own`: `detail.number`, `detail.author_login`,
+  `detail.message`.
+
+`pr ready` (and its draft form) refuses a pull request the bot did not open
+with a bare `refusal_code: "pr_edit_not_own"` and no `code` or `detail`; see
+`pr-ready-not-own.json`.
+
+Keys in these files are sorted; parse them rather than relying on key order.
+Every refusal code `src/github/facade/vendor_band.rs` writes as a string
+literal must have a reply file, or be listed with its reason in the test's
+`NOT_V22_REPLIES`; the test reads the source and fails otherwise.
+
+Regenerate after an intended reply change, then review the diff:
+
+```sh
+PLEXUS_REGENERATE_GH_ROUTE_REPLIES=1 cargo test -p plexus-core --test it v22_reply_contract
+```

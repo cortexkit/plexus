@@ -33,14 +33,18 @@ const UNIVERSALLY_FORBIDDEN: [&str; 6] = [
 
 #[test]
 fn gh_route_request_contract_vectors_match_request_map() {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/gh_shim_wire/requests-contract");
+    let directory =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gh_shim_wire/requests-contract");
     let mut entries: Vec<_> = std::fs::read_dir(&directory)
         .unwrap_or_else(|error| panic!("read {}: {error}", directory.display()))
         .map(|entry| entry.unwrap().path())
         .collect();
     entries.sort();
-    assert!(!entries.is_empty(), "{} holds no vectors", directory.display());
+    assert!(
+        !entries.is_empty(),
+        "{} holds no vectors",
+        directory.display()
+    );
 
     let mut accepted_kinds = BTreeSet::new();
     let mut refusal_codes = BTreeSet::new();
@@ -106,7 +110,10 @@ fn gh_route_request_contract_vectors_match_request_map() {
             );
             refusal_codes.insert(code.to_owned());
         } else {
-            assert_eq!(expect["accepted"], true, "{file}: expect is accepted or refused");
+            assert_eq!(
+                expect["accepted"], true,
+                "{file}: expect is accepted or refused"
+            );
             let mapped = outcome.unwrap_or_else(|code| panic!("{file}: refused {code}"));
             assert!(
                 effects::REQUEST_KINDS.contains(&mapped.request_kind.as_str()),
