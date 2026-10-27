@@ -2658,7 +2658,7 @@ fn pr_create_refuses_bad_heads_and_other_shapes_before_any_vendor_call() {
         let reply = run.call("refuse-nonce", "refuse-id", "worker", 0);
         assert_eq!(
             reply["result"],
-            json!({"status":"refused","refusal_code":code}),
+            json!({"status":"refused","refusal_code":code, "retry_same_nonce": true}),
             "{label}: {reply}"
         );
         assert_eq!(run.sent(), 0, "{label}: GitHub was contacted");
@@ -2697,7 +2697,7 @@ fn pr_create_without_the_agents_grant_refuses_and_sends_nothing() {
     assert_eq!(
         reply["result"],
         json!({"status":"refused",
-            "refusal_code":"agent_grant_excludes_request{request_kind: pr_create, repository: org/repo}"}),
+            "refusal_code":"agent_grant_excludes_request{request_kind: pr_create, repository: org/repo}", "retry_same_nonce": true}),
         "{reply}"
     );
     assert!(transport.requests().is_empty());
@@ -3323,7 +3323,7 @@ mod scoped {
         let first = fixture.send(&scope, &close, "ended-close", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_ended","legs_sent":[],"scope_role":"route"}),
+            json!({"status":"refused","refusal_code":"scope_ended","legs_sent":[],"scope_role":"route", "retry_same_nonce": false}),
             "{first}"
         );
         assert_eq!(
@@ -3398,7 +3398,7 @@ mod scoped {
         let first = fixture.send(&scope, &close, "ended-between", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_ended","legs_sent":["add_issue_comment"],"scope_role":"route"}),
+            json!({"status":"refused","refusal_code":"scope_ended","legs_sent":["add_issue_comment"],"scope_role":"route", "retry_same_nonce": false}),
             "{first}"
         );
         assert_eq!(fixture.actions(), ["add_issue_comment"]);
@@ -3446,7 +3446,7 @@ mod scoped {
         let first = fixture.send(&scope, &reaction(), "not-synced", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_not_synced","legs_sent":[],"scope_role":"route"}),
+            json!({"status":"refused","refusal_code":"scope_not_synced","legs_sent":[],"scope_role":"route", "retry_same_nonce": true}),
             "{first}"
         );
         assert!(fixture.transport.requests().is_empty());
@@ -3478,7 +3478,7 @@ mod scoped {
         let first = fixture.send(&scope, &close, "not-synced-between", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_not_synced","legs_sent":["add_issue_comment"],"scope_role":"route"}),
+            json!({"status":"refused","refusal_code":"scope_not_synced","legs_sent":["add_issue_comment"],"scope_role":"route", "retry_same_nonce": true}),
             "{first}"
         );
         assert_eq!(fixture.actions(), ["add_issue_comment"]);
@@ -3518,7 +3518,7 @@ mod scoped {
         let first = fixture.send(&scope, &reaction(), "unverifiable", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_unverifiable","legs_sent":[],"scope_role":"route"}),
+            json!({"status":"refused","refusal_code":"scope_unverifiable","legs_sent":[],"scope_role":"route", "retry_same_nonce": true}),
             "{first}"
         );
         assert!(fixture.transport.requests().is_empty());
@@ -3548,7 +3548,7 @@ mod scoped {
         let first = fixture.send(&scope, &close, "unverifiable-between", now());
         assert_eq!(
             first["result"],
-            json!({"status":"refused","refusal_code":"scope_unverifiable","legs_sent":["add_issue_comment"],"scope_role":"route"}),
+            json!({"status":"refused","refusal_code":"scope_unverifiable","legs_sent":["add_issue_comment"],"scope_role":"route", "retry_same_nonce": true}),
             "{first}"
         );
         let retry = fixture.send(&scope, &close, "unverifiable-between", now() + 1);

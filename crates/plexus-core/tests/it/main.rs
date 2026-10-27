@@ -15,6 +15,7 @@ mod github_credential;
 mod github_event_wake_reads;
 mod github_facade_callers;
 mod github_facade_gates;
+mod github_facade_retry_flag;
 mod github_facade_vendor_band;
 mod github_handle_placeholder_schemas;
 mod github_import_grant_closure;

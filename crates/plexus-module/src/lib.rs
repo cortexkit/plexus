@@ -2435,13 +2435,24 @@ async fn handle_tool_request_with_budget(
     let epoch = frame.header.epoch;
     let correlation = frame.header.corr;
     if budget.expired() {
+        // The expired call never claimed a receipt, so a bot write stays safe
+        // to retry with the same nonce. Other tools get the bare reply.
+        let expired = match serde_json::from_slice::<Value>(&frame.body)
+            .ok()
+            .and_then(|body| body.as_object().cloned())
+        {
+            Some(object) if is_bot_request_call(&object) => {
+                with_bot_retry_flag(request_expired_reply())
+            }
+            _ => request_expired_reply(),
+        };
         return send_tool_response(
             writer,
             frame.header.ver,
             channel,
             epoch,
             correlation,
-            request_expired_reply(),
+            expired,
         )
         .await;
     }
@@ -2647,6 +2658,14 @@ fn facade_tool_reply_with_budget(
     budget: Arc<request_execution::RequestBudget>,
 ) -> Result<Value, ModuleError> {
     let reply = facade_tool_reply_inner(frame, object, state, route_bindings, budget)?;
+    // Every module-level `bot_request` refusal runs before the facade claims a
+    // receipt, so the same nonce stays safe to retry. The flag lives beside
+    // the code, in the top-level `error` object.
+    let reply = if is_bot_request_call(object) && reply.get("error").is_some() {
+        with_bot_retry_flag(reply)
+    } else {
+        reply
+    };
     let name = object.get("name").and_then(Value::as_str).unwrap_or("");
     if let Some(error) = reply.get("error") {
         if tool_provider::is_metadata_op(name)
@@ -5307,6 +5326,38 @@ async fn send_tool_error(
 /// The route error body `{"error": {"code", "message"}}`.
 fn tool_error(code: &str, message: &str) -> Value {
     json!({"error": {"code": code, "message": message}})
+}
+
+/// Whether this tool call is a GitHub bot write: the `github` tool's
+/// `bot_request` op, or `github_react`, which runs through the same receipt
+/// path. Only those refusals carry `retry_same_nonce`; other tools never
+/// claim a nonce receipt, so the field would be meaningless on them.
+fn is_bot_request_call(object: &serde_json::Map<String, Value>) -> bool {
+    let name = object.get("name").and_then(Value::as_str).unwrap_or("");
+    if name == manifest::GITHUB_REACT_TOOL {
+        return true;
+    }
+    if name != manifest::GITHUB_TOOL {
+        return false;
+    }
+    object
+        .get("arguments")
+        .and_then(Value::as_object)
+        .and_then(|arguments| arguments.get("op"))
+        .and_then(Value::as_str)
+        .is_some_and(|op| op == "bot_request")
+}
+
+/// Mark a top-level `{"error": ...}` refusal of a bot write as safe to
+/// retry with the same nonce. Module gates run before the facade claims any
+/// receipt, so no receipt is held and resending the identical request is safe.
+fn with_bot_retry_flag(mut reply: Value) -> Value {
+    if let Some(error) = reply.get_mut("error") {
+        if error.is_object() && error.get("retry_same_nonce").is_none() {
+            error["retry_same_nonce"] = json!(true);
+        }
+    }
+    reply
 }
 
 fn diagnostic_label(value: &str) -> String {

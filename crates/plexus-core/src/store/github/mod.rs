@@ -1527,7 +1527,7 @@ impl PlexusStore {
                     if let Some(code) = refusal {
                         conn.execute("UPDATE github_bot_receipt SET state='refused',refusal_code=?3,
                             outcome=?4,updated_at=?5 WHERE agent_id=?1 AND request_nonce=?2",
-                            params![agent, nonce, code, serde_json::json!({"status":"refused","refusal_code":code}).to_string(), now])?;
+                            params![agent, nonce, code, serde_json::json!({"status":"refused","refusal_code":code, "retry_same_nonce":false}).to_string(), now])?;
                         return Ok(Claim::Replay(load(conn)?.expect("updated receipt")));
                     }
                     if status != "approved" { return Ok(Claim::PendingApproval(row.clone())); }
@@ -1588,7 +1588,7 @@ impl PlexusStore {
                             VALUES (?1,?2,?3,'refused',NULL,?4,?5,?6,?7,?8,?9,?9)",
                             params![agent, nonce, mapped.fingerprint, now, baseline.to_string(),
                                 serde_json::to_string(effects).map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?,
-                                code, serde_json::json!({"status":"refused","refusal_code":code}).to_string(), now])?;
+                                code, serde_json::json!({"status":"refused","refusal_code":code, "retry_same_nonce":false}).to_string(), now])?;
                         return Ok(Claim::Replay(load(conn)?.expect("refused receipt")));
                     }
                     id
@@ -1598,7 +1598,7 @@ impl PlexusStore {
                         VALUES (?1,?2,?3,'refused',NULL,?4,?5,?6,'approval_denied',?7,?8,?8)",
                         params![agent, nonce, mapped.fingerprint, now, baseline.to_string(),
                             serde_json::to_string(effects).map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?,
-                            serde_json::json!({"status":"refused","refusal_code":"approval_denied"}).to_string(), now])?;
+                            serde_json::json!({"status":"refused","refusal_code":"approval_denied", "retry_same_nonce":false}).to_string(), now])?;
                     return Ok(Claim::Replay(load(conn)?.expect("refused receipt")));
                 } else {
                     // A fresh id per approval: a nonce can be reused once its
