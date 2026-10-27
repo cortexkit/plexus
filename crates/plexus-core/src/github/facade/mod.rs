@@ -178,17 +178,21 @@ fn replay_or_refusal(reply: &gates::GateReply) -> Value {
         return outcome;
     }
     let code = reply.refusal_code.clone();
-    // Every admission refusal here happens before the receipt is claimed,
-    // including `nonce_in_flight`, which waits for the current owner, so
-    // resending the identical request with the same nonce is safe. For
-    // `nonce_in_flight` that means waiting for the current owner to resolve
-    // the request, then retrying the same nonce.
+    // Every admission refusal here happens before the receipt is claimed, so
+    // resending the identical request with the same nonce is safe, except for
+    // `nonce_payload_mismatch`: that nonce already belongs to a different
+    // payload, so the identical request refuses the same way forever and a new
+    // attempt needs a new nonce. For `nonce_in_flight` safe means waiting for
+    // the current owner to resolve the request, then retrying the same nonce.
     if code.as_deref() == Some("consent_unavailable") {
         return json!({"status":"refused","refusal_code":code,"code":code,
             "action":reply.action,"transmission":"not_sent","retry_same_nonce":true,
             "message":format!("consent_unavailable for action '{}': flows cannot request consent", reply.action)});
     }
-    let mut value = json!({"status":"refused","refusal_code":code, "retry_same_nonce":true});
+    let mut value = json!({"status":"refused","refusal_code":code});
+    // A payload mismatch can never succeed with the same nonce: the nonce
+    // already belongs to a different payload, so callers must use a new nonce.
+    value["retry_same_nonce"] = json!(code.as_deref() != Some("nonce_payload_mismatch"));
     if let Some(field) = &reply.invalid_request_field {
         value["code"] = json!("invalid_request");
         value["field"] = json!(field);

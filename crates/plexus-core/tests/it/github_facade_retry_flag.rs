@@ -295,3 +295,44 @@ fn nonce_in_flight_carries_retry_true() {
     assert_eq!(refused["result"]["retry_same_nonce"], json!(true));
     assert!(transport.requests().is_empty());
 }
+
+// A mismatched payload can never succeed with the same nonce: the nonce
+// already belongs to a different payload, so callers must use a new nonce.
+#[test]
+fn nonce_payload_mismatch_carries_retry_false() {
+    let (_scratch, store, engine, transport, scope) =
+        setup("retry-mismatch", &[("add_reaction", "write")]);
+    transport.set_response(MockResponse::Success(json!({
+        "id": 701,
+        "content": "eyes",
+        "user": {"login":"app-fixture[bot]","type":"Bot"},
+    })));
+    let now = plexus_core::now_ms();
+    let first = bot_request_scoped(
+        &store,
+        &engine,
+        plexus_core::github::AFT_PRINCIPAL,
+        Some(&scope),
+        &reaction_request(),
+        "retry-mismatch-nonce",
+        "retry-mismatch-id",
+        "worker",
+        now,
+    );
+    assert_eq!(first["result"]["status"], "completed");
+    let mut changed = reaction_request();
+    changed["body"]["reaction"] = json!("heart");
+    let refused = bot_request_scoped(
+        &store,
+        &engine,
+        plexus_core::github::AFT_PRINCIPAL,
+        Some(&scope),
+        &changed,
+        "retry-mismatch-nonce",
+        "retry-mismatch-id-2",
+        "worker",
+        now + 1,
+    );
+    assert_eq!(refused["result"]["refusal_code"], "nonce_payload_mismatch");
+    assert_eq!(refused["result"]["retry_same_nonce"], json!(false));
+}
