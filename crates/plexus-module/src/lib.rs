@@ -1959,7 +1959,11 @@ async fn handle_management_request(
                                 let connection_ids = inventory
                                     .handles
                                     .iter()
-                                    .map(|handle| format!("github-handle-{}", handle.app_handle_id))
+                                    .map(|handle| {
+                                        plexus_core::github::control::handle_connection_id(
+                                            &handle.app_handle_id,
+                                        )
+                                    })
                                     .collect::<Vec<_>>();
                                 register_handle_connection_transports(
                                     state,

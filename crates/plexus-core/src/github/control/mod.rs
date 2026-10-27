@@ -381,6 +381,14 @@ fn policies(item: &InventoryHandle, grants: &[GithubImportedGrant]) -> Vec<Githu
         .collect()
 }
 
+/// The connection id an import mints for a handle. Spelled once so the
+/// import itself, the onboarding preview, and the runtime transport
+/// registration after an applied import cannot drift apart: a registration
+/// that names any other id would miss the committed connection.
+pub fn handle_connection_id(app_handle_id: &str) -> String {
+    format!("github-handle-{app_handle_id}")
+}
+
 /// Import is a single-use operation. All network reads precede the SQLite
 /// transaction; neither an unlisted repository nor a failed read can activate a row.
 pub fn import(
@@ -523,7 +531,7 @@ fn import_with(
                 .iter()
                 .map(|action| (*action).to_owned()),
         );
-        let connection_id = format!("github-handle-{}", item.app_handle_id);
+        let connection_id = handle_connection_id(&item.app_handle_id);
         module_grants.push(json!({"connection_id":connection_id,"grantee_principal":crate::github::AFT_PRINCIPAL,"action_selectors":aft}));
         module_grants.push(json!({"connection_id":connection_id,"grantee_principal":crate::github::PREFRONTAL_PRINCIPAL,"action_selectors":prefrontal_selectors()}));
         matrix.insert(item.agent_id.clone(), agent_matrix);

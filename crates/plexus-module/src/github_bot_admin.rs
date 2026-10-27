@@ -319,7 +319,7 @@ impl Plan {
             "operation": "onboard_github_bot",
             "app_handle_id": self.handle.app_handle_id,
             "agent_id": self.handle.agent_id,
-            "connection_id": format!("github-handle-{}", self.handle.app_handle_id),
+            "connection_id": control::handle_connection_id(&self.handle.app_handle_id),
             "handle": if self.reuse { "reuse" } else { "import" },
             "installation_repositories": self.installation,
             "newly_bound": self.newly_bound,
@@ -506,7 +506,7 @@ fn apply_steps(state: &Arc<ModuleState>, principal: &str, plan: &Plan) -> Value 
         crate::register_handle_connection_transports(
             state,
             principal,
-            &[format!("github-handle-{id}")],
+            &[control::handle_connection_id(id)],
         );
         completed.push(json!({"step": "import", "status": "imported", "plan": imported["result"]}));
     }
