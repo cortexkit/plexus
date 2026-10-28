@@ -2943,7 +2943,10 @@ fn facade_tool_reply_inner(
     }
     if name == manifest::GITHUB_TOOL {
         let operation = arguments.get("op").and_then(Value::as_str);
-        if !matches!(operation, Some("bot_request" | "bindings.read")) {
+        if !matches!(
+            operation,
+            Some("bot_request" | "bindings.read" | "bindings.read_for_agent")
+        ) {
             return Ok(json!({"error": {
                 "code": "invalid_operation",
                 "op": operation,
@@ -3103,7 +3106,11 @@ fn facade_tool_reply_inner(
             "use credential_id during issue_ticket enrollment, then connect with ticket_id",
         ));
     }
-    if map_contains_secret_input(arguments) {
+    // The agent binding read has a closed field list checked below. Name any
+    // unexpected field as invalid_request before screening its value for secrets.
+    if !(name == manifest::GITHUB_TOOL && op == Some("bindings.read_for_agent"))
+        && map_contains_secret_input(arguments)
+    {
         return Ok(tool_error(
             "secret_input_rejected",
             "credential material may only enter through the binding-ticket ceremony",
@@ -3121,6 +3128,37 @@ fn facade_tool_reply_inner(
         op,
     };
     let response = match (name, op) {
+        (manifest::GITHUB_TOOL, Some("bindings.read_for_agent")) => {
+            let agent_id = arguments.get("agent_id").and_then(Value::as_str);
+            let invalid_field = arguments
+                .keys()
+                .find(|key| !matches!(key.as_str(), "op" | "agent_id"))
+                .map(String::as_str)
+                .or_else(|| agent_id.is_none().then_some("agent_id"));
+            let mut response = if let Some(field) = invalid_field {
+                json!({"error":{"code":"invalid_request","field":field}})
+            } else {
+                match plexus_core::github::control::bindings_read_for_agent(
+                    state.store(),
+                    &principal_key,
+                    agent_id.expect("agent_id validated"),
+                ) {
+                    Ok(result) => json!({"result":result}),
+                    Err(denial) => denial_response(&denial),
+                }
+            };
+            if let Err(error) = state.store().audit_github_control(
+                &principal_key,
+                agent_id,
+                None,
+                "github.bindings.read_for_agent",
+                &fresh_request_id(),
+                response.pointer("/error/code").and_then(Value::as_str),
+            ) {
+                warn_audit_failed(&mut response, "github.bindings.read_for_agent", &error);
+            }
+            response
+        }
         (manifest::GITHUB_TOOL, Some("bindings.read")) => {
             let mut response = match arguments.get("connection_id").and_then(Value::as_str) {
                 Some(id) => match plexus_core::github::control::bindings_read(
@@ -6009,6 +6047,8 @@ mod secret_input_tests;
 #[cfg(test)]
 mod stamp_invoke_tests;
 
+#[cfg(test)]
+mod github_bindings_contract_tests;
 #[cfg(test)]
 mod github_read_frame_tests;
 

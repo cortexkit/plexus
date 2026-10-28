@@ -276,7 +276,9 @@ pub(crate) fn check_call(
                     .cloned()
                     .unwrap_or(Value::Null),
             ),
-            Some("bindings.read") => return Err(excludes("<unresolved>")),
+            Some("bindings.read" | "bindings.read_for_agent") => {
+                return Err(excludes("<unresolved>"))
+            }
             _ => None,
         },
         manifest::INVOKE_TOOL => {

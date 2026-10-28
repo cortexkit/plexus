@@ -22,7 +22,7 @@ scripts/                 Test gate, trains, release, staging, deploy acceptance
 
 - **A vendor:** a new `catalog/<vendor>.jsonc`. Core's `manifest::tests::every_shipped_manifest_is_valid` and `crates/plexus-conformance/tests/it/shipped_catalog_ingests.rs` prove the manifest parses. Review output contracts as well as input schemas; credential-returning actions are never declared. See `docs/design/manifest-model.md`.
 - **A wire tool or operation:** a handler in `crates/plexus-module/src/lib.rs`, declared in `crates/plexus-module/src/manifest.rs`.
-- **A GitHub read:** use the separate `github_read` tool and its shared GitHub read implementation; the `github` facade serves only `bot_request` and `bindings.read`.
+- **A GitHub read:** use the separate `github_read` tool and its shared GitHub read implementation; the `github` facade serves only `bot_request`, `bindings.read`, and `bindings.read_for_agent`.
 - **Agent identity:** daemon scope stamps in `crates/plexus-core/src/scope.rs`, carried by route bindings in `crates/plexus-module/src/lib.rs`. Bot writes resolve the stamped agent's bound handle in `github/facade/gates.rs`; identity-token arguments are refused centrally before tool dispatch.
 - **A governance gate:** `authorize` in `crates/plexus-core/src/governance.rs`.
 - **A table or column:** append a `Migration` to `MIGRATIONS` in `crates/plexus-core/src/storage.rs` and rehearse it with `examples/migration_rehearsal.rs`.

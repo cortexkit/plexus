@@ -476,6 +476,64 @@ fn bindings_read_requires_a_module_grant_and_reports_rebinding_generation() {
 }
 
 #[test]
+fn bindings_read_for_agent_selects_only_permitted_agent_rows() {
+    let store = store();
+    let provider = Credentials(AtomicUsize::new(0));
+    let reader = Reader(AtomicUsize::new(0));
+    let mut input = inventory();
+    let mut second = input.handles[0].clone();
+    second.app_handle_id = "app-two".into();
+    second.agent_id = "agent-two".into();
+    second.credential_id = "github_app:app-two".into();
+    second.grants[0].repository = "org/repo0".into();
+    input.handles.push(second);
+    control::import(&store, "direct", &input, &provider, &reader, 0, false).unwrap();
+    store.bind_github_repo("org/aaa", "app-two").unwrap();
+    let generation = store.github_repo_binding_generation().unwrap();
+    assert_eq!(
+        control::bindings_read_for_agent(&store, plexus_core::github::AFT_PRINCIPAL, "agent-two")
+            .unwrap(),
+        json!({"repo_binding_generation":generation,"bindings":[
+            {"repository":"org/aaa","app_handle_id":"app-two","agent_id":"agent-two"},
+            {"repository":"org/repo0","app_handle_id":"app-two","agent_id":"agent-two"}
+        ]})
+    );
+    for (connection, expires_at) in [
+        ("github-handle-app-one", None),
+        ("github-handle-app-two", Some(1)),
+    ] {
+        store
+            .insert_grant(&plexus_core::GrantInput {
+                grant_id: format!("reader-{connection}"),
+                principal: "direct".into(),
+                connection_id: connection.into(),
+                grantee_principal: "reserved:reader".into(),
+                risk_ceiling: "read".into(),
+                action_selectors: vec![],
+                authority_kind: "invoke".into(),
+                expires_at,
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        control::bindings_read_for_agent(&store, "reserved:reader", "agent-one").unwrap(),
+        json!({"repo_binding_generation":generation,"bindings":[
+            {"repository":"org/last","app_handle_id":"app-one","agent_id":"agent-one"}
+        ]})
+    );
+    for (caller, agent) in [
+        ("reserved:reader", "agent-two"),
+        ("reserved:other", "agent-one"),
+        (plexus_core::github::AFT_PRINCIPAL, "agent-without-bindings"),
+    ] {
+        assert_eq!(
+            control::bindings_read_for_agent(&store, caller, agent).unwrap(),
+            json!({"repo_binding_generation":generation,"bindings":[]})
+        );
+    }
+}
+
+#[test]
 fn probe_requires_direct_and_records_proof_only_after_complete_readback() {
     let store = store();
     let provider = Credentials(AtomicUsize::new(0));

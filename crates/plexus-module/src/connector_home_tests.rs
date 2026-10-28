@@ -123,6 +123,18 @@ fn unknown_refuses_every_facade_effect_before_dispatch() {
     );
 }
 #[test]
+fn agent_binding_reads_do_not_require_connector_home() {
+    let (_scratch, state) = fixture(Arc::new(ConnectorHome::unavailable()));
+    assert!(!connector_home::tool_effect(
+        "github",
+        Some("bindings.read_for_agent")
+    ));
+    let reply = call_tool(&state, "github", "bindings.read_for_agent");
+    assert_eq!(reply["error"]["code"], "invalid_request");
+    assert_eq!(reply["error"]["field"], "agent_id");
+}
+
+#[test]
 fn bot_request_connector_home_refusal_carries_retry_true() {
     let (_scratch, state) = fixture(Arc::new(ConnectorHome::unavailable()));
     // The `github` bot write never claimed a receipt, so the same nonce stays

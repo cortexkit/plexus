@@ -87,7 +87,7 @@ fn regression_github_and_connection_schemas_admit_handler_fields() {
         GITHUB_TOOL,
         "",
         ExecutionMode::Unfenceable,
-        &["bot_request", "bindings.read"],
+        &["bot_request", "bindings.read", "bindings.read_for_agent"],
     );
     let connections = tool(
         CONNECTIONS_TOOL,
@@ -107,6 +107,7 @@ fn regression_github_and_connection_schemas_admit_handler_fields() {
         json!({"op":"bot_request", "request_nonce":"run", "request":{},
             "run_scope":{"owner":"reserved:aft","ref":"run-1","epoch":0}}),
         json!({"op":"bindings.read", "connection_id":"github-bot"}),
+        json!({"op":"bindings.read_for_agent", "agent_id":"registry-agent"}),
     ] {
         assert_object_schema_accepts(&github.schema, &call);
     }
@@ -405,7 +406,7 @@ fn manifest_advertises_eleven_tools_including_read_facades_and_search() {
     assert_eq!(tools[2].execution_mode, ExecutionMode::Unfenceable);
     assert_eq!(
         tools[4].schema["properties"]["op"]["enum"],
-        json!(["bot_request", "bindings.read"]),
+        json!(["bot_request", "bindings.read", "bindings.read_for_agent"]),
         "the github facade only advertises bot requests and binding reads"
     );
     assert_eq!(tools[9].execution_mode, ExecutionMode::Pure);

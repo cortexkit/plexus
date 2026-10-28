@@ -619,6 +619,21 @@ async fn workspace_filter_covers_every_repository_operation_class() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_audience_refuses_agent_binding_enumeration() {
+    let mut core = Core::new(workspace()).await;
+    let (state, _, transport, scratch) = setup(core.audiences());
+    let reply = quiet_refusal(
+        &state,
+        &transport,
+        &scratch,
+        "github",
+        json!({"op":"bindings.read_for_agent","agent_id":"agent-x"}),
+        "flow_audience_excludes_repository",
+    );
+    assert_eq!(reply["error"]["repository"], "<unresolved>");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hand_set_missing_and_conflicting_stamps_do_not_establish_reach() {
     let mut core = Core::new(workspace()).await;
     let (state, _, transport, scratch) = setup(core.audiences());

@@ -754,6 +754,16 @@ pub fn bindings_read(
         .map_err(|_| crate::governance::Denial::StoreFailure)
 }
 
+pub fn bindings_read_for_agent(
+    store: &PlexusStore,
+    principal: &str,
+    agent_id: &str,
+) -> Result<Value, crate::governance::Denial> {
+    store
+        .read_github_bindings_for_agent(agent_id, principal)
+        .map_err(|_| crate::governance::Denial::StoreFailure)
+}
+
 /// A stored handle in the shape [`resolve_repositories`] reads, so the probe
 /// and the bind list the installation exactly as the import does: with the
 /// handle's own credential.

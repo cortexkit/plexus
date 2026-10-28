@@ -334,6 +334,7 @@ pub const TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     ("web_search", ToolEffect::Always),
     // Calls grep.app, a public backend outside this machine.
     ("code_search", ToolEffect::Always),
+    // Both bindings.read and bindings.read_for_agent only inspect the store.
     ("github", ToolEffect::Ops(&["bot_request"])),
     ("github_read", ToolEffect::Always),
     // Every call posts a reaction on GitHub as the agent's bot.

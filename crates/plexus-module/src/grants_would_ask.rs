@@ -243,7 +243,12 @@ fn evaluate_item(
             Err(_) => return verdict(result, "no", "invalid_target"),
         }
     } else if let Some(connection) = target.connection.as_deref().filter(|s| !s.is_empty()) {
-        if target.tool == "github" && target.action == "bindings.read" {
+        if target.tool == "github"
+            && matches!(
+                target.action.as_str(),
+                "bindings.read" | "bindings.read_for_agent"
+            )
+        {
             plexus_core::github::control::bindings_read(
                 state.store(),
                 principal::BASAL_PRINCIPAL,

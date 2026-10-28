@@ -489,6 +489,44 @@ fn unavailable_grant_target_is_not_reported_as_malformed() {
 }
 
 #[test]
+fn agent_binding_grant_inspection_previews_the_named_connections_module_grant() {
+    let (state, store, transport, _scratch) = crate::github_read_frame_tests::imported_runtime();
+    let request = json!({"method":"grants.would_ask","params":{"flow_id":"f1","items":[
+        {"tool":"github","connection":"github-handle-app-x","action":"bindings.read_for_agent"}
+    ]}});
+    let run = || {
+        grants_would_ask::run(
+            &state,
+            "reserved:prefrontal-core",
+            None,
+            request.as_object().unwrap(),
+        )
+    };
+    let absent = run();
+    assert_eq!(absent["result"]["items"][0]["verdict"], "no");
+    assert_eq!(
+        absent["result"]["items"][0]["reason"],
+        "module_grant_absent"
+    );
+    store
+        .insert_grant(&plexus_core::GrantInput {
+            grant_id: "basal-binding-preview".into(),
+            principal: "direct".into(),
+            connection_id: "github-handle-app-x".into(),
+            grantee_principal: "reserved:basal".into(),
+            risk_ceiling: "read".into(),
+            action_selectors: vec![],
+            authority_kind: "invoke".into(),
+            expires_at: None,
+        })
+        .unwrap();
+    let allowed = run();
+    assert_eq!(allowed["result"]["items"][0]["verdict"], "yes");
+    assert_eq!(allowed["result"]["items"][0]["reason"], "allowed");
+    assert!(transport.requests().is_empty());
+}
+
+#[test]
 fn revoked_connections_are_not_counted_as_probe_work() {
     let (scratch, state) = file_state("probe-count-revoked");
     crate::bus::tests::seed_connection_and_subscription(state.store(), "conn-1");

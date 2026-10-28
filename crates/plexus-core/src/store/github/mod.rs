@@ -22,6 +22,11 @@ mod invoke_grant;
 mod read_grant;
 pub use read_grant::GithubHandleReadGrant;
 
+enum GithubBindingSelector<'a> {
+    Connection(&'a str),
+    Agent(&'a str),
+}
+
 /// The credential reference identifies one App; an installation id is optional
 /// because the vault delivers a ready installation token by credential id.
 #[derive(Debug, Clone)]
@@ -2611,14 +2616,37 @@ impl PlexusStore {
         connection_id: &str,
         caller: &str,
     ) -> Result<Value, StoreError> {
+        self.read_github_bindings_permitted(
+            GithubBindingSelector::Connection(connection_id),
+            caller,
+        )
+    }
+
+    pub fn read_github_bindings_for_agent(
+        &self,
+        agent_id: &str,
+        caller: &str,
+    ) -> Result<Value, StoreError> {
+        self.read_github_bindings_permitted(GithubBindingSelector::Agent(agent_id), caller)
+    }
+
+    fn read_github_bindings_permitted(
+        &self,
+        selector: GithubBindingSelector<'_>,
+        caller: &str,
+    ) -> Result<Value, StoreError> {
+        let (column, value) = match selector {
+            GithubBindingSelector::Connection(id) => ("h.connection_id", id),
+            GithubBindingSelector::Agent(id) => ("h.agent_id", id),
+        };
         self.inner.with_read(|conn| {
             let generation: i64 = conn.query_row("SELECT generation FROM github_repo_binding_generation WHERE singleton=1",[],|row| row.get(0))?;
-            let mut query = conn.prepare("SELECT b.repository,h.app_handle_id,h.agent_id FROM github_repo_binding b
+            let mut query = conn.prepare(&format!("SELECT b.repository,h.app_handle_id,h.agent_id FROM github_repo_binding b
                 JOIN github_app_handle h ON h.app_handle_id=b.app_handle_id
-                WHERE h.connection_id=?1 AND EXISTS(SELECT 1 FROM grants g WHERE g.principal=h.connection_principal
+                WHERE {column}=?1 AND EXISTS(SELECT 1 FROM grants g WHERE g.principal=h.connection_principal
                     AND g.connection_id=h.connection_id AND g.grantee_principal=?2 AND g.agent_id IS NULL
-                    AND g.authority_kind='invoke' AND (g.expires_at IS NULL OR g.expires_at>?3)) ORDER BY b.repository")?;
-            let bindings = query.query_map(params![connection_id,caller,now_ms()], |row| Ok(serde_json::json!({
+                    AND g.authority_kind='invoke' AND (g.expires_at IS NULL OR g.expires_at>?3)) ORDER BY b.repository"))?;
+            let bindings = query.query_map(params![value,caller,now_ms()], |row| Ok(serde_json::json!({
                 "repository":row.get::<_,String>(0)?,"app_handle_id":row.get::<_,String>(1)?,"agent_id":row.get::<_,String>(2)?
             })))?.collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(serde_json::json!({"repo_binding_generation":generation,"bindings":bindings}))

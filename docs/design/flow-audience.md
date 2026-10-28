@@ -55,7 +55,7 @@ call mode. In Flow mode:
 | CI `github.actions.run.superseded` | Same outer `repository`; run metadata and newest workflow run use that repository. |
 | `invoke` / `call` | Resolve the invoke-visible connection, including owner-shared grants. For `github`, `github_rest` (imported bot handles), and `github_actions`, check all `args.repository`, `args.repositories`, and `args.owner`/`args.repo` selectors. Missing, malformed or empty selectors refuse. Any `terms`, `q` or `query` field within `args` refuses as an unresolved repository, regardless of the action or value. Non-GitHub connections retain their existing grant path. |
 | `github` / `bot_request` | Check `request.repository` before receipts or preflight. Existing bot identity and grant rules still apply. |
-| `github` / `bindings.read` | Refuse workspace calls: this projects stored repository bindings without a resolvable single repository selector. |
+| `github` / `bindings.read`, `bindings.read_for_agent` | Refuse workspace calls: these project stored repository bindings without a resolvable single repository selector. |
 | `events_get` | Use the stored event's `headers.repo`, not caller arguments or the event's old project label. Apply the filter before name/version disclosure. Excluded and unknown events have the identical `event_not_visible` reply. |
 | `catalog` (`apps`, `list`, `inspect`) | Describes vendor/action schemas, not repository data; unchanged. |
 | `web_search`, `code_search` | Public search, no watched repository target; unchanged under the existing grants. |

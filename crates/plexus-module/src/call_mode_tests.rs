@@ -343,6 +343,32 @@ async fn codemode_github_is_refused_before_grant_lookup_or_dispatch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codemode_github_agent_bindings_are_refused_before_grant_lookup() {
+    let (state, _store, transport, scratch) = super::github_read_frame_tests::imported_runtime();
+    let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+    db.execute_batch("DROP TABLE grants").unwrap();
+    let routes = Arc::new(RouteBindings::new());
+    bind_route(
+        &state,
+        &routes,
+        reserved("prefrontal-core"),
+        stamp(&CallMode::Codemode),
+        Some(CallMode::Codemode),
+    )
+    .await;
+    let reply = call(
+        &state,
+        &routes,
+        "github",
+        json!({"op":"bindings.read_for_agent","agent_id":"agent-x"}),
+    )
+    .await;
+    assert_eq!(reply["error"]["code"], "call_mode_unsupported");
+    assert!(state.store().list_audit("direct").unwrap().is_empty());
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grants_would_ask_still_works_on_the_flows_bound_route() {
     let (state, _scratch) = state();
     let routes = Arc::new(RouteBindings::new());

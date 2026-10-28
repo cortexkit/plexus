@@ -287,7 +287,7 @@ pub fn build_with_launch_nonce_source(
                     GITHUB_TOOL,
                     "Route GitHub bot requests and inspect repository bindings. Repository-bound reads are available through github_read.",
                     ExecutionMode::Unfenceable,
-                    &["bot_request", "bindings.read"],
+                    &["bot_request", "bindings.read", "bindings.read_for_agent"],
                 ),
                 github_read_tool(),
                 github_react_tool(),
@@ -697,6 +697,7 @@ fn tool(name: &str, description: &str, execution_mode: ExecutionMode, operations
     match name {
         GITHUB_TOOL => {
             properties.insert("connection_id".into(), json!({"type":"string"}));
+            properties.insert("agent_id".into(), json!({"type":"string"}));
             properties.insert("request".into(), json!({"type":"object"}));
             properties.insert("request_nonce".into(), json!({"type":"string"}));
             properties.insert("expect".into(), json!({
