@@ -93,6 +93,7 @@ pub(crate) async fn run<P: Composite>(
         }
     }
     if let Err(refusal) = operator_confirmation::confirm(
+        caller.method,
         &plan.summary(),
         caller.route,
         caller.writer,

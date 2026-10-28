@@ -1,5 +1,5 @@
 use super::*;
-use subc_protocol::session::{OperatorConfirmReply, OperatorConfirmRequest};
+use subc_protocol::session::{OperatorConfirmKind, OperatorConfirmReply, OperatorConfirmRequest};
 
 #[path = "operator_confirmation_tests/bulk_invoke.rs"]
 mod bulk_invoke;
@@ -236,6 +236,39 @@ const WIDENING: &[&str] = &[
     manifest::ADMIN_ONBOARD_GITHUB_BOT_OP,
 ];
 
+#[test]
+fn manifest_declares_exactly_the_confirming_operations() {
+    let manifest = manifest::build("plexus");
+    manifest.validate_confirm_operations().unwrap();
+    let declared: std::collections::BTreeSet<_> = manifest
+        .confirm_operations
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let widening: std::collections::BTreeSet<_> = WIDENING.iter().copied().collect();
+    assert_eq!(declared, widening);
+
+    // Exercise every confirmation condition, including the composites whose
+    // handlers plan their own summaries, against all advertised management ops.
+    let params = json!({"effect":"allow","apply":true,"dry_run":false});
+    let confirming: std::collections::BTreeSet<_> = manifest
+        .provides
+        .iter()
+        .filter_map(|role| match role {
+            subc_protocol::manifest::ProviderRole::ManagementSurface { operations, .. } => {
+                Some(operations)
+            }
+            _ => None,
+        })
+        .flatten()
+        .map(|operation| operation.name.as_str())
+        .filter(|method| operator_confirmation::may_need_confirmation(method, &params))
+        .collect();
+    assert_eq!(declared, confirming);
+}
+
 fn route() -> RouteFrameContext {
     RouteFrameContext {
         version: PROTOCOL_VERSION,
@@ -418,6 +451,11 @@ async fn ceremony_with_peer(case: &Case, decision: Result<(), &str>, expect_prom
             assert_eq!((frame.header.channel, frame.header.epoch), (0, 0));
             let request: OperatorConfirmRequest = serde_json::from_slice(&frame.body).unwrap();
             assert!(operator_confirmation::valid_summary(&request.summary));
+            assert_eq!(request.kind, Some(OperatorConfirmKind::Operation));
+            assert_eq!(request.operation.as_deref(), Some(case.method));
+            let body: Value = serde_json::from_slice(&frame.body).unwrap();
+            assert_eq!(body["kind"], "operation");
+            assert_eq!(body["operation"], case.method);
             if case.params["all_handles"] == true && case.params["kind"] == "invoke" {
                 assert!(request.summary.contains("7 writes"));
                 assert!(request.summary.contains("10 expanded"));
@@ -670,13 +708,25 @@ async fn confirmation_fails_closed_on_disconnect_malformed_reply_and_deadline() 
     let pending = Arc::new(PendingControlReplies::default());
     let (writer, frames) = mpsc::channel(1);
     drop(frames);
-    let refusal = operator_confirmation::confirm("mint one grant", route(), &writer, &pending)
-        .await
-        .unwrap_err();
+    let refusal = operator_confirmation::confirm(
+        manifest::ADMIN_GRANT_OP,
+        "mint one grant",
+        route(),
+        &writer,
+        &pending,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(refusal.code, "operator_confirmation_unavailable");
 
     let (writer, mut frames) = mpsc::channel(1);
-    let request = operator_confirmation::confirm("mint one grant", route(), &writer, &pending);
+    let request = operator_confirmation::confirm(
+        manifest::ADMIN_GRANT_OP,
+        "mint one grant",
+        route(),
+        &writer,
+        &pending,
+    );
     let malformed_peer = async {
         let frame = recv_within(
             frames.recv(),
@@ -703,6 +753,7 @@ async fn confirmation_fails_closed_on_disconnect_malformed_reply_and_deadline() 
     );
 
     let request = operator_confirmation::confirm_with_timeout(
+        manifest::ADMIN_GRANT_OP,
         "mint one grant",
         route(),
         &writer,

@@ -1981,9 +1981,14 @@ async fn handle_management_request(
         operator_confirmation::summary(method, params)
     };
     if let Some(summary) = summary {
-        if let Err(refusal) =
-            operator_confirmation::confirm(&summary, route, writer, &route_bindings.control_replies)
-                .await
+        if let Err(refusal) = operator_confirmation::confirm(
+            method,
+            &summary,
+            route,
+            writer,
+            &route_bindings.control_replies,
+        )
+        .await
         {
             let response = operator_confirmation::audit_refusal(state, method, &refusal);
             return send_tool_response(writer, version, channel, epoch, correlation, response)

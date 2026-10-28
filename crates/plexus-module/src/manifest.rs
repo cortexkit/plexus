@@ -231,6 +231,23 @@ pub fn build_with_launch_nonce_source(
         // signals a module raises about itself; nothing here qualifies.
         .self_signals(None)
         .events(Some(published_event_declarations()))
+        .confirm_operations(Some(vec![
+            ADMIN_ISSUE_TICKET_OP.to_owned(),
+            ADMIN_GRANT_OP.to_owned(),
+            ADMIN_WIDEN_CEILING_OP.to_owned(),
+            ADMIN_SET_POLICY_OP.to_owned(),
+            ADMIN_REPIN_ACTION_OP.to_owned(),
+            ADMIN_REBIND_CREDENTIAL_OP.to_owned(),
+            ADMIN_RECIPIENTS_ADD_OP.to_owned(),
+            GITHUB_IMPORT_OP.to_owned(),
+            GITHUB_BIND_OP.to_owned(),
+            GITHUB_GRANT_OP.to_owned(),
+            ADMIN_ADD_WEB_SEARCH_PROVIDER_OP.to_owned(),
+            ADMIN_ADD_WRITE_CONNECTION_OP.to_owned(),
+            ADMIN_ADD_POLL_CONNECTION_OP.to_owned(),
+            ADMIN_WIDEN_AND_GRANT_OP.to_owned(),
+            ADMIN_ONBOARD_GITHUB_BOT_OP.to_owned(),
+        ]))
         // The same facts the binary already embeds for deploy verification
         // (health `buildCommit`/`lockDigest`), now
         // declared on the wire so the supervisor's declared-vs-observed

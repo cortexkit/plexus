@@ -204,15 +204,17 @@ impl Drop for Withdrawal<'_> {
 }
 
 pub(crate) async fn confirm(
+    operation: &str,
     summary: &str,
     route: RouteFrameContext,
     writer: &mpsc::Sender<Frame>,
     pending: &Arc<PendingControlReplies>,
 ) -> Result<(), Refusal> {
-    confirm_with_timeout(summary, route, writer, pending, CONFIRM_TIMEOUT).await
+    confirm_with_timeout(operation, summary, route, writer, pending, CONFIRM_TIMEOUT).await
 }
 
 pub(crate) async fn confirm_with_timeout(
+    operation: &str,
     summary: &str,
     route: RouteFrameContext,
     writer: &mpsc::Sender<Frame>,
@@ -226,11 +228,11 @@ pub(crate) async fn confirm_with_timeout(
         });
     }
     let deadline = tokio::time::Instant::now() + timeout;
-    let body = serde_json::to_vec(&OperatorConfirmRequest::new(
-        summary,
-        route.channel,
-        route.epoch,
-    ))
+    let body = serde_json::to_vec(
+        &OperatorConfirmRequest::new(summary, route.channel, route.epoch)
+            .with_kind(Some(subc_protocol::session::OperatorConfirmKind::Operation))
+            .with_operation(Some(operation.to_owned())),
+    )
     .map_err(Refusal::unavailable)?;
     let (correlation, replies) = pending
         .register()
