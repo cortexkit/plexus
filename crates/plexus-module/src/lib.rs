@@ -43,6 +43,7 @@ pub mod relay;
 mod request_execution;
 pub mod scope_reader;
 pub mod smoke;
+mod startup;
 #[cfg(test)]
 #[path = "../../plexus-core/tests/support/http_server.rs"]
 mod test_http;
@@ -522,68 +523,72 @@ async fn module_loop<R>(
 where
     R: AsyncRead + Unpin,
 {
+    module_loop_with_composition(
+        reader,
+        writer,
+        config,
+        health,
+        route_bindings,
+        ModuleRuntime::production,
+    )
+    .await
+}
+
+async fn module_loop_with_composition<R>(
+    reader: &mut R,
+    writer: mpsc::Sender<Frame>,
+    config: &ModuleConfig,
+    health: Arc<health::HealthState>,
+    route_bindings: Arc<RouteBindings>,
+    compose: impl FnOnce(Arc<PlexusStore>, &Path) -> ModuleRuntime + Send + 'static,
+) -> Result<(), ModuleError>
+where
+    R: AsyncRead + Unpin,
+{
+    let startup_started = std::time::Instant::now();
     send_hello(&writer, config).await?;
     let hello_ack = expect_hello_ack(reader).await?;
-    let store = blocking_section(|| {
-        let (store, data_directory) = initialize_store(&hello_ack)?;
-        if let Some(data_directory) = data_directory {
-            engram_catalog::write_best_effort(&data_directory);
-        }
-        ingest_catalog(&store)?;
-        Ok::<_, ModuleError>(Arc::new(store))
-    })?;
-    // Production composition opens configured route peers synchronously. Run
-    // these connections outside the async worker because dropping a runtime
-    // from within its own worker is unsafe; later route calls follow the same
-    // restriction.
-    let mut runtime =
-        blocking_section(|| ModuleRuntime::production(store, &config.connection_file_path));
-    // The engine re-checks a stored approval raised under a daemon scope with
-    // `scope.describe`, sent on this module's subc connection, just before the
-    // approval is sent. subc answers on channel 0, and the dispatch loop hands
-    // those replies to `control_replies`.
     let control_replies = Arc::clone(&route_bindings.control_replies);
-    runtime.engine = runtime
-        .engine
-        .clone()
-        .with_scope_reader(Arc::new(DaemonScopeReader::new(
-            writer.clone(),
-            PROTOCOL_VERSION,
-            Arc::clone(&control_replies),
-        )));
-    let state = Arc::new(ModuleState { health, runtime });
-    state.health.stamp_heartbeat();
+    let startup = startup::spawn(
+        hello_ack,
+        config.connection_file_path.clone(),
+        Arc::clone(&health),
+        writer.clone(),
+        Arc::clone(&control_replies),
+        compose,
+        startup_started,
+    )?;
+    dispatch_loop_starting(
+        reader,
+        writer,
+        health,
+        route_bindings,
+        control_replies,
+        startup,
+        Some(config),
+    )
+    .await
+}
 
-    // Re-register transport endpoints BEFORE the scheduler starts.
-    //
-    // Transport config is in-memory process state, populated as a side effect of
-    // connect-time discovery and health probes. After a restart it is empty while
-    // the store still holds every connection, so a poll falls back to a default
-    // config carrying an EMPTY ENDPOINT and the MCP transport refuses it as a
-    // configuration error. It self-heals on the supervisor's first health probe
-    // ~30s later, but the scheduler's first pass runs within a second of start.
-    //
-    // The cost is not one wasted pass: `record_poll_attempt` stamps the cadence
-    // BEFORE dispatch, so each subscription caught in that window waits a full
-    // cadence before retrying. After a restart, every due subscription can
-    // lose its first poll this way and wait a full cadence for the next one.
-    //
-    // Runs for every principal with connections rather than a hardcoded one, so
-    // a fleet that grows past the operator principal does not silently keep the
-    // defect for the new ones.
-    blocking_section(|| {
-        let principals = health_probe_principals(&state);
-        refresh_store_health(&state, &principals);
-        for principal in principals {
-            let registered = state.runtime.reconciler.register_transports(&principal);
-            if registered > 0 {
-                eprintln!(info transport:
-                    "registered {registered} transport endpoint(s) for principal '{principal}' before scheduling"
-                );
-            }
+struct BackgroundTasks {
+    shutdown: Vec<mpsc::Sender<()>>,
+    tasks: Vec<(
+        &'static str,
+        tokio::task::JoinHandle<()>,
+        std::time::Duration,
+    )>,
+}
+
+impl BackgroundTasks {
+    async fn stop(self) {
+        drop(self.shutdown);
+        for (name, task, grace) in self.tasks {
+            stop_task(name, task, grace).await;
         }
-    });
+    }
+}
 
+fn spawn_background_tasks(state: Arc<ModuleState>, config: &ModuleConfig) -> BackgroundTasks {
     // Drive trigger polling on a dedicated task rather than from the dispatch
     // loop below (see `spawn_trigger_scheduler`). The shutdown sender is held
     // here: when the loop exits on ANY path the sender is dropped, the task
@@ -649,17 +654,20 @@ where
     let (relay_shutdown, relay_stop) = mpsc::channel::<()>(1);
     let relay_task = relay::spawn(Arc::clone(&state), relay_stop);
 
-    let result = dispatch_loop(reader, writer, state, route_bindings, control_replies).await;
-
-    drop(claim_shutdown);
-    drop(scheduler_shutdown);
-    drop(outbox_shutdown);
-    drop(relay_shutdown);
-    stop_task("connector-home refresh", claim_task, TASK_SHUTDOWN_GRACE).await;
-    stop_task("trigger scheduler", scheduler_task, TASK_SHUTDOWN_GRACE).await;
-    stop_task("outbox drain", outbox_task, BUS_SHUTDOWN_GRACE).await;
-    stop_task("relay", relay_task, BUS_SHUTDOWN_GRACE).await;
-    result
+    BackgroundTasks {
+        shutdown: vec![
+            claim_shutdown,
+            scheduler_shutdown,
+            outbox_shutdown,
+            relay_shutdown,
+        ],
+        tasks: vec![
+            ("connector-home refresh", claim_task, TASK_SHUTDOWN_GRACE),
+            ("trigger scheduler", scheduler_task, TASK_SHUTDOWN_GRACE),
+            ("outbox drain", outbox_task, BUS_SHUTDOWN_GRACE),
+            ("relay", relay_task, BUS_SHUTDOWN_GRACE),
+        ],
+    }
 }
 
 /// How long shutdown waits for the connector-home refresh, scheduler and
@@ -689,6 +697,7 @@ async fn stop_task(name: &str, mut task: tokio::task::JoinHandle<()>, grace: std
 
 /// The frame-handling loop: read a frame (with an idle heartbeat wake), dispatch
 /// it, repeat until the peer closes the route or says goodbye.
+#[cfg(test)]
 async fn dispatch_loop<R>(
     reader: &mut R,
     writer: mpsc::Sender<Frame>,
@@ -699,8 +708,37 @@ async fn dispatch_loop<R>(
 where
     R: AsyncRead + Unpin,
 {
+    dispatch_loop_starting(
+        reader,
+        writer,
+        Arc::clone(&state.health),
+        route_bindings,
+        control_replies,
+        std::future::ready(Ok(startup::Initialized::existing(state))),
+        None,
+    )
+    .await
+}
+
+async fn dispatch_loop_starting<R>(
+    reader: &mut R,
+    writer: mpsc::Sender<Frame>,
+    health: Arc<health::HealthState>,
+    route_bindings: Arc<RouteBindings>,
+    control_replies: Arc<PendingControlReplies>,
+    startup: impl std::future::Future<Output = Result<startup::Initialized, ModuleError>>,
+    config: Option<&ModuleConfig>,
+) -> Result<(), ModuleError>
+where
+    R: AsyncRead + Unpin,
+{
+    let dispatch_entered = std::time::Instant::now();
     let _clear_on_exit = ClearBindingsOnClose(route_bindings.clone());
-    loop {
+    let mut startup = std::pin::pin!(startup);
+    let mut state = None;
+    let mut background = None;
+    let result = async {
+      loop {
         // Keep the diagnostic heartbeat age fresh while idle.
         //
         // The read future is pinned and polled through select! rather than
@@ -708,12 +746,25 @@ where
         // corrupting the stream if it fired while a frame was mid-read
         // (read_exact is not cancellation-safe). Re-polling the same pinned
         // future preserves partial-read state across idle wakes.
-        state.health.stamp_heartbeat();
+        health.stamp_heartbeat();
         let read = std::pin::pin!(read_frame(reader));
         let mut read = read;
         let frame = loop {
             let mut idle_wake = std::pin::pin!(tokio::time::sleep(IDLE_HEARTBEAT_WAKE));
             tokio::select! {
+                biased;
+                result = &mut startup, if state.is_none() => {
+                    let initialized = result?;
+                    initialized.log_timings(dispatch_entered);
+                    // Readiness protocol handoff: once the pinned client exposes
+                    // set_ready, declare `.ready(false)` in send_hello and call
+                    // set_ready(true) here. Until then HELLO is unchanged and
+                    // this local gate refuses work with module_warming.
+                    if let Some(config) = config {
+                        background = Some(spawn_background_tasks(Arc::clone(&initialized.state), config));
+                    }
+                    state = Some(initialized.state);
+                }
                 result = &mut read => {
                     let Some(frame) =
                         result.map_err(|error| ModuleError::Message(error.to_string()))?
@@ -723,7 +774,7 @@ where
                     break frame;
                 }
                 _ = &mut idle_wake => {
-                    state.health.stamp_heartbeat();
+                    health.stamp_heartbeat();
                 }
             }
         };
@@ -737,10 +788,19 @@ where
             }
             continue;
         }
-        if !handle_frame(frame, &writer, &state, &route_bindings).await? {
+        let keep_reading = match &state {
+            Some(state) => handle_frame(frame, &writer, state, &route_bindings).await?,
+            None => startup::handle_warming_frame(frame, &writer, &health).await?,
+        };
+        if !keep_reading {
             return Ok(());
         }
+      }
+    }.await;
+    if let Some(background) = background {
+        background.stop().await;
     }
+    result
 }
 
 fn connector_gate_transition(gate: &Value) -> (Value, Value, Value) {
@@ -1302,6 +1362,9 @@ async fn handle_frame(
     state: &Arc<ModuleState>,
     route_bindings: &Arc<RouteBindings>,
 ) -> Result<bool, ModuleError> {
+    if startup::is_stop_notice(&frame) {
+        return Ok(false);
+    }
     match frame.header.ty {
         FrameType::Ping if frame.header.channel == 0 => {
             let response = Frame::build_with_version(
@@ -4588,6 +4651,7 @@ fn connector_home_health(state: &ModuleState) -> ModuleControlResponse {
             *detail = Some("connector_home_not_held".into());
         }
         if let Some(metrics) = metrics {
+            metrics["ready"] = json!(true);
             metrics["connectorHome"] = state.runtime.connector_home.status();
             let cached = state
                 .health
@@ -5916,6 +5980,8 @@ mod health_probe_scope_tests;
 
 #[cfg(test)]
 mod health_handler_tests;
+#[cfg(test)]
+mod startup_tests;
 
 #[cfg(test)]
 mod scheduler_liveness_tests;

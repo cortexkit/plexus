@@ -33,6 +33,11 @@ fn poll_store() -> Arc<PlexusStore> {
         })
         .unwrap(),
     );
+    seed_poll_store(&store);
+    store
+}
+
+pub(super) fn seed_poll_store(store: &PlexusStore) {
     let schema = json!({"type": "object"});
     // REST discovery uses the reviewed schema locally, so the scheduler's
     // health probe never needs a second vendor or an external network service.
@@ -107,7 +112,6 @@ fn poll_store() -> Arc<PlexusStore> {
         )
         .unwrap()
         .unwrap();
-    store
 }
 
 #[test]

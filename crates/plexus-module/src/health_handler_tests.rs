@@ -97,6 +97,21 @@ async fn a_health_check_reports_without_probing_recoverable_connections() {
         "health check reports cached state; detail={detail:?}"
     );
     let metrics = metrics.expect("health report includes metrics");
+    assert_eq!(metrics["connections"], Value::Null);
+    assert_eq!(metrics["connectionsDegraded"], Value::Null);
+    for gauge in [
+        "outboxDepth",
+        "overlappingKeyRows",
+        "droppedOnUnsubscribe",
+        "droppedOnDelete",
+        "orphanedMarkers",
+        "effectiveCiCadenceS",
+    ] {
+        assert!(
+            metrics.get(gauge).is_none(),
+            "an unsampled store gauge must be absent, not a fabricated zero: {gauge}"
+        );
+    }
 
     assert!(
         metrics.get("schedulerAlive").is_some(),

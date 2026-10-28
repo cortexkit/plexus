@@ -1329,19 +1329,17 @@ const FIXTURE_MODULE_IDS: [&str; 2] = ["entorhinal", "test-vault"];
 /// Being listed in `catalog.list` does not mean a module can serve a route yet,
 /// for two reasons, both seen failing these tests on Linux under load:
 ///
-/// - Plexus sends HELLO first, and only then opens its store, ingests its
-///   catalog and builds its runtime before it starts reading frames. The
-///   daemon lists it from HELLO on, so a route.open sent in that gap waits
-///   until plexus reads the route.bind. With the shipped catalog under load the
-///   gap outlasted the next request's 5 s deadline: "control response
-///   deadline: no answer within 5s to RouteOpen".
+/// - Plexus sends HELLO before opening its store, ingesting its catalog and
+///   building its runtime. It answers health while warming, but refuses route
+///   binds with module_warming until initialization and transport registration
+///   finish. A health answer alone is therefore not evidence of readiness.
 /// - The daemon adds a module to the catalog a moment before it installs the
 ///   connection that forwards to it. A route.open in that gap is refused:
 ///   "module_id 'plexus' has no live forwarding connection".
 ///
-/// An answered `supervisor.health_probe` rules out both. The daemon sends the
-/// probe over the same forwarding connection a route.bind uses, and plexus
-/// answers it from the same loop that reads route.bind. Before then the daemon
+/// A `supervisor.health_probe` with ready=true rules out both. The daemon sends
+/// the probe over the same forwarding connection a route.bind uses. Before
+/// the forwarding connection is installed the daemon
 /// answers `target_unavailable` (no forwarding connection yet) or
 /// `module_timeout` (plexus did not answer the probe within the daemon's own
 /// 5 s probe timeout), and this asks again.
@@ -1419,6 +1417,17 @@ async fn wait_for_module_catalog(stream: &mut TcpStream) -> ClientControlRespons
                 ),
                 "expected a health probe response, got {response:?}"
             );
+            let ClientControlResponse::SupervisorHealthProbe { metrics, .. } = &response else {
+                unreachable!("health probe response checked above");
+            };
+            if metrics
+                .as_ref()
+                .and_then(|metrics| metrics["ready"].as_bool())
+                != Some(true)
+            {
+                sleep(Duration::from_millis(10)).await;
+                continue;
+            }
             eprintln!(
                 "plexus and its fixtures listed after {listed_after:?}; plexus answered a health probe after {:?}",
                 started.elapsed()
