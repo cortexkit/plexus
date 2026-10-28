@@ -9,8 +9,10 @@ to act.
 Where codes appear: the facade's own refusals are in `result.refusal_code`
 (some also carry `result.code` and a `detail` object). Refusals from the
 module's earlier gates are a top-level `error.code`. When a reply carries
-`transmission: "not_sent"`, nothing was sent for that request. A non-empty
-`legs_sent` lists write steps that did reach GitHub before the refusal.
+`transmission: "not_sent"`, no write was sent for that request. The
+`review_thread_not_own` refusal sets `result.transmission` after its pre-dispatch
+reads. A non-empty `legs_sent` lists write steps that did reach GitHub before
+the refusal.
 
 ## Glossary
 
@@ -83,6 +85,7 @@ again. "Who must act" is guidance from what each check enforces.
 | `request_deadline_exceeded` | Generic request-body handler exits when the request budget has expired; reply says `transmission:"not_sent"`. [lib.rs:2394-2403](../../../crates/plexus-module/src/lib.rs) [lib.rs:4732-4734](../../../crates/plexus-module/src/lib.rs) | **Never**. | No receipt; caller retries the approved call. | Caller retries after the deadline issue clears. |
 | `request_field_forbidden{field: X}` | G3 mapper/resolver validation; `X` is request-dependent (including `request_nonce` and `body`). [gates.rs:458-485](../../../crates/plexus-core/src/github/facade/gates.rs) [gates.rs:661-662](../../../crates/plexus-core/src/github/facade/gates.rs) [request_map.rs:151-166](../../../crates/plexus-core/src/github/facade/request_map.rs) | **Never**. | No claim; retry after correcting/removing the field. | Caller fixes the request field. |
 | `request_kind_unmapped` | Request mapper cannot map the supplied request into a supported kind. [request_map.rs:151-156](../../../crates/plexus-core/src/github/facade/request_map.rs) [request_map.rs:195-236](../../../crates/plexus-core/src/github/facade/request_map.rs) | **Never**. | No claim; retry with a supported request shape. | Caller changes the request action/shape. |
+| `review_thread_not_own` | G8 resolve-thread ownership check; `detail` carries `number`, `author_login` and `message`. [vendor_band.rs](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **Yes**: thread and PR reads were checked; no write was sent (`transmission: "not_sent"`). | Terminal refusal (`retry_same_nonce: false`); same nonce replays it. | Reply to the finding as the bot, then resolve the thread as the operator. Only resolve is ownership-checked; unresolve is left to GitHub. |
 | `route_not_bound` | Module route-binding gate. [lib.rs:2775-2795](../../../crates/plexus-module/src/lib.rs) | **Never**. | No receipt; retry after binding this channel/epoch. | Caller/route owner binds the route. |
 | `run_scope_not_child` | Run-scope validation before a write. [run_scope.rs:43-76](../../../crates/plexus-core/src/github/facade/run_scope.rs) | **Maybe**: earlier reads/writes may have been sent; current write is stopped. [vendor_band.rs:876-892](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | Terminal refusal; same nonce replays it. | Caller supplies a live run scope that is a child of the route scope. |
 | `scope_ended`; `delegation_withdrawn` | Per-write route-scope recheck. [scope.rs:22-29](../../../crates/plexus-core/src/scope.rs) [vendor_band.rs:852-875](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **Maybe**: earlier reads/writes may have been sent; current write is stopped. `legs_sent` records completed write steps. [vendor_band.rs:302-309](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | Terminal refusal; same nonce replays it. | Scope owner/carrier obtains or restores a live, authorized scope. |

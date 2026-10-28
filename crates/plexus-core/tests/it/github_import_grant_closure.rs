@@ -390,7 +390,7 @@ fn imported_agent_completes_each_v22_write_with_only_its_implied_reads() {
             json!({"thread_id":"PRRT_7"}),
             json!({}),
             Some("github.review_thread.get"),
-            json!({"data":{"node":{"id":"PRRT_7","pullRequest":{"repository":{"nameWithOwner":"org/repo"}}}}}),
+            json!({"data":{"node":{"id":"PRRT_7","pullRequest":{"number":7,"repository":{"nameWithOwner":"org/repo"}}}}}),
             json!({"data":{"resolveReviewThread":{"thread":{"id":"PRRT_7","isResolved":true}}}}),
         ),
         (
@@ -436,6 +436,13 @@ fn imported_agent_completes_each_v22_write_with_only_its_implied_reads() {
                 .transport
                 .set_response_for_method(read, "", MockResponse::Success(read_value));
         }
+        if action == "resolve_review_thread" {
+            fixture.transport.set_response_for_method(
+                "github.pull_request.get",
+                "",
+                MockResponse::Success(json!({"number":7,"user":bot})),
+            );
+        }
         fixture
             .transport
             .set_response_for_method(action, "", MockResponse::Success(response));
@@ -445,7 +452,11 @@ fn imported_agent_completes_each_v22_write_with_only_its_implied_reads() {
         }
         let (reply, calls) = send(&fixture, "v22-import", request);
         assert_eq!(reply["result"]["status"], "completed", "{action}: {reply}");
-        let expected: Vec<_> = read.into_iter().chain(std::iter::once(action)).collect();
+        let expected: Vec<_> = read
+            .into_iter()
+            .chain((action == "resolve_review_thread").then_some("github.pull_request.get"))
+            .chain(std::iter::once(action))
+            .collect();
         assert_eq!(actions(&calls), expected, "{action}");
     }
 }

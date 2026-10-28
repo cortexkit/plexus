@@ -694,6 +694,9 @@ fn refuse(
         value["code"] = typed["code"].clone();
         value["detail"] = typed["detail"].clone();
     }
+    if code == "review_thread_not_own" {
+        value["transmission"] = json!("not_sent");
+    }
     // The flag mirrors the receipt action taken below, not a table of code
     // names: released claims (including the wait-and-retry `nonce_in_flight`)
     // stay safe to retry with the same nonce, while finished refusals replay
@@ -848,8 +851,12 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         {
             continue;
         }
-        let read_args = if thread_kind(&mapped.request_kind) {
+        let read_args = if action == "github.review_thread.get" {
             json!({"owner":args["owner"], "repo":args["repo"], "variables":{"threadId":args["thread_id"]}})
+        } else if mapped.request_kind == "resolve_thread" {
+            // The reviewed thread query has the PR number but not its author.
+            // Use the same PR read and ownership check as PR edits and stacks.
+            json!({"owner":args["owner"], "repo":args["repo"], "pull_number":args["pull_number"]})
         } else {
             args.clone()
         };
@@ -864,7 +871,7 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             Err(code) => return fail(reply, "G8", code),
         };
         completed.push(action);
-        if thread_kind(&mapped.request_kind) {
+        if action == "github.review_thread.get" {
             let repository = format!(
                 "{}/{}",
                 args["owner"].as_str().unwrap_or(""),
@@ -897,6 +904,31 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             if !repository.eq_ignore_ascii_case(&expected) {
                 return fail(reply, "G8", "agent_repository_conflict".into());
             }
+            if mapped.request_kind == "resolve_thread" {
+                let Some(number) = node["pullRequest"]["number"].as_u64().filter(|n| *n > 0) else {
+                    return fail(
+                        reply,
+                        "G8",
+                        "pre_dispatch_read_incomplete{reason: invalid_response}".into(),
+                    );
+                };
+                args["pull_number"] = json!(number);
+            }
+        }
+        if mapped.request_kind == "resolve_thread"
+            && action == "github.pull_request.get"
+            && !owned(&value, &login)
+        {
+            let number = &args["pull_number"];
+            let author = value["user"]["login"].as_str().unwrap_or("unknown");
+            return fail(
+                reply,
+                "G8",
+                json!({"code":"review_thread_not_own", "detail":{
+                    "number":number, "author_login":author,
+                    "message":format!("'resolveReviewThread' works only on pull requests this repository's bot opened ({login}); #{number} was opened by {author}. Reply to the finding as the bot, then resolve the thread as the operator.")
+                }}).to_string().into(),
+            );
         }
         if mapped.request_kind == "stack_unstack" {
             if let Err(code) = stack_shape(&value, &args) {

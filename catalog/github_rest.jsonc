@@ -329,7 +329,7 @@
       "name":"github.review_thread.get", "risk":"read", "facade_only":true,
       "http": {
         "method":"POST", "path":"/graphql",
-        "request_constants":{"query":"query($threadId: ID!) { node(id: $threadId) { ... on PullRequestReviewThread { id pullRequest { repository { nameWithOwner } } } } }"},
+        "request_constants":{"query":"query($threadId: ID!) { node(id: $threadId) { ... on PullRequestReviewThread { id pullRequest { number repository { nameWithOwner } } } } }"},
         "args_schema": {
           "type":"object", "additionalProperties":false,
           "properties": {

@@ -90,7 +90,8 @@ pub fn reads_for_kind(kind: &str) -> Option<&'static [&'static str]> {
         "pr_ready" | "pr_draft" | "pr_edit" | "stack_create" | "stack_add" => {
             &["github.pull_request.get"]
         }
-        "resolve_thread" | "unresolve_thread" => &["github.review_thread.get"],
+        "resolve_thread" => &["github.review_thread.get", "github.pull_request.get"],
+        "unresolve_thread" => &["github.review_thread.get"],
         "stack_unstack" => &["github.stack.get"],
         "comment" | "pr_review" | "reaction" | "issue_create" | "pr_create" | "close"
         | "reopen" | "review_reply" => &[],

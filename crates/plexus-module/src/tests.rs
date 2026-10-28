@@ -2271,6 +2271,99 @@ fn catalog_rows_across_a_deploy(
         .collect()
 }
 
+/// Adding the parent PR number to the review-thread query does not change
+/// action schemas or catalog statuses during boot ingest or REST reconciliation.
+#[test]
+fn review_thread_pr_number_query_changes_no_reviewed_schema_or_status() {
+    const OLD_QUERY: &str = "query($threadId: ID!) { node(id: $threadId) { ... on PullRequestReviewThread { id pullRequest { repository { nameWithOwner } } } } }";
+    const NEW_QUERY: &str = "query($threadId: ID!) { node(id: $threadId) { ... on PullRequestReviewThread { id pullRequest { number repository { nameWithOwner } } } } }";
+    let deployed_source = include_str!("../../../catalog/github_rest.jsonc");
+    assert_eq!(deployed_source.matches(NEW_QUERY).count(), 1);
+    let earlier_source = deployed_source.replace(NEW_QUERY, OLD_QUERY);
+    let earlier = parse_catalog_manifest(&earlier_source).unwrap().manifest;
+    let deployed = parse_catalog_manifest(deployed_source).unwrap().manifest;
+    let mut query_only = earlier.clone();
+    let action = query_only
+        .actions_baseline
+        .iter_mut()
+        .find(|action| action.name == "github.review_thread.get")
+        .unwrap();
+    action
+        .http
+        .as_mut()
+        .unwrap()
+        .request_constants
+        .as_mut()
+        .unwrap()
+        .insert("query".into(), json!(NEW_QUERY));
+    assert_eq!(query_only, deployed, "only the fixed query may change");
+
+    let before = Scratch::directory("thread-query-before");
+    let after = Scratch::directory("thread-query-after");
+    let directory = Scratch::directory("thread-query-store");
+    std::fs::write(before.join("github_rest.jsonc"), earlier_source).unwrap();
+    std::fs::write(after.join("github_rest.jsonc"), deployed_source).unwrap();
+    let store = Arc::new(
+        PlexusStore::open(&StorageDescriptor {
+            module_id: DEFAULT_MODULE_ID.to_string(),
+            storage_namespace: "thread-query-catalog".into(),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: cortexkit_store_types::StorageBackend::Sqlite {
+                path: directory.join("store.db").to_string_lossy().into_owned(),
+            },
+        })
+        .unwrap(),
+    );
+    ingest_catalog_from(&store, &before).unwrap();
+    store
+        .create_connection("direct", "github", &earlier.key)
+        .unwrap();
+    store
+        .seed_catalog_from_manifest("direct", "github", &earlier.key)
+        .unwrap();
+    let rows = || store.list_catalog_actions_all("direct", "github").unwrap();
+    let seeded = rows();
+    let reconciler = plexus_core::CatalogReconciler::new(
+        store.clone(),
+        Arc::new(plexus_core::McpRemoteTransport::default()),
+        Default::default(),
+    );
+    let refresh = |manifest: &plexus_core::AppManifest| {
+        let connection = plexus_core::rest_api::RestConnection::from_manifest("github", manifest);
+        let discovered = reconciler
+            .refresh_rest("direct", &connection, manifest)
+            .unwrap();
+        assert_eq!(discovered.len(), manifest.actions_baseline.len());
+    };
+    refresh(&earlier);
+    let baseline = rows();
+    // REST discovery normalizes display titles even with the old catalog.
+    // Compare schemas, schema hashes, statuses and quarantine reasons from the
+    // seeded rows before using the refreshed rows as the deploy baseline.
+    assert_eq!(seeded.len(), baseline.len());
+    for (seed, row) in seeded.iter().zip(&baseline) {
+        assert_eq!(seed.name, row.name);
+        assert_eq!(seed.schema, row.schema);
+        assert_eq!(seed.schema_hash, row.schema_hash);
+        assert_eq!(seed.status, row.status);
+        assert_eq!(seed.quarantine_reason, row.quarantine_reason);
+    }
+    ingest_catalog_from(&store, &after).unwrap();
+    assert_eq!(baseline, rows(), "new boot ingest changes no pins");
+    refresh(&deployed);
+    let refreshed = rows();
+    assert_eq!(
+        baseline, refreshed,
+        "new refresh changes no schemas, hashes or statuses"
+    );
+    assert_eq!(refreshed.len(), deployed.actions_baseline.len());
+    for row in &refreshed {
+        assert_eq!(row.status, "active", "{}", row.name);
+        assert!(row.quarantine_reason.is_none(), "{}", row.name);
+    }
+    std::eprintln!("{} GitHub actions: old/new boot ingest and REST refresh preserve every schema, hash and active status; only the thread query differs", refreshed.len());
+}
+
 /// Removing `defaults.rate_limit` from the shipped catalog leaves every
 /// action's pinned argument schema hash unchanged, so deploying the cleaned
 /// files repins or quarantines nothing on any connection.

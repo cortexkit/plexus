@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 const THREAD: &str = "PRRT_kwDOAbc123";
-const THREAD_READ: &str = "query($threadId: ID!) { node(id: $threadId) { ... on PullRequestReviewThread { id pullRequest { repository { nameWithOwner } } } } }";
+const THREAD_READ: &str = "query($threadId: ID!) { node(id: $threadId) { ... on PullRequestReviewThread { id pullRequest { number repository { nameWithOwner } } } } }";
 const RESOLVE: &str = "mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }";
 const UNRESOLVE: &str = "mutation($threadId: ID!) { unresolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }";
 
@@ -152,7 +152,7 @@ fn stack() -> Value {
 }
 
 fn thread_read(repo: &str) -> Value {
-    json!({"data":{"node":{"id":THREAD, "pullRequest":{"repository":{"nameWithOwner":repo}}}}})
+    json!({"data":{"node":{"id":THREAD, "pullRequest":{"number":7, "repository":{"nameWithOwner":repo}}}}})
 }
 
 type Case = (Value, Vec<Value>, Vec<(String, Value)>, Value);
@@ -205,22 +205,24 @@ fn cases() -> Vec<Case> {
             false,
         ),
     ] {
+        let mut responses = vec![thread_read("org/repo")];
+        let mut expected = vec![(
+            "POST /graphql HTTP/1.1".into(),
+            json!({"query":THREAD_READ, "variables":{"threadId":THREAD}}),
+        )];
+        if resolved {
+            responses.push(pr(7));
+            expected.push(("GET /repos/org/repo/pulls/7 HTTP/1.1".into(), Value::Null));
+        }
+        responses.push(json!({"data":{name:{"thread":{"id":THREAD,"isResolved":resolved}}}}));
+        expected.push((
+            "POST /graphql HTTP/1.1".into(),
+            json!({"query":query, "variables":{"threadId":THREAD}}),
+        ));
         result.push((
             request(action, json!({"thread_id":THREAD}), json!({})),
-            vec![
-                thread_read("org/repo"),
-                json!({"data":{name:{"thread":{"id":THREAD,"isResolved":resolved}}}}),
-            ],
-            vec![
-                (
-                    "POST /graphql HTTP/1.1".into(),
-                    json!({"query":THREAD_READ, "variables":{"threadId":THREAD}}),
-                ),
-                (
-                    "POST /graphql HTTP/1.1".into(),
-                    json!({"query":query, "variables":{"threadId":THREAD}}),
-                ),
-            ],
+            responses,
+            expected,
             json!({"id":THREAD,"resolved":resolved}),
         ));
     }
@@ -486,6 +488,78 @@ fn v22_ownership_and_repository_refusals_send_no_mutation_and_replay() {
 }
 
 #[test]
+fn v22_resolve_thread_refuses_non_owned_pr_without_mutation_and_replays() {
+    for (author, user_type) in [
+        ("outside-contributor", "User"),
+        ("another[bot]", "Bot"),
+        ("app-fixture[bot]", "User"),
+    ] {
+        let mut pull_request = pr(7);
+        pull_request["user"] = json!({"login":author, "type":user_type});
+        let run = Run::new(vec![thread_read("org/repo"), pull_request]);
+        let request = request(
+            "graphql resolvereviewthread",
+            json!({"thread_id":THREAD}),
+            json!({}),
+        );
+        let first = run.call(&request);
+        assert_eq!(
+            first["result"],
+            json!({
+                "status":"refused", "refusal_code":"review_thread_not_own",
+                "code":"review_thread_not_own", "retry_same_nonce":false,
+                "transmission":"not_sent",
+                "detail":{
+                    "number":7, "author_login":author,
+                    "message":format!("'resolveReviewThread' works only on pull requests this repository's bot opened (app-fixture[bot]); #7 was opened by {author}. Reply to the finding as the bot, then resolve the thread as the operator.")
+                }
+            })
+        );
+        assert_eq!(run.call(&request)["result"], first["result"]);
+        assert_eq!(
+            run.wire(),
+            vec![
+                (
+                    "POST /graphql HTTP/1.1".into(),
+                    json!({"query":THREAD_READ,"variables":{"threadId":THREAD}})
+                ),
+                ("GET /repos/org/repo/pulls/7 HTTP/1.1".into(), Value::Null),
+            ]
+        );
+        run.server.join().unwrap();
+    }
+}
+
+#[test]
+fn v22_resolve_thread_requires_parent_pr_number_before_pr_read() {
+    for number in [Value::Null, json!(0), json!(-1), json!("7")] {
+        let mut thread = thread_read("org/repo");
+        thread["data"]["node"]["pullRequest"]["number"] = number;
+        let run = Run::new(vec![thread]);
+        let request = request(
+            "graphql resolvereviewthread",
+            json!({"thread_id":THREAD}),
+            json!({}),
+        );
+        let reply = run.call(&request);
+        assert_eq!(
+            reply["result"]["refusal_code"],
+            "pre_dispatch_read_incomplete{reason: invalid_response}",
+            "{reply}"
+        );
+        assert_eq!(reply["result"]["retry_same_nonce"], true);
+        assert_eq!(
+            run.wire(),
+            vec![(
+                "POST /graphql HTTP/1.1".into(),
+                json!({"query":THREAD_READ,"variables":{"threadId":THREAD}}),
+            )]
+        );
+        run.server.join().unwrap();
+    }
+}
+
+#[test]
 fn v22_refuses_bad_ids_lists_empty_edits_and_caller_queries_without_contact() {
     let mut invalid = vec![(request("pr edit", json!({"number":"7"}), json!({})), "body")];
     for field in ["state", "maintainer_can_modify", "title_typo"] {
@@ -596,10 +670,13 @@ fn v22_graphql_mutation_errors_are_sanitized_and_bad_preview_replies_are_unknown
         "graphql resolvereviewthread",
         "graphql unresolvereviewthread",
     ] {
-        let run = Run::new(vec![
-            thread_read("org/repo"),
-            json!({"errors":[{"message":"secret"}]}),
-        ]);
+        let mut responses = vec![thread_read("org/repo")];
+        if action == "graphql resolvereviewthread" {
+            responses.push(pr(7));
+        }
+        responses.push(json!({"errors":[{"message":"secret"}]}));
+        let expected_requests = responses.len();
+        let run = Run::new(responses);
         let request = request(action, json!({"thread_id":THREAD}), json!({}));
         let reply = run.call(&request);
         assert_eq!(
@@ -608,7 +685,7 @@ fn v22_graphql_mutation_errors_are_sanitized_and_bad_preview_replies_are_unknown
         );
         assert!(!reply.to_string().contains("secret"));
         assert_eq!(run.call(&request)["result"], reply["result"]);
-        assert_eq!(run.wire().len(), 2);
+        assert_eq!(run.wire().len(), expected_requests);
         run.server.join().unwrap();
     }
     let run = Run::new(vec![pr(7), json!({"unexpected":"preview change"})]);
@@ -831,6 +908,23 @@ fn reply_contract_cases() -> Vec<ReplyCase> {
     let mut unowned_stack = stack();
     unowned_stack["pull_requests"] = json!([pr(7), human_pr(8)]);
     vec![
+        (
+            "resolve-thread-own",
+            resolve.clone(),
+            vec![
+                (200, thread_read("org/repo")),
+                (200, pr(7)),
+                (
+                    200,
+                    json!({"data":{"resolveReviewThread":{"thread":{"id":THREAD,"isResolved":true}}}}),
+                ),
+            ],
+        ),
+        (
+            "resolve-thread-not-own",
+            resolve.clone(),
+            vec![(200, thread_read("org/repo")), (200, human_pr(7))],
+        ),
         ("pr-edit-not-own", pr_edit.clone(), vec![(200, human_pr(7))]),
         (
             "pr-edit-pull-request-not-found",
@@ -986,8 +1080,17 @@ const NOT_V22_REPLIES: &[(&str, &str)] = &[
 
 /// One reply contract file, rendered with sorted keys so its bytes do not
 /// depend on whether serde_json's preserve_order feature is on in a build.
-fn reply_contract_file(name: &str, request: &Value, reads: Value, reply: &Value) -> String {
+fn reply_contract_file(
+    name: &str,
+    request: &Value,
+    reads: Value,
+    writes: Vec<Value>,
+    reply: &Value,
+) -> String {
     let mut file = json!({"name":name, "request":request, "github_reads":reads, "reply":reply});
+    if !writes.is_empty() {
+        file["github_writes"] = json!(writes);
+    }
     file.sort_all_objects();
     serde_json::to_string_pretty(&file).unwrap() + "\n"
 }
@@ -1013,21 +1116,30 @@ fn v22_reply_contract_files_match_the_facade() {
         let wire = run.wire();
         assert_eq!(wire.len(), responses.len(), "{name}: {reply}");
         run.server.join().unwrap();
-        let reads: Vec<Value> = wire
+        let mut reads: Vec<Value> = wire
             .into_iter()
             .zip(responses)
             .map(|((line, body), (status, response))| {
                 json!({"request_line":line, "request_body":body, "status":status, "response":response})
             })
             .collect();
-        assert_eq!(reply["result"]["status"], "refused", "{name}: {reply}");
-        covered.insert(
-            reply["result"]["refusal_code"]
-                .as_str()
-                .unwrap_or_else(|| panic!("{name}: {reply}"))
-                .to_owned(),
-        );
-        let rendered = reply_contract_file(name, &request, Value::Array(reads), &reply);
+        let writes = if name == "resolve-thread-own" {
+            assert_eq!(
+                reply["result"],
+                json!({"status":"completed", "result":{"id":THREAD,"resolved":true}})
+            );
+            vec![reads.pop().unwrap()]
+        } else {
+            assert_eq!(reply["result"]["status"], "refused", "{name}: {reply}");
+            covered.insert(
+                reply["result"]["refusal_code"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{name}: {reply}"))
+                    .to_owned(),
+            );
+            Vec::new()
+        };
+        let rendered = reply_contract_file(name, &request, Value::Array(reads), writes, &reply);
         let path = directory.join(format!("{name}.json"));
         if regenerate {
             std::fs::write(&path, rendered).unwrap();
