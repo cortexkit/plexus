@@ -363,8 +363,144 @@ fn stack_not_own(pr: &Value, number: &Value, login: &str) -> taxonomy::Failure {
     }}).to_string().into()
 }
 
-fn graphql_errors(value: &Value) -> Result<(), String> {
+/// How many GraphQL `errors` entries one operator line carries. Five is enough
+/// to tell a permission problem from a missing node when several mutations
+/// fail together, and small enough that one chatty reply cannot flood the log.
+const GRAPHQL_LOGGED_ERRORS: usize = 5;
+
+/// Longest vendor message one operator line carries, in characters. Long
+/// messages may carry echoed request material rather than a reason, so the
+/// line keeps only a sentence-sized prefix.
+const GRAPHQL_MESSAGE_CHARS: usize = 300;
+
+/// The operator-log projection of a GraphQL `errors` reply, or `None` when the
+/// reply carries no `errors` value to project.
+///
+/// The agent-facing refusal keeps the closed REST validation vocabulary (free
+/// vendor text never crosses that boundary), so this line is the only place
+/// the vendor's reason survives: the request kind and action, the bot handle
+/// and repository that sent it, and each error's type, path and message.
+///
+/// Only this projection is logged, never the reply itself. Like the REST and
+/// MCP vendor-error lines, it is emitted for refusals only: success bodies
+/// are vendor payload and may legitimately carry secret material.
+fn graphql_errors_log_line(
+    kind: &str,
+    action: &str,
+    login: &str,
+    repository: &str,
+    value: &Value,
+) -> Option<String> {
+    let errors = value.get("errors")?;
+    let entries: &[Value] = errors.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let mut rendered = Vec::new();
+    for error in entries.iter().take(GRAPHQL_LOGGED_ERRORS) {
+        rendered.push(logged_graphql_error(error));
+    }
+    Some(format!(
+        "github GraphQL errors refused kind={kind} action={action} bot={login} repository={repository} errors={}",
+        rendered.join("; ")
+    ))
+}
+
+/// One GraphQL error entry for the operator log: its vendor type, its path
+/// and its message. The type and path are vendor structure; the message is
+/// free vendor text, so it is scrubbed and cut before it is rendered. The
+/// path renders dot-joined rather than as JSON so the line never ends in a
+/// bracketed span: the fleet renderer reads a trailing `[...]` span as a
+/// context bound (which precedes the message) and rejects a line shaped like
+/// a message followed by one.
+fn logged_graphql_error(error: &Value) -> String {
+    let error_type = error
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("<none>");
+    let path = logged_graphql_path(error);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(sanitize_graphql_message)
+        .unwrap_or_else(|| "<none>".into());
+    format!("type={error_type} path={path} message={message:?}")
+}
+
+/// A GraphQL error path (`["mutation"]`, `["data", "node", 0]`) rendered
+/// dot-joined for the operator log. Segments are field names or indices;
+/// anything else renders as `?` rather than reaching the log raw.
+fn logged_graphql_path(error: &Value) -> String {
+    error
+        .get("path")
+        .and_then(Value::as_array)
+        .map(|segments| {
+            segments
+                .iter()
+                .map(|segment| {
+                    segment
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| segment.as_u64().map(|index| index.to_string()))
+                        .or_else(|| segment.as_i64().map(|index| index.to_string()))
+                        .unwrap_or_else(|| "?".into())
+                })
+                .collect::<Vec<_>>()
+                .join(".")
+        })
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| "<none>".into())
+}
+
+/// A vendor message for the operator log only: credential-shaped words become
+/// `[redacted]`, any signed-URL query or userinfo becomes `[redacted]`, and
+/// the remainder is cut to `GRAPHQL_MESSAGE_CHARS` characters. The request's
+/// credential is not passed to this projection as a separate input, and the
+/// vendor's message is still scrubbed in case it quotes request material.
+fn sanitize_graphql_message(message: &str) -> String {
+    let (redacted, _) = crate::secret_input::redact_secret_shaped_words(message);
+    let scrubbed = scrub_signed_urls(&redacted);
+    crate::text::prefix_within_chars(&scrubbed, GRAPHQL_MESSAGE_CHARS)
+        .0
+        .to_string()
+}
+
+/// Any whitespace-separated word carrying a URL scheme with its userinfo and
+/// query redacted, reusing the endpoint redactor the transports log with. The
+/// host and path stay so the operator can tell which vendor surface answered;
+/// the userinfo and query are what may carry a secret, so those become
+/// `[redacted]`.
+fn scrub_signed_urls(text: &str) -> String {
+    let mut scrubbed = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let word_start = rest
+            .find(|ch: char| !ch.is_whitespace())
+            .unwrap_or(rest.len());
+        scrubbed.push_str(&rest[..word_start]);
+        rest = &rest[word_start..];
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..word_end];
+        if word.contains("://") {
+            scrubbed.push_str(&crate::http_support::redacted_endpoint(word));
+        } else {
+            scrubbed.push_str(word);
+        }
+        rest = &rest[word_end..];
+    }
+    scrubbed
+}
+
+fn graphql_errors(
+    kind: &str,
+    action: &str,
+    login: &str,
+    repository: &str,
+    value: &Value,
+) -> Result<(), String> {
     if value.get("errors").is_some() {
+        // The refusal below drops the vendor's reason by design; this line is
+        // the only place it survives, for the operator only.
+        if let Some(line) = graphql_errors_log_line(kind, action, login, repository, value) {
+            eprintln!(warn governance: "{line}");
+        }
         let errors = super::validation::errors(&value.to_string());
         return Err(if errors.is_empty() {
             "vendor_rejected{status: 422}".into()
@@ -433,12 +569,19 @@ fn stack_shape(value: &Value, args: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn write_response(kind: &str, value: Value, args: &Value) -> Result<Value, String> {
+fn write_response(
+    kind: &str,
+    action: &str,
+    login: &str,
+    repository: &str,
+    value: Value,
+    args: &Value,
+) -> Result<Value, String> {
     if pr_state_kind(kind) {
-        return pr_state_response(kind, value);
+        return pr_state_response(kind, action, login, repository, value);
     }
     if thread_kind(kind) {
-        graphql_errors(&value)?;
+        graphql_errors(kind, action, login, repository, &value)?;
         let mutation = if kind == "resolve_thread" {
             "resolveReviewThread"
         } else {
@@ -467,13 +610,26 @@ fn pr_state_kind(kind: &str) -> bool {
 
 /// GraphQL reports application failures in successful HTTP responses. Reuse the
 /// REST validation refusal vocabulary, discarding messages and all unknown fields.
-fn pr_state_response(kind: &str, value: Value) -> Result<Value, String> {
+/// The vendor's reason is kept in the operator log instead; the reply never
+/// carries it.
+fn pr_state_response(
+    kind: &str,
+    action: &str,
+    login: &str,
+    repository: &str,
+    value: Value,
+) -> Result<Value, String> {
     let mutation = if kind == "pr_ready" {
         "markPullRequestReadyForReview"
     } else {
         "convertPullRequestToDraft"
     };
     if value.get("errors").is_some() && value.get("data").is_none_or(Value::is_null) {
+        // The refusal below drops the vendor's reason by design; this line is
+        // the only place it survives, for the operator only.
+        if let Some(line) = graphql_errors_log_line(kind, action, login, repository, &value) {
+            eprintln!(warn governance: "{line}");
+        }
         let errors = super::validation::errors(&value.to_string());
         return Err(if errors.is_empty() {
             "vendor_rejected{status: 422}".into()
@@ -709,7 +865,18 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         };
         completed.push(action);
         if thread_kind(&mapped.request_kind) {
-            if let Err(code) = graphql_errors(&value) {
+            let repository = format!(
+                "{}/{}",
+                args["owner"].as_str().unwrap_or(""),
+                args["repo"].as_str().unwrap_or("")
+            );
+            if let Err(code) = graphql_errors(
+                &mapped.request_kind,
+                mapped.action,
+                &login,
+                &repository,
+                &value,
+            ) {
                 return fail(reply, "G8", code.into());
             }
             let node = &value["data"]["node"];
@@ -945,7 +1112,19 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         match taxonomy::dispatched(dispatch) {
             Ok(value) => {
                 let value = {
-                    match write_response(&mapped.request_kind, value, &response_args) {
+                    let repository = format!(
+                        "{}/{}",
+                        response_args["owner"].as_str().unwrap_or(""),
+                        response_args["repo"].as_str().unwrap_or("")
+                    );
+                    match write_response(
+                        &mapped.request_kind,
+                        action,
+                        &login,
+                        &repository,
+                        value,
+                        &response_args,
+                    ) {
                         Ok(value) => value,
                         Err(code) if code == "outcome_unknown" => {
                             receipt_update(
@@ -1037,4 +1216,110 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     }
     reply.gate = "G10";
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A GraphQL `errors` reply exercising every operator-log scrubber: a
+    /// plain vendor sentence, a credential-shaped word, a signed URL, an
+    /// overlong message, and one entry more than a single line carries.
+    fn erroneous() -> Value {
+        json!({"errors": [
+            {"type": "FORBIDDEN", "path": ["mutation"],
+             "message": "actor cannot resolve this thread"},
+            {"type": "NOT_FOUND", "path": ["data", "node"],
+             "message": "node vanished"},
+            {"type": "CUSTOM", "path": ["viewer"],
+             "message": "leaked ghp_abcdefghijklmnopqrstuvwxyz0123456789 in transit"},
+            {"type": "RATE_LIMITED", "path": ["cost"],
+             "message": "see https://files.example/blob?sig=SIGNED-URL-SECRET&se=2026 for detail"},
+            {"type": "LONG", "path": ["up"], "message": "m".repeat(500)},
+            {"type": "EXTRA", "path": ["sixth"],
+             "message": "beyond the per-line cap"},
+        ]})
+    }
+
+    /// A GraphQL error refusal keeps its closed-vocabulary reply while the
+    /// vendor's reason reaches the operator log scrubbed of secrets.
+    #[test]
+    fn graphql_errors_log_type_path_and_message_and_keep_the_refusal() {
+        const TEST: &str = "github::facade::vendor_band::tests::graphql_errors_log_type_path_and_message_and_keep_the_refusal";
+        if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_some() {
+            crate::test_logging::init_child();
+            // GraphQL-shaped entries match no REST validation code, so the
+            // reply is the bare refusal while the reason goes to the log.
+            assert_eq!(
+                graphql_errors(
+                    "resolve_thread",
+                    "graphql resolvereviewthread",
+                    "app-fixture[bot]",
+                    "org/repo",
+                    &erroneous()
+                )
+                .unwrap_err(),
+                "vendor_rejected{status: 422}"
+            );
+            return;
+        }
+        let output = crate::test_http::bounded::child_test_output(
+            TEST,
+            &[("PLEXUS_LOG_STDERR_CHILD", "1")],
+            std::time::Duration::from_secs(30),
+            "graphql diagnostic child",
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let lines: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.contains("github GraphQL errors refused"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{stderr}");
+        let line = lines[0];
+        for expected in [
+            "kind=resolve_thread",
+            "action=graphql resolvereviewthread",
+            "bot=app-fixture[bot]",
+            "repository=org/repo",
+            "type=FORBIDDEN",
+            "path=mutation",
+            "actor cannot resolve this thread",
+            "type=NOT_FOUND",
+            "path=data.node",
+            "type=CUSTOM",
+            "[redacted]",
+            "type=RATE_LIMITED",
+            "https://files.example/blob?[redacted]",
+        ] {
+            assert!(line.contains(expected), "{expected} missing: {line}");
+        }
+        for absent in [
+            "ghp_",
+            "SIGNED-URL-SECRET",
+            "sig=",
+            "beyond the per-line cap",
+            &"m".repeat(301),
+        ] {
+            assert!(!line.contains(absent), "{absent} leaked: {line}");
+        }
+        assert!(
+            line.contains(&"m".repeat(300)),
+            "the overlong message is cut, not dropped: {line}"
+        );
+        let expected = graphql_errors_log_line(
+            "resolve_thread",
+            "graphql resolvereviewthread",
+            "app-fixture[bot]",
+            "org/repo",
+            &erroneous(),
+        )
+        .expect("the fixture carries an errors value");
+        crate::test_logging::assert_diagnostic(
+            line,
+            cortexkit_log::ParsedLevel::Warn,
+            "plexus.governance",
+            &expected,
+        );
+    }
 }
