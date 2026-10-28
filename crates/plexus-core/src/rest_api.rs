@@ -1149,6 +1149,28 @@ fn accepted_github_permissions(headers: &reqwest::header::HeaderMap) -> Option<S
         .map(str::to_owned)
 }
 
+/// HTTP 200 can still refuse a GraphQL operation. Keep permission evidence in
+/// the operator log at the transport boundary, never in a vendor body or receipt.
+fn graphql_permission_log_line(body: &Value, permissions: Option<&str>) -> Option<String> {
+    let permissions = permissions?;
+    let errors = body.get("errors")?.as_array()?;
+    let permission_refused = errors.iter().any(|error| {
+        error["type"].as_str() == Some("FORBIDDEN")
+            || error["extensions"]["code"].as_str() == Some("FORBIDDEN")
+            || error["message"].as_str().is_some_and(|message| {
+                message
+                    .to_ascii_lowercase()
+                    .contains("resource not accessible by integration")
+            })
+    });
+    permission_refused.then(|| {
+        format!(
+            "github GraphQL permission refusal X-Accepted-GitHub-Permissions={:?}",
+            crate::text::prefix_within_bytes(permissions, REST_ERROR_BODY_CAP)
+        )
+    })
+}
+
 pub(crate) fn log_vendor_error(
     transport: &str,
     method: &reqwest::Method,
@@ -1342,6 +1364,11 @@ fn classify_response_with_privacy(
         // it as text rather than failing a call that may have succeeded.
         serde_json::from_str(&text).unwrap_or(Value::String(text))
     };
+    if github_facade && path == "/graphql" {
+        if let Some(line) = graphql_permission_log_line(&body, permissions.as_deref()) {
+            eprintln!(warn transport: "{line}");
+        }
+    }
     // Vendor payloads stay verbatim. Guessing secrets from vendor field names
     // destroys ordinary result data; credentials travel separately in headers.
     TransportResponse::success(body)
@@ -3301,3 +3328,49 @@ mod local_diagnostic_tests {
 #[cfg(test)]
 #[path = "rest_api/signal_tests.rs"]
 mod signal_tests;
+
+#[cfg(test)]
+mod graphql_permission_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn permission_refusal_log_includes_only_the_accepted_permissions_header() {
+        for error in [
+            json!({"type":"FORBIDDEN", "message":"PRIVATE_MARKER"}),
+            json!({"extensions":{"code":"FORBIDDEN"}}),
+            json!({"message":"Resource not accessible by integration"}),
+        ] {
+            let body = json!({"errors":[error]});
+            let line = graphql_permission_log_line(&body, Some("merge_queues=write")).unwrap();
+            assert!(
+                line.contains("X-Accepted-GitHub-Permissions=\"merge_queues=write\""),
+                "{line}"
+            );
+            assert!(!line.contains("PRIVATE_MARKER"));
+            assert!(graphql_permission_log_line(&body, None).is_none());
+        }
+        assert!(graphql_permission_log_line(
+            &json!({"data":{"ok":true}}),
+            Some("merge_queues=write")
+        )
+        .is_none());
+        assert!(graphql_permission_log_line(
+            &json!({"errors":[{"type":"NOT_FOUND"}]}),
+            Some("merge_queues=write")
+        )
+        .is_none());
+        for status in [401, 403] {
+            let line = vendor_error_log_line(
+                "REST",
+                &reqwest::Method::POST,
+                "/graphql",
+                status,
+                "{}",
+                Some("merge_queues=write"),
+            )
+            .unwrap();
+            assert!(line.contains("X-Accepted-GitHub-Permissions=\"merge_queues=write\""));
+        }
+    }
+}

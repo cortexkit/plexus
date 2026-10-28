@@ -45,6 +45,8 @@ pub const REQUEST_KINDS: &[&str] = &[
     "reopen",
     "pr_ready",
     "pr_draft",
+    "pr_enqueue",
+    "pr_dequeue",
     "pr_edit",
     "review_reply",
     "resolve_thread",
@@ -69,6 +71,8 @@ pub fn primary_action(kind: &str) -> Option<&'static str> {
         "reopen" => "reopen_issue",
         "pr_ready" => "mark_pull_request_ready",
         "pr_draft" => "convert_pull_request_to_draft",
+        "pr_enqueue" => "enqueue_pull_request",
+        "pr_dequeue" => "dequeue_pull_request",
         "pr_edit" => "edit_pull_request",
         "review_reply" => "reply_to_review_comment",
         "resolve_thread" => "resolve_review_thread",
@@ -87,6 +91,7 @@ pub fn reads_for_kind(kind: &str) -> Option<&'static [&'static str]> {
         "comment_edit_last" => &["github.issue_comments.list", "github.issue_comment.get"],
         "comment_edit" => &["github.issue_comment.get"],
         "issue_edit" => &["github.issue.get"],
+        "pr_enqueue" | "pr_dequeue" => &["github.pull_request.queue_state.get"],
         "pr_ready" | "pr_draft" | "pr_edit" | "stack_create" | "stack_add" => {
             &["github.pull_request.get"]
         }
@@ -134,6 +139,8 @@ fn effects_for_kind(kind: &str) -> &'static [&'static str] {
         "reopen" => &["add_issue_comment", "reopen_issue"],
         "pr_ready" => &["mark_pull_request_ready"],
         "pr_draft" => &["convert_pull_request_to_draft"],
+        "pr_enqueue" => &["enqueue_pull_request"],
+        "pr_dequeue" => &["dequeue_pull_request"],
         "pr_edit" => &["edit_pull_request"],
         "review_reply" => &["reply_to_review_comment"],
         "resolve_thread" => &["resolve_review_thread"],

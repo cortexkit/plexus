@@ -9,17 +9,17 @@ const THREAD_READ: &str = "query($threadId: ID!) { node(id: $threadId) { ... on 
 const RESOLVE: &str = "mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }";
 const UNRESOLVE: &str = "mutation($threadId: ID!) { unresolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }";
 
-struct Run {
+pub(super) struct Run {
     store: Arc<PlexusStore>,
     engine: GovernanceEngine<plexus_core::credentials::StubCredentialSource, RestTransport>,
     scope: CallScope,
     sent: Arc<Mutex<Vec<String>>>,
-    server: validation_http::FixedRequestServer,
+    pub(super) server: validation_http::FixedRequestServer,
     _scratch: plexus_core::test_scratch::Scratch,
 }
 
 impl Run {
-    fn new(responses: Vec<Value>) -> Self {
+    pub(super) fn new(responses: Vec<Value>) -> Self {
         Self::with_statuses(
             responses
                 .into_iter()
@@ -29,6 +29,10 @@ impl Run {
     }
 
     fn with_statuses(responses: Vec<(u16, Value)>) -> Self {
+        Self::with_headers(responses, "")
+    }
+
+    pub(super) fn with_headers(responses: Vec<(u16, Value)>, headers: &'static str) -> Self {
         let (scratch, store, _, _, scope) = setup(
             "v22",
             &[
@@ -44,6 +48,9 @@ impl Run {
                 ("unstack_pull_requests", "write"),
                 ("mark_pull_request_ready", "write"),
                 ("convert_pull_request_to_draft", "write"),
+                ("github.pull_request.queue_state.get", "read"),
+                ("enqueue_pull_request", "write"),
+                ("dequeue_pull_request", "write"),
             ],
         );
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -58,7 +65,7 @@ impl Run {
                     return "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into();
                 }
                 let body = value.to_string();
-                format!("HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                format!("HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{body}", body.len())
             },
         );
         let manifest = github_manifest();
@@ -95,7 +102,7 @@ impl Run {
         }
     }
 
-    fn call(&self, request: &Value) -> Value {
+    pub(super) fn call(&self, request: &Value) -> Value {
         bot_request_scoped(
             &self.store,
             &self.engine,
@@ -109,7 +116,7 @@ impl Run {
         )
     }
 
-    fn wire(&self) -> Vec<(String, Value)> {
+    pub(super) fn wire(&self) -> Vec<(String, Value)> {
         self.sent
             .lock()
             .unwrap()
@@ -1106,7 +1113,10 @@ fn v22_reply_contract_files_match_the_facade() {
     }
     let mut names = BTreeSet::new();
     let mut covered = BTreeSet::new();
-    for (name, request, responses) in reply_contract_cases() {
+    for (name, request, responses) in reply_contract_cases()
+        .into_iter()
+        .chain(super::merge_queue::reply_cases())
+    {
         assert!(
             names.insert(format!("{name}.json")),
             "duplicate case {name}"
@@ -1123,7 +1133,15 @@ fn v22_reply_contract_files_match_the_facade() {
                 json!({"request_line":line, "request_body":body, "status":status, "response":response})
             })
             .collect();
-        let writes = if name == "resolve-thread-own" {
+        let writes = if name == "pr-enqueue-own" || name == "pr-dequeue-own" {
+            assert_eq!(reply["result"]["status"], "completed", "{name}: {reply}");
+            assert_eq!(
+                reply["result"]["result"]["queued"],
+                name == "pr-enqueue-own",
+                "{name}: {reply}"
+            );
+            vec![reads.pop().unwrap()]
+        } else if name == "resolve-thread-own" {
             assert_eq!(
                 reply["result"],
                 json!({"status":"completed", "result":{"id":THREAD,"resolved":true}})

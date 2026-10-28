@@ -97,14 +97,24 @@ fn check_nested(object: &Map<String, Value>, kind: &str) -> Result<(), String> {
         .get("target")
         .and_then(Value::as_object)
         .ok_or("request_field_forbidden{field: target}")?;
-    let fields = object
-        .get("body")
-        .and_then(Value::as_object)
-        .ok_or("request_field_forbidden{field: body}")?;
+    let empty = Map::new();
+    let fields = if kind == "pr_dequeue" {
+        if object.contains_key("body") {
+            return Err("request_field_forbidden{field: body}".into());
+        }
+        &empty
+    } else {
+        object
+            .get("body")
+            .and_then(Value::as_object)
+            .ok_or("request_field_forbidden{field: body}")?
+    };
     let (targets, allowed): (&[&str], &[&str]) = match kind {
         // Changing a PR's base retargets what it merges into, which is not
         // speech, so pr edit admits only title and body.
         "pr_edit" => (&["number"], &["title", "body"]),
+        "pr_enqueue" => (&["number"], &["expected_head_sha"]),
+        "pr_dequeue" => (&["number"], &[]),
         "review_reply" => (&["number", "comment_id"], &["body"]),
         "resolve_thread" | "unresolve_thread" => (&["thread_id"], &[]),
         "stack_create" => (&[], &["pull_requests"]),
@@ -140,6 +150,19 @@ fn check_nested(object: &Map<String, Value>, kind: &str) -> Result<(), String> {
     }
     if kind == "review_reply" && !fields.contains_key("body") {
         return Err("request_field_forbidden{field: body}".into());
+    }
+    if kind == "pr_enqueue"
+        && !fields
+            .get("expected_head_sha")
+            .and_then(Value::as_str)
+            .is_some_and(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err("request_field_forbidden{field: expected_head_sha}".into());
+    }
+    if matches!(kind, "pr_enqueue" | "pr_dequeue")
+        && positive_id(target.get("number"), "number")? > i32::MAX as u64
+    {
+        return Err("request_field_forbidden{field: number}".into());
     }
     if matches!(kind, "stack_create" | "stack_add") {
         let valid = fields
@@ -210,6 +233,8 @@ pub fn map(
         (Some("pr create"), _, _) => ("pr_create", RequestKind::PrCreate),
         (Some("issue edit"), _, _) => ("issue_edit", RequestKind::IssueEdit),
         (Some("pr edit"), _, _) => ("pr_edit", RequestKind::PrEdit),
+        (Some("pr enqueue"), _, _) => ("pr_enqueue", RequestKind::PrEnqueue),
+        (Some("pr dequeue"), _, _) => ("pr_dequeue", RequestKind::PrDequeue),
         (Some("api:POST:/repos/*/*/pulls/*/comments/*/replies"), _, _) => {
             ("review_reply", RequestKind::ReviewReply)
         }
@@ -264,6 +289,8 @@ pub fn map(
     if matches!(
         kind,
         "pr_edit"
+            | "pr_enqueue"
+            | "pr_dequeue"
             | "review_reply"
             | "resolve_thread"
             | "unresolve_thread"
@@ -384,7 +411,13 @@ pub fn map(
         // The review endpoint addresses the pull request as pull_number.
         let field = if matches!(
             kind,
-            "pr_review" | "pr_ready" | "pr_draft" | "pr_edit" | "review_reply"
+            "pr_review"
+                | "pr_ready"
+                | "pr_draft"
+                | "pr_edit"
+                | "review_reply"
+                | "pr_enqueue"
+                | "pr_dequeue"
         ) {
             "pull_number"
         } else {

@@ -26,6 +26,8 @@ const WRITES: &[&str] = &[
     "reopen_issue",
     "mark_pull_request_ready",
     "convert_pull_request_to_draft",
+    "enqueue_pull_request",
+    "dequeue_pull_request",
     "edit_pull_request",
     "reply_to_review_comment",
     "resolve_review_thread",
@@ -40,6 +42,7 @@ const READS: &[&str] = &[
     "github.issue_comments.list",
     "github.issue.search",
     "github.pull_request.get",
+    "github.pull_request.queue_state.get",
     "github.pr.review_threads",
 ];
 /// The reviewed reads a scheduled poll may be granted on a handle connection:
@@ -1079,6 +1082,13 @@ mod tests {
 
     #[test]
     fn each_grantable_write_implies_exactly_its_reads_and_legs() {
+        for write in ["enqueue_pull_request", "dequeue_pull_request"] {
+            assert_eq!(
+                effects::implied_by_write(write, WRITES),
+                BTreeSet::from(["github.pull_request.queue_state.get"]),
+                "{write}"
+            );
+        }
         assert_eq!(implied("add_issue_comment"), Vec::<&str>::new());
         assert_eq!(implied("add_pr_review"), Vec::<&str>::new());
         assert_eq!(implied("add_reaction"), Vec::<&str>::new());

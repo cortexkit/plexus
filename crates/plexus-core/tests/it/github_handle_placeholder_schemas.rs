@@ -36,7 +36,7 @@ const PLACEHOLDER: &str = r#"{"additionalProperties":true,"type":"object"}"#;
 /// Every write an import accepts. The label and assignee writes an issue edit
 /// sends are implied by `edit_issue`, so the import grants them without being
 /// asked.
-const WRITES: [&str; 11] = [
+const WRITES: [&str; 13] = [
     "add_issue_comment",
     "update_issue_comment",
     "add_pr_review",
@@ -48,6 +48,8 @@ const WRITES: [&str; 11] = [
     "edit_issue",
     "mark_pull_request_ready",
     "convert_pull_request_to_draft",
+    "enqueue_pull_request",
+    "dequeue_pull_request",
 ];
 
 struct Token;

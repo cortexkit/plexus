@@ -12,6 +12,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+mod merge_queue;
 mod pr_ready;
 mod pulls_open;
 mod regressions;

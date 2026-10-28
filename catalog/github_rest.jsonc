@@ -108,6 +108,72 @@
   // arguments and response correlation are expressed separately.
   "actions_baseline": [
     {
+      // One reviewed snapshot supplies identity, ownership and queue guards.
+      "name": "github.pull_request.queue_state.get", "risk": "read", "ask_first": false,
+      "facade_only": true,
+      "http": {
+        "method": "POST", "path": "/graphql",
+        "request_constants": {
+          "query": "query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { id url number author { login __typename } headRefOid state isInMergeQueue } } }"
+        },
+        "args_schema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "variables": {
+              "type": "object", "additionalProperties": false,
+              "properties": {"owner": {"type": "string"}, "repo": {"type": "string"}, "number": {"type": "integer", "minimum": 1, "maximum": 2147483647}},
+              "required": ["owner", "repo", "number"]
+            }
+          },
+          "required": ["owner", "repo", "variables"]
+        }
+      }
+    },
+    {
+      // No jump input: the bot joins the ordinary queue with a pinned head.
+      "name": "enqueue_pull_request", "risk": "write", "facade_only": true,
+      "http": {
+        "method": "POST", "path": "/graphql",
+        "request_constants": {
+          "query": "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: {pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid}) { mergeQueueEntry { pullRequest { id url number headRefOid isInMergeQueue } } } }"
+        },
+        "args_schema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "variables": {
+              "type": "object", "additionalProperties": false,
+              "properties": {"pullRequestId": {"type": "string"}, "expectedHeadOid": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"}},
+              "required": ["pullRequestId", "expectedHeadOid"]
+            }
+          },
+          "required": ["owner", "repo", "variables"]
+        }
+      }
+    },
+    {
+      "name": "dequeue_pull_request", "risk": "write", "facade_only": true,
+      "http": {
+        "method": "POST", "path": "/graphql",
+        "request_constants": {
+          "query": "mutation($pullRequestId: ID!) { dequeuePullRequest(input: {pullRequestId: $pullRequestId}) { mergeQueueEntry { pullRequest { id url number headRefOid isInMergeQueue } } } }"
+        },
+        "args_schema": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "owner": {"type": "string"}, "repo": {"type": "string"},
+            "variables": {
+              "type": "object", "additionalProperties": false,
+              "properties": {"pullRequestId": {"type": "string"}},
+              "required": ["pullRequestId"]
+            }
+          },
+          "required": ["owner", "repo", "variables"]
+        }
+      }
+    },
+    {
       // One bounded snapshot; prefix filtering never changes the reviewed query.
       "name": "github.pulls.open",
       "risk": "read", "ask_first": false,

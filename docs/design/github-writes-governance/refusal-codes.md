@@ -42,6 +42,8 @@ again. "Who must act" is guidance from what each check enforces.
 
 | Exact code string | Produced at | GitHub transmission | Same-nonce retry | Who must act |
 |---|---|---|---|---|
+| `pull_request_head_moved` | G8 merge-queue pre-read in `vendor_band.rs`; typed detail names `expected_head_sha` and `actual_head_sha`. | **Read only**, never a mutation. | Terminal refusal; same nonce replays it. | Caller reviews the new head and submits its SHA with a new nonce. |
+| `pull_request_not_open` | G8 merge-queue pre-read in `vendor_band.rs`; closed and merged PRs are ineligible, including no-ops. | **Read only**, never a mutation. | Terminal refusal; same nonce replays it. | Caller targets an open bot-owned PR with a new nonce. |
 | `agent_grant_absent` | G6, also governance authorization on G8/G10. [gates.rs:550-564](../../../crates/plexus-core/src/github/facade/gates.rs) [taxonomy.rs:59-64](../../../crates/plexus-core/src/github/facade/taxonomy.rs) | G6: **never**. G8/G10: **maybe**; earlier reads or write steps may have been sent. | G6: no claim; retry after repair. G8/G10: terminal refusal; use a new nonce after repair. | Grant owner/operator must grant the agent capability. |
 | `agent_grant_excludes_request{request_kind: K, repository: R}` | G6. [gates.rs:620-645](../../../crates/plexus-core/src/github/facade/gates.rs) | **Never** on the fresh attempt. | No claim; retry after the grant or request is corrected. | Grant owner/operator adjusts the grant, or caller changes the request. |
 | `agent_handle_unknown` | G2. [gates.rs:397-409](../../../crates/plexus-core/src/github/facade/gates.rs) | **Never** on the fresh attempt. | No claim; retry after the handle/binding is repaired. | Operator repairs the agent’s GitHub App handle. |

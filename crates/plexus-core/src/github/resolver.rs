@@ -117,7 +117,7 @@ where
     // uses owner/repo. They must name the same repository on every dispatch.
     if matches!(
         request.action.as_str(),
-        "github.pr.review_threads" | "github.pulls.open"
+        "github.pr.review_threads" | "github.pulls.open" | "github.pull_request.queue_state.get"
     ) {
         for field in ["owner", "repo"] {
             let outer = request.args[field].as_str();
@@ -164,6 +164,8 @@ pub enum RequestKind {
     PrCreate,
     PrReady,
     PrEdit,
+    PrEnqueue,
+    PrDequeue,
     ReviewReply,
     ReviewThread,
     StackCreate,
@@ -184,6 +186,8 @@ impl RequestKind {
             Self::PrReview => &["pull_number", "body", "event"],
             Self::PrReady => &["pull_number"],
             Self::PrEdit => &["pull_number", "title", "body", "base"],
+            Self::PrEnqueue => &["pull_number", "expected_head_sha"],
+            Self::PrDequeue => &["pull_number"],
             Self::ReviewReply => &["pull_number", "comment_id", "body"],
             Self::ReviewThread => &["thread_id"],
             Self::StackCreate => &["pull_requests"],

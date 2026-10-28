@@ -151,7 +151,7 @@ fn pick(body: &Value, fields: &[(&str, &str)]) -> Value {
         };
         let typed = match source {
             "id" | "number" => value.is_u64(),
-            "draft" | "isDraft" => value.is_boolean(),
+            "draft" | "isDraft" | "isInMergeQueue" => value.is_boolean(),
             // GitHub sends null for an issue closed or reopened without a reason.
             "state_reason" => value.is_string() || value.is_null(),
             _ => value.is_string(),
@@ -245,6 +245,18 @@ pub(crate) fn projection(kind: &str, legs: &[(&str, Value)], issue_read: Option<
             ],
         ),
         "pr_edit" => pick(last, &[("html_url", "url"), ("number", "number")]),
+        "pr_enqueue" | "pr_dequeue" => pick(
+            legs.last()
+                .map(|(_, body)| body)
+                .or(issue_read)
+                .unwrap_or(&Value::Null),
+            &[
+                ("url", "url"),
+                ("number", "number"),
+                ("isInMergeQueue", "queued"),
+                ("headRefOid", "head_sha"),
+            ],
+        ),
         "resolve_thread" | "unresolve_thread" => {
             json!({"id":last["id"], "resolved":last["isResolved"]})
         }
@@ -577,6 +589,27 @@ fn write_response(
     value: Value,
     args: &Value,
 ) -> Result<Value, String> {
+    if queue_kind(kind) {
+        graphql_errors(kind, action, login, repository, &value)?;
+        let mutation = if kind == "pr_enqueue" {
+            "enqueuePullRequest"
+        } else {
+            "dequeuePullRequest"
+        };
+        let pr = &value["data"][mutation]["mergeQueueEntry"]["pullRequest"];
+        if !queue_pr_shape(pr)
+            || pr["id"] != args["variables"]["pullRequestId"]
+            || pr["isInMergeQueue"].as_bool() != Some(kind == "pr_enqueue")
+            || (kind == "pr_enqueue"
+                && !pr["headRefOid"]
+                    .as_str()
+                    .zip(args["variables"]["expectedHeadOid"].as_str())
+                    .is_some_and(|(actual, expected)| actual.eq_ignore_ascii_case(expected)))
+        {
+            return Err("outcome_unknown".into());
+        }
+        return Ok(pr.clone());
+    }
     if pr_state_kind(kind) {
         return pr_state_response(kind, action, login, repository, value);
     }
@@ -606,6 +639,20 @@ fn write_response(
 
 fn pr_state_kind(kind: &str) -> bool {
     matches!(kind, "pr_ready" | "pr_draft")
+}
+
+fn queue_kind(kind: &str) -> bool {
+    matches!(kind, "pr_enqueue" | "pr_dequeue")
+}
+
+fn queue_pr_shape(pr: &Value) -> bool {
+    pr["id"].as_str().is_some_and(|id| !id.is_empty())
+        && pr["url"].is_string()
+        && pr["number"].as_u64().is_some_and(|n| n > 0)
+        && pr["isInMergeQueue"].is_boolean()
+        && pr["headRefOid"]
+            .as_str()
+            .is_some_and(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// GraphQL reports application failures in successful HTTP responses. Reuse the
@@ -851,7 +898,9 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         {
             continue;
         }
-        let read_args = if action == "github.review_thread.get" {
+        let read_args = if action == "github.pull_request.queue_state.get" {
+            json!({"owner":args["owner"], "repo":args["repo"], "variables":{"owner":args["owner"], "repo":args["repo"], "number":args["pull_number"]}})
+        } else if action == "github.review_thread.get" {
             json!({"owner":args["owner"], "repo":args["repo"], "variables":{"threadId":args["thread_id"]}})
         } else if mapped.request_kind == "resolve_thread" {
             // The reviewed thread query has the PR number but not its author.
@@ -871,6 +920,34 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             Err(code) => return fail(reply, "G8", code),
         };
         completed.push(action);
+        let value = if queue_kind(&mapped.request_kind) {
+            let repository = format!(
+                "{}/{}",
+                args["owner"].as_str().unwrap_or(""),
+                args["repo"].as_str().unwrap_or("")
+            );
+            if let Err(code) =
+                graphql_errors(&mapped.request_kind, action, &login, &repository, &value)
+            {
+                return fail(reply, "G8", code.into());
+            }
+            let mut pr = value["data"]["repository"]["pullRequest"].clone();
+            if !queue_pr_shape(&pr)
+                || pr["number"] != args["pull_number"]
+                || !matches!(pr["state"].as_str(), Some("OPEN" | "CLOSED" | "MERGED"))
+            {
+                return fail(
+                    reply,
+                    "G8",
+                    "pre_dispatch_read_incomplete{reason: invalid_response}".into(),
+                );
+            }
+            // Normalize GraphQL's Actor to the shared REST ownership predicate.
+            pr["user"] = json!({"login":pr["author"]["login"], "type":pr["author"]["__typename"]});
+            pr
+        } else {
+            value
+        };
         if action == "github.review_thread.get" {
             let repository = format!(
                 "{}/{}",
@@ -943,7 +1020,9 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 return fail(reply, "G8", stack_not_own(pr, &pr["number"], &login));
             }
         }
-        if mapped.request_kind == "pr_edit" && !owned(&value, &login) {
+        if (mapped.request_kind == "pr_edit" || queue_kind(&mapped.request_kind))
+            && !owned(&value, &login)
+        {
             let message = PR_EDIT_NOT_OWN_MESSAGE
                 .replace("{bot}", &login)
                 .replace("{number}", &args["pull_number"].to_string())
@@ -958,6 +1037,21 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                     .to_string()
                     .into(),
             );
+        }
+        if queue_kind(&mapped.request_kind) {
+            if value["state"] != "OPEN" {
+                return fail(reply, "G8", "pull_request_not_open".into());
+            }
+            if mapped.request_kind == "pr_enqueue" {
+                let expected = args["expected_head_sha"]
+                    .as_str()
+                    .expect("validated head SHA");
+                let actual = value["headRefOid"].as_str().expect("validated PR head");
+                if !actual.eq_ignore_ascii_case(expected) {
+                    return fail(reply, "G8", json!({"code":"pull_request_head_moved", "detail":{"expected_head_sha":expected, "actual_head_sha":actual}}).to_string().into());
+                }
+            }
+            issue_read = Some(value.clone());
         }
         if action == "github.issue.get" || action == "github.pull_request.get" {
             issue_read = Some(value.clone());
@@ -992,6 +1086,26 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     }
     let proof = effects::OwnershipProof::new(&mapped.request_kind, completed);
     let mut legs = effects::plan(&mapped);
+    if queue_kind(&mapped.request_kind) {
+        let pr = issue_read.as_ref().expect("queue read completed");
+        if pr["isInMergeQueue"].as_bool() == Some(mapped.request_kind == "pr_enqueue")
+            && row
+                .effects
+                .iter()
+                .all(|effect| effect.dispatch_attempted_at.is_none())
+        {
+            legs.clear();
+        } else {
+            let mut variables = json!({"pullRequestId":pr["id"]});
+            if mapped.request_kind == "pr_enqueue" {
+                variables["expectedHeadOid"] = args["expected_head_sha"].clone();
+            }
+            legs = vec![(
+                mapped.action,
+                json!({"owner":args["owner"], "repo":args["repo"], "variables":variables}),
+            )];
+        }
+    }
     if thread_kind(&mapped.request_kind) {
         legs = vec![(
             mapped.action,

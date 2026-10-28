@@ -206,6 +206,8 @@ fn github_manifest_catalog_classifies_every_routed_action() {
         "remove_issue_assignees",
         "mark_pull_request_ready",
         "convert_pull_request_to_draft",
+        "enqueue_pull_request",
+        "dequeue_pull_request",
         "edit_pull_request",
         "reply_to_review_comment",
         "resolve_review_thread",
@@ -214,7 +216,10 @@ fn github_manifest_catalog_classifies_every_routed_action() {
         "add_to_pull_request_stack",
         "unstack_pull_requests",
     ];
-    let facade_reads = ["github.review_thread.get"];
+    let facade_reads = [
+        "github.review_thread.get",
+        "github.pull_request.queue_state.get",
+    ];
     let reads = [
         "github.issue.get",
         "github.issue_comment.get",

@@ -2364,6 +2364,64 @@ fn review_thread_pr_number_query_changes_no_reviewed_schema_or_status() {
     std::eprintln!("{} GitHub actions: old/new boot ingest and REST refresh preserve every schema, hash and active status; only the thread query differs", refreshed.len());
 }
 
+#[test]
+fn merge_queue_catalog_additions_preserve_existing_hashes_and_statuses() {
+    const ADDED: [&str; 3] = [
+        "github.pull_request.queue_state.get",
+        "enqueue_pull_request",
+        "dequeue_pull_request",
+    ];
+    let deployed_source = include_str!("../../../catalog/github_rest.jsonc");
+    let mut earlier: Value =
+        serde_json::from_str(&subc_jsonc::jsonc_to_json(deployed_source).unwrap()).unwrap();
+    let actions = earlier["actions_baseline"].as_array_mut().unwrap();
+    let count = actions.len();
+    actions.retain(|action| !ADDED.contains(&action["name"].as_str().unwrap()));
+    assert_eq!(count - actions.len(), ADDED.len());
+    let before = Scratch::directory("queue-catalog-before");
+    let after = Scratch::directory("queue-catalog-after");
+    let directory = Scratch::directory("queue-catalog-store");
+    std::fs::write(before.join("github_rest.jsonc"), earlier.to_string()).unwrap();
+    std::fs::write(after.join("github_rest.jsonc"), deployed_source).unwrap();
+    let apps = catalog_rows_across_a_deploy(&before, &after, &directory);
+    assert_eq!(apps.len(), 1);
+    let app = &apps[0];
+    assert_eq!(app.key, "github_rest");
+    assert_eq!(
+        app.seeded.len() + ADDED.len(),
+        app.seeded_after_deploy.len()
+    );
+    for original in &app.seeded {
+        for rows in [&app.after_deploy, &app.seeded_after_deploy] {
+            let current = rows.iter().find(|row| row.name == original.name).unwrap();
+            assert_eq!(original.schema, current.schema, "{}", original.name);
+            assert_eq!(
+                original.schema_hash, current.schema_hash,
+                "{}",
+                original.name
+            );
+            assert_eq!(original.status, current.status, "{}", original.name);
+            assert_eq!(
+                original.quarantine_reason, current.quarantine_reason,
+                "{}",
+                original.name
+            );
+            assert_eq!(current.status, "active", "{}", current.name);
+            assert!(current.quarantine_reason.is_none(), "{}", current.name);
+        }
+    }
+    for action in ADDED {
+        let row = app
+            .seeded_after_deploy
+            .iter()
+            .find(|row| row.name == action)
+            .unwrap();
+        assert_eq!(row.status, "active", "{action}");
+        assert!(row.quarantine_reason.is_none(), "{action}");
+    }
+    std::eprintln!("{} existing GitHub action schemas, hashes and active statuses unchanged through real boot ingest and connection seeding; 3 new actions active", app.seeded.len());
+}
+
 /// Removing `defaults.rate_limit` from the shipped catalog leaves every
 /// action's pinned argument schema hash unchanged, so deploying the cleaned
 /// files repins or quarantines nothing on any connection.

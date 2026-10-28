@@ -29,6 +29,9 @@
     "run_secret_scanning": "sha256:82ef96cebaf5fbe16269fd18b0240d78f5b9b90a4155a17eb797115b09148ecf"
   },
   "github_rest": {
+    "github.pull_request.queue_state.get": "sha256:055d32c6d60f9ed9088b605e8be6c1862deea5c5981b88f63641aae87986ec0a",
+    "enqueue_pull_request": "sha256:0757f01df982c4fcf977b5d7ca0fa618d0ec3ab2f09224bdf97d5048c940be5a",
+    "dequeue_pull_request": "sha256:06f3ee64f022bf645a2dfa2616b9db998e1173e941aa0b3f25b0e5d592792dff",
     "github.pulls.open": "sha256:bd4174de5433810be39b3eb0dd637ce7a0cc59e10617b72aa743854d34a944c9",
     "github.pr.review_threads": "sha256:0383b5ece0c765e6adb0fa5c8793342c650fa531e949b87420b5b8aa77be7fbb",
     "github.pull_request.get": "sha256:63e718fd050d8c0b3fdd0b1be2cdd4fb263699ba4c19cc9685d8739dca7ee05f",
