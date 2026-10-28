@@ -32,6 +32,7 @@ mod connector_home_tests;
 mod consent_capacity_tests;
 #[cfg(test)]
 mod consent_test_support;
+pub mod daemon_runtime;
 mod engram_catalog;
 mod github_bot_admin;
 pub mod health;

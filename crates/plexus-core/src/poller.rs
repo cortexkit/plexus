@@ -4031,23 +4031,28 @@ where
         let abandoned = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_abandoned = Arc::clone(&abandoned);
         let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = budget::with_deadline(deadline, || {
-                dispatch_probe_action(
-                    &engine,
-                    &principal,
-                    &connection_id,
-                    &subscription_id,
-                    &action,
-                    args,
-                    &worker_abandoned,
-                )
-            });
-            // Release the claim before replying, so a caller that waited sees
-            // the subscription free as soon as it has the answer.
-            drop(in_flight);
-            let _ = sender.send(result);
-        });
+        // Named for profiling: this worker runs one vendor probe action off
+        // the runtime, so its CPU must not hide under a generic thread name.
+        thread::Builder::new()
+            .name("plexus-probe".to_string())
+            .spawn(move || {
+                let result = budget::with_deadline(deadline, || {
+                    dispatch_probe_action(
+                        &engine,
+                        &principal,
+                        &connection_id,
+                        &subscription_id,
+                        &action,
+                        args,
+                        &worker_abandoned,
+                    )
+                });
+                // Release the claim before replying, so a caller that waited sees
+                // the subscription free as soon as it has the answer.
+                drop(in_flight);
+                let _ = sender.send(result);
+            })
+            .expect("probe action thread failed to spawn");
         let result = match receiver.recv_timeout(ACTION_CALLBACK_DEADLINE) {
             Ok(result) => result,
             Err(_) => {

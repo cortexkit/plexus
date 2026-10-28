@@ -8,9 +8,15 @@ use std::process::ExitCode;
 /// capture is what `ck module logs` and test harnesses read), so a module that
 /// dies during startup, such as when the daemon's one-time launch secret
 /// cannot be read, must say why there too.
-#[tokio::main]
-async fn main() -> ExitCode {
-    match plexus_module::run_entry().await {
+fn main() -> ExitCode {
+    let runtime = match plexus_module::daemon_runtime::build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("ck-plexus: failed to build runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(plexus_module::run_entry()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("ck-plexus: {error}");
