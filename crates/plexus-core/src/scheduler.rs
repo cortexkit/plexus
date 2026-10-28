@@ -46,7 +46,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use crate::agent_registry::AgentRegistry;
@@ -269,6 +272,7 @@ where
     credential_repair_waits: Mutex<std::collections::HashMap<String, i64>>,
     relay_health: Option<Arc<dyn RelayPollingHealth>>,
     pass_budget: std::time::Duration,
+    stop: Arc<AtomicBool>,
     resume_after: Mutex<Option<(String, String)>>,
     last_housekeeping: Mutex<Option<std::time::Instant>>,
     /// Last pass that ran event retention. Separate from `last_housekeeping`
@@ -335,6 +339,7 @@ where
             credential_repair_waits: Mutex::new(Default::default()),
             relay_health: None,
             pass_budget: POLL_PASS_BUDGET,
+            stop: Arc::new(AtomicBool::new(false)),
             resume_after: Mutex::new(None),
             last_housekeeping: Mutex::new(None),
             last_event_retention: Mutex::new(None),
@@ -344,6 +349,18 @@ where
     pub fn with_relay_health(mut self, relay: Arc<dyn RelayPollingHealth>) -> Self {
         self.relay_health = Some(relay);
         self
+    }
+
+    /// Stop starting work when the owner sets this flag. Checks happen only
+    /// between phases and whole subscription polls: an in-flight poll must
+    /// finish recording its attempt and committing its result before stopping.
+    pub fn with_stop_flag(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop = stop;
+        self
+    }
+
+    fn stop_requested(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
     }
 
     /// Enable the hourly sweep that revokes grants of agents the registry
@@ -430,6 +447,9 @@ where
     /// that was suspended or polled, in selection order, together with the
     /// selection-failure count for this pass only, not since boot.
     pub fn run_pass_report(&self, principals: &[String], now_ms: i64) -> PassReport {
+        if self.stop_requested() {
+            return PassReport::default();
+        }
         let deadline = std::time::Instant::now() + self.pass_budget;
         if let Some(registry) = &self.repository_registry {
             if self.ownership_throttle.due(now_ms) {
@@ -441,12 +461,18 @@ where
                 );
             }
         }
+        if self.stop_requested() {
+            return PassReport::default();
+        }
         // Read uncertain writes before ordinary polls consume their timeout window.
         if let Err(error) = self
             .engine
             .sweep_write_reconciliations(now_ms, self.audit_retention_window_ms)
         {
             eprintln!(warn scheduler: "write reconciliation sweep failed: {error}");
+        }
+        if self.stop_requested() {
+            return PassReport::default();
         }
         let housekeeping_due = {
             let mut last = self
@@ -487,12 +513,18 @@ where
                 }
             }
         }
+        if self.stop_requested() {
+            return PassReport::default();
+        }
         if housekeeping_due {
             if let Err(error) = self
                 .store
                 .prune_ceremony_history(now_ms, self.audit_retention_window_ms)
             {
                 eprintln!(warn scheduler: "ceremony retention pass failed: {error}");
+            }
+            if self.stop_requested() {
+                return PassReport::default();
             }
             match self
                 .store
@@ -513,6 +545,9 @@ where
                 }
             }
 
+            if self.stop_requested() {
+                return PassReport::default();
+            }
             match crate::github::sweeper::sweep_receipts(&self.store, now_ms) {
                 Ok(uncertain) if !uncertain.is_empty() => {
                     eprintln!(warn scheduler: "receipt sweep recorded {} uncertain write(s)", uncertain.len());
@@ -523,6 +558,9 @@ where
                 }
             }
 
+            if self.stop_requested() {
+                return PassReport::default();
+            }
             match self.store.prune_reservations(now_ms) {
                 Ok(removed) if removed > 0 => {
                     eprintln!(info scheduler: "reservation retention pruned {removed} row(s)");
@@ -532,6 +570,9 @@ where
                     eprintln!(warn scheduler: "reservation retention pass failed: {error}");
                 }
             }
+        }
+        if self.stop_requested() {
+            return PassReport::default();
         }
         // Approvals held unsent because their daemon scope could not be
         // confirmed (typically the owner has not re-synced since a daemon
@@ -549,6 +590,9 @@ where
         let mut cadences = self.polling_cadences();
         let mut candidates = Vec::new();
         for principal in principals {
+            if self.stop_requested() {
+                break;
+            }
             match self.store.due_subscriptions(principal, now_ms) {
                 Ok(subscriptions) => candidates.extend(
                     subscriptions
@@ -577,12 +621,16 @@ where
             }
         }
         for (principal, subscription) in candidates {
-            if std::time::Instant::now() >= deadline {
+            if self.stop_requested() || std::time::Instant::now() >= deadline {
+                break;
+            }
+            let decision = self.classify_subscription(&subscription, now_ms, &mut cadences);
+            if self.stop_requested() {
                 break;
             }
             *self.resume_after.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some((principal.clone(), subscription.subscription_id.clone()));
-            match self.classify_subscription(&subscription, now_ms, &mut cadences) {
+            match decision {
                 DueDecision::BreakerTripped => {
                     self.credential_repair_waits
                         .lock()
@@ -628,7 +676,7 @@ where
         // After the polls, not beside the other housekeeping above: the sweep
         // makes one registry round trip per agent, and running it first would
         // hold this pass's polls behind that traffic once an hour.
-        if std::time::Instant::now() < deadline {
+        if !self.stop_requested() && std::time::Instant::now() < deadline {
             self.sweep_retired_agents_if_due(now_ms);
         }
         PassReport {
@@ -896,6 +944,77 @@ mod tests {
             "the deferred watch must go before the previous slow watch"
         );
         assert!(ids.contains(&second[0].subscription_id));
+    }
+
+    #[test]
+    fn shutdown_finishes_the_current_poll_without_polling_remaining_subscriptions() {
+        struct SignalledSlowPoll {
+            entered: std::sync::mpsc::Sender<()>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl Transport for SignalledSlowPoll {
+            fn dispatch(
+                &self,
+                _: crate::transport::TransportRequest,
+                _: &crate::credentials::ResolvedCredential,
+            ) -> crate::transport::TransportResponse {
+                self.entered.send(()).unwrap();
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("release the in-flight poll");
+                std::thread::sleep(std::time::Duration::from_millis(350));
+                crate::transport::TransportResponse::success(
+                    json!({"items":[], "next_cursor":"committed"}),
+                )
+            }
+        }
+
+        let (store, _, engine) = scheduler_engine(json!({"items":[]}));
+        let ids: Vec<_> = (0..20).map(|_| subscribe(&store, 30)).collect();
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let slow = GovernanceEngine::new(
+            Arc::clone(&store),
+            Arc::clone(engine.credential_source()),
+            Arc::new(SignalledSlowPoll {
+                entered,
+                release: Mutex::new(released),
+            }),
+        );
+        let stopping = Arc::new(AtomicBool::new(false));
+        let scheduler = Scheduler::new(slow, 86_400_000).with_stop_flag(Arc::clone(&stopping));
+        let task =
+            crate::bounded::Task::spawn(move || scheduler.run_pass_report(&principals(), now_ms()));
+        started
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("pass must enter a real poll before shutdown");
+        stopping.store(true, Ordering::Relaxed);
+        // Queue releases for later polls too, so removing the stop check runs
+        // the whole slow pass rather than hanging on the test's handshake.
+        for _ in &ids {
+            release.send(()).unwrap();
+        }
+        // One 350 ms poll plus scheduling/storage slack, not twenty polls.
+        let report = task
+            .join_timeout(std::time::Duration::from_secs(1))
+            .expect("shutdown must finish within one poll's time, not the whole pass");
+        assert_eq!(report.outcomes.len(), 1);
+        assert!(matches!(
+            report.outcomes[0].cycle,
+            PollCycle::Completed { .. }
+        ));
+        let polled = stored(&store, &report.outcomes[0].subscription_id);
+        assert!(polled.last_polled_at_ms.is_some());
+        assert_eq!(polled.cursor_state["sync_token"], "committed");
+        assert_eq!(
+            ids.iter()
+                .filter(|id| stored(&store, id).last_polled_at_ms.is_some())
+                .count(),
+            1,
+            "the in-flight poll must commit, and every later poll must remain untouched"
+        );
     }
 
     #[test]
