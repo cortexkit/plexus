@@ -546,8 +546,9 @@ where
     R: AsyncRead + Unpin,
 {
     let startup_started = std::time::Instant::now();
-    send_hello(&writer, config).await?;
+    let provides = send_hello(&writer, config).await?;
     let hello_ack = expect_hello_ack(reader).await?;
+    let negotiated_ver = hello_ack.negotiated_ver;
     let control_replies = Arc::clone(&route_bindings.control_replies);
     let startup = startup::spawn(
         hello_ack,
@@ -558,6 +559,18 @@ where
         compose,
         startup_started,
     )?;
+    let ready_writer = writer.clone();
+    let ready_replies = Arc::clone(&control_replies);
+    let startup = async move {
+        startup::finish(
+            startup.await?,
+            &ready_writer,
+            negotiated_ver,
+            provides,
+            ready_replies,
+        )
+        .await
+    };
     dispatch_loop_starting(
         reader,
         writer,
@@ -756,10 +769,9 @@ where
                 result = &mut startup, if state.is_none() => {
                     let initialized = result?;
                     initialized.log_timings(dispatch_entered);
-                    // Readiness protocol handoff: once the pinned client exposes
-                    // set_ready, declare `.ready(false)` in send_hello and call
-                    // set_ready(true) here. Until then HELLO is unchanged and
-                    // this local gate refuses work with module_warming.
+                    // The registered connection's startup future includes the
+                    // readiness ACK. Until then health and stray requests use
+                    // the same local warming gate, even after initialization.
                     if let Some(config) = config {
                         background = Some(spawn_background_tasks(Arc::clone(&initialized.state), config));
                     }
@@ -1047,7 +1059,7 @@ where
 async fn send_hello(
     writer: &mpsc::Sender<Frame>,
     config: &ModuleConfig,
-) -> Result<(), ModuleError> {
+) -> Result<Vec<subc_protocol::manifest::ProviderRole>, ModuleError> {
     // Read through the process's one cached accessor, never the environment
     // directly. The daemon hands the nonce over as a pipe on descriptor 3 (the
     // SUBC_LAUNCH_NONCE environment copy is being retired), and the pipe can
@@ -1066,8 +1078,12 @@ async fn send_hello(
     let launch_nonce_source = launch_nonce.as_ref().map(|nonce| {
         subc_protocol::manifest::LaunchNonceSource::from_wire_name(nonce.source().as_str())
     });
+    let mut manifest =
+        manifest::build_with_launch_nonce_source(&config.module_id, launch_nonce_source);
+    manifest.ready = Some(false);
+    let provides = manifest.provides.clone();
     let hello = ModuleHelloBody {
-        manifest: manifest::build_with_launch_nonce_source(&config.module_id, launch_nonce_source),
+        manifest,
         protocol_ver: PROTOCOL_VERSION,
         control_ops: Some(vec![
             "route.bind".to_string(),
@@ -1085,7 +1101,8 @@ async fn send_hello(
         body,
     )
     .map_err(|error| ModuleError::Message(error.to_string()))?;
-    send(writer, frame).await
+    send(writer, frame).await?;
+    Ok(provides)
 }
 
 /// The startup error for a launch nonce the accessor refused.

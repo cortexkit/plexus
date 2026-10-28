@@ -8,6 +8,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    future::Future,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -268,7 +269,16 @@ trait NonceSigner: Send + Sync {
 
 impl NonceSigner for CredentialRoute {
     fn sign<'a>(&'a self, key: &'a str, nonce: &'a [u8]) -> SignFuture<'a> {
-        Box::pin(CredentialRoute::sign(self, key, nonce))
+        // The consumer's stream future is Send but not Sync; NATS requires its
+        // auth future to be both. Lock only while polling, preserving cancellation.
+        let future = Mutex::new(Box::pin(CredentialRoute::sign(self, key, nonce)));
+        Box::pin(std::future::poll_fn(move |cx| {
+            future
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_mut()
+                .poll(cx)
+        }))
     }
 }
 

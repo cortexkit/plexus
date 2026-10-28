@@ -2453,9 +2453,9 @@ dependencies = [
 
 [[package]]
 name = "subc-client-rs"
-version = "0.31.1"
+version = "0.32.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe3d35dd99d22f9475236163358a6e095c0c2144180d66ddfca67691a8cf1a15"
+checksum = "8c9883b5bd1f58e2394f22150dee83e44263785e4571b8c9ff76b9ca7d5f9614"
 dependencies = [
  "async-trait",
  "serde",
@@ -2472,9 +2472,9 @@ dependencies = [
 
 [[package]]
 name = "subc-control"
-version = "0.33.1"
+version = "0.33.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "172c0c54b2322cdb9acb8d782aa64ba00c90790fd2e1bd142886fc1a28de6933"
+checksum = "1e61e31a54e1e2f0b4118b4c9437a1141d19f58442d10121e3335271671207ee"
 dependencies = [
  "serde",
  "serde_json",
@@ -2483,9 +2483,9 @@ dependencies = [
 
 [[package]]
 name = "subc-daemon"
-version = "0.37.4"
+version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5460391d2fbc8297756ba1d503eda838c80bda97b40feab8e3a1a9efc9a070d"
+checksum = "0d45182ea24b69c31f3e0c59062f5617fec33dfec0bc8874091952492ffc8f00"
 dependencies = [
  "base64",
  "cortexkit-log",
@@ -2533,9 +2533,9 @@ dependencies = [
 
 [[package]]
 name = "subc-os"
-version = "0.1.17"
+version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "220f78f6f9d641e8695df7f6ef585962416c594f985e3280f765df365bab7597"
+checksum = "5f2bb5b77e81a963e16cf5cebaf269c601505bd54890b78478c055d77b3aeff9"
 dependencies = [
  "libc",
  "rustix",
@@ -2560,9 +2560,9 @@ dependencies = [
 
 [[package]]
 name = "subc-protocol"
-version = "0.33.1"
+version = "0.33.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "729a9d092c77026e9aca23cf3110cb8214e17a969b471b3f98b070e111652684"
+checksum = "01d912130b9f953c75e41fee2b8631e2749bcce34ee0c88f322d62ffae0c90ef"
 dependencies = [
  "serde",
  "serde_json",
@@ -2570,9 +2570,9 @@ dependencies = [
 
 [[package]]
 name = "subc-transport"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73fcec900a7105be1071e1d478c74831abe936d9d8e4c825a25f7dd9832797e4"
+checksum = "84121e3e5b0cf8126d4c8a54750fb5afa892c1fb598cfca7730cbcca173288d5"
 dependencies = [
  "getrandom 0.2.17",
  "hmac",

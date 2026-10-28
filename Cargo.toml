@@ -27,16 +27,16 @@ tracing = "0.1"
 # from the other, and the in-process test daemon would speak a different
 # protocol from the module it tests. The pinned wire crates below all require
 # protocol 0.33, which cortexkit-role-tool-provider 0.13 (the tool-result/v1
-# format) requires. The protocol and control pins are the versions
-# subc-daemon 0.37.4 names, and the transport pin is the one both it and
-# subc-client-rs 0.31.1 name. When the protocol moves, move this whole block.
-subc-protocol = "=0.33.1"
-subc-os = "=0.1.17"
-subc-transport = "=0.14.0"
-subc-control = "=0.33.1"
-subc-daemon = "=0.37.4"
+# format) requires. Client 0.32.14 needs protocol 0.33.5 and transport 0.14.1;
+# daemon 0.38.0 needs control 0.33.3 and os 0.1.22. When the protocol moves,
+# review and resolve this whole block together.
+subc-protocol = "=0.33.5"
+subc-os = "=0.1.22"
+subc-transport = "=0.14.1"
+subc-control = "=0.33.4"
+subc-daemon = "=0.38.0"
 subc-jsonc = "=0.1.2"
-subc-client-rs = "=0.31.1"
+subc-client-rs = "=0.32.14"
 
 # Exact pins, moved together. cortexkit-log already depends on the registry
 # cortexkit-store-types; a second copy from anywhere else would be a distinct

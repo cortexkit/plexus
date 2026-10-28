@@ -6,6 +6,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
+use subc_protocol::manifest::ProviderRole;
+use subc_protocol::session::{ModuleControlRequestFromModule, ModuleControlResponseToModule};
 use tokio::sync::oneshot;
 
 pub(super) struct Initialized {
@@ -177,6 +179,126 @@ pub(super) fn spawn(
         cancelled,
         writer,
     })
+}
+
+struct AwaitingReadiness(Option<Initialized>);
+
+impl Drop for AwaitingReadiness {
+    fn drop(&mut self) {
+        if let Some(initialized) = self.0.take() {
+            // A stop or failed readiness ACK can discard the composed runtime.
+            // Its blocking HTTP clients must be destroyed off the async reader.
+            tokio::task::spawn_blocking(move || drop(initialized));
+        }
+    }
+}
+
+pub(super) async fn finish(
+    initialized: Initialized,
+    writer: &mpsc::Sender<Frame>,
+    version: u8,
+    provides: Vec<ProviderRole>,
+    pending: Arc<PendingControlReplies>,
+) -> Result<Initialized, ModuleError> {
+    let mut initialized = AwaitingReadiness(Some(initialized));
+    set_ready(writer, version, provides, pending).await?;
+    Ok(initialized.0.take().expect("initialized state"))
+}
+
+struct ReadinessReply {
+    pending: Arc<PendingControlReplies>,
+    correlation: u64,
+}
+
+impl Drop for ReadinessReply {
+    fn drop(&mut self) {
+        // Removing the sender also wakes the blocking receiver on cancellation.
+        self.pending.forget(self.correlation);
+    }
+}
+
+async fn set_ready(
+    writer: &mpsc::Sender<Frame>,
+    version: u8,
+    provides: Vec<ProviderRole>,
+    pending: Arc<PendingControlReplies>,
+) -> Result<(), ModuleError> {
+    const ATTEMPTS: usize = 3;
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+    const BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+    // ModuleHandle::set_ready is tied to the client's serving loop. Plexus owns
+    // its reader, so send the same catalog.update on its registered connection.
+    // This is the only catalog.update sender: roles are the HELLO snapshot,
+    // capabilities are preserved. Only a well-formed Error reply is retried,
+    // with at most three attempts; unexpected replies fail without retry.
+    let body = serde_json::to_vec(&ModuleControlRequestFromModule::CatalogUpdate {
+        provides,
+        capabilities: None,
+        ready: Some(true),
+    })
+    .map_err(ModuleError::Json)?;
+    for attempt in 1..=ATTEMPTS {
+        let (correlation, replies) = pending
+            .register()
+            .map_err(|error| ModuleError::Message(error.0))?;
+        let _reply = ReadinessReply {
+            pending: Arc::clone(&pending),
+            correlation,
+        };
+        let frame = Frame::build_with_version(
+            version,
+            FrameType::Request,
+            wire::control_flags(),
+            0,
+            0,
+            correlation,
+            body.clone(),
+        )
+        .map_err(|error| ModuleError::Message(error.to_string()))?;
+        let result = tokio::time::timeout(DEADLINE, async {
+            send(writer, frame).await?;
+            tokio::task::spawn_blocking(move || replies.recv())
+                .await
+                .map_err(|error| ModuleError::Message(format!("readiness reply worker: {error}")))?
+                .map_err(|error| {
+                    ModuleError::Message(format!("readiness connection closed: {error}"))
+                })
+        })
+        .await;
+        let reply = match result {
+            Ok(Ok(reply)) => reply,
+            result => {
+                // A timeout or cancellation leaves the catalog outcome unknown.
+                // Do not overlap it with another update; reconnect instead.
+                let message = format!("readiness update unanswered: {result:?}");
+                eprintln!(warn wire: "{message}");
+                return Err(ModuleError::Message(message));
+            }
+        };
+        if reply.header.ty == FrameType::Response
+            && matches!(
+                serde_json::from_slice(&reply.body),
+                Ok(ModuleControlResponseToModule::CatalogUpdate {})
+            )
+        {
+            return Ok(());
+        }
+        let message = if reply.header.ty == FrameType::Error {
+            serde_json::from_slice::<ErrorBody>(&reply.body)
+                .map(|error| format!("{}: {}", error.code, error.message))
+                .ok()
+        } else {
+            None
+        };
+        eprintln!(warn wire: "readiness update refused (attempt {attempt}/{ATTEMPTS}): {}",
+            message.as_deref().unwrap_or("invalid catalog.update reply"));
+        if message.is_none() || attempt == ATTEMPTS {
+            return Err(ModuleError::Message("readiness update failed".into()));
+        }
+        tokio::time::sleep(BACKOFF).await;
+    }
+    unreachable!("bounded readiness attempts return a result")
 }
 
 pub(super) fn is_stop_notice(frame: &Frame) -> bool {

@@ -91,15 +91,11 @@ async fn hello(
     input: &mut tokio::io::DuplexStream,
     responses: &mut mpsc::Receiver<Frame>,
     namespace: &str,
-) {
+) -> ModuleHelloBody {
     let hello = reply(responses, HELLO_CORRELATION).await;
     assert_eq!(hello.header.ty, FrameType::Hello);
     let body: ModuleHelloBody = serde_json::from_slice(&hello.body).unwrap();
-    assert_ne!(
-        body.manifest.ready,
-        Some(false),
-        "HELLO readiness stays unchanged until the client can flip it"
-    );
+    assert_eq!(body.manifest.ready, Some(false));
     let descriptor = StorageDescriptor {
         module_id: DEFAULT_MODULE_ID.into(),
         storage_namespace: namespace.into(),
@@ -108,6 +104,11 @@ async fn hello(
             path: ":memory:".into(),
         },
     };
+    hello_ack(input, Some(serde_json::to_value(descriptor).unwrap())).await;
+    body
+}
+
+async fn hello_ack(input: &mut tokio::io::DuplexStream, storage: Option<Value>) {
     write_frame(
         input,
         &frame(
@@ -116,16 +117,58 @@ async fn hello(
             HELLO_CORRELATION,
             serde_json::to_value(ModuleHelloAckBody {
                 negotiated_ver: PROTOCOL_VERSION,
-                subc_ops: vec![],
+                subc_ops: vec!["catalog.update".into()],
                 subc_capabilities: vec![],
                 machine_id: None,
-                storage: Some(serde_json::to_value(descriptor).unwrap()),
+                storage,
             })
             .unwrap(),
         ),
     )
     .await
     .unwrap();
+}
+
+async fn ready_update(responses: &mut mpsc::Receiver<Frame>, hello: &ModuleHelloBody) -> Frame {
+    let update = recv_within(responses.recv(), RESPONSE_DEADLINE, "ready update").await;
+    assert_eq!(update.header.ty, FrameType::Request);
+    assert_eq!(update.header.ver, PROTOCOL_VERSION);
+    assert_eq!(update.header.channel, 0);
+    assert_eq!(update.header.epoch, 0);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&update.body).unwrap(),
+        json!({
+            "op": "catalog.update",
+            "provides": hello.manifest.provides,
+            "ready": true,
+        }),
+        "readiness must preserve the registered roles and omit capabilities"
+    );
+    update
+}
+
+async fn ready_ack(input: &mut tokio::io::DuplexStream, update: &Frame) {
+    write_frame(
+        input,
+        &frame(
+            FrameType::Response,
+            0,
+            update.header.corr,
+            json!({"op":"catalog.update"}),
+        ),
+    )
+    .await
+    .unwrap();
+}
+
+async fn assert_writer_closed(responses: &mut mpsc::Receiver<Frame>) {
+    assert!(
+        tokio::time::timeout(RESPONSE_DEADLINE, responses.recv())
+            .await
+            .expect("daemon writer closes")
+            .is_none(),
+        "unexpected extra frame after startup or shutdown"
+    );
 }
 
 fn assert_warming(response: Frame) {
@@ -232,7 +275,7 @@ async fn delayed_startup_serves_warming_then_registers_before_polling() {
         )
         .await
     });
-    hello(&mut input, &mut responses, "delayed-startup").await;
+    let hello = hello(&mut input, &mut responses, "delayed-startup").await;
     recv_within(
         async { composing.await.ok() },
         RESPONSE_DEADLINE,
@@ -240,6 +283,10 @@ async fn delayed_startup_serves_warming_then_registers_before_polling() {
     )
     .await;
     assert!(polled.try_recv().is_err(), "no polling during composition");
+    assert!(
+        responses.try_recv().is_err(),
+        "no ready flip during composition"
+    );
 
     write_frame(
         &mut input,
@@ -291,12 +338,29 @@ async fn delayed_startup_serves_warming_then_registers_before_polling() {
     }
     assert_eq!(consumed, 10);
     release.send(()).unwrap();
+    let update = ready_update(&mut responses, &hello).await;
+    assert!(
+        polled.try_recv().is_err(),
+        "no polling before readiness ACK"
+    );
+    input.write_all(&bytes[10..]).await.unwrap();
+    assert_warming(reply(&mut responses, 80).await);
+    write_frame(
+        &mut input,
+        &frame(FrameType::Request, 0, 83, json!({"op":"health.check"})),
+    )
+    .await
+    .unwrap();
+    let warming: Value = serde_json::from_slice(&reply(&mut responses, 83).await.body).unwrap();
+    assert_eq!(warming["detail"], "module_warming");
+    assert_eq!(warming["metrics"]["ready"], false);
+    ready_ack(&mut input, &update).await;
     assert!(
         recv_within(polled.recv(), RESPONSE_DEADLINE, "first scheduler poll").await,
         "the first poll must observe registered transport configuration"
     );
-    input.write_all(&bytes[10..]).await.unwrap();
-    let bound = reply(&mut responses, 80).await;
+    write_frame(&mut input, &bind(84)).await.unwrap();
+    let bound = reply(&mut responses, 84).await;
     assert_eq!(bound.header.ty, FrameType::Response);
     assert_eq!(
         serde_json::from_slice::<ModuleControlResponse>(&bound.body).unwrap(),
@@ -352,6 +416,142 @@ async fn delayed_startup_serves_warming_then_registers_before_polling() {
         .expect("module stops")
         .unwrap()
         .unwrap();
+    assert_writer_closed(&mut responses).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_startup_never_sends_ready() {
+    let (mut input, mut reader) = tokio::io::duplex(8192);
+    let (writer, mut responses) = mpsc::channel(8);
+    let module = tokio::spawn(async move {
+        module_loop_with_composition(
+            &mut reader,
+            writer,
+            &config(),
+            Arc::new(health::HealthState::new()),
+            Arc::new(RouteBindings::new()),
+            |_, _| panic!("composition must not run without storage"),
+        )
+        .await
+    });
+    let sent = reply(&mut responses, HELLO_CORRELATION).await;
+    let hello: ModuleHelloBody = serde_json::from_slice(&sent.body).unwrap();
+    assert_eq!(hello.manifest.ready, Some(false));
+    hello_ack(&mut input, None).await;
+    let error = tokio::time::timeout(RESPONSE_DEADLINE, module)
+        .await
+        .expect("failed startup exits")
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("omitted the storage descriptor"));
+    assert_writer_closed(&mut responses).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_refusals_are_bounded_and_keep_health_warming_until_ack() {
+    for accept_last in [true, false] {
+        let (mut input, mut reader) = tokio::io::duplex(8192);
+        let (writer, mut responses) = mpsc::channel(8);
+        let module = tokio::spawn(async move {
+            module_loop_with_composition(
+                &mut reader,
+                writer,
+                &config(),
+                Arc::new(health::HealthState::new()),
+                Arc::new(RouteBindings::new()),
+                |store, _| runtime_for_test(store),
+            )
+            .await
+        });
+        let hello = hello(&mut input, &mut responses, "refused-ready").await;
+        for attempt in 1..=3 {
+            let update = ready_update(&mut responses, &hello).await;
+            write_frame(&mut input, &bind(90)).await.unwrap();
+            assert_warming(reply(&mut responses, 90).await);
+            write_frame(
+                &mut input,
+                &frame(FrameType::Request, 0, 91, json!({"op":"health.check"})),
+            )
+            .await
+            .unwrap();
+            let health: Value =
+                serde_json::from_slice(&reply(&mut responses, 91).await.body).unwrap();
+            assert_eq!(health["metrics"]["ready"], false);
+            if attempt == 3 && accept_last {
+                ready_ack(&mut input, &update).await;
+            } else {
+                write_frame(
+                    &mut input,
+                    &frame(
+                        FrameType::Error,
+                        0,
+                        update.header.corr,
+                        json!({"code":"temporarily_unavailable", "message":"retry"}),
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+        }
+        if accept_last {
+            tokio::time::timeout(RESPONSE_DEADLINE, async {
+                loop {
+                    write_frame(
+                        &mut input,
+                        &frame(FrameType::Request, 0, 93, json!({"op":"health.check"})),
+                    )
+                    .await
+                    .unwrap();
+                    let health: Value =
+                        serde_json::from_slice(&reply(&mut responses, 93).await.body).unwrap();
+                    if health["metrics"]["ready"] == true {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("readiness ACK opens the health gate");
+            write_frame(&mut input, &bind(92)).await.unwrap();
+            assert_eq!(
+                reply(&mut responses, 92).await.header.ty,
+                FrameType::Response
+            );
+            write_frame(&mut input, &stop_notice()).await.unwrap();
+        }
+        let result = tokio::time::timeout(RESPONSE_DEADLINE, module)
+            .await
+            .expect("readiness attempts finish")
+            .unwrap();
+        assert_eq!(result.is_ok(), accept_last);
+        assert_writer_closed(&mut responses).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_while_waiting_for_readiness_ack_closes_without_retry() {
+    let (mut input, mut reader) = tokio::io::duplex(8192);
+    let (writer, mut responses) = mpsc::channel(8);
+    let module = tokio::spawn(async move {
+        module_loop_with_composition(
+            &mut reader,
+            writer,
+            &config(),
+            Arc::new(health::HealthState::new()),
+            Arc::new(RouteBindings::new()),
+            |store, _| runtime_for_test(store),
+        )
+        .await
+    });
+    let hello = hello(&mut input, &mut responses, "stopped-ready").await;
+    let _update = ready_update(&mut responses, &hello).await;
+    write_frame(&mut input, &stop_notice()).await.unwrap();
+    tokio::time::timeout(RESPONSE_DEADLINE, module)
+        .await
+        .expect("stop must not wait for readiness ACK")
+        .unwrap()
+        .unwrap();
+    assert_writer_closed(&mut responses).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
