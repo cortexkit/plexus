@@ -39,6 +39,33 @@ const MILLIS_PER_MINUTE: f64 = 60_000.0;
 /// returns to ok by itself while the cumulative count stays in the metrics.
 const PANIC_RECOVERY_DEGRADED_MS: u64 = 60 * 60 * 1_000;
 
+/// How long the outbox aggregates behind the `outboxDepth` gauge stay
+/// cached. The query counts a table that holds hundreds of thousands of
+/// rows at production scale and joins it against the event history, which
+/// makes it one of the most expensive reads on the minute refresh; the
+/// numbers feed an operator gauge, not an alerting path, so an hourly
+/// refresh is plenty. The first refresh always queries.
+///
+/// NOT the scheduler's event-retention cadence by accident: both are hourly
+/// because both scan the same tables, but each has its own stamp so a slow
+/// retention pass cannot starve the gauge and a failed gauge read cannot
+/// trigger retention.
+pub(crate) const OUTBOX_HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// The expensive outbox aggregates behind the store metrics, sampled hourly.
+/// The counters inside change only on retention, unsubscribe and delete
+/// paths, and the depth is a gauge rather than an alert, so all five share
+/// one stamp instead of splitting cheap counters from costly aggregates.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CachedOutboxHealth {
+    pub(crate) sampled_at: std::time::Instant,
+    pub(crate) depth: i64,
+    pub(crate) overlapping_key_rows: i64,
+    pub(crate) dropped_on_unsubscribe: i64,
+    pub(crate) dropped_on_delete: i64,
+    pub(crate) orphaned_markers: i64,
+}
+
 /// How many connections each vendor transport has healed after a panic
 /// poisoned a connection lock, since the transport was built (at boot).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -61,6 +88,10 @@ type CredentialRepairSource = Box<dyn Fn() -> BTreeMap<String, String> + Send + 
 pub struct HealthState {
     pub(crate) relay: Arc<crate::relay::Status>,
     pub(crate) store_metrics: std::sync::Mutex<serde_json::Value>,
+    /// The last sampled outbox aggregates behind `store_metrics`. `None`
+    /// until the first refresh; a failed re-query keeps the previous sample
+    /// rather than dropping the gauge to absent.
+    pub(crate) outbox_health: std::sync::Mutex<Option<CachedOutboxHealth>>,
     /// The store facts behind the `webSearch` metric, read with
     /// `store_metrics`; `None` until read, or after a failed read.
     pub(crate) web_search: std::sync::Mutex<Option<crate::web_search_health::Snapshot>>,
@@ -247,6 +278,7 @@ impl HealthState {
         Self {
             relay: Arc::new(crate::relay::Status::default()),
             store_metrics: std::sync::Mutex::new(serde_json::json!({})),
+            outbox_health: std::sync::Mutex::new(None),
             web_search: std::sync::Mutex::new(None),
             publish_error: std::sync::Mutex::new(None),
             started_at_ms: now,

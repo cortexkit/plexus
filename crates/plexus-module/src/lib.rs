@@ -4615,15 +4615,42 @@ fn connector_home_health(state: &ModuleState) -> ModuleControlResponse {
 
 fn refresh_store_health(state: &ModuleState, principals: &[String]) {
     let mut metrics = json!({});
-    match state.store().event_outbox_health() {
-        Ok(outbox) => {
-            metrics["outboxDepth"] = json!(outbox.depth);
-            metrics["overlappingKeyRows"] = json!(outbox.overlapping_key_rows);
-            metrics["droppedOnUnsubscribe"] = json!(outbox.dropped_on_unsubscribe);
-            metrics["droppedOnDelete"] = json!(outbox.dropped_on_delete);
-            metrics["orphanedMarkers"] = json!(outbox.orphaned_markers);
+    // The outbox aggregates count and join hundred-thousand-row tables, so
+    // they are sampled hourly and cached; the rest of this refresh stays
+    // per-minute. A failed re-query keeps the previous sample instead of
+    // dropping the gauge, because a store hiccup is not an empty outbox.
+    {
+        let mut cached = state
+            .health
+            .outbox_health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let due = cached.as_ref().is_none_or(|sample| {
+            sample.sampled_at.elapsed() >= crate::health::OUTBOX_HEALTH_INTERVAL
+        });
+        if due {
+            match state.store().event_outbox_health() {
+                Ok(outbox) => {
+                    let sample = crate::health::CachedOutboxHealth {
+                        sampled_at: std::time::Instant::now(),
+                        depth: outbox.depth,
+                        overlapping_key_rows: outbox.overlapping_key_rows,
+                        dropped_on_unsubscribe: outbox.dropped_on_unsubscribe,
+                        dropped_on_delete: outbox.dropped_on_delete,
+                        orphaned_markers: outbox.orphaned_markers,
+                    };
+                    *cached = Some(sample);
+                }
+                Err(error) => eprintln!(warn health: "outbox health read failed: {error}"),
+            }
         }
-        Err(error) => eprintln!(warn health: "outbox health read failed: {error}"),
+        if let Some(sample) = cached.as_ref() {
+            metrics["outboxDepth"] = json!(sample.depth);
+            metrics["overlappingKeyRows"] = json!(sample.overlapping_key_rows);
+            metrics["droppedOnUnsubscribe"] = json!(sample.dropped_on_unsubscribe);
+            metrics["droppedOnDelete"] = json!(sample.dropped_on_delete);
+            metrics["orphanedMarkers"] = json!(sample.orphaned_markers);
+        }
     }
     let stored_cadence = effective_ci_cadence_from_store(
         state.store(),

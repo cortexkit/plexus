@@ -605,8 +605,24 @@ impl PlexusStore {
         })
     }
 
-    /// Maintenance is independent of polling success or watch status. Fence
-    /// each watch separately so the writer is not held for the whole history.
+    /// Watches that can lose a row to this retention pass. The per-watch delete
+    /// only removes rows older than the age cutoff or beyond the row cap, and
+    /// protection (unpublished markers, the body floor, cursor windows) only
+    /// removes rows from that set. A watch whose rows are all newer than the
+    /// cutoff and within the cap therefore loses nothing, so skipping it is
+    /// exact, not a heuristic. One grouped read over the subscription-ordered
+    /// event index replaces a full per-watch scan for every watch.
+    pub(super) const EVENT_RETENTION_CANDIDATES_SQL: &str =
+        "SELECT principal, subscription_id FROM trigger_events
+         GROUP BY principal, subscription_id
+         HAVING MIN(created_at_ms) < ?1 OR COUNT(*) > ?2";
+
+    /// Maintenance is independent of polling success or watch status. Repair
+    /// orphaned markers and the repository-id cache first, then fence each
+    /// watch with prunable rows separately so the writer is not held for the
+    /// whole history. Retention windows are days long, so the scheduler runs
+    /// this pass hourly, not every minute: the candidate query above keeps an
+    /// idle pass to one indexed read instead of a scan per watch.
     pub fn prune_all_events(
         &self,
         max_age_ms: i64,
@@ -621,9 +637,14 @@ impl PlexusStore {
                 AND json_extract(fixed_args,'$.owner') IS NOT NULL AND json_extract(fixed_args,'$.repo') IS NOT NULL)", [])?;
             Ok(())
         })?;
+        let cutoff = now.saturating_sub(max_age_ms.max(0));
+        let cap = i64::try_from(max_rows).unwrap_or(i64::MAX);
         let watches: Vec<(String, String)> = self.inner.with_read(|conn| {
-            conn.prepare("SELECT principal,subscription_id FROM trigger_subscriptions ORDER BY principal,subscription_id")?
-                .query_map([], |row| Ok((row.get(0)?,row.get(1)?)))?.collect()
+            conn.prepare(Self::EVENT_RETENTION_CANDIDATES_SQL)?
+                .query_map(rusqlite::params![cutoff, cap], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect()
         })?;
         let mut removed = 0;
         for (principal, subscription) in watches {
@@ -1311,6 +1332,124 @@ mod tests {
             count(&store, "action_requests"),
             0,
             "scheduler must independently prune ceremony history"
+        );
+    }
+
+    #[test]
+    fn scheduler_event_retention_runs_hourly_not_minutely() {
+        let store = std::sync::Arc::new(store());
+        old_row(&store, "ci_runs", 0, Some(8 * AUDIT_MILLIS_PER_DAY));
+        let now = now_ms();
+        let engine = crate::governance::GovernanceEngine::new(
+            std::sync::Arc::clone(&store),
+            std::sync::Arc::new(crate::credentials::StubCredentialSource::default()),
+            std::sync::Arc::new(crate::transport::MockTransport::default()),
+        );
+        let scheduler = crate::scheduler::Scheduler::new(engine, 30 * AUDIT_MILLIS_PER_DAY);
+        // The first pass runs event retention: the hourly gate starts unset.
+        assert!(scheduler.run_pass(&[], now).is_empty());
+        assert_eq!(
+            count(&store, "trigger_events"),
+            0,
+            "the first pass must prune the expired row"
+        );
+        // A minute later the hourly gate holds, so a newly expired row
+        // survives the pass. Moving event retention back under the minute
+        // gate prunes here and fails this assertion.
+        old_event(&store, 0, Some(8 * AUDIT_MILLIS_PER_DAY));
+        assert_eq!(count(&store, "trigger_events"), 1);
+        assert!(scheduler.run_pass(&[], now + 60_000).is_empty());
+        assert_eq!(
+            count(&store, "trigger_events"),
+            1,
+            "event retention must not run every minute"
+        );
+        // Once the hourly gate opens, the next pass prunes again: the
+        // throttle delays retention, it never disables it.
+        scheduler.reset_event_retention_for_test();
+        assert!(scheduler.run_pass(&[], now + 61_000).is_empty());
+        assert_eq!(
+            count(&store, "trigger_events"),
+            0,
+            "the hourly pass must still prune expired rows"
+        );
+    }
+
+    fn retention_candidates(store: &PlexusStore, cutoff: i64, cap: i64) -> Vec<(String, String)> {
+        store
+            .inner
+            .with_read(|conn| {
+                conn.prepare(PlexusStore::EVENT_RETENTION_CANDIDATES_SQL)?
+                    .query_map(rusqlite::params![cutoff, cap], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?
+                    .collect()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn retention_candidates_search_the_index_without_a_table_scan() {
+        let store = store();
+        subscription(&store, "a", "ordered_timestamp");
+        let plan: Vec<String> = store
+            .inner
+            .with_read(|conn| {
+                conn.prepare(&format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    PlexusStore::EVENT_RETENTION_CANDIDATES_SQL
+                ))?
+                .query_map(rusqlite::params![0_i64, 1000_i64], |row| row.get(3))?
+                .collect()
+            })
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("idx_trigger_events_subscription")),
+            "the candidate query must use the subscription-ordered index: {plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .all(|line| !line.contains("SCAN") || line.contains("INDEX")),
+            "the candidate query must not scan the event table: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn retention_candidates_skip_idle_watches_without_changing_pruning() {
+        let store = store();
+        // One watch with an aged, published row: prunable.
+        old_row(&store, "ci_runs", 0, Some(8 * AUDIT_MILLIS_PER_DAY));
+        // One watch with only a recent row inside the cap: nothing to prune.
+        subscription(&store, "recent", "ci_runs");
+        let h = headers("p");
+        let other = "b".repeat(64);
+        commit(
+            &store,
+            "recent",
+            &[input(&json!({"number": 1}), &other, &h)],
+        );
+        let now = now_ms();
+        let cutoff = now - 30 * AUDIT_MILLIS_PER_DAY;
+        assert_eq!(
+            retention_candidates(&store, cutoff, 1000),
+            vec![("direct".to_string(), "a".to_string())],
+            "only the watch with an aged row may be visited"
+        );
+        assert_eq!(
+            store
+                .prune_all_events(30 * AUDIT_MILLIS_PER_DAY, 1000, now)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            count(&store, "trigger_events"),
+            1,
+            "the recent watch keeps its row"
+        );
+        assert!(
+            retention_candidates(&store, cutoff, 1000).is_empty(),
+            "after pruning, no watch may be visited"
         );
     }
 
@@ -2609,6 +2748,163 @@ mod tests {
         );
     }
 
+    fn seed_idle_scale_store(store: &PlexusStore, now: i64) {
+        let day = AUDIT_MILLIS_PER_DAY;
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                let mut subscription = conn.prepare(
+                    "INSERT INTO trigger_subscriptions
+                     (subscription_id, principal, connection_id, action, cadence_s, cursor_kind, cursor_state, schema_hash, status, created_at_ms, fixed_args)
+                     VALUES (?1, 'direct', 'c', 'list_issues', 300, ?2, ?3, 'hash', ?4, ?5, ?6)",
+                )?;
+                for sub in 0..200 {
+                    let kind = match sub % 3 {
+                        0 => "ordered_timestamp",
+                        1 => "ci_runs",
+                        _ => "sorted_head",
+                    };
+                    let cursor = if kind == "ci_runs" {
+                        "{}".to_string()
+                    } else {
+                        format!(r#"{{"watermark_ms":{now}}}"#)
+                    };
+                    let status = if sub < 104 { "active" } else { "retired" };
+                    subscription.execute(rusqlite::params![
+                        format!("sub-{sub:03}"),
+                        kind,
+                        cursor,
+                        status,
+                        now - 60 * day,
+                        format!(r#"{{"owner":"acme","repo":"repo-{}"}}"#, sub % 20),
+                    ])?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                let mut event = conn.prepare(
+                    "INSERT INTO trigger_events
+                     (event_id, principal, connection_id, subscription_id, vendor_event_id, payload_hash, payload, kind, observed_at_ms, created_at_ms, acked_at_ms, activity_at_ms, event_key)
+                     VALUES (?1, 'direct', 'c', ?2, ?3, 'hash', '{}', 'event', ?4, ?5, ?6, ?4, ?7)",
+                )?;
+                let mut marker = conn.prepare(
+                    "INSERT INTO event_outbox
+                     (event_key, event_id, event_name, repo_id, repo, created_at_ms, published_at_ms)
+                     VALUES (?1, ?2, 'github_issue_changed', 101, 'acme/repo', ?3, ?4)",
+                )?;
+                let mut n: i64 = 0;
+                for sub in 0..200 {
+                    let subscription_id = format!("sub-{sub:03}");
+                    for i in 0..950 {
+                        let created = now - 29 * day + (i as i64 * 29 * day) / 950;
+                        let event_id = format!("eid-{sub:03}-{i:04}");
+                        let key = format!("{n:064x}");
+                        let acked: Option<i64> =
+                            (i % 2 == 0).then_some(created + 60_000);
+                        event.execute(rusqlite::params![
+                            event_id,
+                            subscription_id,
+                            format!("ev-{sub:03}-{i:04}"),
+                            created,
+                            created,
+                            acked,
+                            key,
+                        ])?;
+                        marker.execute(rusqlite::params![
+                            key,
+                            event_id,
+                            created,
+                            acked.map(|at| at + 3_600_000),
+                        ])?;
+                        n += 1;
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        seed_idle_scale_tail(store, now);
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "INSERT INTO audit_journal (ts, principal, actor, acting_principal, decision, reason_code)
+                     WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i + 1 FROM n WHERE i < 1600000)
+                     SELECT ?1 + (i * 2592000000) / 1600000, 'direct', 'seed', 'direct', 'allow', 'seed' FROM n",
+                    [now - 30 * day],
+                )?;
+                conn.execute(
+                    "INSERT INTO audit_journal (ts, principal, actor, acting_principal, decision, reason_code)
+                     WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i + 1 FROM n WHERE i < 5000)
+                     SELECT ?1, 'direct', 'seed', 'direct', 'allow', 'seed' FROM n",
+                    [now - 40 * day],
+                )?;
+                for i in 0..300 {
+                    conn.execute(
+                        "INSERT INTO action_requests
+                         (request_id, principal, connection_id, action, args_snapshot, schema_hash, requester, status, expires_at, created_at_ms, settled_at_ms)
+                         VALUES (?1, 'direct', 'c', 'list_issues', '{}', 'hash', 'seed', 'denied', 0, ?2, ?2)",
+                        rusqlite::params![format!("ceremony-{i:03}"), now - 40 * day],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO binding_tickets
+                         (ticket_id, principal, connection_id, ref_role, expires_at, status, created_at_ms, settled_at_ms)
+                         VALUES (?1, 'direct', 'c', 'api_key', ?2, 'expired', ?2, ?2)",
+                        rusqlite::params![format!("ticket-{i:03}"), now - 40 * day],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        for i in 0..300 {
+            store
+                .insert_reservation_at_for_test(
+                    "direct",
+                    &format!("reservation-{i:03}"),
+                    "dispatched",
+                    now - 40 * day,
+                )
+                .unwrap();
+        }
+    }
+
+    /// One aged, published row per watch: prunable, so the timed passes prove
+    /// they delete rather than merely scan.
+    fn seed_idle_scale_tail(store: &PlexusStore, now: i64) {
+        let day = AUDIT_MILLIS_PER_DAY;
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                for sub in 0..200 {
+                    let subscription_id = format!("sub-{sub:03}");
+                    let event_id = format!("tail-{sub:03}");
+                    let key = format!("tail-{sub:03}");
+                    conn.execute(
+                        "INSERT INTO trigger_events
+                         (event_id, principal, connection_id, subscription_id, vendor_event_id, payload_hash, payload, kind, observed_at_ms, created_at_ms, acked_at_ms, activity_at_ms, event_key)
+                         VALUES (?1, 'direct', 'c', ?2, ?1, 'hash', '{}', 'event', ?3, ?3, ?4, ?3, ?5)",
+                        rusqlite::params![
+                            event_id,
+                            subscription_id,
+                            now - 40 * day,
+                            now - 40 * day + 60_000,
+                            key,
+                        ],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO event_outbox
+                         (event_key, event_id, event_name, repo_id, repo, created_at_ms, published_at_ms)
+                         VALUES (?1, ?2, 'github_issue_changed', 101, 'acme/repo', ?3, ?4)",
+                        rusqlite::params![key, event_id, now - 40 * day, now - 8 * day],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
     fn bulk_ci(store: &PlexusStore, n: usize, age: i64, unkeyed: usize) {
         let now = now_ms();
         store.inner.with_conn_fenced(|conn| {
@@ -2626,6 +2922,164 @@ mod tests {
             }
             Ok(())
         }).unwrap();
+    }
+
+    /// Production-scale idle-housekeeping measurement: about 200 watches,
+    /// about 190k events with outbox markers, a 1.6M-row audit journal, and
+    /// small expired ceremony and reservation tails. It times the work the
+    /// minute cadence used to do every pass (a full per-watch retention loop
+    /// plus the outbox health count-and-join) against the new per-minute cost
+    /// (an idle scheduler pass, both retention gates shut) and the new hourly
+    /// costs (the skipping retention pass, the cached health query).
+    ///
+    /// Every timed section asserts it did real work, so a green run that
+    /// measured an empty pass fails instead of printing a fast zero. Run
+    /// explicitly; seeding takes a few minutes and the suite gate skips it.
+    #[test]
+    #[ignore = "measurement: production-scale idle housekeeping"]
+    fn measure_idle_housekeeping_at_production_scale() {
+        let scratch = crate::test_scratch::Scratch::database("idle-housekeeping-scale");
+        let descriptor = StorageDescriptor {
+            module_id: "plexus".into(),
+            storage_namespace: new_id("idle-scale"),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: scratch.to_string_lossy().into_owned(),
+            },
+        };
+        let store = std::sync::Arc::new(PlexusStore::open(&descriptor).unwrap());
+        let now = now_ms();
+        seed_idle_scale_store(&store, now);
+        assert_eq!(count(&store, "trigger_subscriptions"), 200);
+        assert!(
+            count(&store, "trigger_events") >= 189_000,
+            "the event history must be at live scale"
+        );
+        assert!(
+            count(&store, "event_outbox") >= 189_000,
+            "the outbox must be at live scale"
+        );
+        assert!(count(&store, "audit_journal") >= 1_600_000);
+        let (wall, cpu, removed_old) = timed(|| {
+            let mut removed = 0;
+            for sub in 0..200 {
+                removed += store
+                    .prune(
+                        "direct",
+                        &format!("sub-{sub:03}"),
+                        30 * AUDIT_MILLIS_PER_DAY,
+                        1000,
+                    )
+                    .unwrap();
+            }
+            removed
+        });
+        assert_eq!(removed_old, 200, "the aged tail must be pruned");
+        println!(
+            "scale-housekeeping old_loop_200watches wall_ms={wall} cpu_ms={cpu:?} removed={removed_old}"
+        );
+        seed_idle_scale_tail(&store, now);
+        let (wall, cpu, removed_new) = timed(|| {
+            store
+                .prune_all_events(30 * AUDIT_MILLIS_PER_DAY, 1000, now)
+                .unwrap()
+        });
+        assert_eq!(removed_new, 200, "the hourly pass must prune the same tail");
+        println!(
+            "scale-housekeeping prune_all wall_ms={wall} cpu_ms={cpu:?} removed={removed_new}"
+        );
+        let (wall, cpu, removed_idle) = timed(|| {
+            store
+                .prune_all_events(30 * AUDIT_MILLIS_PER_DAY, 1000, now)
+                .unwrap()
+        });
+        assert_eq!(removed_idle, 0, "steady state must prune nothing");
+        println!(
+            "scale-housekeeping prune_all_idle wall_ms={wall} cpu_ms={cpu:?} removed={removed_idle}"
+        );
+        let (wall, cpu, depth) = timed(|| store.event_outbox_health().unwrap().depth);
+        // Half the seeded markers are unpublished: 475 per watch over 200
+        // watches, so the gauge must see about 95k pending rows.
+        assert!(depth > 90_000, "the gauge must see the live-scale depth");
+        println!("scale-housekeeping outbox_health wall_ms={wall} cpu_ms={cpu:?} depth={depth}");
+        // The bounded deletes that stay on the minute cadence, timed before
+        // the scheduler section below: its first pass would run the same
+        // minute deletes through the production path and consume the tails.
+        let (wall, cpu, audit_removed) =
+            timed(|| store.prune_audit(now, 30 * AUDIT_MILLIS_PER_DAY).unwrap());
+        assert_eq!(
+            audit_removed, 1000,
+            "the audit batch must delete a full batch"
+        );
+        println!(
+            "scale-housekeeping prune_audit wall_ms={wall} cpu_ms={cpu:?} removed={audit_removed}"
+        );
+        let (wall, cpu, _) = timed(|| {
+            store
+                .prune_ceremony_history(now, 30 * AUDIT_MILLIS_PER_DAY)
+                .unwrap()
+        });
+        assert_eq!(
+            count(&store, "action_requests"),
+            0,
+            "expired ceremony must be gone"
+        );
+        assert_eq!(
+            count(&store, "binding_tickets"),
+            0,
+            "expired tickets must be gone"
+        );
+        println!("scale-housekeeping prune_ceremony wall_ms={wall} cpu_ms={cpu:?}");
+        let (wall, cpu, reservations_removed) = timed(|| store.prune_reservations(now).unwrap());
+        assert_eq!(
+            reservations_removed, 300,
+            "expired reservations must be reclaimed"
+        );
+        println!(
+            "scale-housekeeping prune_reservations wall_ms={wall} cpu_ms={cpu:?} removed={reservations_removed}"
+        );
+        // The new per-minute scheduler cost: both retention gates shut, no
+        // subscriptions polled. The first pass opens the gates through the
+        // production path; the timed pass is the idle one the fleet now pays
+        // every second.
+        let engine = crate::governance::GovernanceEngine::new(
+            std::sync::Arc::clone(&store),
+            std::sync::Arc::new(crate::credentials::StubCredentialSource::default()),
+            std::sync::Arc::new(crate::transport::MockTransport::default()),
+        );
+        let scheduler = crate::scheduler::Scheduler::new(engine, 30 * AUDIT_MILLIS_PER_DAY);
+        assert!(scheduler.run_pass(&[], now).is_empty());
+        let (wall, cpu, _) = timed(|| scheduler.run_pass(&[], now + 1_000).len());
+        println!("scale-housekeeping idle_pass wall_ms={wall} cpu_ms={cpu:?}");
+    }
+
+    /// Wall time plus, on Linux, the process CPU time consumed by `work`.
+    /// Single-threaded SQLite work makes the two nearly equal; the CPU
+    /// figure separates compute from wall-clock waits.
+    fn timed<T>(work: impl FnOnce() -> T) -> (u128, Option<u128>, T) {
+        let wall = std::time::Instant::now();
+        let cpu_before = process_cpu_ms();
+        let value = work();
+        let cpu = match (cpu_before, process_cpu_ms()) {
+            (Some(before), Some(after)) => Some(after.saturating_sub(before)),
+            _ => None,
+        };
+        (wall.elapsed().as_millis(), cpu, value)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_cpu_ms() -> Option<u128> {
+        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+        let rest = stat.rfind(')').map(|end| &stat[end + 1..])?;
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let utime: u128 = fields.get(11)?.parse().ok()?;
+        let stime: u128 = fields.get(12)?.parse().ok()?;
+        Some((utime + stime) * 10)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn process_cpu_ms() -> Option<u128> {
+        None
     }
 
     #[test]
@@ -2685,6 +3139,13 @@ mod tests {
 
     fn old_row(store: &PlexusStore, kind: &str, activity: i64, published_age: Option<i64>) {
         subscription(store, "a", kind);
+        old_event(store, activity, published_age);
+    }
+
+    /// Commit and age another event under the existing subscription "a",
+    /// for passes after retention already pruned the first one. The
+    /// subscription row survives pruning; only its events are deleted.
+    fn old_event(store: &PlexusStore, activity: i64, published_age: Option<i64>) {
         let h = headers("p");
         let body = json!({"number": 7});
         let mut event = input(&body, KEY, &h);

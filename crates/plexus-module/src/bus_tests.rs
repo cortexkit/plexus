@@ -2569,6 +2569,63 @@ async fn health_shows_outbox_depth_last_publish_error_and_effective_ci_cadence()
     state.health.clear_publish_error();
 }
 
+#[tokio::test]
+async fn outbox_health_gauge_is_sampled_hourly_not_every_refresh() {
+    assert!(
+        crate::health::OUTBOX_HEALTH_INTERVAL >= std::time::Duration::from_secs(3600),
+        "the outbox count-and-join must not run on the minute refresh"
+    );
+    let (_scratch, store) = test_store("bus_outbox_health_cache");
+    let sub_id = seed_connection_and_subscription(&store, "conn-1");
+    let key1 = "4444444444444444444444444444444444444444444444444444444444444444";
+    let key2 = "5555555555555555555555555555555555555555555555555555555555555555";
+    insert_test_event(
+        &store,
+        &sub_id,
+        key1,
+        "github_issue_changed",
+        "owner/repo",
+        &json!({"test": 1}),
+    );
+    let state = Arc::new(ModuleState {
+        health: Arc::new(crate::health::HealthState::new()),
+        runtime: crate::runtime_for_test(store.clone()),
+    });
+    crate::refresh_store_health(&state, &["direct".into()]);
+    let depth = || {
+        state
+            .health
+            .store_metrics
+            .lock()
+            .unwrap()
+            .get("outboxDepth")
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    assert_eq!(depth(), 1, "the first refresh must query the store");
+    // A second event lands a minute later. Refreshing on the minute cadence
+    // must reuse the cached gauge, not re-run the count-and-join over the
+    // event history. Querying every refresh again fails this assertion.
+    insert_test_event(
+        &store,
+        &sub_id,
+        key2,
+        "github_issue_changed",
+        "owner/repo",
+        &json!({"test": 2}),
+    );
+    crate::refresh_store_health(&state, &["direct".into()]);
+    assert_eq!(depth(), 1, "the minute refresh must reuse the cached gauge");
+    // Once the hourly sample expires, the next refresh queries again.
+    {
+        let mut cached = state.health.outbox_health.lock().unwrap();
+        let sample = cached.as_mut().expect("a sample must be cached");
+        sample.sampled_at -= crate::health::OUTBOX_HEALTH_INTERVAL;
+    }
+    crate::refresh_store_health(&state, &["direct".into()]);
+    assert_eq!(depth(), 2, "an expired sample must refresh from the store");
+}
+
 #[test]
 fn credential_debug_never_exposes_secret_material() {
     let cred = Credential {

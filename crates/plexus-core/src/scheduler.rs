@@ -101,6 +101,14 @@ const CIRCUIT_BREAKER_FAILURES: i64 = 5;
 const WAITING_APPROVAL_RETRIES_PER_PASS: usize = 16;
 const POLL_PASS_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Event retention scans every watch's history plus a full orphan sweep, so
+/// it runs hourly: every retention window it enforces is days long (a 7-day
+/// body floor, 30-day event and audit windows), and minute-level pruning
+/// buys nothing while costing a per-watch scan. The bounded deletes below
+/// (audit, ceremony, receipts, reservations) stay on the minute cadence:
+/// each removes at most one small indexed batch, and the audit batch must
+/// drain faster than vendors and operators append rows.
+const EVENT_RETENTION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// How long a watch waits before its next poll after one that failed on a
 /// credential only a person can repair (sign in again, replace a revoked or
@@ -263,6 +271,10 @@ where
     pass_budget: std::time::Duration,
     resume_after: Mutex<Option<(String, String)>>,
     last_housekeeping: Mutex<Option<std::time::Instant>>,
+    /// Last pass that ran event retention. Separate from `last_housekeeping`
+    /// because the event scan runs hourly while the bounded deletes run every
+    /// minute; one stamp cannot gate both cadences.
+    last_event_retention: Mutex<Option<std::time::Instant>>,
 }
 
 /// The outcome of one subscription within a scheduling pass.
@@ -325,6 +337,7 @@ where
             pass_budget: POLL_PASS_BUDGET,
             resume_after: Mutex::new(None),
             last_housekeeping: Mutex::new(None),
+            last_event_retention: Mutex::new(None),
         }
     }
 
@@ -393,14 +406,27 @@ where
         self.run_pass_report(principals, now_ms).outcomes
     }
 
+    /// Forget the last event-retention pass so the next pass runs it. The
+    /// hourly gate has no other test seam: pass time cannot advance an
+    /// [`std::time::Instant`] clock, and waiting out the interval would stall
+    /// the suite for an hour.
+    #[cfg(test)]
+    pub(crate) fn reset_event_retention_for_test(&self) {
+        *self
+            .last_event_retention
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+    }
+
     /// Run one scheduling pass: suspend any cadence-due subscription whose
     /// vendor-failure streak has reached the circuit breaker, then poll the
     /// remaining due subscriptions ONE AT A TIME, sequentially.
     ///
     /// Subscriptions still in backoff are skipped this pass and produce no
     /// outcome. Audit and reservation retention ride the same scheduler pass and
-    /// each remove at most one storage-level batch; neither suppresses due polling
-    /// if a trim fails. Returns the terminal [`PollCycle`] for every subscription
+    /// each remove at most one storage-level batch; event retention runs on
+    /// its own hourly cadence because it scans every watch. Neither suppresses
+    /// due polling if a trim fails. Returns the terminal [`PollCycle`] for every subscription
     /// that was suspended or polled, in selection order, together with the
     /// selection-failure count for this pass only, not since boot.
     pub fn run_pass_report(&self, principals: &[String], now_ms: i64) -> PassReport {
@@ -434,7 +460,19 @@ where
                 false
             }
         };
-        if housekeeping_due {
+        let event_retention_due = {
+            let mut last = self
+                .last_event_retention
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if last.is_none_or(|at| at.elapsed() >= EVENT_RETENTION_INTERVAL) {
+                *last = Some(std::time::Instant::now());
+                true
+            } else {
+                false
+            }
+        };
+        if event_retention_due {
             match self.store.prune_all_events(
                 crate::poller::UNACKED_MAX_AGE_MS,
                 crate::poller::UNACKED_MAX_ROWS,
@@ -448,6 +486,8 @@ where
                     eprintln!(warn scheduler: "event retention pass failed: {error}");
                 }
             }
+        }
+        if housekeeping_due {
             if let Err(error) = self
                 .store
                 .prune_ceremony_history(now_ms, self.audit_retention_window_ms)
@@ -856,6 +896,19 @@ mod tests {
             "the deferred watch must go before the previous slow watch"
         );
         assert!(ids.contains(&second[0].subscription_id));
+    }
+
+    #[test]
+    fn event_retention_interval_is_hourly_not_minutely() {
+        assert!(
+            EVENT_RETENTION_INTERVAL >= std::time::Duration::from_secs(3600),
+            "event retention scans every watch, so it must not run every minute: {:?}",
+            EVENT_RETENTION_INTERVAL
+        );
+        assert!(
+            HOUSEKEEPING_INTERVAL < EVENT_RETENTION_INTERVAL,
+            "the bounded minute deletes must stay more frequent than the full event scan"
+        );
     }
 
     #[test]
