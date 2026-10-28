@@ -17,6 +17,10 @@ use std::process::ExitCode;
 
 use serde_json::{json, Value};
 
+#[cfg(test)]
+#[path = "../../../plexus-core/tests/support/bounded.rs"]
+mod bounded;
+
 const DEFAULT_MODULE_ID: &str = "plexus";
 
 /// Exit codes are distinguishable so a script can tell "the ceiling refused
@@ -27,6 +31,7 @@ const EXIT_UNKNOWN: u8 = 3;
 const EXIT_USAGE: u8 = 64;
 
 fn main() -> ExitCode {
+    install_diagnostics();
     // This is a standalone operator client, never a supervised module. When it
     // runs from a shell that is itself inside the fleet (an agent session), the
     // parent module's identity leaks in through the environment; the subc client
@@ -51,6 +56,19 @@ fn main() -> ExitCode {
             ExitCode::from(failure.code)
         }
     }
+}
+
+fn install_diagnostics() {
+    // Core diagnostics must reach the operator without the daemon's identity
+    // or timestamp prefix: this process is a CLI, not a supervised module.
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_target(false)
+        .with_level(false)
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 #[derive(Debug)]
@@ -2273,6 +2291,30 @@ fn schema_type(schema: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn admin_diagnostics_are_plain_warn_and_error_messages_on_stderr() {
+        const CHILD: &str = "PLEXUS_ADMIN_DIAGNOSTICS_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            super::install_diagnostics();
+            tracing::warn!(target: "plexus_core::storage", "core rollback warning");
+            tracing::error!(target: "plexus_core::storage", "core failure");
+            tracing::info!(target: "plexus_core::storage", "core informational message");
+            return;
+        }
+        let output = super::bounded::child_test_output(
+            "tests::admin_diagnostics_are_plain_warn_and_error_messages_on_stderr",
+            &[(CHILD, "1"), ("RUST_LOG", "trace")],
+            std::time::Duration::from_secs(10),
+            "admin diagnostic installer",
+        );
+        assert_eq!(
+            String::from_utf8(output.stderr).expect("UTF-8 diagnostics"),
+            "core rollback warning\ncore failure\n",
+            "diagnostics must be plain stderr messages at WARN and above, without a daemon or module tag"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("core rollback warning"));
+    }
+
     #[test]
     fn confirmation_calls_allow_five_minutes() {
         assert!(super::admin_call_options(true).timeout >= std::time::Duration::from_secs(300));

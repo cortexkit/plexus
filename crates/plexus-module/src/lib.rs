@@ -840,8 +840,10 @@ fn spawn_trigger_scheduler_every(
     mut stop: mpsc::Receiver<()>,
     audit_retention_window_ms: i64,
 ) -> tokio::task::JoinHandle<()> {
+    let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let scheduler =
         plexus_core::Scheduler::new(state.runtime.engine.clone(), audit_retention_window_ms)
+            .with_stop_flag(Arc::clone(&stopping))
             .with_relay_health(state.health.relay.clone())
             .with_agent_registry(Arc::clone(&state.runtime.agent_registry));
     let scheduler = match &state.runtime.repository_registry {
@@ -849,6 +851,15 @@ fn spawn_trigger_scheduler_every(
         None => scheduler,
     };
     tokio::spawn(async move {
+        // A separate task can receive shutdown while the pass is inside
+        // block_in_place. The JoinSet aborts the listener if the scheduler
+        // unwinds or is aborted, rather than leaving a detached task behind.
+        let mut stop_listener = tokio::task::JoinSet::new();
+        let stop_flag = Arc::clone(&stopping);
+        stop_listener.spawn(async move {
+            stop.recv().await;
+            stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
         // Held for the life of the task: dropping it — on a clean break, or on
         // an unwind if a pass panics — marks the scheduler dead in the health
         // report, so a module that has silently stopped polling stops claiming
@@ -869,7 +880,8 @@ fn spawn_trigger_scheduler_every(
         let mut last_health_probe: Option<std::time::Instant> = None;
         loop {
             tokio::select! {
-                _ = stop.recv() => break,
+                biased;
+                _ = stop_listener.join_next() => break,
                 _ = tick.tick() => {
                     // Checked on every tick, because the tick is this task's
                     // first action once the host comes back: a suspended machine
@@ -892,6 +904,7 @@ fn spawn_trigger_scheduler_every(
                     // subscription or connection. Due-selection is
                     // principal-scoped, so each is scanned through its own query.
                      let principals = blocking_section(|| health_probe_principals(&state));
+                     if stopping.load(std::sync::atomic::Ordering::Relaxed) { break; }
                      let now = plexus_core::storage::now_ms();
                     let sweep_due = last_sweep.is_none_or(|last| last.elapsed() >= POOL_SWEEP_INTERVAL);
                     if sweep_due {
@@ -1012,12 +1025,16 @@ fn spawn_trigger_scheduler_every(
                         state
                             .health
                             .stamp_scheduler_pass_duration(attempted, elapsed_ms);
-                        if health_probe_due {
-                             run_health_probes_for(&state, &principals);
-                             refresh_store_health(&state, &principals);
+                        if health_probe_due && !stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                              run_health_probes_for(&state, &principals);
                         }
-                        if sweep_due {
+                        if health_probe_due && !stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                              refresh_store_health(&state, &principals);
+                        }
+                        if sweep_due && !stopping.load(std::sync::atomic::Ordering::Relaxed) {
                             state.runtime.mcp_transport.sweep_idle();
+                        }
+                        if sweep_due && !stopping.load(std::sync::atomic::Ordering::Relaxed) {
                             state.runtime.rest_transport.sweep_idle();
                         }
                     });
