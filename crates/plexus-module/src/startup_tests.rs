@@ -283,21 +283,13 @@ async fn delayed_startup_serves_warming_then_registers_before_polling() {
     write_frame(&mut bytes, &bind(80)).await.unwrap();
     while reads.try_recv().is_ok() {}
     input.write_all(&bytes[..10]).await.unwrap();
-    assert_eq!(
-        recv_within(
-            async {
-                let mut consumed = 0;
-                while consumed < 10 {
-                    consumed += reads.recv().await?;
-                }
-                Some(consumed)
-            },
-            RESPONSE_DEADLINE,
-            "partial frame consumed",
-        )
-        .await,
-        10,
-    );
+    // Each read is bounded on its own, so a stalled reader fails the test by
+    // name instead of hanging it.
+    let mut consumed = 0;
+    while consumed < 10 {
+        consumed += recv_within(reads.recv(), RESPONSE_DEADLINE, "partial frame consumed").await;
+    }
+    assert_eq!(consumed, 10);
     release.send(()).unwrap();
     assert!(
         recv_within(polled.recv(), RESPONSE_DEADLINE, "first scheduler poll").await,
