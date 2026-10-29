@@ -49,7 +49,7 @@ if [ "$mode" = --ci ]; then
   mkdir -p "$RUSTUP_HOME" "$NATS_SERVER_INSTALL_DIR"
   export PATH="$NATS_SERVER_INSTALL_DIR:$PATH"
   run_phase "stable host toolchain with clippy and rustfmt" \
-    rustup toolchain install stable --profile minimal --component clippy,rustfmt
+    rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
   # Read the CI pins rather than maintaining a second version/digest pair.
@@ -73,7 +73,7 @@ PY
   try_phase "Rust workspace gate" bash "$0" || failed+=("Rust workspace gate")
   try_phase "conformance fixtures" bash scripts/run-conformance-fixtures.sh || failed+=("conformance fixtures")
   if try_phase "pinned guest toolchain and WASI target" \
-    rustup toolchain install 1.99.0 --profile minimal --target wasm32-wasip1; then
+    rustup toolchain install 1.99.0 --profile minimal --target wasm32-wasip1 --no-self-update; then
     try_phase "embedded probe guest rebuild and comparison" \
       bash scripts/build-probe-guest.sh --check || failed+=("embedded probe guest rebuild and comparison")
   else

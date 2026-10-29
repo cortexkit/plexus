@@ -217,6 +217,13 @@ esac
         self.assertIn(f'home={checkout}/target/prepush-tools/rustup', commands)
         self.assertIn(f'nats-dir={checkout}/target/prepush-tools/bin', commands)
 
+    def test_ci_mode_never_self_updates_the_shared_rustup_binary(self):
+        _result, commands, _checkout = self.ci_mode()
+        installs = [line for line in commands.splitlines() if line.startswith('rustup toolchain install ')]
+        self.assertEqual(len(installs), 2)
+        for install in installs:
+            self.assertIn('--no-self-update', install)
+
 
 class PinnedFixturesTests(Scratch):
     def setUp(self):
