@@ -51,7 +51,7 @@ exit "${REMOTE_RC:-0}"
         phases = self.log.read_text().splitlines()
         self.assertEqual(phases[0], 'fast --fast')
         self.assertIn('--platform linux --vcpus 16 --net', phases[1])
-        self.assertTrue(phases[1].endswith('-- bash scripts/rust-test-gate.sh --ci'))
+        self.assertTrue(phases[1].endswith('-- bash scripts/prepush.sh --full'))
         self.assertEqual(self.prepush('--require-pass', self.sha).returncode, 0)
         tag = git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                   'tag', '-a', 'annotated', '-m', 'tag', cwd=self.checkout)
@@ -65,7 +65,7 @@ exit "${REMOTE_RC:-0}"
     def test_fast_failure_never_dispatches_and_names_the_step(self):
         result = self.prepush(FAST_RC='17')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('FAIL prepush: fast local preflight', result.stderr)
+        self.assertIn(f'FAIL prepush: {self.sha} (fast local preflight)', result.stderr)
         self.assertEqual(self.log.read_text().splitlines(), ['fast --fast'])
         self.assertFalse(self.receipt().exists())
 
@@ -73,8 +73,25 @@ exit "${REMOTE_RC:-0}"
         self.assertEqual(self.prepush().returncode, 0)
         result = self.prepush(REMOTE_RC='23')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('FAIL prepush: Linux CI parity gate', result.stderr)
+        self.assertIn(f'FAIL prepush: {self.sha} (Linux CI parity gate', result.stderr)
         self.assertFalse(self.receipt().exists())
+
+    def test_fast_entry_point_never_dispatches_and_names_the_commit(self):
+        result = self.prepush('--fast')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'PASS prepush-fast: {self.sha}', result.stdout)
+        self.assertEqual(self.log.read_text().splitlines(), ['fast --fast'])
+        self.assertFalse(self.receipt().exists())
+
+    def test_full_entry_point_runs_gate_without_motor_and_names_the_commit(self):
+        result = self.prepush('--full')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'PASS prepush-full: {self.sha}', result.stdout)
+        self.assertEqual(self.log.read_text().splitlines(), ['fast --ci'])
+        self.assertFalse(self.receipt().exists())
+        failed = self.prepush('--full', FAST_RC='7')
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn(f'FAIL prepush-full: {self.sha}', failed.stderr)
 
     def test_dirty_checkout_and_head_movement_cannot_receive_a_pass(self):
         dirty = self.checkout / 'untracked'
@@ -82,7 +99,7 @@ exit "${REMOTE_RC:-0}"
         result = self.prepush()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('clean committed source', result.stderr)
-        self.assertNotIn('remote', self.log.read_text())
+        self.assertFalse(self.log.exists(), 'dirty source must refuse before either phase starts')
         dirty.unlink()
         result = self.prepush(MOVE_HEAD='1')
         self.assertNotEqual(result.returncode, 0)

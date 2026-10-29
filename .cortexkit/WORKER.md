@@ -5,10 +5,16 @@
 - Build and test on Linux through `runon` or `ck motor run`, never on the Mac.
   The no-compile fast phase of `scripts/prepush.sh` is the exception: it runs
   locally before dispatching the full Linux gate at 16 vCPUs.
-- Commit the intended changes, run `scripts/prepush.sh` before delivering, and
-  paste its final PASS line in the delivery. A PASS is valid for that commit
-  only; changing the commit requires another run. The train and pre-push hook
-  require a recent PASS and still require green CI before landing main.
+- Commit the intended changes, then run `scripts/prepush.sh --fast` locally
+  and `scripts/prepush.sh --full` with `runon: "linux,16c,net"` (network enabled
+  for pinned tool downloads). Paste both commit-naming PASS lines in the delivery.
+  Changing the commit requires another run. Worker sandboxes cannot connect to
+  Motor directly; do not invoke plain `scripts/prepush.sh` from a worker shell.
+- From a shell with access to `ck motor`, plain `scripts/prepush.sh` runs fast
+  locally, dispatches full through Motor, and writes a local receipt valid for
+  24 hours. The train and pre-push hook require this receipt for the pushed
+  commit and still require green CI before landing main. Separate phase runs do not write a
+  combined receipt.
 - For a bug fix, show once that the new regression test fails without the fix.
 
 ## Pre-approved: no need to ask

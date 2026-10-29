@@ -63,12 +63,17 @@ Commit the intended changes first. The gate runs a no-compile local preflight,
 then dispatches the full CI checks to Linux with `ck motor run` at 16 vCPUs
 (network enabled for pinned tools). It requires the `ck` CLI and local Cargo
 metadata/rustfmt support; compilation and tests never run on the Mac.
-`scripts/rust-test-gate.sh --ci` is the Linux entry point. It runs
+Sandboxed workers instead run `scripts/prepush.sh --fast` locally and
+`scripts/prepush.sh --full` with `runon: "linux,16c"` and network enabled.
+Both phases print a PASS naming the checked commit. The Linux entry point does
+not call Motor; workers paste both PASS lines in their delivery.
+The full phase delegates to `scripts/rust-test-gate.sh --ci`. It runs
 source-convention checks, the operator-script tests,
 `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`
 and `cargo test --workspace --locked`, one cargo command at a time, plus the
 CI-pinned NATS install, all conformance fixtures and the pinned guest rebuild.
-A final `PASS prepush: <sha> ...` records a local receipt valid for 24 hours.
+A final `PASS prepush: <sha> ...` from the combined command records a local
+receipt valid for 24 hours; separate phase runs do not write that receipt.
 The train and optional pre-push hook require that receipt for the pushed commit;
 rebasing requires a new PASS. Green GitHub CI is still required to land main.
 
