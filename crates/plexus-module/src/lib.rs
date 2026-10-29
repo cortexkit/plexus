@@ -4676,10 +4676,18 @@ fn event_get_reply(
     };
     match store.event_by_key_version(event_key, reader, plexus_core::now_ms(), version as u8) {
         Ok(EventLookupOutcome::Found(event)) => {
-            if audience.is_some_and(|audience| {
-                !flow_audience::repository_allowed(store, audience, &event.headers.repo)
-            }) {
-                return tool_error("event_not_visible", "event not visible");
+            if let Some(audience) = audience {
+                match flow_audience::try_repository_allowed(store, audience, &event.headers.repo) {
+                    Ok(true) => {}
+                    Ok(false) => return tool_error("event_not_visible", "event not visible"),
+                    Err(error) => {
+                        return crate::wire::store_failure(
+                            "check event repository audience",
+                            "event could not be read",
+                            &error,
+                        );
+                    }
+                }
             }
             let (body, digest, published_at) = if version == 2 {
                 let (Some(body), Some(digest)) = (&event.envelope_v2, &event.digest_v2) else {
