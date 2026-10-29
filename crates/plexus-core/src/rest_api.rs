@@ -115,7 +115,9 @@ impl RestConfig {
         let mut config = Self::new(manifest.transport.url.clone())
             .with_bindings(manifest.credential_bindings.clone())
             .with_actions(actions_from_manifest(manifest));
-        config.private_endpoint = manifest.transport.url_from_connection;
+        // Gmail errors can echo message text; omit vendor diagnostics just as
+        // for private instances rather than persist an unsealed copy in logs.
+        config.private_endpoint = manifest.transport.url_from_connection || manifest.key == "gmail";
         config.error_signals = crate::error_signals::from_manifest(manifest);
         config
     }

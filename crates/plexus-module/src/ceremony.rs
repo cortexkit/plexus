@@ -96,6 +96,9 @@ pub(crate) fn rebind_credential(
     if connection.app_key == "searxng_rest" && id != "apikey:searxng" {
         return json!({"error": {"code": "invalid_request", "message": "SearXNG requires apikey:searxng"}});
     }
+    if connection.app_key == "gmail" && id != "oauth:gmail" {
+        return json!({"error":{"code":"invalid_request","message":"Gmail requires oauth:gmail"}});
+    }
     // App handles have their own reference and generation. Changing the ordinary
     // binding would have no effect on their dispatch authority, so refuse it.
     match state
@@ -316,13 +319,20 @@ pub(crate) fn issue_ticket(state: &Arc<ModuleState>, principal_key: &str, params
         return json!({"error": {"code": "invalid_request", "message": "credential_id must be a string"}});
     }
     if let Some(id) = credential_id {
+        if app_key == "gmail" && id != "oauth:gmail" {
+            return json!({"error":{"code":"invalid_request","message":"Gmail requires oauth:gmail"}});
+        }
         if app_key == "searxng_rest" && id != "apikey:searxng" {
             return json!({"error": {"code": "invalid_request", "message": "SearXNG requires apikey:searxng or no credential"}});
         }
         if credential_free || !plexus_core::credentials::valid_credential_id(id) {
             return json!({"error": {"code": "invalid_request", "message": "supply a well-formed credential_id only for a credentialed vendor"}});
         }
-        if let Err(error) = prove_credential_read(state, id) {
+        if let Err(error) = if app_key == "gmail" {
+            Ok(())
+        } else {
+            prove_credential_read(state, id)
+        } {
             return error;
         }
     }
@@ -384,25 +394,50 @@ pub(crate) fn issue_ticket(state: &Arc<ModuleState>, principal_key: &str, params
     } else {
         Some(plexus_core::fingerprint(&reference_bytes))
     };
-    match state.store().issue_binding_ticket_audited_at_instance(
-        principal_key,
-        &connection_id,
-        app_key,
-        ref_role,
-        &reference_bytes,
-        &ceiling,
-        &|_| {
-            AuditRecord::ceremony(
-                principal_key,
-                Some(app_key),
-                Some(&connection_id),
-                "issue_ticket",
-                &ceiling.risk.to_string(),
-                fingerprint.as_deref(),
-            )
-        },
-        instance.as_ref(),
-    ) {
+    let mailbox = if app_key == "gmail" {
+        match state.runtime.engine.gmail_mailbox() {
+            Ok(mailbox) => {
+                match state.store().gmail_mailbox(principal_key, &connection_id) {
+                    Ok(Some(pinned)) if pinned != mailbox => {
+                        return json!({"error":{"code":"gmail_account_mismatch"}})
+                    }
+                    Err(_) => return json!({"error":{"code":"store_failure"}}),
+                    _ => {}
+                }
+                Some(mailbox)
+            }
+            Err(code) => return json!({"error":{"code":code}}),
+        }
+    } else {
+        None
+    };
+    let audit = |_: &plexus_core::BindingTicket| {
+        AuditRecord::ceremony(
+            principal_key,
+            Some(app_key),
+            Some(&connection_id),
+            "issue_ticket",
+            &ceiling.risk.to_string(),
+            fingerprint.as_deref(),
+        )
+    };
+    let issued = if let Some(mailbox) = mailbox {
+        state
+            .store()
+            .issue_gmail_ticket(principal_key, &connection_id, &mailbox, &ceiling, &audit)
+    } else {
+        state.store().issue_binding_ticket_audited_at_instance(
+            principal_key,
+            &connection_id,
+            app_key,
+            ref_role,
+            &reference_bytes,
+            &ceiling,
+            &audit,
+            instance.as_ref(),
+        )
+    };
+    match issued {
         Ok(Err(refusal)) => refusal_response(&refusal),
         Ok(Ok(ticket)) => {
             json!({"result": {

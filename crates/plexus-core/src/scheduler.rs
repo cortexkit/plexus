@@ -517,6 +517,9 @@ where
             return PassReport::default();
         }
         if housekeeping_due {
+            if let Err(error) = self.store.prune_sent_text(now_ms) {
+                eprintln!(warn scheduler: "sent text retention pass failed: {error}");
+            }
             if let Err(error) = self
                 .store
                 .prune_ceremony_history(now_ms, self.audit_retention_window_ms)

@@ -605,13 +605,15 @@ impl<P: CkcredRoutePeer + 'static> CkcredCredentialSource<P> {
 }
 
 impl<P: CkcredRoutePeer> CkcredCredentialSource<P> {
-    /// Read a minted installation token by vault id, never an App private key.
+    /// Read a scoped credential by vault id, never an App private key.
     /// The daemon's subc client authenticates the module on this route.
     ///
     /// The vault answers `get_scoped` with the same body as `credential.get`:
     /// the token as a JSON array of byte integers plus `expires_at_ms` and
     /// `record_version`, with the `credential_id` it actually resolved beside
-    /// them. The token bytes are opaque. GitHub's installation token format is
+    /// them. Optional account_id identifies an OAuth mailbox; consumers that
+    /// pin account identity must refuse when it is absent. The token bytes are
+    /// opaque. GitHub's installation token format is
     /// GitHub's choice, and a vault can serve one that is neither `ghs_`
     /// prefixed nor 40 characters, so nothing here inspects its shape.
     pub fn get_scoped(&self, credential_id: &str) -> Result<ScopedCredential, CredentialError> {
@@ -627,6 +629,11 @@ impl<P: CkcredRoutePeer> CkcredCredentialSource<P> {
             .and_then(|result| result.get("credential_id"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
+        let account_id = response
+            .get("result")
+            .and_then(|result| result.get("account_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         let credential = parse_credential_get_response(response)?;
         let resolved_id = resolved_id.ok_or(CredentialError::Permanent(
             PermanentCredentialError::Corrupt,
@@ -634,6 +641,7 @@ impl<P: CkcredRoutePeer> CkcredCredentialSource<P> {
         Ok(ScopedCredential {
             credential_id: resolved_id,
             credential,
+            account_id,
         })
     }
 }
@@ -644,6 +652,7 @@ impl<P: CkcredRoutePeer> CkcredCredentialSource<P> {
 pub struct ScopedCredential {
     pub credential_id: String,
     pub credential: ResolvedCredential,
+    pub account_id: Option<String>,
 }
 
 fn route_error_to_credential_error(error: CkcredRouteError) -> CredentialError {

@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod gmail;
+
 /// The `tracing` re-export [`diag!`] reaches through `$crate`.
 ///
 /// The macro expands in whichever crate wrote the diagnostic, so every path it

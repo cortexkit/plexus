@@ -144,6 +144,10 @@ impl ModuleRuntime {
             credential_provider: github_handle_credentials.clone(),
         }));
         let engine = with_freshness_check(engine, &store, &mcp_transport, &rest_transport);
+        let engine = match production_gmail_backend(connection_file) {
+            Some(backend) => engine.with_gmail_backend(backend),
+            None => engine,
+        };
         let engine = match consent_cards {
             Some(cards) => engine.with_consent_cards(cards),
             None => engine,
@@ -360,6 +364,24 @@ fn production_handle_credential_provider(
     Some(Arc::new(HandleCredentialPreparer::new(
         source,
         Arc::new(plexus_core::storage::now_ms),
+    )))
+}
+
+fn production_gmail_backend(
+    connection_file: &Path,
+) -> Option<Arc<plexus_core::gmail::GmailBackend>> {
+    let module = credentials_route_module_id()?;
+    let peer = plexus_core::credentials::SubcCkcredRoutePeer::connect(
+        connection_file,
+        &module,
+        plexus_bind_identity(),
+    )
+    .ok()?;
+    let vault = Arc::new(plexus_core::gmail::vault::Vault::new(Arc::new(peer)));
+    Some(Arc::new(plexus_core::gmail::GmailBackend::new(
+        vault.clone(),
+        vault.clone(),
+        vault,
     )))
 }
 

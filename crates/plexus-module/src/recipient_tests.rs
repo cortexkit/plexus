@@ -239,6 +239,52 @@ fn args() -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gmail_sent_text_admin_is_direct_only_and_audits_failed_reads() {
+    let f = Fixture::new(true);
+    let reply = f
+        .manage(
+            manifest::ADMIN_SENT_TEXT_READ_OP,
+            json!({"row_id":"missing"}),
+        )
+        .await;
+    assert_eq!(reply["error"]["code"], "gmail_vault_unavailable");
+    assert_eq!(
+        f.store()
+            .list_audit("direct")
+            .unwrap()
+            .iter()
+            .filter(|r| r.action.as_deref() == Some("sent_text_read"))
+            .count(),
+        1
+    );
+    f.routes
+        .insert(
+            3,
+            1,
+            Principal::Reserved {
+                module_id: "aft".into(),
+            },
+        )
+        .unwrap();
+    for method in [
+        manifest::ADMIN_SENT_TEXT_READ_OP,
+        manifest::ADMIN_SENT_TEXT_RETENTION_OP,
+    ] {
+        let refused = f.manage(method, json!({"row_id":"missing","days":1})).await;
+        assert_eq!(refused["error"]["code"], "operator_authority_required");
+    }
+    assert_eq!(
+        f.store()
+            .list_audit("direct")
+            .unwrap()
+            .iter()
+            .filter(|r| r.action.as_deref() == Some("sent_text_read"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn listed_recipients_under_allow_dispatch_and_audit_normalized_identities() {
     let f = Fixture::new(true);
     f.list(None, "alice@example.com");

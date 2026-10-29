@@ -82,6 +82,9 @@ const TABLES: &[&str] = &[
     "reservations",
     "binding_tickets",
     "audit_journal",
+    "gmail_accounts",
+    "sent_text",
+    "sent_text_settings",
 ];
 
 /// Tables of the current schema that `import_store` deliberately does not
@@ -300,6 +303,10 @@ fn copy_store(
             "consent_call_keys" => " WHERE request_id IN (SELECT request_id FROM action_requests WHERE reconciliation_status IS NOT NULL)",
             _ => "",
         };
+        if table == "sent_text_settings" {
+            tx.execute("DELETE FROM sent_text_settings", [])
+                .map_err(|e| e.to_string())?;
+        }
         let mut statement = old
             .prepare(&format!("SELECT * FROM {table}{predicate}"))
             .map_err(|e| format!("{table}: {e}"))?;
@@ -395,6 +402,9 @@ fn identity(table: &str, row: &Record) -> String {
         "app_manifests" => vec!["principal", "key"],
         "catalog_actions" => vec!["principal", "connection_id", "name"],
         "connections" => vec!["principal", "connection_id"],
+        "gmail_accounts" => vec!["principal", "connection_id"],
+        "sent_text" => vec!["row_id"],
+        "sent_text_settings" => vec![],
         "recipient_allowlist" => vec!["connection_id", "recipient"],
         "grants" => vec!["principal", "grant_id"],
         "policies" => vec!["principal", "policy_id"],

@@ -16,8 +16,6 @@ use cortexkit_store_types::StorageBackend;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-// The event-outbox tests hash fixture bodies through this import.
-#[cfg(test)]
 use sha2::Digest;
 
 use crate::actor_attribution::{served_actor_fields, ActorAttribution, ActorUnknown};
@@ -1151,6 +1149,36 @@ ALTER TABLE audit_journal ADD COLUMN scope_on_behalf_of_agent TEXT;
         statements: "ALTER TABLE connections ADD COLUMN instance_url TEXT;
                      ALTER TABLE binding_tickets ADD COLUMN instance_url TEXT;",
     },
+    Migration {
+        version: 58,
+        statements: r#"
+CREATE TABLE gmail_accounts (
+    principal TEXT NOT NULL, connection_id TEXT NOT NULL, mailbox TEXT NOT NULL,
+    next_send_ms INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (principal, connection_id)
+);
+CREATE TABLE sent_text (
+    row_id TEXT PRIMARY KEY, principal TEXT NOT NULL, connection_id TEXT NOT NULL,
+    recipient_hash TEXT NOT NULL, key_id TEXT NOT NULL, enc BLOB NOT NULL,
+    ciphertext BLOB NOT NULL, expires_at_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX sent_text_expiry ON sent_text(expires_at_ms);
+CREATE TABLE sent_text_settings (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    retention_days INTEGER NOT NULL CHECK(retention_days BETWEEN 1 AND 3650)
+);
+INSERT INTO sent_text_settings VALUES (1,30);
+ALTER TABLE action_requests ADD COLUMN terminal_args_snapshot TEXT;
+CREATE TRIGGER scrub_gmail_terminal_text AFTER UPDATE OF status ON action_requests
+WHEN NEW.action='gmail.send' AND NEW.status IN ('consumed','denied','expired','cancelled')
+     AND NEW.terminal_args_snapshot IS NOT NULL
+BEGIN
+    UPDATE action_requests SET args_snapshot=NEW.terminal_args_snapshot,
+        terminal_args_snapshot=NULL
+    WHERE principal=NEW.principal AND request_id=NEW.request_id;
+END;
+"#,
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
@@ -1214,6 +1242,9 @@ mod repository_ownership_store;
 
 #[path = "store/recipients.rs"]
 mod recipients_store;
+
+#[path = "store/sent_text.rs"]
+pub mod sent_text_store;
 
 #[path = "store/ceiling.rs"]
 mod ceiling_store;
@@ -1310,6 +1341,8 @@ const GITHUB_HANDLE_CONNECTION_PREFIX: &str = "github-handle-";
 /// fails when a table gains a `connection_id` column without being listed
 /// here or among those exceptions.
 pub(crate) const CONNECTION_KEYED_TABLES: &[(&str, &str)] = &[
+    ("gmail_accounts", "principal=?1 AND connection_id=?2"),
+    ("sent_text", "principal=?1 AND connection_id=?2"),
     (
         "probe_subscriptions",
         "subscription_id IN (SELECT subscription_id FROM trigger_subscriptions
@@ -7436,6 +7469,59 @@ impl PlexusStore {
         audit: AuditFor<'_, BindingTicket>,
         instance: Option<&crate::instance_url::InstanceUrl>,
     ) -> Result<Result<BindingTicket, CeremonyRefusal>, StoreError> {
+        self.write_binding_ticket_with_mailbox(
+            principal,
+            connection_id,
+            create_for_app,
+            ref_role,
+            credential_id_bytes,
+            ceiling,
+            audit,
+            instance,
+            None,
+        )
+    }
+
+    /// Gmail enrollment records the verified mailbox in the ticket transaction.
+    pub fn issue_gmail_ticket(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        mailbox: &str,
+        ceiling: &Ceiling,
+        audit: &dyn Fn(&BindingTicket) -> AuditRecord,
+    ) -> Result<Result<BindingTicket, CeremonyRefusal>, StoreError> {
+        self.write_binding_ticket_with_mailbox(
+            principal,
+            connection_id,
+            Some("gmail"),
+            "credential_reference",
+            b"oauth:gmail",
+            ceiling,
+            Some(audit),
+            None,
+            Some(mailbox),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_binding_ticket_with_mailbox(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        create_for_app: Option<&str>,
+        ref_role: &str,
+        credential_id_bytes: &[u8],
+        ceiling: &Ceiling,
+        audit: AuditFor<'_, BindingTicket>,
+        instance: Option<&crate::instance_url::InstanceUrl>,
+        mailbox: Option<&str>,
+    ) -> Result<Result<BindingTicket, CeremonyRefusal>, StoreError> {
+        if create_for_app == Some("gmail") && mailbox.is_none() {
+            return Err(StoreError::Backend(
+                "gmail_account_unconfirmed: verified mailbox required".into(),
+            ));
+        }
         if let Some(app_key) = create_for_app {
             match (
                 self.manifest_takes_instance_url(app_key)?,
@@ -7531,6 +7617,9 @@ impl PlexusStore {
                         }
                     }
                 }
+            }
+            if let Some(mailbox) = mailbox {
+                conn.execute("INSERT INTO gmail_accounts(principal,connection_id,mailbox) VALUES (?1,?2,?3) ON CONFLICT(principal,connection_id) DO UPDATE SET mailbox=CASE WHEN mailbox=excluded.mailbox THEN mailbox ELSE NULL END", [principal,connection_id,mailbox])?;
             }
             // The pending binding belongs only to the newest ticket. Superseded
             // tickets must not pair their ceiling with that newer credential.
@@ -10831,6 +10920,24 @@ fn insert_action_request_on_conn(
             scope.and_then(|scope| scope.flow_id.as_deref()),
         ],
     )?;
+    // Approval dispatch and exact-argument re-calls need plaintext while the
+    // request is pending. Precompute only the terminal copy; the status trigger
+    // swaps it in atomically for every terminal path, including withdrawal and
+    // expiry. Gmail is the only archived-text action; other actions keep their
+    // existing snapshot contract.
+    if row.action == "gmail.send" {
+        let mut terminal: Value =
+            serde_json::from_str(&row.snapshot).expect("serialized arguments");
+        for field in ["subject", "body"] {
+            if let Some(text) = terminal.get(field).and_then(Value::as_str) {
+                terminal[field] = Value::String(format!(
+                    "sha256:{}",
+                    hex::encode(sha2::Sha256::digest(text.as_bytes()))
+                ));
+            }
+        }
+        conn.execute("UPDATE action_requests SET terminal_args_snapshot=?1 WHERE principal=?2 AND request_id=?3", rusqlite::params![terminal.to_string(),row.principal,row.request_id])?;
+    }
     Ok(())
 }
 
@@ -11427,7 +11534,10 @@ mod tests {
             }).unwrap();
         };
         old_insert(&inner, "before");
-        assert_eq!(inner.migrate("plexus", MIGRATIONS).unwrap().applied, 1);
+        assert_eq!(
+            inner.migrate("plexus", MIGRATIONS).unwrap().applied,
+            u32::try_from(MIGRATIONS.len() - boundary).unwrap()
+        );
         let store = PlexusStore {
             inner,
             grant_journal: None,

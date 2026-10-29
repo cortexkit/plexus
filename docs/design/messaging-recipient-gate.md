@@ -59,6 +59,29 @@ management operation, write risk audit, and `widening: true` in its result).
 Listing is read-only. Authority changes and audit records share one fenced
 transaction.
 
+## Gmail sent-text custody
+
+Gmail uses the existing approval behavior: subject and body are plaintext in
+`action_requests.args_snapshot` only while a request can still execute. Pending
+and approved requests need that copy for exact-argument matching and dispatch.
+On consumption, denial, expiry or withdrawal, a SQL trigger swaps in a prepared
+snapshot in the same transaction, replacing only subject and body with SHA-256
+hashes and keeping every recipient and other argument. There is no new manifest
+content marker: archiving selects `gmail.send` explicitly. Expired
+approvals are terminalized by the scheduler's existing housekeeping pass.
+
+The composed RFC 822 message is separately sealed with RFC 9180 base-mode
+X25519/HKDF-SHA256/ChaCha20-Poly1305 before sending. Its row id, connection id
+and normalized recipient-set hash are associated data. Only the operator's
+direct, unscoped admin route can open it through the vault, and every read
+attempt is audited. `sent-text-read --row <id>` returns that composed message;
+`sent-text-retention --days <1..3650>` sets an independent retention window
+(default 30 days). The audit's original argument hash survives ciphertext expiry.
+
+Scrubbing is logical SQLite deletion, not erasure of old WAL pages, free pages,
+or backups captured while an approval was pending. Those temporary plaintext
+copies still require the operator's disk and backup protection.
+
 ## Approval policy correction
 
 Review of the recipient gate exposed an existing ordinary-approval bypass of

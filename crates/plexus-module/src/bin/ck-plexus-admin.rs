@@ -116,6 +116,8 @@ commands:
   recipients-add     widen send authority (preview by default, --apply to write)
   recipients-remove narrow send authority (preview by default, --apply to write)
   recipients-list   read a connection and agent's allowlist
+  sent-text-read    open an archived sent message through the vault (audited)
+  sent-text-retention set the sent-text retention period independently of audit
   connector-home status
                  read the live Entorhinal role and plexus gate
   import-store   offline cutover to a new store (no --subc required)
@@ -175,7 +177,9 @@ Transport exit 2 means no daemon connection was made; exit 3 means the outcome
 is unknown after submission. Inspect state before retrying an exit-3 operation.
 
 recipients-add|recipients-remove --connection <id> [--agent <id>] --recipient <id> [--apply]
-recipients-list --connection <id> [--agent <id>]
+ recipients-list --connection <id> [--agent <id>]
+ sent-text-read --row <id>
+ sent-text-retention --days <1..3650>
     Omit --agent for the module-only (SQL NULL) key, not all agents.
     Email addresses are trimmed and lowercased. Phone identifiers are only trimmed.
     Add/remove previews and applied changes are audited. Approval never adds an entry.
@@ -543,6 +547,14 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         "recipients-add" | "recipients-remove" | "recipients-list" => {
             recipients_request(command, &flags)?
         }
+        "sent-text-read" => (
+            plexus_module::manifest::ADMIN_SENT_TEXT_READ_OP,
+            json!({"row_id":flags.required("--row")?}),
+        ),
+        "sent-text-retention" => (
+            plexus_module::manifest::ADMIN_SENT_TEXT_RETENTION_OP,
+            json!({"days":flags.required("--days")?.parse::<i64>().map_err(|_|Failure::usage("--days must be an integer"))?}),
+        ),
         other => {
             eprintln!("{USAGE}");
             return Err(Failure::usage(format!("unknown command '{other}'")));
@@ -672,6 +684,8 @@ fn accepted_flags(command: &str) -> Option<&'static [&'static str]> {
             &["--connection", "--agent", "--recipient", "--apply"]
         }
         "recipients-list" => &["--connection", "--agent"],
+        "sent-text-read" => &["--row"],
+        "sent-text-retention" => &["--days"],
         _ => return None,
     })
 }
@@ -1810,7 +1824,11 @@ fn report(command: &str, response: &Value, flags: &Flags) -> Result<(), Failure>
             Failure::unknown("malformed management response: expected result object or error")
         })?;
     match command {
-        "recipients-add" | "recipients-remove" | "recipients-list" => println!(
+        "recipients-add"
+        | "recipients-remove"
+        | "recipients-list"
+        | "sent-text-read"
+        | "sent-text-retention" => println!(
             "{}",
             serde_json::to_string_pretty(result).expect("recipient response JSON")
         ),
