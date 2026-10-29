@@ -38,7 +38,7 @@ rustix = { version = "1", features = ["process"], optional = true }
 cortexkit-store = { workspace = true }
 cortexkit-store-types = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-zip = { version = "=9.0.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 httpdate = { workspace = true }
 subc-client-rs = { workspace = true }
 subc-protocol = { workspace = true }
