@@ -479,6 +479,57 @@ async fn named_refusals_malformed_and_timeout_fail_closed_without_side_effects()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_get_audience_refusals_have_retryable_policy() {
+    let mut core = Core::new(global()).await;
+    let (state, _, _, _scratch) = setup(core.audiences());
+    let args = json!({"event_key":"a".repeat(64),"event_name":"github_issue_changed"});
+    for (upstream, expected, retryable) in [
+        ("flow_unknown", "flow_unknown", false),
+        ("flow_not_approved", "flow_not_approved", false),
+        ("flow_audience_conflict", "flow_audience_conflict", false),
+        (
+            "flow_audience_unavailable",
+            "flow_audience_unavailable",
+            true,
+        ),
+        ("unexpected_error", "flow_audience_unavailable", true),
+    ] {
+        for error_frame in [true, false] {
+            let error =
+                json!({"code":upstream,"message":"core refusal","detail":{"versions":[1,2]}});
+            core.behavior(json!({"reply":if error_frame { error } else { json!({"error":error}) },"error_frame":error_frame}));
+            let reply = call(&state, "events_get", args.clone(), Some(scope(None)));
+            assert_eq!(reply["error"]["code"], expected, "{reply}");
+            assert_eq!(reply["error"]["retryable"], retryable, "{reply}");
+            assert_eq!(reply["error"]["transmission"], "not_sent");
+            if upstream == "flow_audience_conflict" {
+                assert_eq!(reply["error"]["detail"]["versions"], json!([1, 2]));
+            }
+        }
+    }
+    for malformed in [
+        Value::Null,
+        json!({"error":"bad"}),
+        json!({"flow_id":"other","audience":{"kind":"global"},"revision":"r"}),
+        json!({"flow_id":"flow-a","audience":{"kind":"unknown"},"revision":"r"}),
+    ] {
+        core.behavior(json!({"reply":malformed}));
+        let reply = call(&state, "events_get", args.clone(), Some(scope(None)));
+        assert_eq!(reply["error"]["code"], "flow_audience_unavailable");
+        assert_eq!(reply["error"]["retryable"], true, "{reply}");
+    }
+    core.behavior(json!({"reply":{"flow_id":"flow-a","audience":{"kind":"agent","agent_id":"agent-a"},"revision":"r"}}));
+    let reply = call(&state, "events_get", args.clone(), Some(scope(None)));
+    assert_eq!(reply["error"]["code"], "flow_audience_mismatch");
+    assert_eq!(reply["error"]["retryable"], false);
+
+    let (state, _, _, _scratch) = setup(FlowAudiences::new(None));
+    let reply = call(&state, "events_get", args, Some(scope(None)));
+    assert_eq!(reply["error"]["code"], "flow_audience_unavailable");
+    assert_eq!(reply["error"]["retryable"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn global_workspace_and_agent_audiences_preserve_their_authority() {
     for answer in [
         global(),
@@ -740,6 +791,7 @@ async fn events_use_stored_repository_and_hide_excluded_event_existence() {
             json!({"event_key":"f".repeat(64),"event_name":"wrong-name","version":version}),
             "event_not_visible",
         );
+        assert_eq!(excluded["error"]["retryable"], false);
         assert_eq!(
             excluded, unknown,
             "excluded and unknown events must be indistinguishable"

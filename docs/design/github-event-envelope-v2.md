@@ -238,6 +238,36 @@ checked exactly as before. A v2 request for an old row without an envelope
 refuses `event_not_visible`, just like an unknown or inaccessible key; there is
 no fallback to v1.
 
+Every `events_get` refusal includes a boolean `error.retryable`. The legacy
+`events op:get` surface carries the same field. This is additive: existing error
+codes, messages, details, and successful replies do not change. Consumers such as
+Basal should retain the event and retry when it is `true`, rather than dropping
+the event because a transient read failed.
+
+| `retryable` | Refusal codes |
+| --- | --- |
+| `true` | `flow_audience_unavailable`, `store_failure`, `resource_exhausted`, `route_not_bound`, `request_deadline_exceeded`, `internal_error` |
+| `false` | `invalid_request`, `argument_undeclared`, `secret_input_rejected`, `events_get_carrier_refused`, `event_not_visible`, `event_name_mismatch`, `flow_audience_mismatch`, `flow_unknown`, `flow_not_approved`, `flow_audience_conflict`, `call_mode_unsupported`, `flow_carrier_not_admitted`, `flow_scope_required` |
+
+`flow_audience_unavailable` includes an unreachable core, a malformed audience
+reply, and an unknown refusal from core. `route_not_bound` is retryable because
+the route can be stale after a Plexus restart; the next attempt opens a new one.
+All other refusals default to `false`, so a newly introduced code still carries
+the field and needs an explicit transient classification to enable retries.
+
+The field also covers validation and admission before the event-read handler:
+oversized, undecodable, or non-object requests; missing arguments; retired
+identity fields; invalid presets, call keys, or relay origins; unbound routes;
+unsupported call modes; unadmitted flow carriers; missing flow scopes; expired
+request budgets; exhausted admission or work capacity; and internal route/worker
+failures. Admission saturation uses a terminal ERROR frame with `retryable` next
+to `code`, rather than a facade response's `error` object, as before.
+
+Workspace-audience filtering of an event returns `event_not_visible`, not
+`flow_audience_excludes_repository`, to hide excluded events' existence. The
+latter code is terminal (`retryable: false`) if encountered, but is currently
+emitted only for tools with caller-supplied repository selectors.
+
 Migration 47 adds three nullable columns on `event_outbox`: `envelope_v2`,
 `digest_v2`, and `published_v2_at_ms`. This minimal shape reuses the existing v1
 marker row and its routing labels without changing its primary key or v1 ack.
