@@ -129,6 +129,8 @@ pub(crate) fn envelope(
     }
     if matches!(event_kind, GithubEventKind::CiRun) {
         body["run_id"] = item["id"].clone();
+        body["workflow_id"] = item["workflow_id"].clone();
+        body["workflow_path"] = item["path"].clone();
         // Workflow runs lack completed_at; updated_at is their completion time
         // only once GitHub marks the run completed. Jobs use their own field.
         body["completed_at"] = if item["status"] == "completed" {
@@ -774,6 +776,7 @@ mod tests {
                 "head_branch":"train/check-persist-wait","head_sha":"3c8a2c3c7ca8e3407c60b7953c1267920b482a1b",
                 "url":"https://github.com/cortexkit/aft/actions/runs/38097281838","run_id":38097281838_i64,
                 "run_attempt":2,"completed_at":"2026-10-11T00:41:42Z",
+                "workflow_id":271019280,"workflow_path":".github/workflows/tests.yml",
                 // A push run inside the repository.
                 "actor":"octo-lantern","triggering_actor":"octo-lantern","event":"push",
                 "head_repo_is_fork":false
@@ -793,6 +796,7 @@ mod tests {
                 "head_branch":"fix/pi-model-discovery-readiness","head_sha":"f65b17d9d2bcd48126557b3afbe9df84691852e9",
                 "url":"https://github.com/cortexkit/magic-context/actions/runs/38083743687","run_id":38083743687_i64,
                 "run_attempt":1,"completed_at":"2026-10-10T20:26:40Z",
+                "workflow_id":362227872,"workflow_path":".github/workflows/harness-coverage-check.yml",
                 // A pull request from the octo-quartz fork.
                 "actor":"octo-checks[bot]","triggering_actor":"octo-checks[bot]",
                 "event":"pull_request_target","head_repo_is_fork":true

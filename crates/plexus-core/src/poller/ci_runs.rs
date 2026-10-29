@@ -2014,6 +2014,47 @@ mod tests {
     }
 
     #[test]
+    fn polled_ci_run_carries_workflow_identity_or_explicit_nulls() {
+        for has_identity in [true, false] {
+            let f = Fixture::new();
+            let mut run = run(1, 1, f.now, "completed", Some("success"));
+            if has_identity {
+                run["workflow_id"] = json!(123456789);
+                run["path"] = json!(".github/workflows/ci.yml");
+            }
+            f.add(run.clone(), vec![], true);
+            assert_eq!(f.poll_checked(0), 1);
+            assert_eq!(
+                f.requests()
+                    .iter()
+                    .map(|request| request.action.as_str())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "list_workflow_runs",
+                    "list_workflow_runs",
+                    RUN_READ,
+                    JOBS_READ
+                ],
+                "workflow identity must come from reads the poll already makes"
+            );
+            let markers = f.markers();
+            assert_eq!(markers.len(), 1);
+            let marker = &markers[0];
+            assert_eq!(serde_json::from_str::<Value>(&marker.body).unwrap(), run);
+            let envelope: Value =
+                serde_json::from_str(marker.envelope_v2.as_deref().unwrap()).unwrap();
+            assert_eq!(envelope["kind"], "ci_run");
+            let (workflow_id, workflow_path) = if has_identity {
+                (json!(123456789), json!(".github/workflows/ci.yml"))
+            } else {
+                (Value::Null, Value::Null)
+            };
+            assert_eq!(envelope.get("workflow_id"), Some(&workflow_id));
+            assert_eq!(envelope.get("workflow_path"), Some(&workflow_path));
+        }
+    }
+
+    #[test]
     fn polled_jobs_take_run_attribution_from_the_run_read_without_extra_requests() {
         let f = Fixture::new();
         f.add(

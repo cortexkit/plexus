@@ -151,6 +151,18 @@ run's `updated_at` when `status` is `completed`; otherwise the field is `null`.
 This normalization applies only to newly inserted envelopes. Previously stored
 envelopes remain byte-identical, including any `completed_at: null` value.
 
+CI-run envelopes additionally always contain:
+
+| Field | Type (or null) | Source |
+| --- | --- | --- |
+| `workflow_id` | integer | The run object's `workflow_id`, identifying the workflow independently of its display name. |
+| `workflow_path` | string | The run object's `path`, for example `.github/workflows/ci.yml`. |
+
+Both webhook and polling envelopes copy these values from the GitHub run object
+already available, without additional requests or fallback values. Missing fields
+are `null`. Only newly inserted envelopes gain these fields; stored bodies and
+their digests, event keys, and v1 bodies remain unchanged.
+
 CI-job envelopes additionally always contain:
 
 | Field | Type (or null) | Source |

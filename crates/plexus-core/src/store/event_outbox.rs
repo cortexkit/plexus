@@ -3549,13 +3549,15 @@ mod tests {
                 older["actor"], "octo-lantern",
                 "a new {item_kind} envelope carries the run values"
             );
-            // Rebuild the envelope an older binary, before run attribution and
-            // job execution fields were added, would have stored for this change.
+            // Rebuild the envelope an older binary, before run attribution,
+            // workflow identity and job execution fields, would have stored.
             for field in [
                 "actor",
                 "triggering_actor",
                 "event",
                 "head_repo_is_fork",
+                "workflow_id",
+                "workflow_path",
                 "runner_name",
                 "steps_run",
             ] {
@@ -3573,8 +3575,8 @@ mod tests {
                     )
                 })
                 .unwrap();
-            // A second copy arrives with run values and job execution fields;
-            // the stored envelope is not rewritten.
+            // A second copy arrives with run values, workflow identity and job
+            // execution fields; the stored envelope is not rewritten.
             commit(&store, subscription_id, &[make()]);
             grant(
                 &store,

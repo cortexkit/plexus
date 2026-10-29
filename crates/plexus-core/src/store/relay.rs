@@ -1376,6 +1376,44 @@ mod tests {
         ])
     }
 
+    #[test]
+    fn ci_run_webhook_carries_workflow_identity_or_explicit_nulls() {
+        for has_identity in [true, false] {
+            let store = ci_relay_store();
+            let mut run = capture("webhook_ci_run");
+            if has_identity {
+                run["workflow_id"] = json!(123456789);
+                run["path"] = json!(".github/workflows/ci.yml");
+            } else {
+                for field in ["workflow_id", "path"] {
+                    run.as_object_mut().unwrap().remove(field);
+                }
+            }
+            store
+                .commit_relay_event(
+                    "github",
+                    "stream",
+                    &ci_webhook(
+                        1,
+                        "completed",
+                        "workflow_run",
+                        run,
+                        "2030-10-08T09:00:00.000Z",
+                    ),
+                )
+                .unwrap();
+            let envelope = envelope_for(&store, "ci-1");
+            assert_eq!(envelope["kind"], "ci_run");
+            let (workflow_id, workflow_path) = if has_identity {
+                (json!(123456789), json!(".github/workflows/ci.yml"))
+            } else {
+                (Value::Null, Value::Null)
+            };
+            assert_eq!(envelope.get("workflow_id"), Some(&workflow_id));
+            assert_eq!(envelope.get("workflow_path"), Some(&workflow_path));
+        }
+    }
+
     /// `workflow_run` webhooks that are not completed publish nothing, but the
     /// relay remembers their run values. A later job webhook for the same run
     /// attempt carries them in its v2 envelope; a job for an unseen run gets
