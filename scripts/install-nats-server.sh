@@ -18,5 +18,12 @@ if ! printf '%s  %s\n' "$NATS_SERVER_LINUX_AMD64_SHA256" "$install_dir/$archive"
   exit 1
 fi
 tar -xzf "$install_dir/$archive" -C "$install_dir"
-sudo install -m 0755 "$install_dir/nats-server-v${NATS_SERVER_VERSION}-linux-amd64/nats-server" /usr/local/bin/nats-server
-nats-server --version
+binary="$install_dir/nats-server-v${NATS_SERVER_VERSION}-linux-amd64/nats-server"
+if [ -n "${NATS_SERVER_INSTALL_DIR:-}" ]; then
+  mkdir -p "$NATS_SERVER_INSTALL_DIR"
+  install -m 0755 "$binary" "$NATS_SERVER_INSTALL_DIR/nats-server"
+  "$NATS_SERVER_INSTALL_DIR/nats-server" --version
+else
+  sudo install -m 0755 "$binary" /usr/local/bin/nats-server
+  nats-server --version
+fi

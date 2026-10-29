@@ -42,6 +42,12 @@ try_phase() {
 
 if [ "$mode" = --ci ]; then
   run_phase "Linux runner" test "$(uname -s)" = Linux
+  # The ck motor Linux build server mounts preinstalled toolchains and
+  # /usr/local/bin read-only. Download gate tools into ignored workspace output.
+  export RUSTUP_HOME="$repo_root/target/prepush-tools/rustup"
+  export NATS_SERVER_INSTALL_DIR="$repo_root/target/prepush-tools/bin"
+  mkdir -p "$RUSTUP_HOME" "$NATS_SERVER_INSTALL_DIR"
+  export PATH="$NATS_SERVER_INSTALL_DIR:$PATH"
   run_phase "stable host toolchain with clippy and rustfmt" \
     rustup toolchain install stable --profile minimal --component clippy,rustfmt
   export RUSTUP_TOOLCHAIN=stable

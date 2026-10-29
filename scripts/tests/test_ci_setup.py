@@ -7,7 +7,7 @@ from test_scripts import SCRIPTS, SYSTEM_PATH, Scratch, run, write_executable
 
 
 class NatsInstallerTests(Scratch):
-    def test_archive_checksum_is_checked_before_installation(self):
+    def installer_fixture(self):
         archive = self.tmp / 'nats.tar.gz'
         payload = b'#!/bin/sh\necho fixture\n'
         with tarfile.open(archive, 'w:gz') as output:
@@ -30,6 +30,10 @@ exit 99
         env = {'PATH': f'{tools}:{SYSTEM_PATH}', 'NATS_SERVER_VERSION': '2.15.0',
                'NATS_SERVER_LINUX_AMD64_SHA256': digest, 'NATS_FIXTURE': str(archive),
                'NATS_CALLS': str(calls), 'TMPDIR': str(self.tmp)}
+        return env, calls, payload
+
+    def test_archive_checksum_is_checked_before_installation(self):
+        env, calls, _payload = self.installer_fixture()
         valid = run(['bash', SCRIPTS / 'install-nats-server.sh'], env=env)
         self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
         self.assertIn('/usr/local/bin/nats-server', calls.read_text())
@@ -38,3 +42,20 @@ exit 99
         self.assertNotEqual(invalid.returncode, 0, 'mismatched archive digest must refuse installation')
         self.assertIn('checksum verification failed', invalid.stderr)
         self.assertFalse(calls.exists(), 'checksum refusal must precede sudo install')
+
+    def test_private_install_directory_needs_no_sudo_and_preserves_checksum_guard(self):
+        env, calls, payload = self.installer_fixture()
+        destination = self.tmp / 'private tools'
+        env['NATS_SERVER_INSTALL_DIR'] = str(destination)
+        valid = run(['bash', SCRIPTS / 'install-nats-server.sh'], env=env)
+        self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+        binary = destination / 'nats-server'
+        self.assertTrue(binary.exists(), 'the verified binary must land in the requested private directory')
+        self.assertEqual(binary.read_bytes(), payload)
+        self.assertIn('fixture', valid.stdout)
+        self.assertFalse(calls.exists(), 'private installation must not invoke sudo')
+        binary.unlink()
+        invalid = run(['bash', SCRIPTS / 'install-nats-server.sh'],
+                      env={**env, 'NATS_SERVER_LINUX_AMD64_SHA256': '0' * 64})
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertFalse(binary.exists(), 'checksum refusal must precede private installation')

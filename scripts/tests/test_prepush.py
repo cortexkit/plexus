@@ -181,7 +181,7 @@ push_train
 
 
 class CiParityTests(Scratch):
-    def test_ci_mode_keeps_conformance_and_guest_answers_after_host_failure(self):
+    def ci_mode(self):
         checkout = self.tmp / 'checkout'
         (checkout / 'scripts/lib').mkdir(parents=True)
         (checkout / '.github/workflows').mkdir(parents=True)
@@ -190,11 +190,11 @@ class CiParityTests(Scratch):
             shutil.copy2(REPO / relative, checkout / relative)
         tools = self.tmp / 'bin'
         log = self.tmp / 'commands'
-        write_executable(tools / 'rustup', '#!/bin/sh\necho "rustup $*" >> "$COMMAND_LOG"\n')
+        write_executable(tools / 'rustup', '#!/bin/sh\necho "rustup $* home=$RUSTUP_HOME" >> "$COMMAND_LOG"\n')
         write_executable(tools / 'bash', '''#!/bin/sh
 echo "$*" >> "$COMMAND_LOG"
 case "$1" in
-  *install-nats-server.sh) [ "$NATS_SERVER_VERSION" = 2.15.0 ] ;;
+  *install-nats-server.sh) echo "nats-dir=$NATS_SERVER_INSTALL_DIR" >> "$COMMAND_LOG"; [ "$NATS_SERVER_VERSION" = 2.15.0 ] ;;
   *rust-test-gate.sh) exit 7 ;;
   *run-conformance-fixtures.sh) exit 0 ;;
   *build-probe-guest.sh) [ "$2" = --check ] ;;
@@ -203,11 +203,19 @@ esac
 ''')
         result = run(['/bin/bash', checkout / 'scripts/rust-test-gate.sh', '--ci'],
                      env={'PATH': f'{tools}:{SYSTEM_PATH}', 'COMMAND_LOG': str(log)})
+        return result, log.read_text(), checkout
+
+    def test_ci_mode_keeps_conformance_and_guest_answers_after_host_failure(self):
+        result, commands, _checkout = self.ci_mode()
         self.assertNotEqual(result.returncode, 0)
-        commands = log.read_text()
         self.assertIn('scripts/run-conformance-fixtures.sh', commands)
         self.assertIn('scripts/build-probe-guest.sh --check', commands)
         self.assertIn('FAIL rust-test-gate: Rust workspace gate', result.stderr)
+
+    def test_ci_mode_keeps_tool_installs_in_writable_workspace_output(self):
+        _result, commands, checkout = self.ci_mode()
+        self.assertIn(f'home={checkout}/target/prepush-tools/rustup', commands)
+        self.assertIn(f'nats-dir={checkout}/target/prepush-tools/bin', commands)
 
 
 class PinnedFixturesTests(Scratch):
