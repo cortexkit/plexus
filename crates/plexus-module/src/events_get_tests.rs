@@ -172,7 +172,15 @@ async fn execute_tool_call(
         health: Arc::new(health::HealthState::new()),
         runtime: runtime_for_test(store),
     });
-    crate::test_support::send_tool_call(&state, principal, scope, None, tool_name, arguments).await
+    let event_get = tool_name == manifest::EVENTS_GET_TOOL
+        || (tool_name == manifest::EVENTS_TOOL && arguments["op"] == "get");
+    let reply =
+        crate::test_support::send_tool_call(&state, principal, scope, None, tool_name, arguments)
+            .await;
+    if event_get && reply.get("error").is_some() {
+        assert_eq!(reply["error"]["retryable"], false, "{reply}");
+    }
+    reply
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -335,6 +343,295 @@ fn basal_flow_scope(agent_id: Option<&str>) -> CallScope {
         delegates: false,
         owner_authorized: true,
     }
+}
+
+fn assert_retryable(reply: &Value, code: &str, retryable: bool) {
+    assert_eq!(reply["error"]["code"], code, "{reply}");
+    assert_eq!(reply["error"]["retryable"], retryable, "{reply}");
+}
+
+fn get_frame(body: Vec<u8>) -> Frame {
+    Frame::build(FrameType::Request, wire::control_flags(), 1, 1, 7, body).unwrap()
+}
+
+async fn get_response(responses: &mut mpsc::Receiver<Frame>) -> Value {
+    let frame = crate::bounded::recv_within(
+        responses.recv(),
+        std::time::Duration::from_secs(5),
+        "events_get refusal",
+    )
+    .await;
+    let body: Value = serde_json::from_slice(&frame.body).unwrap();
+    if frame.header.ty == FrameType::Error {
+        json!({"error": body})
+    } else {
+        body
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_get_pre_handler_refusals_have_retryable_policy() {
+    let (_scratch, store, _) = test_store("get_retryable_ingress");
+    let state = Arc::new(ModuleState {
+        health: Arc::new(health::HealthState::new()),
+        runtime: runtime_for_test(store),
+    });
+    let request = json!({"name":"events_get","arguments":{"event_key":"a".repeat(64),"event_name":"github_issue_changed"}});
+    // Unknown modes cannot be bound normally; insert one to exercise the
+    // facade's own mode guard without changing the route-bind contract.
+    for (principal, scope, mode, code) in [
+        (
+            "prefrontal-core",
+            None,
+            CallMode::Unknown("future".into()),
+            "call_mode_unsupported",
+        ),
+        (
+            "other",
+            Some(basal_flow_scope(None)),
+            CallMode::Flow,
+            "flow_carrier_not_admitted",
+        ),
+        ("basal", None, CallMode::Flow, "flow_scope_required"),
+        (
+            "other",
+            None,
+            CallMode::Classic,
+            "events_get_carrier_refused",
+        ),
+    ] {
+        let reply = crate::test_support::send_tool_call(
+            &state,
+            Principal::Reserved {
+                module_id: principal.into(),
+            },
+            scope,
+            Some(mode),
+            "events_get",
+            request["arguments"].clone(),
+        )
+        .await;
+        assert_retryable(&reply, code, false);
+    }
+    let routes = Arc::new(RouteBindings::new());
+    routes
+        .insert_mode(
+            1,
+            1,
+            Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+            None,
+            CallMode::Classic,
+        )
+        .unwrap();
+    let mut invalids = vec![
+        json!({"name":"events_get"}),
+        json!({"name":"events_get","arguments":null}),
+        json!({"name":"events_get","arguments":{"identity_token":null}}),
+    ];
+    for (field, value) in [
+        ("preset", json!("unknown")),
+        ("call_key", json!(42)),
+        ("origin", json!(42)),
+    ] {
+        let mut invalid = request.clone();
+        invalid[field] = value;
+        invalids.push(invalid);
+    }
+    for invalid in invalids {
+        let (writer, mut responses) = mpsc::channel(1);
+        handle_tool_request(
+            get_frame(serde_json::to_vec(&invalid).unwrap()),
+            &writer,
+            &state,
+            &routes,
+        )
+        .await
+        .unwrap();
+        assert_retryable(
+            &get_response(&mut responses).await,
+            "invalid_request",
+            false,
+        );
+    }
+    for (arguments, code) in [
+        (json!({"assertion": null}), "argument_undeclared"),
+        (json!({"agent_assertion": null}), "argument_undeclared"),
+        (
+            json!({"event_key":"a".repeat(64),"event_name":{"password":"not-a-real-secret"}}),
+            "secret_input_rejected",
+        ),
+    ] {
+        let reply = crate::test_support::send_tool_call(
+            &state,
+            Principal::Reserved {
+                module_id: "prefrontal-core".into(),
+            },
+            None,
+            None,
+            "events_get",
+            arguments,
+        )
+        .await;
+        assert_retryable(&reply, code, false);
+    }
+    for body in [
+        b"not-json".to_vec(),
+        b"null".to_vec(),
+        vec![b' '; MAX_REQUEST_BYTES + 1],
+    ] {
+        let (writer, mut responses) = mpsc::channel(1);
+        handle_tool_request(get_frame(body), &writer, &state, &routes)
+            .await
+            .unwrap();
+        assert_retryable(
+            &get_response(&mut responses).await,
+            "invalid_request",
+            false,
+        );
+    }
+    let body = serde_json::to_vec(&request).unwrap();
+    let (writer, mut responses) = mpsc::channel(1);
+    let mut budget = request_execution::RequestBudget::new();
+    Arc::get_mut(&mut budget).unwrap().deadline =
+        std::time::Instant::now() - std::time::Duration::from_secs(1);
+    handle_tool_request_with_budget(get_frame(body.clone()), &writer, &state, &routes, budget)
+        .await
+        .unwrap();
+    assert_retryable(
+        &get_response(&mut responses).await,
+        "request_deadline_exceeded",
+        true,
+    );
+
+    for failure in [
+        "route_not_bound",
+        "admission",
+        "queue",
+        "internal_error",
+        "oversized",
+    ] {
+        let routes = Arc::new(RouteBindings::new());
+        if failure != "route_not_bound" {
+            routes
+                .insert_mode(
+                    1,
+                    1,
+                    Principal::Reserved {
+                        module_id: "prefrontal-core".into(),
+                    },
+                    None,
+                    CallMode::Classic,
+                )
+                .unwrap();
+        }
+        match failure {
+            "admission" => routes.in_flight.close(),
+            "queue" => routes.blocking.close(),
+            "internal_error" => {
+                let _ = std::panic::catch_unwind(|| {
+                    let _lock = routes.inner.write().unwrap();
+                    panic!("poison route lock");
+                });
+            }
+            _ => {}
+        }
+        let body = if failure == "oversized" {
+            vec![b' '; MAX_REQUEST_BYTES + 1]
+        } else {
+            body.clone()
+        };
+        let (writer, mut responses) = mpsc::channel(1);
+        handle_frame(get_frame(body), &writer, &state, &routes)
+            .await
+            .unwrap();
+        let code = match failure {
+            "admission" | "queue" => "resource_exhausted",
+            "oversized" => "invalid_request",
+            other => other,
+        };
+        assert_retryable(
+            &get_response(&mut responses).await,
+            code,
+            code != "invalid_request",
+        );
+    }
+    let (writer, mut responses) = mpsc::channel(1);
+    handle_tool_request(
+        get_frame(body.clone()),
+        &writer,
+        &state,
+        &Arc::new(RouteBindings::new()),
+    )
+    .await
+    .unwrap();
+    assert_retryable(&get_response(&mut responses).await, "route_not_bound", true);
+
+    let poisoned = Arc::new(RouteBindings::new());
+    let _ = std::panic::catch_unwind(|| {
+        let _lock = poisoned.inner.write().unwrap();
+        panic!("poison route lock before serving");
+    });
+    serve_tool_request(
+        get_frame(body),
+        &writer,
+        &state,
+        &poisoned,
+        request_execution::RequestBudget::new(),
+    )
+    .await;
+    assert_retryable(&get_response(&mut responses).await, "internal_error", true);
+
+    let worker = tokio::spawn(async { panic!("request worker failed") }).await;
+    answer_worker_failure(worker, (subc_protocol::PROTOCOL_VERSION, 1, 1, 7), &writer).await;
+    assert_retryable(&get_response(&mut responses).await, "internal_error", true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_get_store_failure_is_retryable() {
+    let (_scratch, store, path) = test_store("get_retryable_store");
+    let (key, _) = seed_test_events(&path, &store);
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("ALTER TABLE grants RENAME TO unavailable_grants")
+        .unwrap();
+    let state = Arc::new(ModuleState {
+        health: Arc::new(health::HealthState::new()),
+        runtime: runtime_for_test(store),
+    });
+    let reply = crate::test_support::send_tool_call(
+        &state,
+        Principal::Reserved {
+            module_id: "prefrontal-core".into(),
+        },
+        None,
+        None,
+        "events_get",
+        json!({"event_key":key,"event_name":"github_issue_changed"}),
+    )
+    .await;
+    assert_retryable(&reply, "store_failure", true);
+    assert_eq!(reply["error"]["message"], "event could not be read");
+}
+
+#[test]
+fn events_get_retryable_decoration_is_additive_and_covers_new_codes() {
+    for code in ["flow_audience_excludes_repository", "future_refusal"] {
+        let reply = json!({"error":{"code":code,"message":"refused","detail":{"kept":true}}});
+        let mut decorated = with_event_get_retryable(reply.clone());
+        assert_retryable(&decorated, code, false);
+        decorated["error"]
+            .as_object_mut()
+            .unwrap()
+            .remove("retryable");
+        assert_eq!(decorated, reply);
+    }
+    let success = json!({"result":{"body":"unchanged"}});
+    assert_eq!(with_event_get_retryable(success.clone()), success);
+    let existing =
+        json!({"error":{"code":"resource_exhausted","retryable":true,"retry_after_ms":1000}});
+    assert_eq!(with_event_get_retryable(existing.clone()), existing);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

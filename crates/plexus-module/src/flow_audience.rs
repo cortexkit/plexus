@@ -220,16 +220,28 @@ impl FlowAudiences {
 }
 
 pub fn repository_allowed(store: &PlexusStore, audience: &Audience, repository: &str) -> bool {
-    let Audience::Workspace { project_ids, .. } = audience else {
-        return true;
-    };
-    match store.entorhinal_repository_project(repository) {
-        Ok(project) => project.is_some_and(|project| project_ids.contains(&project)),
+    match try_repository_allowed(store, audience, repository) {
+        Ok(allowed) => allowed,
         Err(error) => {
             eprintln!(warn governance: "flow audience repository lookup failed: {error}");
             false
         }
     }
+}
+
+/// Event readers must distinguish a failed lookup from a real exclusion so a
+/// transient store error does not cause the consumer to discard the event.
+pub(crate) fn try_repository_allowed(
+    store: &PlexusStore,
+    audience: &Audience,
+    repository: &str,
+) -> Result<bool, cortexkit_store::StoreError> {
+    let Audience::Workspace { project_ids, .. } = audience else {
+        return Ok(true);
+    };
+    store
+        .entorhinal_repository_project(repository)
+        .map(|project| project.is_some_and(|project| project_ids.contains(&project)))
 }
 
 fn excludes(repository: &str) -> Value {
@@ -350,3 +362,127 @@ pub(crate) fn check_call(
 #[cfg(test)]
 #[path = "flow_audience_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod repository_lookup_tests {
+    use super::*;
+
+    async fn fetch(state: &Arc<ModuleState>, key: &str, version: u8) -> Value {
+        crate::test_support::send_tool_call(
+            state,
+            Principal::Reserved {
+                module_id: "basal".into(),
+            },
+            Some(CallScope {
+                owner: "basal".into(),
+                scope_ref: "scope-a".into(),
+                scope_epoch: 1,
+                kind: None,
+                parent: None,
+                parent_state: None,
+                agent_id: None,
+                flow_id: Some("flow-a".into()),
+                delegates: false,
+                owner_authorized: true,
+            }),
+            Some(CallMode::Flow),
+            manifest::EVENTS_GET_TOOL,
+            json!({"event_key":key,"event_name":"github_issue_changed","version":version}),
+        )
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn events_get_repository_lookup_failure_is_retryable() {
+        let scratch = plexus_core::test_scratch::Scratch::database("event-audience-lookup-error");
+        let store = Arc::new(crate::test_support::open_file_store(scratch.path()));
+        let (key, _) = crate::events_get_tests::seed_test_events(scratch.path(), &store);
+        store
+            .insert_grant(&plexus_core::GrantInput {
+                grant_id: "basal-consume".into(),
+                principal: "direct".into(),
+                connection_id: "conn-github".into(),
+                grantee_principal: "reserved:basal".into(),
+                risk_ceiling: "read".into(),
+                action_selectors: vec!["list_issues".into()],
+                authority_kind: "events_consume".into(),
+                expires_at: None,
+            })
+            .unwrap();
+        let db = rusqlite::Connection::open(scratch.path()).unwrap();
+        db.execute("UPDATE trigger_subscriptions SET project_id='outside',project_source='entorhinal',fixed_args='{\"owner\":\"owner\",\"repo\":\"repo\"}' WHERE subscription_id='issue-sub-1'", []).unwrap();
+        let audience = Audience::Workspace {
+            workspace_id: "workspace-a".into(),
+            project_ids: vec!["project-a".into()],
+        };
+        let audiences = FlowAudiences::new(None);
+        let now = Instant::now();
+        audiences.cache.lock().unwrap().insert(
+            "flow-a".into(),
+            (
+                now,
+                Answer {
+                    flow_id: "flow-a".into(),
+                    audience: audience.clone(),
+                    revision: "r1".into(),
+                },
+                now,
+            ),
+        );
+        let mut runtime = runtime_for_test(store.clone());
+        runtime.flow_audiences = audiences;
+        let state = Arc::new(ModuleState {
+            health: Arc::new(health::HealthState::new()),
+            runtime,
+        });
+
+        for version in [1, 2] {
+            let excluded = fetch(&state, &key, version).await;
+            let unknown = fetch(&state, &"f".repeat(64), version).await;
+            assert_eq!(excluded["error"]["code"], "event_not_visible");
+            assert_eq!(excluded["error"]["retryable"], false);
+            assert_eq!(excluded, unknown);
+        }
+        db.execute("UPDATE trigger_subscriptions SET project_id='project-a' WHERE subscription_id='issue-sub-1'", []).unwrap();
+        for version in [1, 2] {
+            assert!(fetch(&state, &key, version).await.get("result").is_some());
+        }
+        db.execute_batch("ALTER TABLE connections RENAME COLUMN app_key TO unavailable_app_key")
+            .unwrap();
+        assert!(store.entorhinal_repository_project("owner/repo").is_err());
+        for version in [1, 2] {
+            assert!(matches!(
+                store
+                    .event_by_key_version(
+                        &key,
+                        EventReader::Consumer {
+                            principal: principal::BASAL_PRINCIPAL
+                        },
+                        plexus_core::now_ms(),
+                        version
+                    )
+                    .unwrap(),
+                EventLookupOutcome::Found(_)
+            ));
+            let reply = fetch(&state, &key, version).await;
+            assert_eq!(reply["error"]["code"], "store_failure", "{reply}");
+            assert_eq!(reply["error"]["retryable"], true, "{reply}");
+            assert_eq!(reply["error"].as_object().unwrap().len(), 3);
+            assert_eq!(reply["error"]["message"], "event could not be read");
+        }
+        assert!(!repository_allowed(&store, &audience, "owner/repo"));
+        let refusal = check_call(
+            &state,
+            &audience,
+            manifest::GITHUB_READ_TOOL,
+            json!({"action":"github.issue.get","repository":"owner/repo","args":{}})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            refusal["error"]["code"],
+            "flow_audience_excludes_repository"
+        );
+    }
+}

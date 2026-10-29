@@ -2539,13 +2539,16 @@ async fn handle_tool_request_with_budget(
     let correlation = frame.header.corr;
     if budget.expired() {
         // The expired call never claimed a receipt, so a bot write stays safe
-        // to retry with the same nonce. Other tools get the bare reply.
+        // to retry with the same nonce. Event reads also retain their retry hint.
         let expired = match serde_json::from_slice::<Value>(&frame.body)
             .ok()
             .and_then(|body| body.as_object().cloned())
         {
             Some(object) if is_bot_request_call(&object) => {
                 with_bot_retry_flag(request_expired_reply())
+            }
+            Some(object) if is_event_get_call(&object) => {
+                with_event_get_retryable(request_expired_reply())
             }
             _ => request_expired_reply(),
         };
@@ -2761,6 +2764,11 @@ fn facade_tool_reply_with_budget(
     budget: Arc<request_execution::RequestBudget>,
 ) -> Result<Value, ModuleError> {
     let reply = facade_tool_reply_inner(frame, object, state, route_bindings, budget)?;
+    let reply = if is_event_get_call(object) {
+        with_event_get_retryable(reply)
+    } else {
+        reply
+    };
     // Every module-level `bot_request` refusal runs before the facade claims a
     // receipt, so the same nonce stays safe to retry. The flag lives beside
     // the code, in the top-level `error` object.
@@ -4668,10 +4676,18 @@ fn event_get_reply(
     };
     match store.event_by_key_version(event_key, reader, plexus_core::now_ms(), version as u8) {
         Ok(EventLookupOutcome::Found(event)) => {
-            if audience.is_some_and(|audience| {
-                !flow_audience::repository_allowed(store, audience, &event.headers.repo)
-            }) {
-                return tool_error("event_not_visible", "event not visible");
+            if let Some(audience) = audience {
+                match flow_audience::try_repository_allowed(store, audience, &event.headers.repo) {
+                    Ok(true) => {}
+                    Ok(false) => return tool_error("event_not_visible", "event not visible"),
+                    Err(error) => {
+                        return crate::wire::store_failure(
+                            "check event repository audience",
+                            "event could not be read",
+                            &error,
+                        );
+                    }
+                }
             }
             let (body, digest, published_at) = if version == 2 {
                 let (Some(body), Some(digest)) = (&event.envelope_v2, &event.digest_v2) else {
@@ -5487,7 +5503,7 @@ async fn send_tool_error(
         channel,
         epoch,
         correlation,
-        tool_error(code, message),
+        with_event_get_retryable(tool_error(code, message)),
     )
     .await
 }
@@ -5495,6 +5511,38 @@ async fn send_tool_error(
 /// The route error body `{"error": {"code", "message"}}`.
 fn tool_error(code: &str, message: &str) -> Value {
     json!({"error": {"code": code, "message": message}})
+}
+
+fn is_event_get_call(object: &serde_json::Map<String, Value>) -> bool {
+    object.get("name").and_then(Value::as_str) == Some(manifest::EVENTS_GET_TOOL)
+        || (object.get("name").and_then(Value::as_str) == Some(manifest::EVENTS_TOOL)
+            && object
+                .get("arguments")
+                .and_then(|arguments| arguments.get("op"))
+                .and_then(Value::as_str)
+                == Some("get"))
+}
+
+/// Event consumers retain events on transient failures, but drop terminal refusals.
+/// Decorate the complete reply, rather than individual gates, so new refusals
+/// always carry a boolean. Ingress errors share this helper because they can
+/// precede decoding the tool name; their retry policy is the same for every tool.
+fn with_event_get_retryable(mut reply: Value) -> Value {
+    if let Some(error) = reply.get_mut("error").and_then(Value::as_object_mut) {
+        let retryable = matches!(
+            error.get("code").and_then(Value::as_str),
+            Some(
+                "flow_audience_unavailable"
+                    | "store_failure"
+                    | "resource_exhausted"
+                    | "route_not_bound"
+                    | "request_deadline_exceeded"
+                    | "internal_error"
+            )
+        );
+        error.entry("retryable").or_insert(json!(retryable));
+    }
+    reply
 }
 
 /// Whether this tool call is a GitHub bot write: the `github` tool's
