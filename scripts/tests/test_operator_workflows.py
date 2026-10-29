@@ -93,7 +93,8 @@ esac
         step = next(step for step in load_gates_module().parse_workflow(str(REPO / '.github/workflows/ci.yml'))['jobs']['test']['steps']
                     if step.get('name') == 'Conformance fixtures')
         harness = write_executable(self.tmp / 'harness', '#!/bin/sh\necho partial\nexit 1\n')
-        source = step['run']
+        self.assertEqual(step['run'], 'bash scripts/run-conformance-fixtures.sh')
+        source = (SCRIPTS / 'run-conformance-fixtures.sh').read_text()
         start = source.index('fixture_list=') if 'fixture_list=' in source else source.index('mapfile -t fixtures')
         end = source.index('echo "Fixtures:')
         result = run(['bash', '-c', 'set -euo pipefail\nharness="$1"\n' + source[start:end], 'test', harness])

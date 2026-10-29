@@ -947,6 +947,10 @@ verified_sha=""
 # ref to have been refreshed along the way.
 
 push_train() {
+  # A rebase changes the commit, so verify a pre-push PASS for the current SHA
+  # on every round. CI is still checked after pushing.
+  bash "$script_dir/prepush.sh" --require-pass "$head_sha" ||
+    refuse "run scripts/prepush.sh for the train commit before pushing"
   if [ -z "$train_remote_sha" ]; then
     # Create with a plain push: a mistyped train name must not be able to
     # clobber a branch that already exists.

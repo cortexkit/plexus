@@ -19,6 +19,9 @@ class RepositoryIdentityTests(Scratch):
         shutil.copytree(SCRIPTS / "lib", self.checkout / "scripts/lib")
         shutil.copy2(SCRIPTS / "train-push.sh", self.checkout / "scripts/train-push.sh")
         shutil.copy2(SCRIPTS / "install-hooks.sh", self.checkout / "scripts/install-hooks.sh")
+        # Identity/CI cases use synthetic SHAs; receipt semantics have their own
+        # real-repository tests in test_prepush.py.
+        write_executable(self.checkout / "scripts/prepush.sh", '#!/bin/sh\n[ "$1" = --require-pass ]\n')
         (self.checkout / ".githooks").mkdir()
         shutil.copy2(REPO / ".githooks/pre-push", self.checkout / ".githooks/pre-push")
         self.assertEqual(git("init", "-q", cwd=self.checkout).returncode, 0)

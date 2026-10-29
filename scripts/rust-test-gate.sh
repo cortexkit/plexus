@@ -6,19 +6,86 @@
 # An unformatted commit fails before compilation.
 # Serialize cargo invocations (never parallel cargo): concurrent workspace
 # builds on a shared machine saturate it.
-set -euo pipefail
+set -Eeuo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+mode="${1:-}"
+case "$mode" in
+  ''|--fast|--ci) [ "$#" -le 1 ] || exit 2 ;;
+  *) echo "usage: scripts/rust-test-gate.sh [--fast|--ci]" >&2; exit 2 ;;
+esac
+phase="gate setup"
+trap 'echo "FAIL rust-test-gate: $phase" >&2' ERR
+
 run_phase() {
   local label="$1"
+  phase="$label"
   shift
   local started=$SECONDS
   echo "==> $label"
   "$@"
   echo "    ok ($((SECONDS - started))s)"
 }
+
+# Only external commands belong here: conditionals suppress Bash's errexit
+# inside shell functions, while each child script retains its own strict mode.
+try_phase() {
+  phase="$1"
+  shift
+  echo "==> $phase"
+  if "$@"; then return 0; fi
+  echo "FAIL rust-test-gate: $phase" >&2
+  return 1
+}
+
+if [ "$mode" = --ci ]; then
+  run_phase "Linux runner" test "$(uname -s)" = Linux
+  run_phase "stable host toolchain with clippy and rustfmt" \
+    rustup toolchain install stable --profile minimal --component clippy,rustfmt
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+  # Read the CI pins rather than maintaining a second version/digest pair.
+  phase="read CI NATS pins"
+  pins="$(python3 - <<'PY'
+import importlib.util
+spec = importlib.util.spec_from_file_location("gates", "scripts/lib/workflow-gates.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+env = module.parse_workflow(".github/workflows/ci.yml")["env"]
+for name in ("NATS_SERVER_VERSION", "NATS_SERVER_LINUX_AMD64_SHA256"):
+    print(name + "=" + env[name])
+PY
+  )"
+  while IFS='=' read -r name value; do export "$name=$value"; done <<< "$pins"
+  run_phase "install CI-pinned nats-server" bash scripts/install-nats-server.sh
+
+  # CI runs conformance even after the Rust gate fails, and the guest job is
+  # independent. Preserve those answers instead of stopping at the first red.
+  failed=()
+  try_phase "Rust workspace gate" bash "$0" || failed+=("Rust workspace gate")
+  try_phase "conformance fixtures" bash scripts/run-conformance-fixtures.sh || failed+=("conformance fixtures")
+  if try_phase "pinned guest toolchain and WASI target" \
+    rustup toolchain install 1.99.0 --profile minimal --target wasm32-wasip1; then
+    try_phase "embedded probe guest rebuild and comparison" \
+      bash scripts/build-probe-guest.sh --check || failed+=("embedded probe guest rebuild and comparison")
+  else
+    failed+=("pinned guest toolchain and WASI target")
+  fi
+  if [ "${#failed[@]}" -ne 0 ]; then
+    echo "FAIL rust-test-gate: ${failed[*]}" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+run_phase "train preconditions" bash scripts/check-train-preconditions.sh
+run_phase "duplicate-main planner (local runs never skip tests)" \
+  env GITHUB_EVENT_NAME=local GITHUB_OUTPUT= python3 scripts/skip_main_tests.py
+run_phase "workspace lockfile in sync (offline)" \
+  bash -c 'cargo metadata --locked --offline --format-version 1 > /dev/null'
+run_phase "pinned fixture checksums (no build)" python3 scripts/check-pinned-fixtures.py
 
 # Refuse a raw `std::env::temp_dir()` anywhere under crates/.
 #
@@ -588,13 +655,6 @@ run_phase "no path dependency outside the repository" refuse_outside_path_deps
 run_phase "no internal CortexKit file is tracked" \
   bash scripts/check-cortexkit-layout.sh
 
-# Test scripts/train*.sh, scripts/watch-ci.sh and staging verification against
-# stubbed external tools. The Python runner first verifies it counts and reports
-# a deliberately failing test and a passing test, then discovers test_*.py.
-# It refuses failures and runs that discover no tests.
-run_phase "operator script regression tests" \
-  python3 -B scripts/tests/run.py
-
 # Formatting check, scoped to this workspace's own members.
 #
 # Registry dependencies are not this repository's formatting responsibility.
@@ -619,6 +679,12 @@ fi
 # an unformatted commit.
 run_phase "cargo fmt (workspace members) -- --check" \
   cargo fmt "${FMT_MEMBERS[@]}" -- --check
+
+[ "$mode" != --fast ] || exit 0
+
+# Test scripts/train*.sh, scripts/watch-ci.sh and staging verification against
+# stubbed external tools. The runner fails if a test fails or it finds no tests.
+run_phase "operator script regression tests" python3 -B scripts/tests/run.py
 
 # Clippy with warnings as errors, across all targets.
 # `--locked` makes a stale or absent Cargo.lock a FAILURE rather than a silent

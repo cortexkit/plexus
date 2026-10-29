@@ -39,12 +39,15 @@ repo_slug="$(require_github_repository "$repo_root" "$OPERATOR_GH" "${2:-}")" ||
 remote_ref_is_main=0
 sha=""
 while read -r _local_ref local_sha remote_ref _remote_sha; do
-    [ "$remote_ref" = "refs/heads/main" ] || continue
     # A deletion pushes the all-zero sha and has nothing to verify.
     case "$local_sha" in
         *[!0]*) ;;
         *) continue ;;
     esac
+    # Local parity is required for every pushed commit, including train refs
+    # and annotated tags. The receipt checker peels tags to their commit.
+    bash "$repo_root/scripts/prepush.sh" --require-pass "$local_sha" || exit 1
+    [ "$remote_ref" = "refs/heads/main" ] || continue
     remote_ref_is_main=1
     sha="$local_sha"
 done

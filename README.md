@@ -56,16 +56,24 @@ not need either.
 ## Build and test
 
 ```sh
-cargo build --locked -p plexus-module
-scripts/rust-test-gate.sh
+scripts/prepush.sh
 ```
 
-The build produces `target/debug/ck-plexus` and `target/debug/ck-plexus-admin`.
-The gate runs source-convention checks, the operator-script tests,
+Commit the intended changes first. The gate runs a no-compile local preflight,
+then dispatches the full CI checks to Linux with `ck motor run` at 16 vCPUs
+(network enabled for pinned tools). It requires the `ck` CLI and local Cargo
+metadata/rustfmt support; compilation and tests never run on the Mac.
+`scripts/rust-test-gate.sh --ci` is the Linux entry point. It runs
+source-convention checks, the operator-script tests,
 `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`
-and `cargo test --workspace --locked`, one cargo command at a time.
+and `cargo test --workspace --locked`, one cargo command at a time, plus the
+CI-pinned NATS install, all conformance fixtures and the pinned guest rebuild.
+A final `PASS prepush: <sha> ...` records a local receipt valid for 24 hours.
+The train and optional pre-push hook require that receipt for the pushed commit;
+rebasing requires a new PASS. Green GitHub CI is still required to land main.
 
-CI also runs every conformance fixture against stub vendors:
+The gate and CI run every conformance fixture against stub vendors. For a
+targeted Linux investigation:
 
 ```sh
 cargo build --locked -p plexus-conformance --bin plexus-conformance

@@ -456,6 +456,7 @@ class CortexkitLayoutTests(Scratch):
     def test_a_clean_tree_with_allowed_files_tracked_passes(self):
         self.write(".gitignore", LAYOUT_BLOCK)
         self.write(".cortexkit/release-notes/v1.md")
+        self.write(".cortexkit/WORKER.md")
         self.write(".cortexkit/notes/plan.md")
         self.git("add", ".gitignore", ".cortexkit")
         result = self.check()
@@ -488,3 +489,9 @@ class CortexkitLayoutTests(Scratch):
         result = self.check()
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("release-notes", result.stderr)
+
+    def test_an_ignored_worker_guide_is_blind(self):
+        self.write(".gitignore", LAYOUT_BLOCK.replace("!/.cortexkit/WORKER.md\n", ""))
+        result = self.check()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("WORKER.md", result.stderr)

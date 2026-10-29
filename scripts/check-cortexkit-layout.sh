@@ -25,6 +25,10 @@ if git check-ignore -q --no-index .cortexkit/release-notes/control.md; then
   echo "BLIND: .cortexkit/release-notes/ is ignored; the block's allow lines are missing" >&2
   exit 2
 fi
+if git check-ignore -q --no-index .cortexkit/WORKER.md; then
+  echo "BLIND: .cortexkit/WORKER.md is ignored; the shared worker guide must be trackable" >&2
+  exit 2
+fi
 
 tracked="$(git ls-files -ci --exclude-standard -- .cortexkit)"
 if [ -n "$tracked" ]; then
