@@ -32,6 +32,8 @@ hex = { workspace = true }
 # links the same version.
 base64 = "0.22"
 getrandom = "0.3"
+# RFC 9180 base mode, X25519/HKDF-SHA256/ChaCha20-Poly1305; no other KEMs.
+hpke = { version = "=0.13.0", default-features = false, features = ["alloc", "x25519"] }
 zeroize = { workspace = true }
 rusqlite = { workspace = true }
 rustix = { version = "1", features = ["process"], optional = true }

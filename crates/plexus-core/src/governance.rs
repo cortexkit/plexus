@@ -1427,6 +1427,7 @@ where
     store: Arc<PlexusStore>,
     credential_source: Arc<C>,
     transport: Arc<T>,
+    gmail: Option<Arc<crate::gmail::GmailBackend>>,
     decision_plane: Option<Arc<dyn DecisionPlane>>,
     seams: Option<Arc<dyn GovernanceSeams>>,
     /// Asks the daemon for a scope's current state when a stored approval
@@ -1473,6 +1474,7 @@ where
             store: Arc::clone(&self.store),
             credential_source: Arc::clone(&self.credential_source),
             transport: Arc::clone(&self.transport),
+            gmail: self.gmail.clone(),
             decision_plane: self.decision_plane.clone(),
             seams: self.seams.clone(),
             scope_reader: self.scope_reader.clone(),
@@ -1495,6 +1497,7 @@ where
             store,
             credential_source,
             transport,
+            gmail: None,
             decision_plane: None,
             seams: None,
             scope_reader: None,
@@ -1503,6 +1506,34 @@ where
             connector_home_guard: None,
             freshness_check: None,
             now_ms: Arc::new(crate::storage::now_ms),
+        }
+    }
+
+    pub fn with_gmail_backend(mut self, backend: Arc<crate::gmail::GmailBackend>) -> Self {
+        self.gmail = Some(backend);
+        self
+    }
+
+    pub fn gmail_mailbox(&self) -> Result<String, &'static str> {
+        self.gmail
+            .as_ref()
+            .ok_or("gmail_vault_unavailable")?
+            .mailbox()
+    }
+
+    pub fn read_sent_text(
+        &self,
+        owner: &str,
+        row_id: &str,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, &'static str> {
+        match self.gmail.as_ref() {
+            Some(backend) => backend.read_sent_text(&self.store, owner, row_id, self.now_ms()),
+            None => {
+                self.store
+                    .audit_sent_text_read(owner, row_id, "vault_unavailable")
+                    .map_err(|_| "store_failure")?;
+                Err("gmail_vault_unavailable")
+            }
         }
     }
 
@@ -3039,6 +3070,53 @@ where
                 )));
             }
         };
+        // Gmail's mailbox-bearing scoped read and versioned 401 report are
+        // owned by its backend, not the ordinary opaque-token exchange.
+        if connection.app_key == "gmail" && reservation.action == "gmail.send" {
+            let request = TransportRequest {
+                request_id: reservation.request_id.clone(),
+                connection_id: reservation.connection_id.clone(),
+                action: reservation.action.clone(),
+                args: reservation.args.clone(),
+                credential_fingerprint: reservation.credential_fingerprint.clone(),
+            };
+            let prepared = match self.gmail.as_ref() {
+                Some(backend) => {
+                    backend.prepare(&self.store, &reservation.principal, &request, self.now_ms())
+                }
+                None => Err(Box::new(crate::gmail::refusal(
+                    "gmail_vault_unavailable",
+                    true,
+                ))),
+            };
+            let gmail = match prepared {
+                Ok(prepared) => prepared,
+                Err(response) => {
+                    self.abandon_unsent_reservation(reservation);
+                    let code = response
+                        .error_code
+                        .clone()
+                        .unwrap_or_else(|| "gmail_preparation_failed".into());
+                    self.audit_dispatch_denial(reservation, &code);
+                    return Err(Box::new(self.maybe_report_decision_outcome(
+                        reservation,
+                        DispatchOutcome::not_sent(
+                            reservation,
+                            code.clone(),
+                            "Gmail preparation was refused".into(),
+                            response.retryability,
+                        ),
+                        OutcomeTerminal::Refused { reason: code },
+                    )));
+                }
+            };
+            return Ok(PreparedCredential {
+                connection,
+                material: CredentialMaterial::Waived,
+                vault_credential: None,
+                gmail: Some(gmail),
+            });
+        }
         let material = self.credential_material(&connection).map_err(refuse)?;
         let vault_credential = match &material {
             CredentialMaterial::Bound(handle) => {
@@ -3088,6 +3166,7 @@ where
             connection,
             material,
             vault_credential,
+            gmail: None,
         })
     }
     /// Refuse an authorized reservation before anything is transmitted, with
@@ -3427,6 +3506,7 @@ where
             connection,
             material,
             vault_credential,
+            gmail,
         }) = prepared
         else {
             return self.deny_before_transmit(reservation, "credential_missing".into());
@@ -3513,7 +3593,19 @@ where
             self.abandon_marked_transmit(reservation);
             return outcome;
         }
-        let response = if reservation.origin == RequestOrigin::Facade {
+        let response = if connection.app_key == "gmail" && reservation.action == "gmail.send" {
+            match (&self.gmail, gmail) {
+                (Some(backend), Some(prepared)) => backend.send_prepared(
+                    &self.store,
+                    &reservation.principal,
+                    request,
+                    self.transport.as_ref(),
+                    || self.now_ms(),
+                    prepared,
+                ),
+                _ => crate::gmail::refusal("gmail_vault_unavailable", true),
+            }
+        } else if reservation.origin == RequestOrigin::Facade {
             self.transport.dispatch_github_facade(request, &credential)
         } else {
             self.transport.dispatch(request, &credential)
@@ -4735,6 +4827,7 @@ enum CredentialMaterial {
 /// Read by dispatch before it claims a reservation; see
 /// `prepare_dispatch_credential`.
 struct PreparedCredential {
+    gmail: Option<crate::gmail::PreparedGmail>,
     connection: ConnectionRecord,
     material: CredentialMaterial,
     /// The secret for `CredentialMaterial::Bound`, fetched from the vault;

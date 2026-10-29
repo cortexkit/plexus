@@ -128,6 +128,8 @@ pub const ADMIN_ONBOARD_GITHUB_BOT_OP: &str = "plexus.admin.onboard_github_bot";
 pub const ADMIN_RECIPIENTS_ADD_OP: &str = "plexus.admin.recipients_add";
 pub const ADMIN_RECIPIENTS_REMOVE_OP: &str = "plexus.admin.recipients_remove";
 pub const ADMIN_RECIPIENTS_LIST_OP: &str = "plexus.admin.recipients_list";
+pub const ADMIN_SENT_TEXT_READ_OP: &str = "plexus.admin.sent_text_read";
+pub const ADMIN_SENT_TEXT_RETENTION_OP: &str = "plexus.admin.sent_text_retention";
 pub const GITHUB_IMPORT_OP: &str = "github.handle.import";
 pub const GITHUB_PROBE_OP: &str = "github.handle.probe";
 /// Add write abilities to one imported handle, widening its connection
@@ -335,6 +337,8 @@ pub fn build_with_launch_nonce_source(
                 ManagementOperation { name: ADMIN_RECIPIENTS_ADD_OP.into(), kind: ManagementOperationKind::Mutate, description: Some("Widen send authority by adding a recipient; preview by default, Direct only".into()) },
                 ManagementOperation { name: ADMIN_RECIPIENTS_REMOVE_OP.into(), kind: ManagementOperationKind::Mutate, description: Some("Narrow send authority by removing a recipient; preview by default, Direct only".into()) },
                 ManagementOperation { name: ADMIN_RECIPIENTS_LIST_OP.into(), kind: ManagementOperationKind::Query, description: Some("Read one connection and agent's recipient allowlist; Direct only".into()) },
+                ManagementOperation { name: ADMIN_SENT_TEXT_READ_OP.into(), kind: ManagementOperationKind::Query, description: Some("Open an archived sent message through the vault and audit the read; Direct only".into()) },
+                ManagementOperation { name: ADMIN_SENT_TEXT_RETENTION_OP.into(), kind: ManagementOperationKind::Mutate, description: Some("Set sent-text retention independently of audit retention; Direct only".into()) },
                 ManagementOperation {
                     name: GITHUB_IMPORT_OP.to_string(), kind: ManagementOperationKind::Mutate,
                     description: Some("Import reviewed GitHub handle authority from an operator inventory".to_string()),

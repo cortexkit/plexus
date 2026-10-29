@@ -1864,6 +1864,8 @@ async fn handle_management_request(
             | manifest::ADMIN_RECIPIENTS_ADD_OP
             | manifest::ADMIN_RECIPIENTS_REMOVE_OP
             | manifest::ADMIN_RECIPIENTS_LIST_OP
+            | manifest::ADMIN_SENT_TEXT_READ_OP
+            | manifest::ADMIN_SENT_TEXT_RETENTION_OP
             | manifest::GITHUB_IMPORT_OP
             | manifest::GITHUB_PROBE_OP
             | manifest::GITHUB_GRANT_OP
@@ -2025,6 +2027,33 @@ async fn handle_management_request(
         }
     }
     let mut response = match method {
+        manifest::ADMIN_SENT_TEXT_READ_OP => blocking_section(|| {
+            let Some(row_id) = params.get("row_id").and_then(Value::as_str) else {
+                return json!({"error":{"code":"invalid_request","message":"row_id is required"}});
+            };
+            match state.runtime.engine.read_sent_text("direct", row_id) {
+                Ok(bytes) => match std::str::from_utf8(&bytes) {
+                    Ok(text) => json!({"result":{"row_id":row_id,"text":text}}),
+                    Err(_) => json!({"error":{"code":"sent_text_invalid_utf8"}}),
+                },
+                Err(code) => json!({"error":{"code":code}}),
+            }
+        }),
+        manifest::ADMIN_SENT_TEXT_RETENTION_OP => {
+            match params
+                .get("days")
+                .and_then(Value::as_i64)
+                .filter(|days| (1..=3650).contains(days))
+            {
+                Some(days) => match state.store().set_sent_text_retention(days) {
+                    Ok(()) => json!({"result":{"retention_days":days}}),
+                    Err(_) => json!({"error":{"code":"store_failure"}}),
+                },
+                None => {
+                    json!({"error":{"code":"invalid_request","message":"days must be 1..3650"}})
+                }
+            }
+        }
         relay::STATUS_OP => json!({"result": state.health.relay.status()}),
         manifest::ADMIN_RECIPIENTS_ADD_OP
         | manifest::ADMIN_RECIPIENTS_REMOVE_OP
