@@ -4,9 +4,9 @@
 
 - Build and test on Linux through `runon` or `ck motor run`, never on the Mac.
   The no-compile fast phase of `scripts/prepush.sh` is the exception: it runs
-  locally before dispatching the full Linux gate at 16 vCPUs.
+  locally before dispatching the full Linux gate at 8 vCPUs.
 - Commit the intended changes, then run `scripts/prepush.sh --fast` locally
-  and `scripts/prepush.sh --full` with `runon: "linux,16c,net"` (network enabled
+  and `scripts/prepush.sh --full` with `runon: "linux,8c,net"` (network enabled
   for pinned tool downloads). Paste both commit-naming PASS lines in the delivery.
   Changing the commit requires another run. Worker sandboxes cannot connect to
   Motor directly; do not invoke plain `scripts/prepush.sh` from a worker shell.

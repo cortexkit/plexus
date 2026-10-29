@@ -58,8 +58,8 @@ case "$mode" in
     rm -f "$receipt_dir/$sha.json"
     step="fast local preflight"
     bash scripts/prepush.sh --fast
-    step="Linux CI parity gate (16 vCPUs; failing substep is printed above)"
-    ck motor run --platform linux --vcpus 16 --net --timeout 7200 \
+    step="Linux CI parity gate (8 vCPUs; failing substep is printed above)"
+    ck motor run --platform linux --vcpus 8 --net --timeout 7200 \
       --env CARGO_PROFILE_DEV_DEBUG=0 --env CARGO_PROFILE_TEST_DEBUG=0 \
       --env CARGO_INCREMENTAL=0 -- bash scripts/prepush.sh --full ;;
 esac

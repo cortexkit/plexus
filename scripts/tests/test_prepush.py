@@ -44,13 +44,13 @@ exit "${REMOTE_RC:-0}"
     def receipt(self):
         return self.checkout / '.git/plexus-prepush' / (self.sha + '.json')
 
-    def test_pass_runs_fast_first_then_linux_at_16c_and_binds_exact_commit(self):
+    def test_pass_runs_fast_first_then_linux_at_8c_and_binds_exact_commit(self):
         result = self.prepush()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(f'PASS prepush: {self.sha}', result.stdout)
         phases = self.log.read_text().splitlines()
         self.assertEqual(phases[0], 'fast --fast')
-        self.assertIn('--platform linux --vcpus 16 --net', phases[1])
+        self.assertIn('--platform linux --vcpus 8 --net', phases[1])
         self.assertTrue(phases[1].endswith('-- bash scripts/prepush.sh --full'))
         self.assertEqual(self.prepush('--require-pass', self.sha).returncode, 0)
         tag = git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',

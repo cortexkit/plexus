@@ -60,11 +60,11 @@ scripts/prepush.sh
 ```
 
 Commit the intended changes first. The gate runs a no-compile local preflight,
-then dispatches the full CI checks to Linux with `ck motor run` at 16 vCPUs
+then dispatches the full CI checks to Linux with `ck motor run` at 8 vCPUs
 (network enabled for pinned tools). It requires the `ck` CLI and local Cargo
 metadata/rustfmt support; compilation and tests never run on the Mac.
 Sandboxed workers instead run `scripts/prepush.sh --fast` locally and
-`scripts/prepush.sh --full` with `runon: "linux,16c"` and network enabled.
+`scripts/prepush.sh --full` with `runon: "linux,8c"` and network enabled.
 Both phases print a PASS naming the checked commit. The Linux entry point does
 not call Motor; workers paste both PASS lines in their delivery.
 The full phase delegates to `scripts/rust-test-gate.sh --ci`. It runs
