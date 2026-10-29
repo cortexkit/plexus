@@ -975,3 +975,80 @@ fn gmail_admin_read_back_decodes_every_vault_open_case_and_audits_each() {
         6
     );
 }
+
+#[test]
+fn gmail_ticket_pins_verified_mailbox_atomically_without_filter_defaults() {
+    let f = Fixture::new();
+    f.store
+        .upsert_manifest(crate::storage::CATALOG_PRINCIPAL, &document())
+        .unwrap();
+    let ceiling = f
+        .store
+        .ceiling_within_manifest("gmail", "write", &["gmail.send".into()])
+        .unwrap()
+        .unwrap();
+    let audit = |_: &crate::storage::BindingTicket| {
+        crate::storage::AuditRecord::ceremony(
+            "direct",
+            Some("gmail"),
+            Some("enrolled"),
+            "issue_ticket",
+            "write",
+            None,
+        )
+    };
+    let mailbox = f.backend.mailbox().unwrap();
+    f.store
+        .issue_gmail_ticket("direct", "enrolled", &mailbox, &ceiling, &audit)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        f.store
+            .gmail_mailbox("direct", "enrolled")
+            .unwrap()
+            .as_deref(),
+        Some("owner@example.com")
+    );
+    assert_eq!(
+        f.store
+            .connection("direct", "enrolled")
+            .unwrap()
+            .unwrap()
+            .resource_filters,
+        json!({})
+    );
+    assert_eq!(
+        f.store
+            .connection_credential_reference("direct", "enrolled")
+            .unwrap()
+            .as_deref(),
+        Some("oauth:gmail")
+    );
+    assert!(f
+        .store
+        .issue_gmail_ticket("direct", "enrolled", "other@example.com", &ceiling, &audit)
+        .is_err());
+    assert_eq!(
+        f.store
+            .gmail_mailbox("direct", "enrolled")
+            .unwrap()
+            .as_deref(),
+        Some("owner@example.com")
+    );
+    assert!(f
+        .store
+        .issue_binding_ticket(
+            "direct",
+            "unconfirmed",
+            "gmail",
+            "credential_reference",
+            b"oauth:gmail",
+            &ceiling
+        )
+        .is_err());
+    assert!(f
+        .store
+        .connection("direct", "unconfirmed")
+        .unwrap()
+        .is_none());
+}

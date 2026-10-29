@@ -1995,7 +1995,7 @@ async fn every_shipped_manifest_is_reachable_through_the_operator_ceremony() {
         let app_key = ingested.manifest.key;
         // Vendors whose key is optional (SearXNG) are enrolled without a key here,
         // like keyless vendors. They accept only their own named key, so the
-        // placeholder credential this test gives every keyed vendor would be refused.
+        // generic placeholder credential would be refused.
         let credential_free = matches!(
             ingested.manifest.auth.mode,
             plexus_core::manifest::AuthMode::None | plexus_core::manifest::AuthMode::OptionalApiKey
@@ -2014,7 +2014,13 @@ async fn every_shipped_manifest_is_reachable_through_the_operator_ceremony() {
                 .arg("--actions")
                 .arg("*");
             if !credential_free {
-                command.arg("--credential-id").arg("test:operator_totality");
+                command
+                    .arg("--credential-id")
+                    .arg(if invoked_app == "gmail" {
+                        "oauth:gmail"
+                    } else {
+                        "test:operator_totality"
+                    });
             }
             if invoked_app == "searxng_rest" {
                 command
@@ -2431,7 +2437,11 @@ async fn vault_route_fixture() {
                         assert_eq!(request["params"], json!({"role":"connector_home"}));
                         json!({"result":{"role":"connector_home","epoch":1,"known":true,"stale":false,"holder":"test-member","holder_name":"Test machine","held_here":true,"source":"cloud"}})
                     } else {
-                        json!({"result": {"credential_id": request["params"]["credential_id"], "payload": b"test-vendor-token".to_vec(), "record_version": 1}})
+                        let mut result = json!({"credential_id": request["params"]["credential_id"], "payload": b"test-vendor-token".to_vec(), "record_version": 1});
+                        if request["params"]["credential_id"] == "oauth:gmail" {
+                            result["account_id"] = json!("owner@example.com");
+                        }
+                        json!({"result":result})
                     }
                 }
                 _ => {

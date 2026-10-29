@@ -458,7 +458,10 @@ fn production_v23_round_trip_dispositions_and_routing() {
             | "elicitation_answers_cursor"
             | "github_repo_id_cache"
             | "github_actions_quota"
-            | "event_outbox_counters" => (0, 0, 0),
+            | "event_outbox_counters"
+            | "gmail_accounts"
+            | "sent_text"
+            | "sent_text_settings" => (0, 0, 0),
             _ => (1, 1, 0),
         };
         assert_eq!(
@@ -468,11 +471,25 @@ fn production_v23_round_trip_dispositions_and_routing() {
             row.table
         );
         assert_eq!(row.read, row.carried + row.scrubbed);
+        // The destination migration seeds a retention policy even when the
+        // source predates sent text; this row is not counted as imported data.
+        let stored = if row.table == "sent_text_settings" {
+            1
+        } else {
+            carried
+        };
         assert_eq!(
             scalar::<u64>(&new, &format!("SELECT count(*) FROM {}", row.table)),
-            carried
+            stored
         );
     }
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT retention_days FROM sent_text_settings WHERE singleton=1"
+        ),
+        30
+    );
     let old = Connection::open(&f.from).unwrap();
     for column in [
         "cursor_state",
@@ -892,4 +909,70 @@ fn cutover_keeps_receipt_approvals_and_unreconcilable_deleted_handle_results() {
     let destination = f.destination();
     assert_eq!(scalar::<i64>(&destination,"SELECT COUNT(*) FROM action_requests WHERE request_id='approval' AND reconciliation_status IS NULL"),1,"a carried pending receipt must retain its approval row");
     assert_eq!(scalar::<i64>(&destination,"SELECT COUNT(*) FROM write_reconciliation_results WHERE request_id='orphan' AND connection_id=''"),1,"deleted-handle results must not abort the cutover");
+}
+
+#[test]
+fn gmail_sent_text_mailbox_pacing_and_retention_survive_cutover() {
+    let f = Fixture::new();
+    let source = open_sqlite(&descriptor(&f.from).unwrap()).unwrap();
+    source.migrate("plexus", MIGRATIONS).unwrap();
+    source.with_conn(|conn|conn.execute_batch("INSERT INTO gmail_accounts(principal,connection_id,mailbox,next_send_ms) VALUES ('direct','c','owner@example.com',123456); INSERT INTO sent_text(row_id,principal,connection_id,recipient_hash,key_id,enc,ciphertext,expires_at_ms,created_at_ms) VALUES ('sent-row','direct','c','recipient-hash','fixture-key',x'010203',x'040506',777777,1000); UPDATE sent_text_settings SET retention_days=17 WHERE singleton=1;")).unwrap();
+    drop(source);
+    let report = f.import();
+    for table in ["gmail_accounts", "sent_text", "sent_text_settings"] {
+        let row = report.iter().find(|r| r.table == table).unwrap();
+        assert_eq!((row.read, row.carried, row.scrubbed), (1, 1, 0), "{table}");
+    }
+    let new = f.destination();
+    assert_eq!(
+        scalar::<String>(
+            &new,
+            "SELECT mailbox FROM gmail_accounts WHERE principal='direct' AND connection_id='c'"
+        ),
+        "owner@example.com"
+    );
+    assert_eq!(scalar::<i64>(&new,"SELECT next_send_ms FROM gmail_accounts WHERE principal='direct' AND connection_id='c'"),123456);
+    assert_eq!(
+        scalar::<String>(
+            &new,
+            "SELECT recipient_hash FROM sent_text WHERE row_id='sent-row'"
+        ),
+        "recipient-hash"
+    );
+    assert_eq!(
+        scalar::<String>(&new, "SELECT key_id FROM sent_text WHERE row_id='sent-row'"),
+        "fixture-key"
+    );
+    assert_eq!(
+        scalar::<Vec<u8>>(&new, "SELECT enc FROM sent_text WHERE row_id='sent-row'"),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        scalar::<Vec<u8>>(
+            &new,
+            "SELECT ciphertext FROM sent_text WHERE row_id='sent-row'"
+        ),
+        vec![4, 5, 6]
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT expires_at_ms FROM sent_text WHERE row_id='sent-row'"
+        ),
+        777777
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT created_at_ms FROM sent_text WHERE row_id='sent-row'"
+        ),
+        1000
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT retention_days FROM sent_text_settings WHERE singleton=1"
+        ),
+        17
+    );
 }

@@ -129,6 +129,16 @@ fn seed_connection(
              updated_at_ms) VALUES (?1, ?2, 'mock', ?3, 1, 1)",
         params![c, principal, status],
     )?;
+    // Seed archive state on current stores so deletion must remove both the
+    // mailbox pin and ciphertext, rather than pass on two empty tables.
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='gmail_accounts')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? {
+        conn.execute("INSERT INTO gmail_accounts(principal,connection_id,mailbox) VALUES (?1,?2,'owner@example.com')",params![principal,c])?;
+        conn.execute("INSERT INTO sent_text(row_id,principal,connection_id,recipient_hash,key_id,enc,ciphertext,expires_at_ms,created_at_ms) VALUES (?1,?2,?3,'hash','key',x'01',x'02',1000,1)",params![format!("sent-{principal}-{c}"),principal,c])?;
+    }
     conn.execute(
         "INSERT INTO catalog_actions (connection_id, principal, name, schema_json, schema_hash,
              risk, severity, status, first_seen_at_ms, last_seen_at_ms)
