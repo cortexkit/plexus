@@ -89,8 +89,11 @@ fi
 run_phase "train preconditions" bash scripts/check-train-preconditions.sh
 run_phase "duplicate-main planner (local runs never skip tests)" \
   env GITHUB_EVENT_NAME=local GITHUB_OUTPUT= python3 scripts/skip_main_tests.py
-run_phase "workspace lockfile in sync (offline)" \
-  bash -c 'cargo metadata --locked --offline --format-version 1 > /dev/null'
+# `--locked` alone: a fresh CI runner hasn't downloaded the crates yet, so
+# `--offline` refuses there with "no matching package" even when the lockfile is
+# in sync. Where the crates are already cached, this makes no network request.
+run_phase "workspace lockfile in sync" \
+  bash -c 'cargo metadata --locked --format-version 1 > /dev/null'
 run_phase "pinned fixture checksums (no build)" python3 scripts/check-pinned-fixtures.py
 
 # Refuse a raw `std::env::temp_dir()` anywhere under crates/.
