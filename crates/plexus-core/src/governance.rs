@@ -3070,8 +3070,11 @@ where
                 )));
             }
         };
-        // Gmail's mailbox-bearing scoped read and versioned 401 report are
-        // owned by its backend, not the ordinary opaque-token exchange.
+        // A Gmail send is prepared by its own backend, not by the ordinary
+        // token exchange. The backend checks that the vault's credential still
+        // belongs to the mailbox this connection was set up for, composes the
+        // message itself, and on a 401 reports the exact credential version it
+        // was served so the vault refreshes the right login.
         if connection.app_key == "gmail" && reservation.action == "gmail.send" {
             let request = TransportRequest {
                 request_id: reservation.request_id.clone(),

@@ -34,7 +34,10 @@ replace the recipient allowlist. No `values` map is needed. Messages to only cc
 or bcc recipients remain valid with the other lists empty.
 
 The command deliberately omits `--allow`, so default policy remains ask-first.
-Gmail writes also retain the existing S3 decision-plane requirement. Standing
+`catalog/gmail.jsonc` declares tier `S3`, and Plexus refuses every S3 action
+while no decision plane is configured, which is the case in production today.
+So no message is sent until the operator lowers the tier or a decision plane
+exists; deciding that is part of going live. Standing
 recipient authority, if desired, is a separate operator operation:
 
 ```sh
@@ -56,8 +59,10 @@ retrying a send whose outcome is unknown.
 Before sending, Plexus composes the MIME message and seals it locally with
 RFC 9180 base mode, X25519/HKDF-SHA256/ChaCha20-Poly1305. It caches only the
 public half of `kem:plexus-sent-text:1`, verified against key id
-`f0d59c165a515480`. The vault retains the private key. Vault operations require
-the appropriate grants to the reserved Plexus module identity.
+`f0d59c165a515480`. The vault retains the private key. The vault must grant
+`reserved:plexus` three things: `read` on `oauth:gmail` (the mailbox's token),
+`read` on `kem:plexus-sent-text:1` (its public key), and `open` on
+`kem:plexus-sent-text:1` (operator read-back).
 
 An accepted result contains Gmail's message id and `sent_text_row_id`; it is not
 a delivery receipt. Read or change retention only over the operator's direct,
