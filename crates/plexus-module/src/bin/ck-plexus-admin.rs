@@ -177,12 +177,17 @@ Transport exit 2 means no daemon connection was made; exit 3 means the outcome
 is unknown after submission. Inspect state before retrying an exit-3 operation.
 
 recipients-add|recipients-remove --connection <id> [--agent <id>] --recipient <id> [--apply]
- recipients-list --connection <id> [--agent <id>]
- sent-text-read --row <id>
- sent-text-retention --days <1..3650>
+recipients-list --connection <id> [--agent <id>]
     Omit --agent for the module-only (SQL NULL) key, not all agents.
     Email addresses are trimmed and lowercased. Phone identifiers are only trimmed.
     Add/remove previews and applied changes are audited. Approval never adds an entry.
+
+sent-text-read --row <id>
+    Open an archived sent message through the vault; each read attempt is audited.
+
+sent-text-retention --days <1..3650>
+    Set the ciphertext retention period independently of audit retention.
+    Applies immediately; existing rows can expire sooner, never later.
 
 issue-ticket --app <key> --actions a,b,c|'*' [--credential-id <id>]
              [--risk read|write|destructive] [--connection <id>] [--instance-url <url>]
