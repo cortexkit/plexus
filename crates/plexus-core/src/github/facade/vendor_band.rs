@@ -103,7 +103,15 @@ fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     row: &Receipt,
     action: &str,
     args: Value,
+    clock: &dyn Fn() -> i64,
 ) -> Result<Value, taxonomy::Failure> {
+    let expires_at = row.claim_lease_expires_at.ok_or("store_failure")?;
+    let check_lease = || {
+        pagination::check_lease(expires_at, clock()).map_err(|_| {
+            taxonomy::Failure::from("pre_dispatch_read_incomplete{reason: lease_expired}")
+        })
+    };
+    check_lease()?;
     let handle = reply
         .handle
         .as_ref()
@@ -123,7 +131,10 @@ fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     let reservation = engine
         .authorize(request)
         .map_err(|denial| taxonomy::denied(&denial, "G8"))?;
-    taxonomy::dispatched(engine.revalidate_and_dispatch(&reservation))
+    check_lease()?;
+    let result = engine.revalidate_and_dispatch(&reservation);
+    check_lease()?;
+    taxonomy::dispatched(result)
 }
 
 /// Carry the caller's daemon scope onto a governed leg for its audit rows. The
@@ -801,6 +812,42 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     claim_owner: &str,
     now: i64,
 ) -> Value {
+    run_with_clock(
+        engine,
+        store,
+        reply,
+        nonce,
+        claim_owner,
+        now,
+        &crate::storage::now_ms,
+    )
+}
+
+/// Exercise pre-read lease boundaries without waiting for wall-clock expiry.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_test_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+    engine: &GovernanceEngine<C, T>,
+    store: &PlexusStore,
+    reply: &mut gates::GateReply,
+    nonce: &str,
+    claim_owner: &str,
+    now: i64,
+    clock: &dyn Fn() -> i64,
+) -> Value {
+    run_with_clock(engine, store, reply, nonce, claim_owner, now, clock)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+    engine: &GovernanceEngine<C, T>,
+    store: &PlexusStore,
+    reply: &mut gates::GateReply,
+    nonce: &str,
+    claim_owner: &str,
+    now: i64,
+    clock: &dyn Fn() -> i64,
+) -> Value {
     let Some(Claim::Owned(row)) = reply.claim.as_ref() else {
         return json!({"status":"pending"});
     };
@@ -808,6 +855,26 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     let agent = row.agent_id.clone();
     let fail = |reply: &mut gates::GateReply, gate, failure| {
         refuse(store, &row, reply, nonce, claim_owner, gate, failure)
+    };
+    let fail_read = |reply: &mut gates::GateReply, gate, mut failure: taxonomy::Failure| {
+        // Reads run again when a partial receipt resumes. Only an unattempted
+        // receipt can promise that no write was sent; retain partial progress
+        // and the original failure classification on resumed requests.
+        let not_sent = row
+            .effects
+            .iter()
+            .all(|effect| effect.dispatch_attempted_at.is_none() && effect.outcome.is_none());
+        if not_sent {
+            if failure.code == "outcome_unknown" {
+                failure.code = "pre_dispatch_read_incomplete{reason: transport_unknown}".into();
+            }
+            failure.retryable = true;
+        }
+        let mut value = fail(reply, gate, failure);
+        if not_sent {
+            value["transmission"] = json!("not_sent");
+        }
+        value
     };
     if let Err(code) = stale(store, reply, &row) {
         return fail(reply, "G8", code.into());
@@ -831,23 +898,29 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     if mapped.request_kind == "comment_edit_last" {
         let start = now;
         let mut read_error = None;
-        let walk =
-            pagination::walk_newest_bot_comment(slug, start, crate::storage::now_ms, |page| {
-                let mut page_args = args.clone();
-                page_args["page"] = json!(page.page);
-                page_args["per_page"] = json!(page.per_page);
-                match read(engine, reply, &row, "github.issue_comments.list", page_args) {
-                    Ok(value) => Ok(value),
-                    Err(code) => {
-                        read_error = Some(code);
-                        Err(WalkError::ReadFailed)
-                    }
+        let walk = pagination::walk_newest_bot_comment(slug, start, clock, |page| {
+            let mut page_args = args.clone();
+            page_args["page"] = json!(page.page);
+            page_args["per_page"] = json!(page.per_page);
+            match read(
+                engine,
+                reply,
+                &row,
+                "github.issue_comments.list",
+                page_args,
+                clock,
+            ) {
+                Ok(value) => Ok(value),
+                Err(code) => {
+                    read_error = Some(code);
+                    Err(WalkError::ReadFailed)
                 }
-            });
+            }
+        });
         let walk = match walk {
             Ok(walk) => walk,
             Err(error) => {
-                return fail(
+                return fail_read(
                     reply,
                     "G8",
                     read_error.unwrap_or_else(|| match error {
@@ -882,9 +955,10 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 &row,
                 "github.pull_request.get",
                 json!({"owner":args["owner"], "repo":args["repo"], "pull_number":number}),
+                clock,
             ) {
                 Ok(value) => value,
-                Err(code) => return fail(reply, "G8", code),
+                Err(code) => return fail_read(reply, "G8", code),
             };
             if !owned(&value, &login) {
                 return fail(reply, "G8", stack_not_own(&value, number, &login));
@@ -909,15 +983,15 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         } else {
             args.clone()
         };
-        let value = match read(engine, reply, &row, action, read_args) {
+        let value = match read(engine, reply, &row, action, read_args, clock) {
             Ok(value) => value,
             Err(code)
                 if mapped.request_kind == "issue_edit"
                     && code.code == "vendor_rejected{status: 404}" =>
             {
-                return fail(reply, "G8", "not_present".into());
+                return fail_read(reply, "G8", "not_present".into());
             }
-            Err(code) => return fail(reply, "G8", code),
+            Err(code) => return fail_read(reply, "G8", code),
         };
         completed.push(action);
         let value = if queue_kind(&mapped.request_kind) {
@@ -929,14 +1003,14 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             if let Err(code) =
                 graphql_errors(&mapped.request_kind, action, &login, &repository, &value)
             {
-                return fail(reply, "G8", code.into());
+                return fail_read(reply, "G8", code.into());
             }
             let mut pr = value["data"]["repository"]["pullRequest"].clone();
             if !queue_pr_shape(&pr)
                 || pr["number"] != args["pull_number"]
                 || !matches!(pr["state"].as_str(), Some("OPEN" | "CLOSED" | "MERGED"))
             {
-                return fail(
+                return fail_read(
                     reply,
                     "G8",
                     "pre_dispatch_read_incomplete{reason: invalid_response}".into(),
@@ -961,7 +1035,7 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 &repository,
                 &value,
             ) {
-                return fail(reply, "G8", code.into());
+                return fail_read(reply, "G8", code.into());
             }
             let node = &value["data"]["node"];
             let Some(repository) = node
@@ -983,7 +1057,7 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             }
             if mapped.request_kind == "resolve_thread" {
                 let Some(number) = node["pullRequest"]["number"].as_u64().filter(|n| *n > 0) else {
-                    return fail(
+                    return fail_read(
                         reply,
                         "G8",
                         "pre_dispatch_read_incomplete{reason: invalid_response}".into(),
@@ -1009,6 +1083,9 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         }
         if mapped.request_kind == "stack_unstack" {
             if let Err(code) = stack_shape(&value, &args) {
+                if code == "pre_dispatch_read_incomplete{reason: invalid_response}" {
+                    return fail_read(reply, "G8", code.into());
+                }
                 return fail(reply, "G8", code.into());
             }
             if let Some(pr) = value["pull_requests"]
@@ -1118,14 +1195,14 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             pr["draft"].as_bool(),
             pr["node_id"].as_str().filter(|id| !id.is_empty()),
         ) else {
-            return fail(
+            return fail_read(
                 reply,
                 "G9",
                 "pre_dispatch_read_incomplete{reason: invalid_response}".into(),
             );
         };
         if !pr["number"].is_u64() || !pr["html_url"].is_string() {
-            return fail(
+            return fail_read(
                 reply,
                 "G9",
                 "pre_dispatch_read_incomplete{reason: invalid_response}".into(),

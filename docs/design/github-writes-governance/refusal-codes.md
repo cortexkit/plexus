@@ -1,7 +1,7 @@
 # GitHub bot write refusal codes
 
 Every code the `github` tool's `bot_request` operation can return, read from
-the source at commit 3a5c2312. Callers such as AFT's gh shim, which routes
+the facade source. Callers such as a `gh` shim, which routes
 agents' `gh` commands through plexus, use it to tell an agent whether anything
 reached GitHub, whether retrying the same request nonce is safe, and who has
 to act.
@@ -40,6 +40,52 @@ step can follow earlier reads or writes. "No claim" means the refusal did not
 take or finish the nonce's receipt, so the same nonce can simply be sent
 again. "Who must act" is guidance from what each check enforces.
 
+## Pre-read failures and write transmission
+
+Before any write effect has been attempted, a failed pre-read is always a
+retryable refusal with `retry_same_nonce: true` and `transmission: "not_sent"`.
+The claim is released, not finished as a terminal refusal, so an identical
+same-nonce retry performs the reads again and can dispatch the write normally.
+`TransportOutcome::OutcomeUnknown` on a read becomes
+`pre_dispatch_read_incomplete{reason: transport_unknown}`; it can mean a read
+timed out, not that a write may have executed. Other read failures retain their
+diagnostic code but receive the same safe-retry treatment. These rules override
+the table's ordinary terminal classification for failures originating in a
+pre-read (for example, a read's HTTP 401 or 404). A successful read that proves
+the target is not owned remains a terminal ownership refusal.
+
+Reads run again when an unfinished multi-leg receipt resumes. If a write was
+already attempted, read failures retain their existing classification and
+`legs_sent` reports completed write effects; the reply does not claim
+`transmission: "not_sent"`. A write's unknown transport outcome remains
+`status: "outcome_unknown"`, and the receipt prevents retransmitting that write.
+
+Every call to `read()` in `facade/vendor_band.rs` is before the current
+invocation's write loop:
+
+| Call site | Reads | Can an earlier write of the same request already be complete? |
+|---|---|---|
+| `comment_edit_last` pagination callback | `github.issue_comments.list` | No: the only write is `update_issue_comment`; completed effects recover without rerunning reads. |
+| `stack_create` / `stack_add` PR loop | `github.pull_request.get` for each member | No: each kind has only one write effect. |
+| Generic `mapped.reads` loop | `github.issue_comment.get` for comment edits; `github.issue.get` for issue edits; PR, queue-state, thread and stack reads for the other ownership checks | **Yes for multi-leg `issue_edit` retries**: an earlier edit/label/assignee effect can be complete while a later one is unfinished. All other mapped kinds using this loop have one write effect. |
+
+The generic loop covers `comment_edit_last`, `comment_edit`, `issue_edit`,
+`pr_edit`, `pr_ready`, `pr_draft`, `pr_enqueue`, `pr_dequeue`, `resolve_thread`,
+`unresolve_thread` and `stack_unstack`. Close/reopen requests may have several
+write effects but have no pre-reads.
+
+All pre-reads check the receipt's claim deadline before authorization, again
+before dispatch, and after the response. The comment-list walk and `read()`
+share `pagination::check_lease`, including expiry at the exact deadline. A slow
+read may finish after expiry, but no further read starts; the refusal is
+`pre_dispatch_read_incomplete{reason: lease_expired}`. With the production
+120-second lease and 30-second transport timeout, serial pre-reads consume at
+most roughly 120 + 30 seconds of vendor wait, rather than 30 seconds per member
+of an arbitrarily large stack. Local authorization and scheduling time are not
+a hard end-to-end response deadline.
+
+## Refusal table
+
 | Exact code string | Produced at | GitHub transmission | Same-nonce retry | Who must act |
 |---|---|---|---|---|
 | `pull_request_head_moved` | G8 merge-queue pre-read in `vendor_band.rs`; typed detail names `expected_head_sha` and `actual_head_sha`. | **Read only**, never a mutation. | Terminal refusal; same nonce replays it. | Caller reviews the new head and submits its SHA with a new nonce. |
@@ -73,13 +119,14 @@ again. "Who must act" is guidance from what each check enforces.
 | `nonce_in_flight` | Existing-receipt check, claim, or dispatch mapping. [gates.rs:501-517](../../../crates/plexus-core/src/github/facade/gates.rs) [taxonomy.rs:94-108](../../../crates/plexus-core/src/github/facade/taxonomy.rs) | **Maybe**: another owner may still be dispatching. | Receipt remains pending; wait, then retry the same nonce. | Caller waits for the current owner to resolve the request. |
 | `nonce_payload_mismatch` | Existing-receipt check or claim. [gates.rs:487-490](../../../crates/plexus-core/src/github/facade/gates.rs) [gates.rs:672-687](../../../crates/plexus-core/src/github/facade/gates.rs) | **Maybe**: the existing receipt may represent earlier GitHub activity. | Mismatched attempt cannot succeed with the same nonce (`retry_same_nonce: false`); retry with its original payload under the same nonce, or use a new nonce for the changed payload. | Caller makes the payload/nonce consistent. |
 | `not_present` | G8 target/read checks. [vendor_band.rs:651-656](../../../crates/plexus-core/src/github/facade/vendor_band.rs) [vendor_band.rs:701-722](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **Yes**: a GitHub read response was checked. | Terminal refusal; same nonce replays it. | Caller corrects the target or restores the missing resource. |
-| `outcome_unknown` | A G8 read can return it as a refusal; on G10 write paths it is instead a status, not a refusal code. [taxonomy.rs:111-112](../../../crates/plexus-core/src/github/facade/taxonomy.rs) [vendor_band.rs:988-1001](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **Maybe**: transport outcome for the read is unknown. | G8 refusal is terminal; same nonce replays it. A G10 `status:"outcome_unknown"` is not a refusal and the receipt prevents retransmitting the uncertain write. | Operator/caller resolves the uncertain outcome; do not blindly repeat a potentially executed write. |
+| `outcome_unknown` | G8 read failure only when resuming after an earlier write attempt; on G10 write paths it is a status, not a refusal code. [taxonomy.rs](../../../crates/plexus-core/src/github/facade/taxonomy.rs) [vendor_band.rs](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **Earlier writes** are possible; inspect `legs_sent`. A read before any write uses `pre_dispatch_read_incomplete{reason: transport_unknown}` instead. | Partial G8 refusal is terminal; same nonce replays it. A G10 `status:"outcome_unknown"` prevents retransmitting the uncertain write. | Operator/caller resolves the uncertain outcome; do not blindly repeat a potentially executed write. |
 | `pipeline_denied{gate: G, denial: D}` where `G` is `G8` or `G10`; `D` is `ConnectorHomeNotHeld`, `Connection(Unhealthy)`, `Credential(StoreUnavailable)`, `Credential(Transient)`, `Severity(DecisionPlaneFailure)`, or `StoreFailure` | Governance authorization mapped by the facade. [taxonomy.rs:30-35](../../../crates/plexus-core/src/github/facade/taxonomy.rs) [governance.rs:1215-1285](../../../crates/plexus-core/src/governance.rs) | **Maybe**: earlier G8 reads or G10 write steps may have been sent. | Retryable; claim is released when no write outcome is uncertain. Earlier completed effects are retained and skipped. [vendor_band.rs:537-558](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | Relevant service/operator restores connector home, connection health, credential store, decision plane, or storage; caller retries. |
 | `pipeline_denied{gate: G, denial: D}` where `G` is `G8` or `G10`; `D` is `ConsentUnavailable`, `RecipientArgumentInvalid`, `Connection(NotFound)`, `Connection(Disabled)`, `Connection(Revoked)`, `Connection(Pending)`, `Catalog(NotFound)`, `Catalog(Quarantined)`, `Catalog(Disabled)`, `Catalog(SchemaMismatch)`, `Policy(Blocked)`, `Policy(AskFirst)`, `Policy(ApprovalMissing)`, `Policy(ApprovalExpired)`, `Policy(ApprovalShapeMismatch)`, `Policy(ApprovalAlreadyDecided)`, `Severity(DecisionDenied)`, `Severity(GrantHashMismatch)`, `NeedsDecisionPlane`, `ResourceFilter(MissingRequiredFilter)`, `ResourceFilter(ValueNotAllowed)`, `ResourceFilter(WriteFiltersAbsent)`, `Credential(Missing)`, `Credential(Permanent)`, `Credential(AuthRequired)`, `OwnershipProofMissing`, `ActionRequestCreated`, `ArgumentUndeclared`, or `ArgumentUndeclared, field: X` | Governance authorization mapped by the facade. [taxonomy.rs:30-35,59-64](../../../crates/plexus-core/src/github/facade/taxonomy.rs) [governance.rs:1215-1294](../../../crates/plexus-core/src/governance.rs) | **Maybe**: a read or earlier write may have been sent; authorization stops the current leg. | Terminal refusal; same nonce replays it. | Caller fixes request, approval, target or resource filters as applicable; otherwise the relevant connection, catalog, policy, grant/decision-plane, credential or operator owner repairs authority. |
 | `policy_blocked{source: module}`; `policy_blocked{source: agent}` | G6. [gates.rs:647-655](../../../crates/plexus-core/src/github/facade/gates.rs) | **Never** on the fresh attempt. | No claim; retry after policy changes. | Corresponding module/agent policy owner or operator changes the blocking policy. |
-| `pre_dispatch_read_incomplete{reason: page_bound}` | G8 pagination. [vendor_band.rs:631-648](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **Yes**: pagination reached its bound after reads. | Terminal refusal; same nonce replays it. | Caller/operator resolves the oversized or incomplete read path. |
+| `pre_dispatch_read_incomplete{reason: page_bound}` | G8 pagination. [vendor_band.rs](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **Read only**: pagination reached its bound; `transmission: "not_sent"` refers to writes. | Retryable; claim is released for the same nonce. | Caller/operator resolves the oversized or incomplete read path. |
 | `pre_dispatch_read_incomplete{reason: invalid_response}` | G8 read validation or G9 response validation. [vendor_band.rs:112-116](../../../crates/plexus-core/src/github/facade/vendor_band.rs) [vendor_band.rs:792-809](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **Yes** when caused by a returned GitHub response; the G8 precheck branch can occur before a request. | Retryable; claim is released when no write outcome is uncertain. [taxonomy.rs:19-27](../../../crates/plexus-core/src/github/facade/taxonomy.rs) | Caller retries; operator fixes malformed upstream response behavior if persistent. |
-| `pre_dispatch_read_incomplete{reason: lease_expired}` | G8 pagination/read path. [vendor_band.rs:631-648](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **Maybe**: earlier pages may have reached GitHub. | Retryable; claim releases when no write is uncertain. | Caller retries after the lease/read delay clears. |
+| `pre_dispatch_read_incomplete{reason: lease_expired}` | Every G8 pre-read and the pagination walk, through shared `pagination::check_lease`. [pagination.rs](../../../crates/plexus-core/src/github/pagination.rs) [vendor_band.rs](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **Reads only** on an unattempted receipt (`transmission: "not_sent"`); a resumed partial issue edit retains `legs_sent` instead. | Retryable; claim releases when no write is uncertain. | Caller retries after the lease/read delay clears. |
+| `pre_dispatch_read_incomplete{reason: transport_unknown}` | A pre-read's unknown transport outcome before any write attempt. [vendor_band.rs](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **No writes** (`transmission: "not_sent"`); only the read's outcome is unknown. | Retryable (`retry_same_nonce: true`); releases the claim so the same nonce runs normally. | Caller retries the same request and nonce after the read failure clears. |
 | `pr_edit_not_own`; `issue_edit_not_own` | G8 ownership checks. [vendor_band.rs:737-751](../../../crates/plexus-core/src/github/facade/vendor_band.rs) [vendor_band.rs:762-778](../../../crates/plexus-core/src/github/facade/vendor_band.rs) | **Yes**: a GitHub read response was checked. | Terminal refusal; same nonce replays it. | Caller targets a resource the bot owns or resolves ownership with its author/operator. |
 | `pr_head_cross_repository` | Request mapper rejects a cross-repository PR head before claim. [request_map.rs:29-32](../../../crates/plexus-core/src/github/facade/request_map.rs) [request_map.rs:49-58](../../../crates/plexus-core/src/github/facade/request_map.rs) | **Never**. | No claim; retry after correcting the head branch. | Caller supplies a branch in the bound repository. |
 | `probe_unproven` | G5. [gates.rs:542-547](../../../crates/plexus-core/src/github/facade/gates.rs) | **Never** on the fresh attempt. | No claim; retry after proof/probe. | Operator completes or restores the handle proof. |
@@ -105,4 +152,4 @@ The parameterized `pipeline_denied` grammar is emitted by `pipeline_denial`; the
 
 **Codes the `bot_request` path does not return:** `invalid_operation` is emitted only when the GitHub `op` is unsupported; the module explicitly accepts `bot_request`, so it is not returned for that op. `agent_identity_conflict` belongs to `grants.would_ask`, not the GitHub handler. [lib.rs:2801-2809](../../../crates/plexus-module/src/lib.rs) [grants_would_ask.rs:102-115](../../../crates/plexus-module/src/grants_would_ask.rs)
 
-**Transmission not determinable from the code string alone:** `nonce_in_flight` (another owner may still be working); G8/G9/G10 `pipeline_denied{...}`, the later-phase `store_failure`/`repository_unbound`/`module_grant_absent` and `stale_authority{...}` forms, `scope_*`, and `transport_not_sent` (earlier reads or writes are path-dependent); and G8 `outcome_unknown` (the read’s transport outcome is uncertain). `legs_sent` reports completed write steps, not pre-dispatch reads; `outcome_unknown` on a write is a status rather than a refusal code. [vendor_band.rs:523-535,852-915,940-1001](../../../crates/plexus-core/src/github/facade/vendor_band.rs) [taxonomy.rs:94-112](../../../crates/plexus-core/src/github/facade/taxonomy.rs)
+**Transmission not determinable from the code string alone:** `nonce_in_flight` (another owner may still be working); G8/G9/G10 `pipeline_denied{...}`, the later-phase `store_failure`/`repository_unbound`/`module_grant_absent` and `stale_authority{...}` forms, `scope_*`, and `transport_not_sent` (earlier reads or writes are path-dependent); and G8 `outcome_unknown` on a resumed partial request. Check `transmission` and `legs_sent`: the latter reports completed write steps, not pre-dispatch reads. `outcome_unknown` on a write is a status rather than a refusal code. [vendor_band.rs](../../../crates/plexus-core/src/github/facade/vendor_band.rs) [taxonomy.rs](../../../crates/plexus-core/src/github/facade/taxonomy.rs)

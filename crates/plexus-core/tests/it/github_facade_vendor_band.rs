@@ -1059,7 +1059,7 @@ fn missing_handle_credential_is_reported_at_the_kind_specific_gate() {
 }
 
 #[test]
-fn page_bound_is_sticky_without_treating_incomplete_list_as_no_comment() {
+fn page_bound_releases_claim_without_treating_incomplete_list_as_no_comment() {
     let (_scratch, store, engine, transport, scope) = setup(
         "facade-page-bound",
         &[
@@ -1090,6 +1090,8 @@ fn page_bound_is_sticky_without_treating_incomplete_list_as_no_comment() {
         first["result"]["refusal_code"], "pre_dispatch_read_incomplete{reason: page_bound}",
         "{first}"
     );
+    assert_eq!(first["result"]["retry_same_nonce"], true);
+    assert_eq!(first["result"]["transmission"], "not_sent");
     assert_eq!(
         transport.requests().len(),
         plexus_core::github::pagination::MAX_PAGES
@@ -1114,7 +1116,7 @@ fn page_bound_is_sticky_without_treating_incomplete_list_as_no_comment() {
     );
     assert_eq!(
         transport.requests().len(),
-        plexus_core::github::pagination::MAX_PAGES
+        2 * plexus_core::github::pagination::MAX_PAGES
     );
 }
 
@@ -1229,18 +1231,18 @@ fn g8_read_ask_first_never_creates_an_inner_action_request() {
         .query_row("SELECT count(*) FROM action_requests", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 0);
-    assert_eq!(
-        store
-            .github_receipt("agent-fixture", "inner-policy-nonce")
-            .unwrap()
-            .unwrap()
-            .state,
-        "refused"
-    );
+    assert_eq!(result["result"]["retry_same_nonce"], true);
+    assert_eq!(result["result"]["transmission"], "not_sent");
+    let row = store
+        .github_receipt("agent-fixture", "inner-policy-nonce")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, "pending");
+    assert!(row.claim_owner.is_none());
 }
 
 #[test]
-fn g8_read_401_is_sticky_and_never_retransmits() {
+fn g8_read_401_releases_claim_for_retry_after_credential_repair() {
     let (_scratch, store, engine, transport, scope) = setup(
         "facade-read-401",
         &[("github.issue.get", "read"), ("edit_issue", "write")],
@@ -1268,6 +1270,11 @@ fn g8_read_401_is_sticky_and_never_retransmits() {
     );
     assert_eq!(transport.requests().len(), 1);
     assert_eq!(transport.requests()[0].action, "github.issue.get");
+    assert_eq!(first["result"]["retry_same_nonce"], true);
+    assert_eq!(first["result"]["transmission"], "not_sent");
+    transport.set_response(MockResponse::Success(
+        json!({"user":{"login":"app-fixture[bot]", "type":"Bot"}}),
+    ));
     assert_eq!(
         bot_request_scoped(
             &store,
@@ -1279,10 +1286,10 @@ fn g8_read_401_is_sticky_and_never_retransmits() {
             "retry-id",
             "retry",
             now + 1
-        )["result"],
-        first["result"]
+        )["result"]["status"],
+        "completed"
     );
-    assert_eq!(transport.requests().len(), 1);
+    assert_eq!(transport.requests().len(), 3);
 }
 
 #[test]

@@ -1,6 +1,268 @@
 use super::*;
 
 #[test]
+fn stack_pre_reads_stop_when_the_first_slow_read_exhausts_the_claim_lease() {
+    use plexus_core::github::facade::{gates, vendor_band};
+    use plexus_core::transport::{Transport, TransportRequest, TransportResponse};
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    struct SlowReads {
+        inner: Arc<MockTransport>,
+        clock: Arc<AtomicI64>,
+    }
+    impl Transport for SlowReads {
+        fn dispatch(
+            &self,
+            request: TransportRequest,
+            credential: &ResolvedCredential,
+        ) -> TransportResponse {
+            let result = self.inner.dispatch(request, credential);
+            self.clock.fetch_add(30_000, Ordering::SeqCst);
+            result
+        }
+    }
+    for already_expired in [false, true] {
+        let (_scratch, store, _, transport, scope) = setup(
+            "stack-read-deadline",
+            &[
+                ("github.pull_request.get", "read"),
+                ("create_pull_request_stack", "write"),
+            ],
+        );
+        transport.set_response(MockResponse::Success(
+            json!({"user":{"login":"app-fixture[bot]", "type":"Bot"}}),
+        ));
+        let clock = Arc::new(AtomicI64::new(0));
+        let engine = GovernanceEngine::new(
+            store.clone(),
+            Arc::new(
+                plexus_core::credentials::StubCredentialSource::with_default_success(
+                    b"test".to_vec(),
+                ),
+            ),
+            Arc::new(SlowReads {
+                inner: transport.clone(),
+                clock: clock.clone(),
+            }),
+        )
+        .with_governance_seams(Arc::new(GithubGovernanceSeams {
+            store: store.clone(),
+            credential_provider: Some(Arc::new(Token)),
+        }))
+        .with_scope_reader(Arc::new(LiveScopeReader(scope.clone())));
+        let now = plexus_core::now_ms();
+        let request = json!({"action":"api:POST:/repos/*/*/stacks", "repository":"org/repo", "target":{}, "body":{"pull_requests":[7,8,9,10]}});
+        let mut reply = gates::run_scoped(
+            &*store,
+            plexus_core::github::AFT_PRINCIPAL,
+            Some(&scope),
+            &request,
+            "stack-lease",
+            "request",
+            "worker",
+            now,
+            120,
+        );
+        assert!(reply.refusal_code.is_none(), "{reply:?}");
+        let Some(plexus_core::github::receipt::Claim::Owned(row)) = reply.claim.as_ref() else {
+            panic!("expected owned claim")
+        };
+        let deadline = row.claim_lease_expires_at.unwrap();
+        clock.store(
+            deadline - if already_expired { 0 } else { 10_000 },
+            Ordering::SeqCst,
+        );
+        let value = vendor_band::run_with_test_clock(
+            &engine,
+            &store,
+            &mut reply,
+            "stack-lease",
+            "worker",
+            now,
+            &|| clock.load(Ordering::SeqCst),
+        );
+        let sent = transport.requests();
+        assert_eq!(
+            sent.iter()
+                .filter(|r| r.action == "github.pull_request.get")
+                .count(),
+            if already_expired { 0 } else { 1 }
+        );
+        assert_eq!(
+            value,
+            json!({"status":"refused", "refusal_code":"pre_dispatch_read_incomplete{reason: lease_expired}", "retry_same_nonce":true, "transmission":"not_sent"})
+        );
+        assert_eq!(sent.len(), if already_expired { 0 } else { 1 });
+        assert!(sent
+            .iter()
+            .all(|r| r.action == "github.pull_request.get" && r.args["pull_number"] == 7));
+        let row = store
+            .github_receipt("agent-fixture", "stack-lease")
+            .unwrap()
+            .unwrap();
+        assert!(row.claim_owner.is_none());
+        assert!(row
+            .effects
+            .iter()
+            .all(|effect| effect.dispatch_attempted_at.is_none()));
+    }
+}
+
+#[test]
+fn pre_read_failures_before_any_write_release_nonce_and_retry_sends_once() {
+    for (response, code) in [
+        (
+            MockResponse::OutcomeUnknown,
+            "pre_dispatch_read_incomplete{reason: transport_unknown}",
+        ),
+        (
+            MockResponse::VendorError {
+                code: "http_401".into(),
+                message: "expired".into(),
+            },
+            "handle_credential_rejected",
+        ),
+        (
+            MockResponse::TransientNotSent {
+                message: "offline".into(),
+            },
+            "transport_not_sent",
+        ),
+    ] {
+        let run = ResultRun::new(
+            "comment-pre-read-retry",
+            json!({"action":"api:PATCH:/repos/*/*/issues/comments/*", "target":{"comment_id":101}, "body":{"body":"replacement"}}),
+            |transport| transport.set_response_for_method("github.issue_comment.get", "", response),
+        );
+        let first = run.call("read-retry", "first", "worker", 0);
+        assert_eq!(
+            first["result"],
+            json!({
+                "status":"refused", "refusal_code":code,
+                "retry_same_nonce":true, "transmission":"not_sent"
+            }),
+            "{first}"
+        );
+        let row = run
+            .store
+            .github_receipt("agent-fixture", "read-retry")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, "pending");
+        assert!(row.claim_owner.is_none());
+        assert!(row.outcome.is_none());
+        assert!(row
+            .effects
+            .iter()
+            .all(|effect| effect.dispatch_attempted_at.is_none() && effect.outcome.is_none()));
+        assert_eq!(
+            run.transport
+                .requests()
+                .iter()
+                .map(|r| r.action.as_str())
+                .collect::<Vec<_>>(),
+            ["github.issue_comment.get"]
+        );
+
+        github_bodies(&run.transport);
+        let retry = run.call("read-retry", "retry", "retry-worker", 1);
+        assert_eq!(retry["result"]["status"], "completed", "{retry}");
+        assert_eq!(
+            run.transport
+                .requests()
+                .iter()
+                .map(|r| r.action.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "github.issue_comment.get",
+                "github.issue_comment.get",
+                "update_issue_comment"
+            ]
+        );
+        assert_eq!(
+            run.call("read-retry", "replay", "replay-worker", 2)["result"],
+            retry["result"]
+        );
+        assert_eq!(run.sent(), 3);
+    }
+}
+
+#[test]
+fn write_outcome_unknown_stays_unknown_and_never_retransmits() {
+    let run = ResultRun::new(
+        "comment-write-unknown",
+        json!({"action":"api:PATCH:/repos/*/*/issues/comments/*", "target":{"comment_id":101}, "body":{"body":"replacement"}}),
+        |transport| {
+            transport.set_response_for_method(
+                "update_issue_comment",
+                "",
+                MockResponse::OutcomeUnknown,
+            )
+        },
+    );
+    let first = run.call("write-unknown", "first", "worker", 0);
+    assert_eq!(first["result"], json!({"status":"outcome_unknown"}));
+    assert_eq!(
+        run.store
+            .github_receipt("agent-fixture", "write-unknown")
+            .unwrap()
+            .unwrap()
+            .state,
+        "outcome_unknown"
+    );
+    assert_eq!(
+        run.transport
+            .requests()
+            .iter()
+            .map(|r| r.action.as_str())
+            .collect::<Vec<_>>(),
+        ["github.issue_comment.get", "update_issue_comment"]
+    );
+    github_bodies(&run.transport);
+    assert_eq!(
+        run.call("write-unknown", "retry", "retry-worker", 1)["result"],
+        first["result"]
+    );
+    assert_eq!(run.sent(), 2);
+}
+
+#[test]
+fn pre_read_unknown_after_an_earlier_write_retains_partial_send_reporting() {
+    let run = ResultRun::new(
+        "issue-partial-read-unknown",
+        json!({"action":"issue edit", "target":{"number":42}, "body":{"title":"changed", "add_labels":["triaged"]}}),
+        |transport| {
+            transport.set_response_for_method(
+                "add_issue_labels",
+                "",
+                MockResponse::TransientNotSent {
+                    message: "offline".into(),
+                },
+            )
+        },
+    );
+    let first = run.call("partial", "first", "worker", 0);
+    assert_eq!(first["result"]["retry_same_nonce"], true, "{first}");
+    assert_eq!(first["result"]["legs_sent"], json!(["edit_issue"]));
+    run.transport
+        .set_response_for_method("github.issue.get", "", MockResponse::OutcomeUnknown);
+    let retry = run.call("partial", "retry", "retry-worker", 1);
+    assert_eq!(
+        retry["result"],
+        json!({"status":"refused", "refusal_code":"outcome_unknown", "retry_same_nonce":false, "legs_sent":["edit_issue"]})
+    );
+    assert_eq!(
+        run.transport
+            .requests()
+            .iter()
+            .filter(|r| r.action == "edit_issue")
+            .count(),
+        1
+    );
+    assert!(retry["result"]["transmission"].is_null());
+}
+
+#[test]
 fn completed_label_only_edit_recovers_its_projection_without_another_read() {
     let (scratch, store, engine, transport, scope) = setup(
         "label-finish-replay",

@@ -9,6 +9,15 @@ use serde_json::Value;
 pub const PER_PAGE: usize = 100;
 pub const MAX_PAGES: usize = 100;
 
+/// Reads may finish after the deadline, but must not extend the claim's budget.
+pub(crate) fn check_lease(expires_at_ms: i64, now_ms: i64) -> Result<(), WalkError> {
+    if now_ms >= expires_at_ms {
+        Err(WalkError::LeaseExpired)
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListRead {
     IssueComments,
@@ -133,22 +142,16 @@ where
     C: FnMut() -> i64,
 {
     let mut items = Vec::new();
+    let expires_at_ms =
+        started_at_ms.saturating_add(crate::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS * 1000);
     for page in 1..=MAX_PAGES {
-        if now_ms().saturating_sub(started_at_ms)
-            >= crate::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS * 1000
-        {
-            return Err(WalkError::LeaseExpired);
-        }
+        check_lease(expires_at_ms, now_ms())?;
         let response = fetch(PageRequest {
             read,
             page,
             per_page: PER_PAGE,
         })?;
-        if now_ms().saturating_sub(started_at_ms)
-            >= crate::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS * 1000
-        {
-            return Err(WalkError::LeaseExpired);
-        }
+        check_lease(expires_at_ms, now_ms())?;
         let page_items = match read {
             ListRead::IssueComments => response.as_array(),
             ListRead::InstallationRepositories => {

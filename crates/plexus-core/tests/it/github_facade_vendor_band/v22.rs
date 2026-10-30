@@ -36,6 +36,8 @@ impl Run {
         let (scratch, store, _, _, scope) = setup(
             "v22",
             &[
+                ("github.issue_comment.get", "read"),
+                ("update_issue_comment", "write"),
                 ("github.pull_request.get", "read"),
                 ("github.review_thread.get", "read"),
                 ("github.stack.get", "read"),
@@ -448,10 +450,6 @@ fn v22_ownership_and_repository_refusals_send_no_mutation_and_replay() {
             (thread_read("foreign/repo"), "agent_repository_conflict"),
             (json!({"data":{"node":null}}), "not_present"),
             (json!({"data":{"node":{"id":THREAD}}}), "not_present"),
-            (
-                json!({"errors":[{"message":"private vendor canary"}]}),
-                "vendor_rejected{status: 422}",
-            ),
         ] {
             let run = Run::new(vec![response]);
             let request = request(action, json!({"thread_id":THREAD}), json!({}));
@@ -490,6 +488,43 @@ fn v22_ownership_and_repository_refusals_send_no_mutation_and_replay() {
         );
         assert_eq!(run.call(&request)["result"], first["result"]);
         assert_eq!(run.wire().len(), 1);
+        run.server.join().unwrap();
+    }
+}
+
+#[test]
+fn v22_graphql_pre_read_errors_release_claim_and_retry_without_mutation() {
+    let error = json!({"errors":[{"message":"private vendor canary"}]});
+    for action in [
+        "graphql resolvereviewthread",
+        "graphql unresolvereviewthread",
+    ] {
+        let run = Run::new(vec![error.clone(), error.clone()]);
+        let request = request(action, json!({"thread_id":THREAD}), json!({}));
+        let first = run.call(&request);
+        assert_eq!(
+            first["result"],
+            json!({"status":"refused", "refusal_code":"vendor_rejected{status: 422}", "retry_same_nonce":true, "transmission":"not_sent"})
+        );
+        assert!(!first.to_string().contains("private vendor canary"));
+        let row = run
+            .store
+            .github_receipt("agent-fixture", "v22-nonce")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, "pending");
+        assert!(row.claim_owner.is_none());
+        assert_eq!(run.call(&request)["result"], first["result"]);
+        assert_eq!(
+            run.wire(),
+            vec![
+                (
+                    "POST /graphql HTTP/1.1".into(),
+                    json!({"query":THREAD_READ,"variables":{"threadId":THREAD}})
+                );
+                2
+            ]
+        );
         run.server.join().unwrap();
     }
 }
@@ -915,6 +950,15 @@ fn reply_contract_cases() -> Vec<ReplyCase> {
     let mut unowned_stack = stack();
     unowned_stack["pull_requests"] = json!([pr(7), human_pr(8)]);
     vec![
+        (
+            "comment-edit-pre-read-unknown",
+            request(
+                "api:PATCH:/repos/*/*/issues/comments/*",
+                json!({"comment_id":"101"}),
+                json!({"body":"replacement"}),
+            ),
+            vec![(500, json!({"message":"upstream unavailable"}))],
+        ),
         (
             "resolve-thread-own",
             resolve.clone(),
