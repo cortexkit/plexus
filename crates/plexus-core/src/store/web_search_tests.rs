@@ -576,6 +576,7 @@ fn migration_53_is_additive_and_preserves_existing_limits_and_rows() {
         inner,
         grant_journal: None,
         outbox_ready: tokio::sync::Notify::new(),
+        orphan_sweep_after: Default::default(),
         ci_runs: Default::default(),
         manifest_cache: Default::default(),
     };

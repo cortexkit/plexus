@@ -3031,6 +3031,8 @@ pub struct PlexusStore {
     manifest_cache: std::sync::Mutex<ManifestCache>,
     grant_journal: Option<PathBuf>,
     outbox_ready: tokio::sync::Notify,
+    /// Resume the bounded legacy-orphan sweep; restart from the beginning on open.
+    orphan_sweep_after: std::sync::Mutex<Option<String>>,
     /// Run values from recent `workflow_run` webhooks, for later job webhooks.
     /// In memory only; empty after a restart.
     ci_runs: relay::CiRunCache,
@@ -3107,6 +3109,7 @@ impl PlexusStore {
             inner: store,
             grant_journal,
             outbox_ready: tokio::sync::Notify::new(),
+            orphan_sweep_after: Default::default(),
             ci_runs: Default::default(),
             manifest_cache: Default::default(),
         })
@@ -11564,6 +11567,7 @@ mod tests {
             inner,
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
+            orphan_sweep_after: Default::default(),
             ci_runs: Default::default(),
             manifest_cache: Default::default(),
         };
@@ -11903,6 +11907,7 @@ mod tests {
             inner,
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
+            orphan_sweep_after: Default::default(),
             ci_runs: Default::default(),
             manifest_cache: Default::default(),
         };
@@ -12218,6 +12223,7 @@ mod tests {
             inner,
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
+            orphan_sweep_after: Default::default(),
             ci_runs: Default::default(),
             manifest_cache: Default::default(),
         };
@@ -12300,6 +12306,7 @@ mod tests {
             inner,
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
+            orphan_sweep_after: Default::default(),
             ci_runs: Default::default(),
             manifest_cache: Default::default(),
         };
@@ -12415,6 +12422,7 @@ mod tests {
             inner,
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
+            orphan_sweep_after: Default::default(),
             ci_runs: Default::default(),
             manifest_cache: Default::default(),
         };

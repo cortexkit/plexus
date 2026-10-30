@@ -254,16 +254,34 @@ pub(super) fn increment(conn: &Connection, name: &str, count: i64) -> rusqlite::
     Ok(())
 }
 
-// Normal deletes remove their markers in the same transaction. Retention also
-// repairs orphaned markers left by older binaries or imported stores, not on
-// every publisher pass through the seven-day event history.
-pub(super) fn cleanup_orphans(conn: &Connection) -> rusqlite::Result<()> {
-    let deleted = conn.execute(
-        "DELETE FROM event_outbox WHERE NOT EXISTS
-        (SELECT 1 FROM trigger_events e WHERE e.event_id = event_outbox.event_id)",
-        [],
-    )?;
-    increment(conn, "orphaned_markers", deleted as i64)
+// Current deletes remove markers atomically. Sweep legacy/imported orphans in
+// bounded keyset pages instead of rechecking the entire outbox every hour.
+pub(super) fn cleanup_orphans(
+    conn: &Connection,
+    after: Option<&str>,
+) -> rusqlite::Result<Option<String>> {
+    let comparison = if after.is_some() { ">" } else { ">=" };
+    let start = after.unwrap_or("");
+    let mut query = conn.prepare(&format!(
+        "SELECT event_id FROM event_outbox WHERE event_id {comparison} ?1 ORDER BY event_id LIMIT 1000"
+    ))?;
+    let ids = query
+        .query_map([start], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    #[cfg(test)]
+    record_retention_work(&query);
+    let Some(last) = ids.last() else {
+        return Ok(None);
+    };
+    let mut delete = conn.prepare(&format!(
+        "DELETE FROM event_outbox WHERE event_id {comparison} ?1 AND event_id <= ?2 AND NOT EXISTS
+        (SELECT 1 FROM trigger_events e WHERE e.event_id = event_outbox.event_id)"
+    ))?;
+    let deleted = delete.execute((start, last))?;
+    #[cfg(test)]
+    record_retention_work(&delete);
+    increment(conn, "orphaned_markers", deleted as i64)?;
+    Ok((ids.len() == 1000).then(|| last.clone()))
 }
 
 /// Repoint visibility before deleting a canonical watch, without changing the
@@ -618,8 +636,8 @@ impl PlexusStore {
          HAVING MIN(created_at_ms) < ?1 OR COUNT(*) > ?2";
 
     /// Maintenance is independent of polling success or watch status. Repair
-    /// orphaned markers and the repository-id cache first, then fence each
-    /// watch with prunable rows separately so the writer is not held for the
+    /// one page of orphaned markers and the repository-id cache first, then prune
+    /// one watch per transaction so the writer is not held for the
     /// whole history. Retention windows are days long, so the scheduler runs
     /// this pass hourly, not every minute: the candidate query above keeps an
     /// idle pass to one indexed read instead of a scan per watch.
@@ -629,14 +647,19 @@ impl PlexusStore {
         max_rows: usize,
         now: i64,
     ) -> Result<usize, StoreError> {
-        self.inner.with_conn_fenced(|conn| {
-            cleanup_orphans(conn)?;
+        // Hold the sweep cursor through commit: a failed transaction must not
+        // advance past markers that still need repair.
+        let mut orphan_after = self.orphan_sweep_after.lock().unwrap();
+        let next = self.inner.with_conn_fenced(|conn| {
+            let next = cleanup_orphans(conn, orphan_after.as_deref())?;
             conn.execute("DELETE FROM github_repo_id_cache WHERE repo NOT IN (
                 SELECT lower(json_extract(fixed_args,'$.owner') || '/' || json_extract(fixed_args,'$.repo'))
                 FROM trigger_subscriptions WHERE status <> 'retired' AND json_valid(fixed_args)
                 AND json_extract(fixed_args,'$.owner') IS NOT NULL AND json_extract(fixed_args,'$.repo') IS NOT NULL)", [])?;
-            Ok(())
+            Ok(next)
         })?;
+        *orphan_after = next;
+        drop(orphan_after);
         let cutoff = now.saturating_sub(max_age_ms.max(0));
         let cap = i64::try_from(max_rows).unwrap_or(i64::MAX);
         let watches: Vec<(String, String)> = self.inner.with_read(|conn| {
@@ -856,6 +879,20 @@ fn pending_query(version: u8) -> String {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    // Count selection and orphan-sweep work. The remaining deletes operate on
+    // an already bounded ID set rather than searching the retained history.
+    static RETENTION_SQL_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_retention_work(query: &rusqlite::Statement<'_>) {
+    RETENTION_SQL_STEPS.with(|steps| {
+        steps.set(steps.get() + query.get_status(rusqlite::StatementStatus::VmStep) as usize);
+    });
+}
+
 /// Select at most one retention batch in SQLite, then delete that id set.
 /// Publication, body-floor and cursor protections still contribute to the row
 /// cap, but are never removed just to meet it. The caller owns the transaction.
@@ -867,51 +904,61 @@ pub(super) fn prune_events(
     max_rows: usize,
     now: i64,
 ) -> rusqlite::Result<usize> {
-    let mut query=conn.prepare(
-        "WITH candidates AS (
-            SELECT e.event_id,e.created_at_ms,e.observed_at_ms,
+    let cutoff = now.saturating_sub(max_age_ms.max(0));
+    let cap = i64::try_from(max_rows).unwrap_or(i64::MAX);
+    let select = |aged: bool, limit: usize| -> rusqlite::Result<Vec<(String, i64, bool, i64)>> {
+        let comparison = if aged { "<" } else { ">=" };
+        let mut query = conn.prepare(&format!(
+            "SELECT e.event_id,
             CASE WHEN e.kind='gap' THEN COALESCE(e.gap_from_ms,e.observed_at_ms) ELSE e.observed_at_ms END AS coverage_from,
-            CASE WHEN e.kind='gap' THEN COALESCE(e.gap_to_ms,e.observed_at_ms) ELSE e.observed_at_ms END AS coverage_to,
             e.acked_at_ms IS NULL AND (o.published_at_ms IS NULL OR (o.envelope_v2 IS NOT NULL AND o.published_v2_at_ms IS NULL)) AS undelivered,
-            COALESCE((o.event_id IS NOT NULL AND (o.published_at_ms IS NULL OR (o.envelope_v2 IS NOT NULL AND o.published_v2_at_ms IS NULL)))
-            OR max(e.created_at_ms,COALESCE(o.published_at_ms,e.created_at_ms),COALESCE(o.published_v2_at_ms,e.created_at_ms))>?3
-            OR (s.status <> 'retired' AND e.activity_at_ms IS NOT NULL AND ((s.cursor_kind='ordered_timestamp' AND e.activity_at_ms>=json_extract(s.cursor_state,'$.watermark_ms')-?4)
-                OR (s.cursor_kind='sorted_head' AND e.activity_at_ms>=json_extract(s.cursor_state,'$.watermark_ms')-?7))),0) AS protected
+            CASE WHEN e.kind='gap' THEN COALESCE(e.gap_to_ms,e.observed_at_ms) ELSE e.observed_at_ms END AS coverage_to
             FROM trigger_events e LEFT JOIN event_outbox o ON o.event_id=e.event_id
             LEFT JOIN trigger_subscriptions s ON s.subscription_id=e.subscription_id
-            WHERE e.principal=?1 AND e.subscription_id=?2
-        ), stats AS (
-            SELECT count(*) AS total,COALESCE(sum(NOT protected AND created_at_ms<?5),0) AS aged FROM candidates
-        ), ranked AS (
-            SELECT *,sum(created_at_ms>=?5) OVER (ORDER BY created_at_ms,event_id) AS recent_ordinal
-            FROM candidates WHERE NOT protected
-        )
-        SELECT event_id,coverage_from,undelivered,coverage_to FROM ranked,stats
-        WHERE created_at_ms<?5 OR recent_ordinal<=max(0,total-aged-?6)
-        ORDER BY created_at_ms,event_id LIMIT 1000"
-    )?;
-    let rows = query
-        .query_map(
-            rusqlite::params![
-                principal,
-                subscription_id,
-                now.saturating_sub(EVENT_BODY_FLOOR_MS),
-                RETENTION_MAX_WINDOW_MS,
-                now.saturating_sub(max_age_ms.max(0)),
-                i64::try_from(max_rows).unwrap_or(i64::MAX),
-                SORTED_HEAD_REPLAY_WINDOW_MS
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, bool>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(query);
+            WHERE e.principal=?1 AND e.subscription_id=?2 AND e.created_at_ms {comparison} ?5
+            AND NOT COALESCE((o.event_id IS NOT NULL AND (o.published_at_ms IS NULL OR (o.envelope_v2 IS NOT NULL AND o.published_v2_at_ms IS NULL)))
+            OR max(e.created_at_ms,COALESCE(o.published_at_ms,e.created_at_ms),COALESCE(o.published_v2_at_ms,e.created_at_ms))>?3
+            OR (s.status <> 'retired' AND e.activity_at_ms IS NOT NULL AND ((s.cursor_kind='ordered_timestamp' AND e.activity_at_ms>=json_extract(s.cursor_state,'$.watermark_ms')-?4)
+                OR (s.cursor_kind='sorted_head' AND e.activity_at_ms>=json_extract(s.cursor_state,'$.watermark_ms')-?7))),0)
+            ORDER BY e.created_at_ms,e.event_id LIMIT ?6"
+        ))?;
+        let rows = query
+            .query_map(
+                rusqlite::params![
+                    principal,
+                    subscription_id,
+                    now.saturating_sub(EVENT_BODY_FLOOR_MS),
+                    RETENTION_MAX_WINDOW_MS,
+                    cutoff,
+                    limit as i64,
+                    SORTED_HEAD_REPLAY_WINDOW_MS
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?
+            .collect();
+        #[cfg(test)]
+        record_retention_work(&query);
+        rows
+    };
+    // Seek the aged range before joining payload-bearing tables. Most watches
+    // are below the cap: count recent rows using only the existing index,
+    // without loading their event or outbox rows.
+    let mut rows = select(true, 1000)?;
+    if rows.len() < 1000 {
+        let mut count = conn.prepare(
+            "SELECT count(*) FROM trigger_events WHERE principal=?1 AND subscription_id=?2",
+        )?;
+        let total: i64 = count.query_row((principal, subscription_id), |row| row.get(0))?;
+        #[cfg(test)]
+        record_retention_work(&count);
+        // Protected rows still count toward the cap. Aged eligible rows leave
+        // first; only the remaining excess can consume recent eligible rows.
+        let excess = total.saturating_sub(cap).saturating_sub(rows.len() as i64);
+        if excess > 0 {
+            let remaining = usize::try_from(excess).unwrap_or(usize::MAX);
+            rows.extend(select(false, remaining.min(1000 - rows.len()))?);
+        }
+    }
     let interval = rows
         .iter()
         .filter(|row| row.2)
@@ -1451,6 +1498,155 @@ mod tests {
             retention_candidates(&store, cutoff, 1000).is_empty(),
             "after pruning, no watch may be visited"
         );
+    }
+
+    struct SqlWork;
+
+    impl SqlWork {
+        fn start() -> Self {
+            RETENTION_SQL_STEPS.with(|steps| steps.set(0));
+            Self
+        }
+
+        fn steps(&self) -> usize {
+            RETENTION_SQL_STEPS.with(|steps| steps.get())
+        }
+    }
+
+    #[test]
+    fn retention_range_work_does_not_join_recent_history() {
+        let store = store();
+        subscription(&store, "a", "ci_runs");
+        bulk_ci(&store, 10_000, 8 * AUDIT_MILLIS_PER_DAY, 0);
+        let now = now_ms();
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE trigger_events SET created_at_ms=?1 WHERE event_id='row-0000'",
+                    [now - 40 * AUDIT_MILLIS_PER_DAY],
+                )?;
+                for expected in [1, 0] {
+                    let work = SqlWork::start();
+                    let removed =
+                        prune_events(conn, "direct", "a", 30 * AUDIT_MILLIS_PER_DAY, 20_000, now)?;
+                    assert_eq!(removed, expected);
+                    // Counting through the index takes few SQLite virtual-machine
+                    // steps per row. Joining and ranking exceeds this budget.
+                    assert!(
+                        (1..50_000).contains(&work.steps()),
+                        "retention executed {} VM steps",
+                        work.steps()
+                    );
+                    println!(
+                        "retention selection removed={removed} vm_steps={}",
+                        work.steps()
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(count(&store, "trigger_events"), 9_999);
+        assert_eq!(count(&store, "event_outbox"), 9_999);
+    }
+
+    #[test]
+    fn retention_range_age_and_cap_keep_protections_and_delete_atomically() {
+        let store = store();
+        subscription(&store, "a", "ci_runs");
+        bulk_ci(&store, 1102, 8 * AUDIT_MILLIS_PER_DAY, 0);
+        let now = now_ms();
+        store.inner.with_conn_fenced(|conn| {
+            conn.execute("UPDATE trigger_events SET created_at_ms=?1 WHERE event_id IN ('row-0000','row-0001')", [now - 40 * AUDIT_MILLIS_PER_DAY])?;
+            conn.execute("UPDATE event_outbox SET published_at_ms=NULL WHERE event_id='row-0000'", [])?;
+            conn.execute("UPDATE event_outbox SET published_at_ms=?1 WHERE event_id='row-1101'", [now])?;
+            conn.execute("INSERT INTO event_outbox_failures(event_key,version,failed_at_ms,failure_reason)
+                SELECT event_key,1,1,'invalid' FROM event_outbox WHERE event_id='row-0001'", [])?;
+            conn.execute_batch("CREATE TRIGGER reject_retention BEFORE DELETE ON trigger_events
+                WHEN OLD.event_id='row-0002' BEGIN SELECT RAISE(ABORT,'retention rollback'); END;")
+        }).unwrap();
+        assert!(store
+            .prune("direct", "a", 30 * AUDIT_MILLIS_PER_DAY, 1100)
+            .is_err());
+        assert_eq!(count(&store, "trigger_events"), 1102);
+        assert_eq!(count(&store, "event_outbox"), 1102);
+        assert_eq!(count(&store, "event_outbox_failures"), 1);
+        store
+            .inner
+            .with_conn_fenced(|conn| conn.execute_batch("DROP TRIGGER reject_retention"))
+            .unwrap();
+        assert_eq!(
+            store
+                .prune("direct", "a", 30 * AUDIT_MILLIS_PER_DAY, 1100)
+                .unwrap(),
+            2
+        );
+        store
+            .inner
+            .with_read(|conn| {
+                let ids: Vec<String> = conn
+                    .prepare(
+                        "SELECT event_id FROM trigger_events WHERE event_id IN
+                ('row-0000','row-0001','row-0002','row-1101') ORDER BY event_id",
+                    )?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                assert_eq!(ids, ["row-0000", "row-1101"]);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(count(&store, "event_outbox"), 1100);
+        assert_eq!(count(&store, "event_outbox_failures"), 0);
+    }
+
+    #[test]
+    fn orphan_repair_bounds_examined_markers_and_wraps() {
+        let store = store();
+        subscription(&store, "a", "ci_runs");
+        bulk_ci(&store, 10_000, 8 * AUDIT_MILLIS_PER_DAY, 0);
+        store.inner.with_conn_fenced(|conn| {
+            conn.execute("INSERT INTO event_outbox(event_key,event_id,event_name,repo_id,repo,created_at_ms)
+                VALUES ('first','!orphan','github_issue_changed',101,'owner/repo',1),
+                       ('last','~orphan','github_issue_changed',101,'owner/repo',1)", [])?;
+            let mut after = None;
+            let mut pages = 0;
+            loop {
+                let work = SqlWork::start();
+                after = cleanup_orphans(conn, after.as_deref())?;
+                assert!((1..40_000).contains(&work.steps()), "orphan page executed {} VM steps", work.steps());
+                pages += 1;
+                if after.is_none() { break; }
+            }
+            assert_eq!(pages, 11);
+            assert_eq!(cleanup_orphans(conn, None)?, Some("row-0999".into()));
+            Ok(())
+        }).unwrap();
+        assert_eq!(count(&store, "event_outbox"), 10_000);
+        assert_eq!(store.event_outbox_health().unwrap().orphaned_markers, 2);
+    }
+
+    #[test]
+    fn orphan_repair_advances_only_after_commit() {
+        let store = store();
+        store.inner.with_conn_fenced(|conn| {
+            conn.execute_batch("WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<1000)
+                INSERT INTO event_outbox(event_key,event_id,event_name,repo_id,repo,created_at_ms)
+                SELECT printf('%064x',i),printf('orphan-%04d',i),'github_issue_changed',101,'owner/repo',1 FROM n;
+                CREATE TRIGGER reject_orphan_repair BEFORE DELETE ON event_outbox
+                WHEN OLD.event_id='orphan-0000' BEGIN SELECT RAISE(ABORT,'repair rollback'); END;")
+        }).unwrap();
+        let now = now_ms();
+        assert!(store.prune_all_events(0, 0, now).is_err());
+        assert_eq!(count(&store, "event_outbox"), 1001);
+        store
+            .inner
+            .with_conn_fenced(|conn| conn.execute_batch("DROP TRIGGER reject_orphan_repair"))
+            .unwrap();
+        assert_eq!(store.prune_all_events(0, 0, now).unwrap(), 0);
+        assert_eq!(count(&store, "event_outbox"), 1);
+        assert_eq!(store.prune_all_events(0, 0, now).unwrap(), 0);
+        assert_eq!(count(&store, "event_outbox"), 0);
+        assert_eq!(store.event_outbox_health().unwrap().orphaned_markers, 1001);
     }
 
     #[test]
@@ -2694,7 +2890,11 @@ mod tests {
         for _ in 0..100 {
             for version in [1, 2] {
                 inner.with_conn_fenced(|conn| {
-                    cleanup_orphans(conn)?;
+                    let mut after = None;
+                    loop {
+                        after = cleanup_orphans(conn, after.as_deref())?;
+                        if after.is_none() { break; }
+                    }
                     let predicate = if version == 2 { "o.envelope_v2 IS NOT NULL AND o.published_v2_at_ms IS NULL" } else { "o.published_at_ms IS NULL" };
                     // Every marker here is published, so the query returns no
                     // rows. Selecting event_key avoids later additive body columns.
@@ -2711,6 +2911,7 @@ mod tests {
             inner,
             grant_journal: None,
             outbox_ready: tokio::sync::Notify::new(),
+            orphan_sweep_after: Default::default(),
             ci_runs: Default::default(),
             manifest_cache: Default::default(),
         };
@@ -2746,6 +2947,36 @@ mod tests {
             "event retention: rows=10000 removed={removed} elapsed={}us",
             started.elapsed().as_micros()
         );
+    }
+
+    #[test]
+    #[ignore = "measurement: hourly retention at production scale"]
+    fn measure_hourly_event_retention_at_production_scale() {
+        let scratch = crate::test_scratch::Scratch::database("hourly-retention-scale");
+        let descriptor = StorageDescriptor {
+            module_id: "plexus".into(),
+            storage_namespace: new_id("retention-scale"),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: scratch.to_string_lossy().into_owned(),
+            },
+        };
+        let store = PlexusStore::open(&descriptor).unwrap();
+        let now = now_ms();
+        seed_idle_scale_store(&store, now);
+        assert_eq!(count(&store, "trigger_subscriptions"), 200);
+        assert_eq!(count(&store, "trigger_events"), 190_200);
+        assert_eq!(count(&store, "event_outbox"), 190_200);
+        assert!(count(&store, "audit_journal") >= 1_600_000);
+        for expected in [200, 0] {
+            let (wall, cpu, removed) = timed(|| {
+                store
+                    .prune_all_events(30 * AUDIT_MILLIS_PER_DAY, 1000, now)
+                    .unwrap()
+            });
+            assert_eq!(removed, expected);
+            println!("hourly-retention events=190000 watches=200 wall_ms={wall} cpu_ms={cpu:?} removed={removed}");
+        }
     }
 
     fn seed_idle_scale_store(store: &PlexusStore, now: i64) {
