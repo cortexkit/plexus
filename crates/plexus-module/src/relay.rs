@@ -12,7 +12,11 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::{net::TcpStream, sync::mpsc};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+    sync::mpsc,
+};
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{
@@ -512,7 +516,9 @@ fn connection_failure(error: tungstenite::Error) -> Failure {
     }
 }
 
-async fn protocol_error(socket: &mut Socket) -> Failure {
+async fn protocol_error<S: AsyncRead + AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+) -> Failure {
     let _ = socket
         .send(Message::Close(Some(CloseFrame {
             code: CloseCode::Library(4400),
@@ -523,8 +529,8 @@ async fn protocol_error(socket: &mut Socket) -> Failure {
     Failure::Reconnecting
 }
 
-async fn consume(
-    mut socket: Socket,
+async fn consume<S: AsyncRead + AsyncWrite + Unpin>(
+    mut socket: WebSocketStream<S>,
     store: Arc<PlexusStore>,
     status: &Status,
     home: &ConnectorHome,

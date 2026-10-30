@@ -54,36 +54,52 @@ fn hello() -> String {
     vector(HELLOS, "buffered")
 }
 
+async fn memory_sockets() -> (
+    WebSocketStream<tokio::io::DuplexStream>,
+    WebSocketStream<tokio::io::DuplexStream>,
+) {
+    // Duplex writes wake the peer directly; real socket readiness can arrive
+    // after a paused runtime has auto-advanced past the receive deadline.
+    let (client, server) = tokio::io::duplex(16 * 1024);
+    use tungstenite::protocol::Role;
+    (
+        WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+        WebSocketStream::from_raw_socket(server, Role::Server, None).await,
+    )
+}
+
+async fn delayed_pong() {
+    // This deliberately external delay must run with real time, even over
+    // duplex: Tokio cannot observe pending work on the helper thread.
+    tokio::time::resume();
+    let (sent, received) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(10));
+        let _ = sent.send(());
+    });
+    received.await.unwrap();
+    tokio::time::pause();
+}
+
 #[tokio::test(start_paused = true)]
 async fn regression_silent_websocket_has_a_receive_deadline() {
     let (_scratch, store, _) = fixture("relay_silent_peer");
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("ws://{}/v1/relay/github/ws", listener.local_addr().unwrap());
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut socket = accept_async(tcp).await.unwrap();
-        socket.send(Message::Text(hello().into())).await.unwrap();
-        ready_tx.send(()).unwrap();
-        let _ = release_rx.await;
-        drop(socket);
-    });
+    let (socket, mut server) = memory_sockets().await;
+    server.send(Message::Text(hello().into())).await.unwrap();
     let home = Arc::new(ConnectorHome::test_admitted());
-    let socket = dial(&url, b"opaque-token", &home).await.unwrap();
-    ready_rx.await.unwrap();
     let status = Status::default();
+    let started = tokio::time::Instant::now();
     let failure = tokio::time::timeout(
         Duration::from_secs(65),
         consume(socket, store, &status, &home),
     )
     .await;
-    release_tx.send(()).unwrap();
-    server.await.unwrap();
     assert_eq!(
         failure.expect("silent peer must time out before the outer deadline"),
         Failure::Reconnecting
     );
+    assert!(started.elapsed() >= RECEIVE_DEADLINE);
+    assert_eq!(status.0.lock().unwrap().state, State::Connected);
 }
 
 #[test]
@@ -99,27 +115,49 @@ fn regression_supersede_names_the_other_connector_home() {
 
 #[tokio::test(start_paused = true)]
 async fn received_pongs_keep_an_idle_relay_connection_alive() {
-    let (_scratch, store, _) = fixture("relay-pong-progress");
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("ws://{}/v1/relay/github/ws", listener.local_addr().unwrap());
+    pongs_keep_connection_alive(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn received_pongs_with_real_delay_keep_an_idle_relay_connection_alive() {
+    pongs_keep_connection_alive(true).await;
+}
+
+async fn pongs_keep_connection_alive(real_delay: bool) {
+    let (_scratch, store, _) = fixture(if real_delay {
+        "relay-pong-delayed"
+    } else {
+        "relay-pong-progress"
+    });
+    let (socket, mut server_socket) = memory_sockets().await;
     let server = tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut socket = accept_async(tcp).await.unwrap();
-        socket.send(Message::Text(hello().into())).await.unwrap();
+        server_socket
+            .send(Message::Text(hello().into()))
+            .await
+            .unwrap();
         for _ in 0..5 {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            socket.send(Message::Pong(Vec::new().into())).await.unwrap();
+            if real_delay {
+                delayed_pong().await;
+            }
+            server_socket
+                .send(Message::Pong(Vec::new().into()))
+                .await
+                .unwrap();
         }
-        socket.close(None).await.unwrap();
+        server_socket.close(None).await.unwrap();
     });
     let home = Arc::new(ConnectorHome::test_admitted());
-    let socket = dial(&url, b"opaque-token", &home).await.unwrap();
     let started = tokio::time::Instant::now();
     assert_eq!(
         consume(socket, store, &Status::default(), &home).await,
         Failure::Reconnecting
     );
-    assert!(started.elapsed() >= Duration::from_secs(150));
+    assert!(
+        started.elapsed() >= Duration::from_secs(150),
+        "relay disconnected after {:?}",
+        started.elapsed()
+    );
     server.await.unwrap();
 }
 
@@ -2002,6 +2040,7 @@ async fn rejected_credential_is_reread_with_backoff_and_only_new_bytes_reconnect
         tokio::task::yield_now().await;
     }
     tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::time::resume();
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
@@ -2019,6 +2058,7 @@ async fn rejected_credential_is_reread_with_backoff_and_only_new_bytes_reconnect
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
+    tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
     credentials.set_success(
         CREDENTIAL.as_bytes(),
@@ -2049,27 +2089,18 @@ async fn rejected_credential_is_reread_with_backoff_and_only_new_bytes_reconnect
     bounded(task).await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn protocol_ping_is_sent_every_thirty_seconds() {
     let (_scratch, store, _) = fixture("relay-ping");
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("ws://{}/v1/relay/github/ws", listener.local_addr().unwrap());
-    let accept = tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        accept_async(tcp).await.unwrap()
-    });
+    let (socket, mut server) = memory_sockets().await;
     let home = Arc::new(ConnectorHome::test_admitted());
-    let socket = bounded(dial(&url, b"secret", &home)).await.unwrap();
-    let mut server = bounded(accept).await.unwrap();
     let status = Arc::new(Status::default());
     let task_status = status.clone();
     let task = tokio::spawn(async move { consume(socket, store, &task_status, &home).await });
     server.send(Message::Text(hello().into())).await.unwrap();
     wait_state(&status, State::Connected).await;
     for _ in 0..2 {
-        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(30)).await;
-        tokio::time::resume();
         assert!(
             matches!(bounded(server.next()).await,Some(Ok(Message::Ping(payload))) if payload.is_empty()),
             "relay liveness must use a WebSocket protocol ping"
@@ -2162,8 +2193,10 @@ async fn an_unserved_source_is_retried_after_the_recheck_interval() {
     drop(first);
     wait_state(&status, State::SourceNotServed).await;
     tokio::time::pause();
-    let retried = tokio::time::timeout(CREDENTIAL_RECHECK * 2, listener.accept()).await;
+    // Advance the retry timer, not the real TCP accept or credential lookup.
+    tokio::time::advance(CREDENTIAL_RECHECK).await;
     tokio::time::resume();
+    let retried = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
     assert!(
         retried.is_ok(),
         "an unserved source must be asked about again after the recheck interval"
