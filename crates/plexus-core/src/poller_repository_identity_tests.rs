@@ -401,6 +401,289 @@ fn unchanged_legacy_issue_is_duplicate_on_real_poll_with_no_marker() {
 }
 
 #[test]
+fn relay_stored_revisions_skip_actor_reads_before_poll_dedup() {
+    use crate::storage::relay::{Event, Hello};
+
+    for (action, event_name, item_kind) in [
+        ("list_issues", "issues", "issue"),
+        ("list_pull_requests", "pull_request", "pull_request"),
+    ] {
+        let f = Fixture::new(true);
+        let issue_watch = f.watch("list_issues");
+        let pr_watch = f.watch("list_pull_requests");
+        let watch = if action == "list_issues" {
+            issue_watch
+        } else {
+            pr_watch
+        };
+        f.connect("actors", "github", &["issue_read"]);
+        f.sql("UPDATE catalog_actions SET schema_json = '{\"type\":\"object\",\"additionalProperties\":true}' WHERE connection_id = 'actors'");
+        f.store
+            .set_subscription_actor_source(
+                PRINCIPAL,
+                &watch.subscription_id,
+                Some(&ActorSource {
+                    connection_id: "actors".into(),
+                    action: "issue_read".into(),
+                    methods: if item_kind == "issue" {
+                        vec!["get_comments".into()]
+                    } else {
+                        vec!["get_comments".into(), "get_review_comments".into()]
+                    },
+                }),
+            )
+            .unwrap();
+        f.mock.set_response_for_method(
+            "issue_read",
+            "get_comments",
+            MockResponse::Success(json!({"unrecognized":true})),
+        );
+        let timestamp = iso8601::format_millis(now_ms().div_euclid(1_000) * 1_000);
+        let items = [issue(1, &timestamp), issue(3, &timestamp)];
+        let hello = Hello {
+            v: 1,
+            source: "github".into(),
+            stream_id: "actor-dedup".into(),
+            next_seq: 1,
+            oldest_seq: 1,
+            last_acked_seq: 0,
+        };
+        f.store.relay_hello("github", &hello).unwrap();
+        for (i, payload) in items.iter().enumerate() {
+            let event = Event {
+                seq: i as u64 + 1,
+                delivery_id: format!("webhook-delivery-{i}"),
+                event: event_name.into(),
+                action: Some("edited".into()),
+                installation_id: 1,
+                received_at: iso8601::format_millis(now_ms()),
+                stub: None,
+                body: json!({"repository":{"id":101,"full_name":"owner/repo"},
+                    "sender":{"login":"relay-bot"}, item_kind: payload}),
+            };
+            f.store
+                .commit_relay_event("github", "actor-dedup", &event)
+                .unwrap();
+        }
+        assert_eq!(
+            f.count("trigger_events"),
+            2,
+            "the relay must store both deliveries"
+        );
+        let before = f
+            .store
+            .list_events(PRINCIPAL, None, Some(&watch.subscription_id))
+            .unwrap();
+        assert!(before.iter().all(|event| event
+            .vendor_event_id
+            .as_deref()
+            .unwrap()
+            .starts_with("webhook-delivery-")));
+        let markers = f.store.drain_event_outbox(10).unwrap();
+        let reply = |items: Vec<Value>| {
+            if item_kind == "issue" {
+                json!({"issues":items})
+            } else {
+                json!(items)
+            }
+        };
+        f.mock
+            .set_response_for_method(action, "", MockResponse::Success(reply(items.to_vec())));
+        let actor_reads = || {
+            f.mock
+                .requests()
+                .iter()
+                .filter(|request| request.connection_id == "actors")
+                .count()
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                f.poll(&watch),
+                PollCycle::Completed {
+                    inserted: 0,
+                    duplicates: 2
+                }
+            );
+            assert_eq!(
+                actor_reads(),
+                0,
+                "a relay-stored revision must not spend actor reads"
+            );
+        }
+        assert_eq!(f.count("trigger_events"), 2);
+        assert_eq!(
+            f.store.drain_event_outbox(10).unwrap(),
+            markers,
+            "dedup must not rewrite canonical bytes or actors"
+        );
+
+        // A new item between two duplicates must keep its own identity and
+        // remain deliverable even when actor attribution fails.
+        f.mock.set_response_for_method(
+            action,
+            "",
+            MockResponse::Success(reply(vec![
+                items[0].clone(),
+                issue(2, &timestamp),
+                items[1].clone(),
+            ])),
+        );
+        assert_eq!(
+            f.poll(&watch),
+            PollCycle::Completed {
+                inserted: 1,
+                duplicates: 2
+            }
+        );
+        let stored = f
+            .store
+            .list_events(PRINCIPAL, None, Some(&watch.subscription_id))
+            .unwrap();
+        let new = stored
+            .iter()
+            .find(|event| event.vendor_event_id.as_deref() == Some("2"))
+            .unwrap();
+        assert_eq!(
+            actor_reads(),
+            1,
+            "new event attribution: {:?}",
+            new.actor_unknown
+        );
+        assert_eq!(new.payload["number"], 2);
+        assert!(
+            new.actor_logins.is_none(),
+            "failed enrichment must not suppress delivery"
+        );
+        let expected = crate::event_key::derive_event_key(
+            if item_kind == "issue" {
+                crate::event_key::GITHUB_ISSUE_CHANGED
+            } else {
+                crate::event_key::GITHUB_PR_CHANGED
+            },
+            &json!({"repo_id":101,"number":2,"updated_at":timestamp}),
+        )
+        .unwrap();
+        assert_eq!(
+            f.store
+                .canonical_event_by_key(&expected)
+                .unwrap()
+                .unwrap()
+                .event_id,
+            new.event_id
+        );
+        assert_eq!(f.count("event_outbox"), 3);
+        assert_eq!(
+            f.store
+                .stored_event_keys("another-subscription", &[Some(&expected), None])
+                .unwrap(),
+            vec![false, false]
+        );
+    }
+}
+
+#[test]
+fn keyed_prefilter_retains_uncertain_and_unkeyed_candidates() {
+    let event = |id: &str| DerivedEvent {
+        vendor_event_id: id.into(),
+        payload: json!({}),
+        activity_at_ms: None,
+        replay_candidate: false,
+    };
+    let identity = || {
+        Some(PollEventIdentity {
+            key: "stored-key".into(),
+            change: None,
+            headers: EventHeaders::default(),
+        })
+    };
+    let mut events = vec![event("1"), event("2")];
+    let mut identities = vec![identity(), None];
+    let mut dropped = vec![];
+    assert_eq!(
+        retain_unstored_keyed_events(&mut events, &mut identities, &mut dropped, |_| Err::<
+            Vec<bool>,
+            _,
+        >(
+            "unreadable"
+        )),
+        0
+    );
+    assert_eq!(events.len(), 2);
+    assert_eq!(identities.len(), 2);
+    assert!(dropped.is_empty());
+    assert_eq!(
+        retain_unstored_keyed_events(&mut events, &mut identities, &mut dropped, |_| Ok::<_, ()>(
+            vec![true]
+        )),
+        1
+    );
+    assert_eq!(
+        events[0].vendor_event_id, "2",
+        "a short lookup result is not proof of a duplicate"
+    );
+    assert!(identities[0].is_none());
+    assert_eq!(dropped, vec![("1".into(), DropReason::AlreadyDelivered)]);
+}
+
+#[test]
+fn actor_unknown_warns_once_per_subscription_item_then_debugs() {
+    const TEST: &str = "poller::repository_identity_tests::actor_unknown_warns_once_per_subscription_item_then_debugs";
+    if std::env::var_os("PLEXUS_ACTOR_UNKNOWN_LOG_CHILD").is_some() {
+        let mut config =
+            cortexkit_log::Config::in_dir("plexus", std::env::current_exe().unwrap().join("logs"));
+        config.spec = Some("debug".into());
+        assert!(cortexkit_log::init(config).unwrap().fallback_active());
+        let f = Fixture::new(false);
+        let mut watch = f.watch("list_issues");
+        watch.subscription_id = "warn-once-watch".into();
+        let mut event = DerivedEvent {
+            vendor_event_id: "808".into(),
+            payload: json!({}),
+            activity_at_ms: None,
+            replay_candidate: false,
+        };
+        log_actor_unknown(
+            &watch,
+            &event,
+            "same_second_ambiguity method=get_comments count=1",
+        );
+        log_actor_unknown(&watch, &event, "call_cap_exhausted count=1");
+        event.vendor_event_id = "818".into();
+        log_actor_unknown(&watch, &event, "empty_actor_window count=1");
+        watch.subscription_id = "another-watch".into();
+        event.vendor_event_id = "808".into();
+        log_actor_unknown(&watch, &event, "transport_failure count=1");
+        return;
+    }
+    let output = crate::test_http::bounded::child_test_output(
+        TEST,
+        &[("PLEXUS_ACTOR_UNKNOWN_LOG_CHILD", "1")],
+        Duration::from_secs(30),
+        "actor unknown diagnostic child",
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    let log = String::from_utf8(output.stderr).unwrap();
+    let lines: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("actor_enrichment_unknown"))
+        .collect();
+    assert_eq!(lines.len(), 4, "{log}");
+    for (line, level) in lines.iter().zip([
+        cortexkit_log::ParsedLevel::Warn,
+        cortexkit_log::ParsedLevel::Debug,
+        cortexkit_log::ParsedLevel::Warn,
+        cortexkit_log::ParsedLevel::Warn,
+    ]) {
+        let parsed = cortexkit_log::parse_line(line).unwrap();
+        assert_eq!(parsed.level, level, "{line}");
+        assert_eq!(parsed.logger, "plexus.poller");
+    }
+    assert!(lines[0].contains("reason=same_second_ambiguity method=get_comments count=1"));
+    assert!(lines[1].contains("reason=call_cap_exhausted count=1"));
+}
+
+#[test]
 fn absent_actions_connection_survives_twenty_ticks_and_recovery_does_not_publish_old_state() {
     let f = Fixture::new(false);
     let watch = f.watch("list_issues");

@@ -17,7 +17,7 @@ use budget::expired as pass_budget_expired;
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -1623,6 +1623,46 @@ fn retain_unstored_established_events<E>(
     )
 }
 
+/// A webhook can store this revision under its delivery id, so payload lookups
+/// by polling's vendor item id cannot find it. Mirror the subscription/key
+/// insert check before spending actor reads, keeping event/identity alignment.
+fn retain_unstored_keyed_events<E>(
+    events: &mut Vec<DerivedEvent>,
+    identities: &mut Vec<Option<PollEventIdentity>>,
+    dropped: &mut Vec<(String, DropReason)>,
+    lookup: impl FnOnce(&[Option<&str>]) -> Result<Vec<bool>, E>,
+) -> usize {
+    let keys = identities
+        .iter()
+        .map(|identity| identity.as_ref().map(|identity| identity.key.as_str()))
+        .collect::<Vec<_>>();
+    if !keys.iter().any(Option::is_some) {
+        return 0;
+    }
+    let stored = match lookup(&keys) {
+        Ok(stored) => stored,
+        // Keep uncertain candidates: insert-time dedup still arbitrates, and a
+        // failed lookup must not discard a new revision or prevent subscribers
+        // from being notified that an event is ready.
+        Err(_) => {
+            crate::diag!(warn poller: "stored event key lookup failed; retaining candidates for insert-time deduplication");
+            return 0;
+        }
+    };
+    let mut flags = stored.iter();
+    identities.retain(|_| !flags.next().copied().unwrap_or(false));
+    let before = events.len();
+    let mut flags = stored.iter();
+    events.retain(|event| {
+        let duplicate = flags.next().copied().unwrap_or(false);
+        if duplicate {
+            dropped.push((event.vendor_event_id.clone(), DropReason::AlreadyDelivered));
+        }
+        !duplicate
+    });
+    before - events.len()
+}
+
 #[cfg(test)]
 thread_local! {
     /// Makes the pre-enrichment stored-payload lookup in `Poller::complete`
@@ -2584,7 +2624,7 @@ where
         // so only it pays for the extra per-item lookup. Without one, an
         // already-stored item costs nothing extra and insert-time dedupe drops
         // it under the same reason.
-        let skipped_duplicates = if subscription.actor_source.is_some() {
+        let mut skipped_duplicates = if subscription.actor_source.is_some() {
             retain_unstored_established_events(
                 &mut advance.events,
                 &mut advance.dropped,
@@ -2615,7 +2655,7 @@ where
         // Keep vendor bodies byte-identical. In particular, `change` belongs to
         // the marker only, so legacy payload-hash dedup still sees the same item.
         let identities = poll_event_identities(subscription, &advance.events, repository);
-        let identities = match identities {
+        let mut identities = match identities {
             Ok(identities) => identities,
             Err(_) => {
                 return self.suspend(
@@ -2625,6 +2665,14 @@ where
                 )
             }
         };
+        if subscription.actor_source.is_some() {
+            skipped_duplicates += retain_unstored_keyed_events(
+                &mut advance.events,
+                &mut identities,
+                &mut advance.dropped,
+                |keys| store.stored_event_keys(&subscription.subscription_id, keys),
+            );
+        }
         let (actor_logins, envelope_contexts) =
             self.enrich_actor_logins(principal, subscription, &advance.events, item_kind);
         let inputs: Vec<KeyedPollEventInput<'_>> = advance
@@ -3203,10 +3251,28 @@ fn poll_event_identities(
 }
 
 fn log_actor_unknown(subscription: &TriggerSubscription, event: &DerivedEvent, reason: &str) {
-    eprintln!(warn poller:
-        "actor_enrichment_unknown subscription={:?} item={:?} actor_source={:?} reason={reason}",
-        subscription.subscription_id, event.vendor_event_id, subscription.actor_source
-    );
+    // Keep the first diagnostic visible for each watch/item for the process's
+    // lifetime, even if its failure reason changes on a later poll.
+    static WARNED: OnceLock<Mutex<BTreeSet<(String, String)>>> = OnceLock::new();
+    let first = WARNED
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert((
+            subscription.subscription_id.clone(),
+            event.vendor_event_id.clone(),
+        ));
+    if first {
+        crate::diag!(warn poller:
+            "actor_enrichment_unknown subscription={:?} item={:?} actor_source={:?} reason={reason}",
+            subscription.subscription_id, event.vendor_event_id, subscription.actor_source
+        );
+    } else {
+        crate::diag!(debug poller:
+            "actor_enrichment_unknown subscription={:?} item={:?} actor_source={:?} reason={reason}",
+            subscription.subscription_id, event.vendor_event_id, subscription.actor_source
+        );
+    }
 }
 
 /// Why enrichment could not attribute one event: the code that is stored and

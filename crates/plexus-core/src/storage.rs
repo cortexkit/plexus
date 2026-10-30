@@ -5435,6 +5435,28 @@ impl PlexusStore {
         })
     }
 
+    /// Identify keys already stored in this subscription, including webhook
+    /// deliveries whose vendor id differs from polling's item number. This is
+    /// the same subscription/key check used by insert-time deduplication.
+    pub(crate) fn stored_event_keys(
+        &self,
+        subscription_id: &str,
+        keys: &[Option<&str>],
+    ) -> Result<Vec<bool>, StoreError> {
+        self.inner.with_read(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT EXISTS(SELECT 1 FROM trigger_events
+                 WHERE subscription_id = ?1 AND event_key = ?2)",
+            )?;
+            keys.iter()
+                .map(|key| match key {
+                    Some(key) => statement.query_row((subscription_id, key), |row| row.get(0)),
+                    None => Ok(false),
+                })
+                .collect()
+        })
+    }
+
     /// Report which (vendor id, activity time) pairs this subscription has
     /// already stored as events. The returned flags align positionally with
     /// `candidates`.
