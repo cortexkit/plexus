@@ -107,11 +107,7 @@ async fn subscribe_resume_and_unsubscribe_take_effect_through_the_tool_surface()
                 target: RouteTarget::ToolProvider {
                     module_id: DEFAULT_MODULE_ID.to_string(),
                 },
-                identity: BindIdentity::new(
-                    "/tmp/project",
-                    "test".to_string(),
-                    "session".to_string(),
-                ),
+                identity: BindIdentity::new("test".to_string(), "session".to_string()),
                 principal: Some(Principal::Direct),
                 consumer_capabilities: None,
                 admission_facts: None,
@@ -524,11 +520,7 @@ async fn subscription_bindings_persist_through_the_tool_surface() {
                 target: RouteTarget::ToolProvider {
                     module_id: DEFAULT_MODULE_ID.to_string(),
                 },
-                identity: BindIdentity::new(
-                    "/tmp/project",
-                    "test".to_string(),
-                    "session".to_string(),
-                ),
+                identity: BindIdentity::new("test".to_string(), "session".to_string()),
                 principal: Some(Principal::Direct),
                 consumer_capabilities: None,
                 admission_facts: None,

@@ -126,7 +126,7 @@ impl Daemon {
         let route = SubcPrefrontalRoutePeer::connect(
             &connection,
             "cingulate",
-            subc_protocol::BindIdentity::new("/", "plexus", "module"),
+            subc_protocol::BindIdentity::new("plexus", "module"),
         )
         .unwrap()
         .with_call_options(options);

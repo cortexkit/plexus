@@ -115,7 +115,7 @@ async fn main() {
         DEADLINE,
         consumer.call(
             RouteTarget::ManagementSurface { module_id },
-            BindIdentity::new("/tmp", "vault-call", "operator"),
+            BindIdentity::new("vault-call", "operator"),
             serde_json::to_vec(&body).expect("serialize the vault call"),
             subc_client_rs::CallOptions::default(),
         ),

@@ -195,7 +195,7 @@ async fn live_daemon_proves_hello_empty_connections_health_and_deny() {
             target: RouteTarget::ToolProvider {
                 module_id: MODULE_ID.to_string(),
             },
-            identity: BindIdentity::new("/tmp", "conformance".to_string(), "session".to_string()),
+            identity: BindIdentity::new("conformance".to_string(), "session".to_string()),
             principal: Some(Principal::Reserved {
                 module_id: "subc-mcp".to_string(),
             }),
@@ -1460,11 +1460,7 @@ async fn open_live_route(stream: &mut TcpStream) -> (u16, u32) {
             target: RouteTarget::ToolProvider {
                 module_id: MODULE_ID.to_string(),
             },
-            identity: BindIdentity::new(
-                "/tmp",
-                "conformance".to_string(),
-                "live-session".to_string(),
-            ),
+            identity: BindIdentity::new("conformance".to_string(), "live-session".to_string()),
             consumer_identity: None,
             consumer_capabilities: None,
             admission_facts: None,
@@ -1500,11 +1496,7 @@ async fn open_management_route(stream: &mut TcpStream) -> (u16, u32) {
             target: RouteTarget::ManagementSurface {
                 module_id: MODULE_ID.to_string(),
             },
-            identity: BindIdentity::new(
-                "/tmp",
-                "conformance".to_string(),
-                "live-session".to_string(),
-            ),
+            identity: BindIdentity::new("conformance".to_string(), "live-session".to_string()),
             consumer_identity: None,
             consumer_capabilities: None,
             admission_facts: None,

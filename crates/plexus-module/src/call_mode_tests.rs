@@ -46,7 +46,7 @@ async fn bind_route(
             target: RouteTarget::ToolProvider {
                 module_id: DEFAULT_MODULE_ID.into(),
             },
-            identity: BindIdentity::new("/tmp", "mode-test", "session"),
+            identity: BindIdentity::new("mode-test", "session"),
             principal: Some(principal),
             scope,
             call_mode: mode,

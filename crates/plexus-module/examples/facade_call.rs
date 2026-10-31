@@ -72,7 +72,7 @@ async fn main() {
             RouteTarget::ToolProvider {
                 module_id: MODULE_ID.to_owned(),
             },
-            BindIdentity::new("/tmp", "facade-call", "operator"),
+            BindIdentity::new("facade-call", "operator"),
             serde_json::to_vec(&parsed).expect("serialize the tool call"),
             subc_client_rs::CallOptions::default(),
         ),

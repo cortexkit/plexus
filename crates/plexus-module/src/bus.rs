@@ -191,13 +191,7 @@ impl CredentialRoute {
         .map_err(|e| e.to_string())?;
         Ok(Self {
             consumer,
-            identity: BindIdentity::new(
-                path.parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or_else(|| Path::new(".")),
-                "plexus",
-                "bus",
-            ),
+            identity: BindIdentity::new("plexus", "bus"),
             principal: ConsumerIdentity {
                 module_id: "plexus".into(),
                 launch_nonce: nonce.value().to_owned(),

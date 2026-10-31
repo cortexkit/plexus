@@ -97,11 +97,7 @@ async fn configure_and_revoke_take_effect_on_the_named_connection() {
                 target: RouteTarget::ToolProvider {
                     module_id: DEFAULT_MODULE_ID.to_string(),
                 },
-                identity: BindIdentity::new(
-                    "/tmp/project",
-                    "test".to_string(),
-                    "session".to_string(),
-                ),
+                identity: BindIdentity::new("test".to_string(), "session".to_string()),
                 principal: Some(Principal::Direct),
                 consumer_capabilities: None,
                 admission_facts: None,

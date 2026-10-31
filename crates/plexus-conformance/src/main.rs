@@ -381,11 +381,7 @@ fn build_live_credential_source(
             "live mode requires PLEXUS_CKCRED_MODULE_ID to be set (the CKCRED route module id)"
                 .to_string()
         })?;
-    let identity = BindIdentity::new(
-        env::var("PLEXUS_PROJECT_ROOT").unwrap_or_else(|_| "/".to_string()),
-        "plexus",
-        "conformance",
-    );
+    let identity = BindIdentity::new("plexus", "conformance");
 
     let connect_started = Instant::now();
     let connect_result =

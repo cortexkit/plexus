@@ -86,7 +86,7 @@ impl Core {
         let peer = SubcPrefrontalRoutePeer::connect(
             &connection,
             "prefrontal-core",
-            subc_protocol::BindIdentity::new("/", "plexus", "module"),
+            subc_protocol::BindIdentity::new("plexus", "module"),
         )
         .unwrap()
         .with_call_options(subc_client_rs::CallOptions {

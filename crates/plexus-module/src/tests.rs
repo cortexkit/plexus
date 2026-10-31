@@ -2081,7 +2081,7 @@ fn bind(principal: Option<Principal>) -> Frame {
         target: RouteTarget::ToolProvider {
             module_id: DEFAULT_MODULE_ID.to_string(),
         },
-        identity: BindIdentity::new("/tmp/project", "test".to_string(), "session".to_string()),
+        identity: BindIdentity::new("test".to_string(), "session".to_string()),
         principal,
         consumer_capabilities: None,
         admission_facts: None,

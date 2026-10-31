@@ -20,11 +20,7 @@ use plexus_core::{MockTransport, StubAgentRegistry, StubCredentialSource};
 use subc_protocol::BindIdentity;
 
 fn plexus_bind_identity() -> BindIdentity {
-    BindIdentity::new(
-        std::env::var("PLEXUS_PROJECT_ROOT").unwrap_or_else(|_| "/".into()),
-        "plexus",
-        "module",
-    )
+    BindIdentity::new("plexus", "module")
 }
 
 fn peer_failure_warning(role: &str, target: &str) -> String {

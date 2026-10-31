@@ -221,9 +221,11 @@ pub fn build_with_launch_nonce_source(
         // permissions.list and permissions.revoke for the agents' GitHub bot
         // grants. scope-on-behalf-of/v1 asks the daemon to stamp a worker
         // scope's on_behalf_of_agent, which chooses the bot a worker's GitHub
-        // bot reads use; plexus treats it as attribution only.
+        // bot reads use; plexus treats it as attribution only. bind-no-project/v1
+        // lets the daemon omit legacy project fields from incoming route.bind
+        // identities because plexus never reads those fields.
     .capabilities(Some(subc_protocol::manifest::CapabilityDeclarations {
-        provides: vec!["flow-scopes/v1".to_string(), subc_protocol::call_mode::CALL_MODES_CAPABILITY.to_string(), cortexkit_role_tool_provider::PROVIDES.to_string(), plexus_core::permissions::CAPABILITY.to_string(), subc_protocol::scope::SCOPE_ON_BEHALF_OF_CAPABILITY.to_string()],
+        provides: vec!["flow-scopes/v1".to_string(), subc_protocol::call_mode::CALL_MODES_CAPABILITY.to_string(), cortexkit_role_tool_provider::PROVIDES.to_string(), plexus_core::permissions::CAPABILITY.to_string(), subc_protocol::scope::SCOPE_ON_BEHALF_OF_CAPABILITY.to_string(), subc_protocol::scope::BIND_NO_PROJECT_CAPABILITY.to_string()],
         requires: vec![],
         must_never_reach: vec![],
     }))

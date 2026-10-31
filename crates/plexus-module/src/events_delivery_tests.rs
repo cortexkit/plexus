@@ -238,11 +238,7 @@ async fn a_reserved_consumer_sees_granted_events_only_through_the_wire() {
                 target: RouteTarget::ToolProvider {
                     module_id: DEFAULT_MODULE_ID.to_string(),
                 },
-                identity: BindIdentity::new(
-                    "/tmp/project",
-                    "test".to_string(),
-                    "consumer".to_string(),
-                ),
+                identity: BindIdentity::new("test".to_string(), "consumer".to_string()),
                 // The REAL consumer identity rather than an invented one.
                 // Reserved principals must be first-party to bind at all, so
                 // an invented module id is refused at the bind and every
@@ -695,11 +691,7 @@ async fn a_stored_event_is_delivered_through_the_tool_surface() {
                 target: RouteTarget::ToolProvider {
                     module_id: DEFAULT_MODULE_ID.to_string(),
                 },
-                identity: BindIdentity::new(
-                    "/tmp/project",
-                    "test".to_string(),
-                    "session".to_string(),
-                ),
+                identity: BindIdentity::new("test".to_string(), "session".to_string()),
                 principal: Some(Principal::Direct),
                 consumer_capabilities: None,
                 admission_facts: None,

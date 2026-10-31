@@ -243,7 +243,7 @@ async fn route_call(
             target: RouteTarget::ToolProvider {
                 module_id: DEFAULT_MODULE_ID.into(),
             },
-            identity: BindIdentity::new("/tmp", "permissions-test", "session"),
+            identity: BindIdentity::new("permissions-test", "session"),
             principal: Some(principal.clone()),
             scope: stamp(&mode),
             call_mode: Some(mode),

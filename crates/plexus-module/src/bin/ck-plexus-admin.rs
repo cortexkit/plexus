@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 use serde_json::{json, Value};
@@ -1755,11 +1755,7 @@ fn call_module(
         let bytes = consumer
             .call(
                 target,
-                subc_protocol::BindIdentity::new(
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
-                    "ck-plexus-admin",
-                    "operator",
-                ),
+                subc_protocol::BindIdentity::new("ck-plexus-admin", "operator"),
                 body,
                 options,
             )

@@ -138,11 +138,7 @@ async fn approve_and_deny_act_on_the_request_the_caller_named() {
                 target: RouteTarget::ToolProvider {
                     module_id: DEFAULT_MODULE_ID.to_string(),
                 },
-                identity: BindIdentity::new(
-                    "/tmp/project",
-                    "test".to_string(),
-                    "session".to_string(),
-                ),
+                identity: BindIdentity::new("test".to_string(), "session".to_string()),
                 principal: Some(Principal::Direct),
                 consumer_capabilities: None,
                 admission_facts: None,

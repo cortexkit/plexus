@@ -230,6 +230,16 @@ fn manifest_advertises_flow_scopes_v1() {
         .any(|value| value == "flow-scopes/v1"));
 }
 
+#[test]
+fn manifest_advertises_bind_no_project_v1() {
+    let wire = serde_json::to_value(build("plexus")).unwrap();
+    assert!(wire["capabilities"]["provides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "bind-no-project/v1"));
+}
+
 /// Without scope-on-behalf-of/v1 in the manifest's provided capabilities,
 /// the daemon never stamps a worker scope's on_behalf_of_agent on a bind to
 /// plexus, and every worker GitHub bot read would be refused for naming no

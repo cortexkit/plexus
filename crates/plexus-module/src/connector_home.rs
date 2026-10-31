@@ -47,7 +47,7 @@ impl RolePeer for EntorhinalPeer {
                 SubcPrefrontalRoutePeer::connect(
                     &self.path,
                     "entorhinal",
-                    subc_protocol::BindIdentity::new("connector-home", "plexus", "module"),
+                    subc_protocol::BindIdentity::new("plexus", "module"),
                 )
                 .map_err(|_| ErrorBody {
                     code: "unavailable".into(),

@@ -56,7 +56,7 @@ fn bind(corr: u64) -> Frame {
             target: RouteTarget::ToolProvider {
                 module_id: DEFAULT_MODULE_ID.into(),
             },
-            identity: BindIdentity::new("startup-fixture", "test", "session"),
+            identity: BindIdentity::new("test", "session"),
             principal: Some(Principal::Direct),
             consumer_capabilities: None,
             role_versions: None,
