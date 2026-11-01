@@ -1711,8 +1711,12 @@ async fn handle_control_request(
                 .as_ref()
                 .and_then(|stamp| stamp.attributes.on_behalf_of_agent.clone());
             let scope = scope.as_ref().map(CallScope::from_stamp);
+            // One line per scoped bind is per-call routing detail, like the
+            // unscoped ACCEPTED line above, so it logs at debug: core now opens
+            // every worker preflight and tool route under a scope, which made
+            // this the most frequent line in the log.
             if let Some(scope) = &scope {
-                eprintln!(info wire:
+                eprintln!(debug wire:
                     "route bind on channel {route_channel} is under scope {}/{}@{} (agent {}, delegates {}, owner authorized {})",
                     scope.owner,
                     scope.scope_ref,
