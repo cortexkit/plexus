@@ -63,10 +63,10 @@ Commit the intended changes first. The gate runs a no-compile local preflight,
 then dispatches the full CI checks to Linux with `ck motor run` at 8 vCPUs
 (network enabled for pinned tools). It requires the `ck` CLI and local Cargo
 metadata/rustfmt support; compilation and tests never run on the Mac.
-Sandboxed workers instead run `scripts/prepush.sh --fast` locally and
-`scripts/prepush.sh --full` with `runon: "linux,8c"` and network enabled.
-Both phases print a PASS naming the checked commit. The Linux entry point does
-not call Motor; workers paste both PASS lines in their delivery.
+Delegated workers run only `scripts/prepush.sh --fast` plus the filtered tests
+for what they changed (`.cortexkit/WORKER.md`). The maintainer runs the full
+gate once over each merged batch. `scripts/prepush.sh --full` runs the full
+phase alone on Linux, without calling Motor.
 The full phase delegates to `scripts/rust-test-gate.sh --ci`. It runs
 source-convention checks, the operator-script tests,
 `cargo fmt --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`

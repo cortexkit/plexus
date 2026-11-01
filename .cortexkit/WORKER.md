@@ -2,20 +2,27 @@
 
 ## Building, testing and delivery
 
-- Build and test on Linux through `runon` or `ck motor run`, never on the Mac.
-  The no-compile fast phase of `scripts/prepush.sh` is the exception: it runs
-  locally before dispatching the full Linux gate at 8 vCPUs.
-- Commit the intended changes, then run `scripts/prepush.sh --fast` locally
-  and `scripts/prepush.sh --full` with `runon: "linux,8c,net"` (network enabled
-  for pinned tool downloads). Paste both commit-naming PASS lines in the delivery.
-  Changing the commit requires another run. Worker sandboxes cannot connect to
-  Motor directly; do not invoke plain `scripts/prepush.sh` from a worker shell.
-- From a shell with access to `ck motor`, plain `scripts/prepush.sh` runs fast
-  locally, dispatches full through Motor, and writes a local receipt valid for
-  24 hours. The train and pre-push hook require this receipt for the pushed
-  commit and still require green CI before landing main. Separate phase runs do not write a
-  combined receipt.
+- Build and test on Linux through `runon`, never on the Mac. Use `linux,4c` for
+  one crate's tests and keep the normal build directory: don't set your own
+  `CARGO_TARGET_DIR`.
+- Run only the tests for what you changed: the test modules that cover the
+  files and behaviour you touched, selected by module or test name
+  (`cargo test --locked -p <crate> <module>::`), plus `cargo fmt --check` and
+  `cargo clippy --locked -p <crate> --all-targets -- -D warnings` for the crates
+  you changed. Also run tests your change can break by name, for example the
+  manifest, catalog-fixture or `gh_shim_wire` contract tests when you touch
+  those surfaces.
+- Run `scripts/prepush.sh --fast` locally. It compiles nothing and takes seconds.
 - For a bug fix, show once that the new regression test fails without the fix.
+- Never run a whole crate or workspace suite, `scripts/prepush.sh --full`,
+  plain `scripts/prepush.sh`, or `scripts/rust-test-gate.sh`. The head runs the
+  full gate once over each merged batch before landing.
+- If a test that looks unrelated fails, rerun that one test by name on the base
+  commit, never the suite, and report both results.
+- A filtered run that takes more than about 15 minutes means the filter is too
+  broad. Narrow it rather than waiting in long `bash_watch` loops.
+- Commit your changes and list in the delivery exactly which test filters you
+  ran, with their pass counts.
 
 ## Pre-approved: no need to ask
 
