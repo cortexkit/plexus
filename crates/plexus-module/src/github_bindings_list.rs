@@ -17,17 +17,25 @@ pub(super) fn reply(
             Err(_) => return denial_response(&plexus_core::Denial::StoreFailure),
         };
         let generation = result["repo_binding_generation"].clone();
-        let bindings = result["bindings"].as_array_mut().expect("binding rows");
-        bindings.retain(|binding| {
-            agent.is_none_or(|agent| binding["agent_id"] == agent)
-                && audience.is_none_or(|audience| {
-                    flow_audience::repository_allowed(
-                        state.store(),
-                        audience,
-                        binding["repository"].as_str().expect("stored repository"),
-                    )
-                })
-        });
+        let rows = std::mem::take(result["bindings"].as_array_mut().expect("binding rows"));
+        let mut bindings = Vec::with_capacity(rows.len());
+        for binding in rows {
+            if agent.is_some_and(|agent| binding["agent_id"] != agent) {
+                continue;
+            }
+            if let Some(audience) = audience {
+                // A failed project lookup must refuse the whole read: dropping
+                // the row would hand the caller a complete-looking list with a
+                // repository missing, which a flow would then cache by generation.
+                let repository = binding["repository"].as_str().expect("stored repository");
+                match flow_audience::try_repository_allowed(state.store(), audience, repository) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(_) => return denial_response(&plexus_core::Denial::StoreFailure),
+                }
+            }
+            bindings.push(binding);
+        }
         json!({"result":{"generation":generation,"bindings":bindings}})
     })();
     let mut response = result;
