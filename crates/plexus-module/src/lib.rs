@@ -34,6 +34,7 @@ mod consent_capacity_tests;
 mod consent_test_support;
 pub mod daemon_runtime;
 mod engram_catalog;
+mod github_bindings_list;
 mod github_bot_admin;
 pub mod health;
 pub mod manifest;
@@ -3076,6 +3077,15 @@ fn facade_tool_reply_inner(
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or("");
+        if action == "github.bindings.list" {
+            return Ok(github_bindings_list::reply(
+                state,
+                &principal_key,
+                arguments,
+                route_scope.as_ref(),
+                audience.as_ref(),
+            ));
+        }
         // Refuse by action name before inspecting repository/args, secrets, or
         // connection authority. The read-only surface cannot carry a bot write.
         if !plexus_core::github::reads::ACTIONS.contains(&action) {
@@ -3179,7 +3189,12 @@ fn facade_tool_reply_inner(
             "credential material may only enter through the binding-ticket ceremony",
         ));
     }
-    if connector_home::tool_effect(name, op) {
+    let effect_op = if name == manifest::GITHUB_READ_TOOL {
+        arguments.get("action").and_then(Value::as_str)
+    } else {
+        op
+    };
+    if connector_home::tool_effect(name, effect_op) {
         if let Some(refusal) = state.runtime.connector_home.refusal() {
             return Ok(refusal);
         }

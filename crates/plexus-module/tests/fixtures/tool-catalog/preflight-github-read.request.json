@@ -1,0 +1,6 @@
+{
+  "preset": "reader",
+  "params": {
+    "capabilities": ["plexus:github.read/v1"]
+  }
+}

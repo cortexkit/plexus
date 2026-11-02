@@ -772,7 +772,7 @@ fn github_read_manifest_is_pure_with_a_closed_action_schema() {
             "properties": {
                 "action": {"type": "string", "enum": [
                     "github.issue.get", "github.issue_comments.list", "github.issue.search", "github.pr.review_threads", "github.actions.job_log", "github.actions.artifact_file", "github.actions.run.superseded",
-                    "github.repo.get", "github.search.code", "github.search.issues", "github.pulls.open"
+                    "github.repo.get", "github.search.code", "github.search.issues", "github.pulls.open", "github.bindings.list"
                 ]},
                 "repository": {"oneOf": [
                     {"type": "string"},
@@ -798,7 +798,7 @@ fn github_read_manifest_is_pure_with_a_closed_action_schema() {
                     "length": {"type": "integer", "minimum": 1, "maximum": 1048576}
                 }}
             },
-            "required": ["action", "repository", "args"],
+            "required": ["action"],
             "additionalProperties": false
         })
     );

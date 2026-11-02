@@ -10,7 +10,8 @@ use crate::{credentials::CredentialSource, transport::Transport};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
-// The `github_read` actions, in three groups:
+// The vendor `github_read` actions, in three groups. The binding-list action
+// reads Plexus's store and is served by the module facade, not this dispatcher.
 // - Issue and review reads, made with a repository's bot token. Importing a
 //   bot (a GitHub App handle) also grants these to Prefrontal, the core
 //   module, on that bot's connection.
@@ -21,7 +22,7 @@ use std::collections::BTreeMap;
 macro_rules! read_actions {
     ($($bot:literal),* ; $($ci:literal),* ; $($agent_bot:literal),*) => {
         pub(crate) const BOT_ACTIONS: &[&str] = &[$($bot),*];
-        pub const ACTIONS: &[&str] = &[$($bot),*, $($ci),*, $($agent_bot),*];
+        pub const ACTIONS: &[&str] = &[$($bot),*, $($ci),*, $($agent_bot),*, "github.bindings.list"];
     };
 }
 read_actions!("github.issue.get", "github.issue_comments.list", "github.issue.search", "github.pr.review_threads";

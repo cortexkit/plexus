@@ -44,12 +44,32 @@ case-insensitively. Refusals disclose the repository, not workspace project IDs.
 
 ## Operation inventory
 
+### `github_read` binding-list reference
+
+`{"action":"github.bindings.list"}` accepts only `action`: any additional
+field, including `repository` or `args`, refuses `invalid_request` with `field`.
+Its result is `{"generation":6,"bindings":[{"repository":"owner/name","agent_id":"agent-id","app_handle_id":"handle-id"}]}`,
+mirrored into MCP `structuredContent` and the full JSON envelope in
+`content[0].text` as for other `github_read` successes. `generation` is the
+global binding generation even when visibility removes rows. Bindings are
+lowercase, sorted by repository and limited to enabled handles whose
+connections have active module invoke grants for the caller.
+
+An agent-stamped Basal flow sees only that agent's bindings. An agentless
+workspace flow receives the intersection with its existing repository audience
+instead of a wholesale refusal; an agentless global flow or ordinary module
+caller sees all module-granted enabled bindings. This action writes one audit
+row but never contacts GitHub, reserves a read budget or requires connector home.
+The byte-exact Basal example is in
+`crates/plexus-module/tests/fixtures/github-read-bindings/`.
+
 `tool_provider::modes_for` determines which tools `ops.call` may reach in each
 call mode. In Flow mode:
 
 | Operation | Repository source and audience decision |
 | --- | --- |
-| `github_read` | Check every string in `repository` (scalar or array). This includes issue reads, comments and repository-only issue search. On `github.issue.search`, caller-supplied `terms`, `q` or `query` refuse as an unresolved repository. |
+| `github_read` repository reads | Check every string in `repository` (scalar or array). This includes issue reads, comments and repository-only issue search. On `github.issue.search`, caller-supplied `terms`, `q` or `query` refuse as an unresolved repository. |
+| `github_read` / `github.bindings.list` | No repository selector; filter each returned binding through the same repository audience check. |
 | CI `github.actions.job_log` | Same outer `repository`; the reader derives both `get_job` and job-log request targets from it. |
 | CI `github.actions.artifact_file` | Same outer `repository`; artifact listing, selection and file download use that repository. |
 | CI `github.actions.run.superseded` | Same outer `repository`; run metadata and newest workflow run use that repository. |

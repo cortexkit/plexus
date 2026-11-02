@@ -317,6 +317,8 @@ pub enum ToolEffect {
     Always,
     /// Only the listed ops reach outside the store.
     Ops(&'static [&'static str]),
+    /// Every call except the listed store-only actions reaches outside.
+    Except(&'static [&'static str]),
     /// No call reaches outside the store.
     Never,
 }
@@ -336,7 +338,7 @@ pub const TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     ("code_search", ToolEffect::Always),
     // Both bindings.read and bindings.read_for_agent only inspect the store.
     ("github", ToolEffect::Ops(&["bot_request"])),
-    ("github_read", ToolEffect::Always),
+    ("github_read", ToolEffect::Except(&["github.bindings.list"])),
     // Every call posts a reaction on GitHub as the agent's bot.
     ("github_react", ToolEffect::Always),
     ("connections", ToolEffect::Ops(&["connect"])),
@@ -348,6 +350,7 @@ pub const TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
 ];
 
 /// Whether this tool call has an effect outside this store; see [`TOOL_EFFECTS`].
+/// `op` is the operation, or the action for `github_read`.
 pub fn tool_effect(name: &str, op: Option<&str>) -> bool {
     match TOOL_EFFECTS
         .iter()
@@ -356,6 +359,7 @@ pub fn tool_effect(name: &str, op: Option<&str>) -> bool {
     {
         Some(ToolEffect::Always) => true,
         Some(ToolEffect::Ops(ops)) => op.is_some_and(|op| ops.contains(&op)),
+        Some(ToolEffect::Except(ops)) => !op.is_some_and(|op| ops.contains(&op)),
         Some(ToolEffect::Never) => false,
         None => true,
     }

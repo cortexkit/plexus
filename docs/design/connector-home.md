@@ -63,7 +63,7 @@ state, epoch and holder name where known, and `transmission: not_sent`:
 | `web_search`, `code_search` | Backend/cache/rate-limiter admission, public search |
 | `requests.approve` | Approval decision and execution |
 | Consent answer task | Feed polling, approval execution, settlement, feed acknowledgment |
-| `github_read` | Governed vendor reads (not reads of Plexus's store) |
+| `github_read` | Governed vendor reads; `github.bindings.list` only reads Plexus's store and is exempt |
 | `connections.connect` | Ticket consumption and connection discovery |
 | `github.handle.import`, `.probe`, `.bind` | Installation reads and credential resolution |
 | `plexus.admin.issue_ticket`, `.rebind_credential` | Vault credential proof |

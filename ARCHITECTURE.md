@@ -64,6 +64,23 @@ Plexus serves tool-provider/v1's `tool.catalog` with per-tool capability tags fr
 
 ## GitHub bot writes
 
+**Live repository bindings.** The Pure `github_read` action
+`{"action":"github.bindings.list"}` takes no `repository`, `args`, or other
+fields. It returns `{"result":{"generation":6,"bindings":[{"repository":"owner/name","agent_id":"agent-id","app_handle_id":"handle-id"}]}}`
+(with the usual MCP structured and text mirrors). Bindings are lowercase and
+sorted by repository, include only enabled handles with an active module invoke
+grant for the caller, and are further restricted to an agent-stamped Basal
+flow's own agent or an agentless workspace flow's audience. Global agentless
+flows and ordinary module callers retain their grant-based reach. `generation`
+is the global `github_repo_binding_generation`, not a generation of the filtered
+view. Basal can cache by it and re-read when it moves. This store-only read writes
+one `github.bindings.list` audit row, makes no GitHub request, charges no read
+budget and remains served even when this machine does not hold the
+connector-home lease. Tool catalogs require a flat
+input schema, so only `action` is schema-required. Runtime validation still
+requires `repository` and `args` for every other `github_read` action and
+refuses either field on the binding-list action.
+
   GitHub App bot requests go through plexus. The `github` tool has three operations: `bot_request` (governed writes with ownership pre-reads, or recording an issue an agent has seen), `bindings.read` (one handle connection), and `bindings.read_for_agent` (one registry agent's handles). Both binding reads expose only rows whose handle connection the caller has an active module invoke grant on. Repository-bound issue and CI reads use the separate `github_read` tool; the former `github`/`read` operation is no longer accepted.
 
 `bot_request` optionally accepts `expect: {app_handle_id, repo_binding_generation}` beside `request` and `request_nonce`. Both fields are required when present (string handle, non-negative integer generation; no extra keys). After resolving the acting agent's bound bot and replaying any terminal receipt, plexus compares the expectation to the authority baseline it will pin, before any receipt claim or GitHub contact. A mismatch refuses `stale_authority` with dimension `expected_handle` or `expected_binding` and `transmission: not_sent`. The expectation joins a separate fingerprint domain, so changing it on the same nonce refuses `nonce_payload_mismatch`; calls without it retain their existing fingerprint and reply bytes. Existing baseline rechecks and uncached per-write scope descriptions remain mandatory: a cached open route never proves that a session is still live.

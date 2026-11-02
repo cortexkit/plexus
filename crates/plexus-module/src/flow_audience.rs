@@ -106,6 +106,25 @@ impl FlowAudiences {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture(flow_id: &str, audience: Audience) -> Self {
+        let fixture = Self::new(None);
+        let now = Instant::now();
+        fixture.cache.lock().unwrap().insert(
+            flow_id.into(),
+            (
+                now,
+                Answer {
+                    flow_id: flow_id.into(),
+                    audience,
+                    revision: "fixture".into(),
+                },
+                now,
+            ),
+        );
+        fixture
+    }
+
     fn cached(&self, flow_id: &str) -> Result<Option<Answer>, Value> {
         let now = Instant::now();
         let mut cache = self
@@ -271,6 +290,13 @@ pub(crate) fn check_call(
     args: &serde_json::Map<String, Value>,
 ) -> Result<(), Value> {
     if !matches!(audience, Audience::Workspace { .. }) {
+        return Ok(());
+    }
+    // The binding list has no repository selector; its reply is filtered row
+    // by row through repository_allowed instead.
+    if name == manifest::GITHUB_READ_TOOL
+        && args.get("action").and_then(Value::as_str) == Some("github.bindings.list")
+    {
         return Ok(());
     }
     let github_search_read = name == manifest::GITHUB_READ_TOOL

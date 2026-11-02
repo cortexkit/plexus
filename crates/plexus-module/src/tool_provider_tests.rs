@@ -380,6 +380,11 @@ fn catalog_core_wire_vectors_match_reply() {
                 "../tests/fixtures/tool-catalog/preflight-unknown-capability.reply.json"
             ),
         ),
+        (
+            "preflight-github-read",
+            include_bytes!("../tests/fixtures/tool-catalog/preflight-github-read.request.json"),
+            include_bytes!("../tests/fixtures/tool-catalog/preflight-github-read.reply.json"),
+        ),
     ];
 
     for (index, (name, request_bytes, reply_bytes)) in vectors.iter().enumerate() {
@@ -399,6 +404,8 @@ fn catalog_core_wire_vectors_match_reply() {
                         ))));
                 } else if index == 3 {
                     assert_eq!(names(&decoded), ["github"]);
+                } else if index == 5 {
+                    assert_eq!(names(&decoded), ["github_read"]);
                 } else {
                     panic!("unknown capability vector must be refused");
                 }

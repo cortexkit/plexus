@@ -25,6 +25,7 @@ pub use read_grant::GithubHandleReadGrant;
 enum GithubBindingSelector<'a> {
     Connection(&'a str),
     Agent(&'a str),
+    Enabled,
 }
 
 /// The credential reference identifies one App; an installation id is optional
@@ -2630,6 +2631,10 @@ impl PlexusStore {
         self.read_github_bindings_permitted(GithubBindingSelector::Agent(agent_id), caller)
     }
 
+    pub fn read_github_bindings_for_module(&self, caller: &str) -> Result<Value, StoreError> {
+        self.read_github_bindings_permitted(GithubBindingSelector::Enabled, caller)
+    }
+
     fn read_github_bindings_permitted(
         &self,
         selector: GithubBindingSelector<'_>,
@@ -2638,6 +2643,7 @@ impl PlexusStore {
         let (column, value) = match selector {
             GithubBindingSelector::Connection(id) => ("h.connection_id", id),
             GithubBindingSelector::Agent(id) => ("h.agent_id", id),
+            GithubBindingSelector::Enabled => ("h.status", "enabled"),
         };
         self.inner.with_read(|conn| {
             let generation: i64 = conn.query_row("SELECT generation FROM github_repo_binding_generation WHERE singleton=1",[],|row| row.get(0))?;
