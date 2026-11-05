@@ -19,6 +19,8 @@
 # can verify against the artifact rather than trust.
 
 set -euo pipefail
+# Bash 3.2 can lose an unset-variable error status in EXIT; success must be explicit.
+finished=0
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGING="${PLEXUS_STAGING_DIR:-$HOME/.local/share/cortexkit/staging}"
@@ -48,6 +50,7 @@ while [ $# -gt 0 ]; do
     --help|-h)
       echo "usage: scripts/stage-binaries.sh [--catalog-dir <path>] --marker <string|none> [--control <string>] [--marker-binary daemon|admin]"
       echo "  --catalog-dir overrides PLEXUS_CATALOG_DIR in ~/.config/cortexkit/subc.jsonc"
+      finished=1
       exit 0 ;;
     --marker)
       if [ "${2:-}" = "none" ]; then MARKER_NONE=1; else MARKERS+=("${2:?--marker needs a string}"); fi
@@ -139,7 +142,15 @@ CHECK_DIR="$(private_executable_copy target/release/ck-plexus)" || {
   exit 1
 }
 CHECK_BINARY="$CHECK_DIR/ckdev-plexus"
-trap 'rm -rf "$CHECK_DIR"' EXIT
+cleanup_catalog_check() {
+  local status=$?
+  local cleanup_status=0
+  rm -rf "$CHECK_DIR" || cleanup_status=$?
+  if [ "$status" -eq 0 ]; then status=$cleanup_status; fi
+  if [ "$status" -eq 0 ] && [ "$finished" -ne 1 ]; then status=1; fi
+  exit "$status"
+}
+trap cleanup_catalog_check EXIT
 if ! CATALOG_CHECK="$("$CHECK_BINARY" --check-catalog "$CATALOG_DIR" 2>&1)"; then
   echo "refusing: ck-plexus cannot check the deployed catalog: $CATALOG_DIR" >&2
   printf '%s\n' "$CATALOG_CHECK" >&2
@@ -152,7 +163,16 @@ echo "==> staging $SHA into $STAGING"
 STAGING_ROOT="$STAGING"
 STAGING="$(mktemp -d "$STAGING_ROOT/.candidate.XXXXXX")"
 PUBLISH_LOCK=""
-trap 'rm -rf "$CHECK_DIR" "$STAGING"; if [ -n "$PUBLISH_LOCK" ]; then rmdir "$PUBLISH_LOCK"; fi' EXIT
+cleanup_candidate() {
+  local status=$?
+  local cleanup_status=0
+  rm -rf "$CHECK_DIR" "$STAGING" || cleanup_status=$?
+  if [ -n "$PUBLISH_LOCK" ]; then rmdir "$PUBLISH_LOCK" || cleanup_status=$?; fi
+  if [ "$status" -eq 0 ]; then status=$cleanup_status; fi
+  if [ "$status" -eq 0 ] && [ "$finished" -ne 1 ]; then status=1; fi
+  exit "$status"
+}
+trap cleanup_candidate EXIT
 
 for BIN in ck-plexus ck-plexus-admin; do
   DEST="$STAGING/SIGNED.$BIN.$SHA"
@@ -345,6 +365,16 @@ else
   fi
 fi
 
+cleanup_published() {
+  local status=$?
+  local cleanup_status=0
+  rm -rf "$CHECK_DIR" || cleanup_status=$?
+  rmdir "$PUBLISH_LOCK" || cleanup_status=$?
+  if [ "$status" -eq 0 ]; then status=$cleanup_status; fi
+  if [ "$status" -eq 0 ] && [ "$finished" -ne 1 ]; then status=1; fi
+  exit "$status"
+}
+
 # EVERY PUBLISHING SIDE EFFECT LIVES HERE AND NOWHERE ELSE, and this function is
 # called exactly once, below, after the last thing that can refuse.
 #
@@ -379,7 +409,7 @@ publish_staging() {
   rmdir "$STAGING"
   STAGING="$STAGING_ROOT"
   # The candidate directory is gone; cleanup must never delete the staging root.
-  trap 'rm -rf "$CHECK_DIR"; rmdir "$PUBLISH_LOCK"' EXIT
+  trap cleanup_published EXIT
   stamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   # The currency declaration, in the form the subconscious placer settled on: a
   # keyed file at the STAGING ROOT naming which stage is current, rather than a
@@ -451,3 +481,4 @@ publish_staging
 
 echo "==> staged pair and pointers:"
 ls -1 "$STAGING" | grep -E "^(SIGNED\.ck-plexus(-admin)?\.$SHA(\.sha256)?|ck-plexus(-admin)?\.current)$" | sed 's/^/    /'
+finished=1

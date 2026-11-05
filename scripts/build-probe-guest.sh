@@ -13,6 +13,8 @@
 # compiler that builds the sandbox's interpreter would be whatever that URL
 # served on the day.
 set -euo pipefail
+# Bash 3.2 can lose an unset-variable error status in EXIT; success must be explicit.
+finished=0
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 guest_root="$repo_root/crates/plexus-probe/guest"
@@ -100,7 +102,15 @@ fi
 # A compiler left by a failed extraction is not evidence of a complete SDK.
 # Extract the verified archive afresh and publish only a complete tree.
 extracted="$(mktemp -d "$sdk_cache/extract.XXXXXX")"
-trap 'rm -rf "$extracted"' EXIT
+cleanup_extraction() {
+  local status=$?
+  local cleanup_status=0
+  rm -rf "$extracted" || cleanup_status=$?
+  if [ "$status" -eq 0 ]; then status=$cleanup_status; fi
+  if [ "$status" -eq 0 ] && [ "$finished" -ne 1 ]; then status=1; fi
+  exit "$status"
+}
+trap cleanup_extraction EXIT
 tar -xzf "$archive" -C "$extracted" --strip-components 1
 if [ ! -x "$extracted/bin/clang" ] || [ ! -d "$extracted/share/wasi-sysroot" ]; then
   echo "build-probe-guest: incomplete WASI SDK archive" >&2; exit 1
@@ -144,8 +154,10 @@ if "$check_only"; then
     exit 1
   fi
   echo "==> embedded guest matches pinned source rebuild: sha256 $(sha256_of "$artifact")"
+  finished=1
   exit 0
 fi
 mkdir -p "$(dirname "$destination")"
 install -m 0644 "$artifact" "$destination"
 echo "==> $destination sha256 $(sha256_of "$destination")"
+finished=1

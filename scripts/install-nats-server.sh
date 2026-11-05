@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Shared Linux CI setup; version and digest come from the workflow's pinned env.
 set -euo pipefail
+# Bash 3.2 can lose an unset-variable error status in EXIT; success must be explicit.
+finished=0
 : "${NATS_SERVER_VERSION:?NATS_SERVER_VERSION is required}"
 : "${NATS_SERVER_LINUX_AMD64_SHA256:?NATS_SERVER_LINUX_AMD64_SHA256 is required}"
 case "$(uname -s)-$(uname -m)" in
@@ -8,7 +10,15 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "install-nats-server: requires Linux x86_64" >&2; exit 2 ;;
 esac
 install_dir="$(mktemp -d)"
-trap 'rm -rf "$install_dir"' EXIT
+cleanup_install() {
+  local status=$?
+  local cleanup_status=0
+  rm -rf "$install_dir" || cleanup_status=$?
+  if [ "$status" -eq 0 ]; then status=$cleanup_status; fi
+  if [ "$status" -eq 0 ] && [ "$finished" -ne 1 ]; then status=1; fi
+  exit "$status"
+}
+trap cleanup_install EXIT
 archive="nats-server-v${NATS_SERVER_VERSION}-linux-amd64.tar.gz"
 curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 120 \
   "https://github.com/nats-io/nats-server/releases/download/v${NATS_SERVER_VERSION}/${archive}" \
@@ -27,3 +37,4 @@ else
   sudo install -m 0755 "$binary" /usr/local/bin/nats-server
   nats-server --version
 fi
+finished=1

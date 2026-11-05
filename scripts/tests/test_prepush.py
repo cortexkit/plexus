@@ -12,6 +12,7 @@ class PrepushTests(Scratch):
         self.checkout = self.tmp / 'checkout with spaces'
         (self.checkout / 'scripts').mkdir(parents=True)
         shutil.copy2(SCRIPTS / 'prepush.sh', self.checkout / 'scripts/prepush.sh')
+        shutil.copy2(SCRIPTS / 'check-exit-traps.py', self.checkout / 'scripts/check-exit-traps.py')
         self.log = self.tmp / 'phases'
         write_executable(self.checkout / 'scripts/rust-test-gate.sh', '''#!/bin/sh
 echo "fast $*" >> "$PHASE_LOG"
@@ -82,6 +83,16 @@ exit "${REMOTE_RC:-0}"
         self.assertIn(f'PASS prepush-fast: {self.sha}', result.stdout)
         self.assertEqual(self.log.read_text().splitlines(), ['fast --fast'])
         self.assertFalse(self.receipt().exists())
+
+    def test_fast_phase_refuses_unguarded_exit_trap_before_other_checks(self):
+        write_executable(self.checkout / 'scripts/unsafe.sh', '#!/bin/bash\nset -euo pipefail\ntrap "true" EXIT\n')
+        self.commit()
+        result = self.prepush('--fast')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('controls passed', result.stdout)
+        self.assertIn('scripts/unsafe.sh: errexit with an EXIT trap', result.stderr)
+        self.assertIn('(fail-closed shell EXIT traps)', result.stderr)
+        self.assertFalse(self.log.exists())
 
     def test_full_entry_point_runs_gate_without_motor_and_names_the_commit(self):
         result = self.prepush('--full')

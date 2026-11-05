@@ -47,6 +47,9 @@ case "$mode" in
   --fast)
     step="fast local preflight (no compilation)"
     echo "==> $step"
+    step="fail-closed shell EXIT traps"
+    python3 scripts/check-exit-traps.py
+    step="fast local preflight (no compilation)"
     bash scripts/rust-test-gate.sh --fast ;;
   --full)
     step="full Linux CI parity gate (failing substep is printed above)"

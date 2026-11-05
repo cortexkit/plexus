@@ -79,6 +79,8 @@
 #   4  CI is green, but landing or its outcome verification failed; re-run
 #      with --land to finish without paying for another CI run
 set -euo pipefail
+# Bash 3.2 can lose an unset-variable error status in EXIT; success must be explicit.
+finished=0
 
 # Run from a private copy of this file. bash reads a script incrementally, so an
 # edit to scripts/train-push.sh while a train is watching CI (a pick of a
@@ -90,7 +92,15 @@ if [ -z "${TRAIN_PUSH_EXEC_COPY:-}" ]; then
   cp "${BASH_SOURCE[0]}" "$train_push_copy"
   TRAIN_PUSH_EXEC_COPY="$train_push_copy" exec bash "$train_push_copy" "$@"
 fi
-trap 'rm -f "$TRAIN_PUSH_EXEC_COPY"' EXIT
+cleanup_exec_copy() {
+  local status=$?
+  local cleanup_status=0
+  rm -f "$TRAIN_PUSH_EXEC_COPY" || cleanup_status=$?
+  if [ "$status" -eq 0 ]; then status=$cleanup_status; fi
+  if [ "$status" -eq 0 ] && [ "$finished" -ne 1 ]; then status=1; fi
+  exit "$status"
+}
+trap cleanup_exec_copy EXIT
 
 repo_slug_override="${REPO:-}"
 REPO="$(git rev-parse --show-toplevel)" || {
@@ -551,7 +561,15 @@ land_verified_sha() {
 
 watch_log="$(mktemp "${TMPDIR:-/tmp}/train-push-watch.XXXXXX")"
 push_log="$(mktemp "${TMPDIR:-/tmp}/train-push-push.XXXXXX")"
-trap 'rm -f "$watch_log" "$push_log" "$TRAIN_PUSH_EXEC_COPY"' EXIT
+cleanup_train_logs() {
+  local status=$?
+  local cleanup_status=0
+  rm -f "$watch_log" "$push_log" "$TRAIN_PUSH_EXEC_COPY" || cleanup_status=$?
+  if [ "$status" -eq 0 ]; then status=$cleanup_status; fi
+  if [ "$status" -eq 0 ] && [ "$finished" -ne 1 ]; then status=1; fi
+  exit "$status"
+}
+trap cleanup_train_logs EXIT
 
 git -C "$REPO" fetch -q --prune "$remote" || refuse "git fetch $remote failed"
 default_branch="$(resolve_default_branch || true)"
@@ -628,6 +646,7 @@ if [ "$recover_existing" -eq 1 ]; then
     say "$heartbeat_dead_note; landing its verified sha $verified_sha"
   fi
   land_verified_sha "$verified_sha" "$run_url"
+  finished=1
   exit 0
 fi
 
@@ -1116,3 +1135,4 @@ if [ "$verified_sha" != "$head_sha" ]; then
 fi
 
 land_verified_sha "$head_sha" "$run_url"
+finished=1
