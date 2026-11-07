@@ -21,8 +21,10 @@ fn request(enqueue: bool) -> Value {
 }
 
 fn pr(queued: bool) -> Value {
+    // GitHub's GraphQL API names an App's bot by its bare slug; only REST
+    // carries the `[bot]` suffix that the bound handle's login uses.
     json!({"id":"PR_node_7", "url":URL, "number":7,
-        "author":{"login":"app-fixture[bot]", "__typename":"Bot"},
+        "author":{"login":"app-fixture", "__typename":"Bot"},
         "headRefOid":SHA, "state":"OPEN", "isInMergeQueue":queued})
 }
 
@@ -128,12 +130,47 @@ fn merge_queue_not_owned_uses_pr_edit_refusal_before_mutation() {
             first["result"]["refusal_code"], "pr_edit_not_own",
             "{first}"
         );
-        assert!(first["result"]["detail"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("human"));
+        let message = first["result"]["detail"]["message"].as_str().unwrap();
+        assert!(message.contains("human"), "{message}");
+        let verb = if enqueue {
+            "'pr enqueue'"
+        } else {
+            "'pr dequeue'"
+        };
+        assert!(message.starts_with(verb), "{message}");
         assert_eq!(run.call(&request(enqueue))["result"], first["result"]);
         assert_eq!(run.wire().len(), 1);
+        run.server.join().unwrap();
+    }
+}
+
+#[test]
+fn merge_queue_ownership_matches_graphql_bot_slug_but_not_a_lookalike() {
+    // The suffixed form is accepted too, in case GitHub ever reports it.
+    for login in ["app-fixture", "app-fixture[bot]", "APP-FIXTURE"] {
+        let mut own = pr(false);
+        own["author"] = json!({"login":login, "__typename":"Bot"});
+        let run = Run::new(vec![read(own), mutation(true)]);
+        let reply = run.call(&request(true));
+        assert_eq!(reply["result"]["status"], "completed", "{login}: {reply}");
+        assert_eq!(run.wire().len(), 2);
+        run.server.join().unwrap();
+    }
+    for (login, kind) in [
+        ("app-fixture", "User"),
+        ("app-fixture[bot]", "User"),
+        ("other-app", "Bot"),
+        ("app-fixture[bot][bot]", "Bot"),
+    ] {
+        let mut foreign = pr(false);
+        foreign["author"] = json!({"login":login, "__typename":kind});
+        let run = Run::new(vec![read(foreign)]);
+        let reply = run.call(&request(true));
+        assert_eq!(
+            reply["result"]["refusal_code"], "pr_edit_not_own",
+            "{login}/{kind}: {reply}"
+        );
+        assert_eq!(run.wire().len(), 1, "nothing is written");
         run.server.join().unwrap();
     }
 }

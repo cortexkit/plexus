@@ -376,7 +376,7 @@ fn owned(value: &Value, login: &str) -> bool {
         && value.pointer("/user/type").and_then(Value::as_str) == Some("Bot")
 }
 
-const PR_EDIT_NOT_OWN_MESSAGE: &str = "'pr edit' changes only pull requests this repository's bot opened ({bot}); #{number} was opened by {author}. Ask the author, or run it as the operator with GH_SHIM_BYPASS=operator.";
+const PR_EDIT_NOT_OWN_MESSAGE: &str = "'{verb}' changes only pull requests this repository's bot opened ({bot}); #{number} was opened by {author}. Ask the author, or run it as the operator with GH_SHIM_BYPASS=operator.";
 
 fn stack_not_own(pr: &Value, number: &Value, login: &str) -> taxonomy::Failure {
     let author = pr["user"]["login"].as_str().unwrap_or("unknown");
@@ -1017,7 +1017,19 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 );
             }
             // Normalize GraphQL's Actor to the shared REST ownership predicate.
-            pr["user"] = json!({"login":pr["author"]["login"], "type":pr["author"]["__typename"]});
+            // GraphQL names a GitHub App's bot by its bare slug (`aft-alfonso`),
+            // while REST and the bot login that `owned` compares against use the
+            // account login (`aft-alfonso[bot]`). Only a `Bot` actor gets the suffix, so a
+            // user account with the same name still fails the type check.
+            let kind = pr["author"]["__typename"].clone();
+            let author = pr["author"]["login"].as_str().map(|login| {
+                if kind == "Bot" && !login.ends_with("[bot]") {
+                    format!("{login}[bot]")
+                } else {
+                    login.to_owned()
+                }
+            });
+            pr["user"] = json!({"login":author, "type":kind});
             pr
         } else {
             value
@@ -1100,7 +1112,13 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         if (mapped.request_kind == "pr_edit" || queue_kind(&mapped.request_kind))
             && !owned(&value, &login)
         {
+            let verb = match mapped.request_kind.as_str() {
+                "pr_enqueue" => "pr enqueue",
+                "pr_dequeue" => "pr dequeue",
+                _ => "pr edit",
+            };
             let message = PR_EDIT_NOT_OWN_MESSAGE
+                .replace("{verb}", verb)
                 .replace("{bot}", &login)
                 .replace("{number}", &args["pull_number"].to_string())
                 .replace(
