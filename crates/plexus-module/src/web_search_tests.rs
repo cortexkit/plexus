@@ -1397,6 +1397,34 @@ async fn a_delegating_stamp_without_the_module_grant_refuses_module_grant_absent
     assert_eq!(fixture.requests(), 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permissions_revoke_ends_every_folded_web_search_authorization() {
+    use plexus_core::permissions::{module_row_id, revoke, RevokeOutcome, SearchCapability};
+
+    let fixture = Fixture::new("permissions-revoke");
+    let before = fixture
+        .send_scoped(basal(), owned_flow_stamp(), json!({"name":manifest::WEB_SEARCH_TOOL,"arguments":{"query":"weather before revocation"}}))
+        .await;
+    assert_eq!(before["isError"], false, "{before}");
+    fixture.add_connection("second-exa");
+    fixture.grant("second-basal", "second-exa", &basal());
+    let id = module_row_id("basal", SearchCapability::Web);
+    let outcome = revoke(&fixture.store, "reserved:cingulate", &id, NOW_MS).unwrap();
+    let RevokeOutcome::Revoked(grants) = outcome else {
+        panic!("module row must be revocable")
+    };
+    assert_eq!(grants.len(), 2);
+    let refused = fixture
+        .send_scoped(basal(), owned_flow_stamp(), json!({"name":manifest::WEB_SEARCH_TOOL,"arguments":{"query":"weather after revocation"}}))
+        .await;
+    assert_eq!(refused["errorCode"], "module_grant_absent", "{refused}");
+    assert_eq!(
+        fixture.requests(),
+        1,
+        "revoked authority must never dispatch"
+    );
+}
+
 /// A stamp that does not delegate, or whose owner is not authorized to set
 /// agent attributes, gives module-level authority only: the call runs on the
 /// carrier's module grant with no agent grant, and the stamp's agent is

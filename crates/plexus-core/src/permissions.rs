@@ -1,10 +1,11 @@
-//! `permissions/v1`: the per-agent GitHub bot grants plexus holds, shaped as
-//! rows on the operator's permissions page, and their revocation.
+//! `permissions/v1`: revocable agent GitHub bot and module search grants,
+//! shaped as rows on the operator's permissions page.
 //!
-//! Only agent-layer grants are listed. Module-layer grants (the carrier
-//! ceilings held for aft, prefrontal-core, basal, broca and direct) and
-//! policies (allow, ask_first, block) are not standing grants the operator
-//! gave an agent, so they stay off the page.
+//! Module rows cover only web and code search. GitHub bot carrier grants
+//! stay off the page: revoking one would break bot access for every agent,
+//! whose own grants are listed separately. Other module grants, grants to the
+//! local operator's `direct` route or the wildcard `*` principal, and policies
+//! (allow, ask_first, block) are not listed.
 //!
 //! The page shows capabilities, not grant rows. An agent's grants on one bot
 //! connection fold into at most three rows, the same for every bot and
@@ -16,9 +17,10 @@
 //! | `github_bot_open_issues` | `create_issue` |
 //! | `github_bot_open_pull_requests` | `create_pull_request` |
 //!
-//! These three tokens are plexus's whole `scope` vocabulary. A selector plexus
-//! does not know yet lands in the speak row. A row exists only while at least
-//! one of its grants is live.
+//! Module search grants fold across connections into one `web_search` and
+//! one `code_search` row per module. A bot selector plexus does not know yet
+//! lands in the speak row. A row exists only while at least one of its grants
+//! is live.
 //!
 //! A grant whose selectors span more than one row (`*`, or a list naming
 //! `create_issue` beside a comment action) is in every row it touches.
@@ -32,7 +34,7 @@ use cortexkit_store::StoreError;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::storage::permissions_store::LiveAgentGrant;
+use crate::storage::permissions_store::{LiveAgentGrant, LiveModuleGrant};
 use crate::storage::{AuditRecord, PlexusStore};
 
 /// The capability a module declares to serve `permissions.list` and
@@ -104,10 +106,14 @@ impl Capability {
 /// every list for as long as any of its grants is live, however many of its
 /// grants come and go.
 pub fn row_id(agent_id: &str, connection_id: &str, capability: Capability) -> String {
+    hashed_row_id(&[CAPABILITY, agent_id, connection_id, capability.scope()])
+}
+
+fn hashed_row_id(parts: &[&str]) -> String {
     // Not `jcs::sha256_hex`: the parts are hashed length-prefixed as a stream,
     // and the id keeps only the first 24 hex characters.
     let mut hasher = Sha256::new();
-    for part in [CAPABILITY, agent_id, connection_id, capability.scope()] {
+    for part in parts {
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part.as_bytes());
     }
@@ -119,6 +125,7 @@ pub fn row_id(agent_id: &str, connection_id: &str, capability: Capability) -> St
 pub struct HeldGrant {
     pub principal: String,
     pub grant_id: String,
+    pub connection_id: String,
 }
 
 /// One row on the permissions page.
@@ -171,10 +178,136 @@ pub fn rows(grants: &[LiveAgentGrant]) -> Vec<PermissionRow> {
             row.grants.push(HeldGrant {
                 principal: grant.principal.clone(),
                 grant_id: grant.grant_id.clone(),
+                connection_id: grant.connection_id.clone(),
             });
         }
     }
     rows.into_values().collect()
+}
+
+/// Search capabilities are folded across all providers a module can invoke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SearchCapability {
+    Web,
+    Code,
+}
+
+impl SearchCapability {
+    fn scope(self) -> &'static str {
+        match self {
+            Self::Web => "web_search",
+            Self::Code => "code_search",
+        }
+    }
+
+    fn for_connection(grant: &LiveModuleGrant) -> Option<Self> {
+        if !crate::web_search::connection_status_can_search(&grant.status) {
+            return None;
+        }
+        if crate::web_search::providers::PROVIDER_NAMES
+            .iter()
+            .any(|provider| provider.app_key == grant.app_key)
+        {
+            Some(Self::Web)
+        } else if grant.app_key == crate::code_search::BACKEND {
+            Some(Self::Code)
+        } else {
+            None
+        }
+    }
+}
+
+/// Module ids use their own hash domain, independent of provider connections
+/// and disjoint from the four-part agent row identity.
+pub fn module_row_id(module_id: &str, capability: SearchCapability) -> String {
+    hashed_row_id(&[CAPABILITY, "module", module_id, capability.scope(), "v1"])
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleSearchRow {
+    pub id: String,
+    pub module_id: String,
+    pub capability: SearchCapability,
+    pub granted_at_ms: i64,
+    pub expires_at_ms: Option<i64>,
+    pub grants: Vec<HeldGrant>,
+}
+
+fn module_rows(grants: &[LiveModuleGrant]) -> Vec<ModuleSearchRow> {
+    let mut rows = BTreeMap::new();
+    for grant in grants {
+        let Some(capability) = SearchCapability::for_connection(grant) else {
+            continue;
+        };
+        let row = rows
+            .entry((grant.module_id.clone(), capability))
+            .or_insert_with(|| ModuleSearchRow {
+                id: module_row_id(&grant.module_id, capability),
+                module_id: grant.module_id.clone(),
+                capability,
+                granted_at_ms: grant.created_at_ms,
+                expires_at_ms: grant.expires_at,
+                grants: Vec::new(),
+            });
+        row.granted_at_ms = row.granted_at_ms.max(grant.created_at_ms);
+        row.expires_at_ms = match (row.expires_at_ms, grant.expires_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            _ => None,
+        };
+        row.grants.push(HeldGrant {
+            principal: grant.principal.clone(),
+            grant_id: grant.grant_id.clone(),
+            connection_id: grant.connection_id.clone(),
+        });
+    }
+    rows.into_values().collect()
+}
+
+/// A page row held by an agent or a module; only agent rows name an agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListedRow {
+    Agent(PermissionRow),
+    Module(ModuleSearchRow),
+}
+
+impl ListedRow {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Agent(row) => &row.id,
+            Self::Module(row) => &row.id,
+        }
+    }
+
+    fn grants(&self) -> &[HeldGrant] {
+        match self {
+            Self::Agent(row) => &row.grants,
+            Self::Module(row) => &row.grants,
+        }
+    }
+
+    pub fn to_wire(&self) -> Value {
+        let row = match self {
+            Self::Agent(row) => return row.to_wire(),
+            Self::Module(row) => row,
+        };
+        let (subject, scope) = match row.capability {
+            SearchCapability::Web => ("Web search", "Can search the web."),
+            SearchCapability::Code => ("Code search", "Can search public code on GitHub."),
+        };
+        let mut wire = json!({
+            "id": row.id,
+            "holder": {"kind": "module", "module_id": row.module_id},
+            "module": MODULE,
+            "subject_label": subject,
+            "scope": row.capability.scope(),
+            "scope_label": scope,
+            "granted_at_ms": row.granted_at_ms,
+        });
+        if let Some(expires_at_ms) = row.expires_at_ms {
+            wire["expires_at_ms"] = json!(expires_at_ms);
+        }
+        wire
+    }
 }
 
 /// "a", "a and b", "a, b and c".
@@ -241,15 +374,26 @@ impl PermissionRow {
     }
 }
 
-/// The permissions-page rows built from the agent-layer grants that are live
-/// at `now`, optionally for one agent only. A live grant is one still in
+/// The permissions-page rows built from grants that are live at `now`.
+/// An agent filter excludes module rows. A live grant is one still in
 /// `grants` (not revoked) whose expiry, if it has one, is after `now`.
 pub fn list(
     store: &PlexusStore,
     agent_id: Option<&str>,
     now: i64,
-) -> Result<Vec<PermissionRow>, StoreError> {
-    Ok(rows(&store.live_agent_grants(agent_id, now)?))
+) -> Result<Vec<ListedRow>, StoreError> {
+    let mut listed: Vec<_> = rows(&store.live_agent_grants(agent_id, now)?)
+        .into_iter()
+        .map(ListedRow::Agent)
+        .collect();
+    if agent_id.is_none() {
+        listed.extend(
+            module_rows(&store.live_module_grants(now)?)
+                .into_iter()
+                .map(ListedRow::Module),
+        );
+    }
+    Ok(listed)
 }
 
 /// What `permissions.revoke` did.
@@ -273,7 +417,7 @@ pub enum RevokeOutcome {
 /// Grants are revoked one at a time. A crash or store error part way leaves
 /// every grant before it fully revoked and every grant after it untouched;
 /// the row is still listed under the same id, because the id depends only on
-/// the agent, the connection and the capability, so a retry finds the rest
+/// the holder and capability (plus the connection for agent rows), so a retry finds the rest
 /// and finishes. A grant journaled but not yet deleted is removed by the
 /// replay on the next open. Each revoked grant gets an audit row; a failed
 /// audit append is logged and does not undo the revocation.
@@ -283,11 +427,14 @@ pub fn revoke(
     id: &str,
     now: i64,
 ) -> Result<RevokeOutcome, StoreError> {
-    let Some(row) = list(store, None, now)?.into_iter().find(|row| row.id == id) else {
+    let Some(row) = list(store, None, now)?
+        .into_iter()
+        .find(|row| row.id() == id)
+    else {
         return Ok(RevokeOutcome::NotFound);
     };
     let mut revoked = Vec::new();
-    for grant in &row.grants {
+    for grant in row.grants() {
         // `revoke_grant` returns false when the grant is no longer in
         // `grants`: a concurrent revoke (another `permissions.revoke`, the
         // admin `revoke-grant` or the agent-retirement sweep) removed it
@@ -296,10 +443,13 @@ pub fn revoke(
             if let Err(error) = store.append_audit(&AuditRecord::permissions_revocation(
                 caller,
                 &grant.principal,
-                &row.agent_id,
-                &row.connection_id,
+                match &row {
+                    ListedRow::Agent(row) => Some(&row.agent_id),
+                    ListedRow::Module(_) => None,
+                },
+                &grant.connection_id,
                 &grant.grant_id,
-                &row.id,
+                row.id(),
             )) {
                 eprintln!(error governance: "audit append failed: permissions.revoke principal={:?} grant_id={:?}: {error}", grant.principal, grant.grant_id);
             }
@@ -383,11 +533,11 @@ mod tests {
         let list_us = start.elapsed().as_micros();
         assert_eq!(listed.len(), 32);
         assert_eq!(
-            listed.iter().map(|row| row.grants.len()).sum::<usize>(),
+            listed.iter().map(|row| row.grants().len()).sum::<usize>(),
             542
         );
         let start = std::time::Instant::now();
-        let revoked = revoke(&store, "direct", &listed[0].id, crate::storage::now_ms()).unwrap();
+        let revoked = revoke(&store, "direct", listed[0].id(), crate::storage::now_ms()).unwrap();
         let revoke_us = start.elapsed().as_micros();
         let RevokeOutcome::Revoked(revoked) = revoked else {
             panic!("no grants revoked")
@@ -425,14 +575,14 @@ mod tests {
         }
         let before = list(&store, None, 1).unwrap();
         assert_eq!(
-            before[0].expires_at_ms,
-            Some(20),
+            before[0].to_wire()["expires_at_ms"],
+            json!(20),
             "row expires before capability ends"
         );
         let after = list(&store, None, 11).unwrap();
         assert_eq!(after.len(), 1);
-        assert_eq!(after[0].id, before[0].id);
-        assert_eq!(after[0].expires_at_ms, Some(20));
+        assert_eq!(after[0].id(), before[0].id());
+        assert_eq!(after[0].to_wire()["expires_at_ms"], 20);
         store
             .insert_agent_grant_for_test(
                 &GrantInput {
@@ -448,7 +598,16 @@ mod tests {
                 "agent-a",
             )
             .unwrap();
-        assert_eq!(list(&store, None, 11).unwrap()[0].expires_at_ms, None);
-        assert_eq!(list(&store, None, 21).unwrap()[0].expires_at_ms, None);
+        assert!(list(&store, None, 11).unwrap()[0]
+            .to_wire()
+            .get("expires_at_ms")
+            .is_none());
+        assert!(list(&store, None, 21).unwrap()[0]
+            .to_wire()
+            .get("expires_at_ms")
+            .is_none());
     }
 }
+
+#[cfg(test)]
+mod search_tests;

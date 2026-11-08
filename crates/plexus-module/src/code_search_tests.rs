@@ -238,6 +238,54 @@ async fn basal_flow_is_admitted_and_unscoped_basal_is_refused() {
     assert_eq!(rows, 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permissions_revoke_ends_module_code_search_authorization() {
+    use plexus_core::permissions::{module_row_id, revoke, RevokeOutcome, SearchCapability};
+
+    let f = Fixture::new();
+    let basal = Principal::Reserved {
+        module_id: "basal".into(),
+    };
+    let scope = subc_protocol::scope::ScopeStamp::new(
+        basal.clone(),
+        "flow-search",
+        1,
+        subc_protocol::scope::ScopeKind::Worker,
+    )
+    .with_attributes(
+        subc_protocol::scope::ScopeAttributes::new().with_flow_id(Some("flow-search".into())),
+    )
+    .with_owner_authorized(true);
+    let before = f
+        .call(
+            basal.clone(),
+            Some(scope.clone()),
+            json!({"query":"before revoke"}),
+        )
+        .await;
+    assert_eq!(before["isError"], false, "{before}");
+    let outcome = revoke(
+        &f.store,
+        "reserved:cingulate",
+        &module_row_id("basal", SearchCapability::Code),
+        plexus_core::storage::now_ms(),
+    )
+    .unwrap();
+    let RevokeOutcome::Revoked(grants) = outcome else {
+        panic!("module code search row must be revocable")
+    };
+    assert_eq!(grants.len(), 1);
+    let refused = f
+        .call(basal, Some(scope), json!({"query":"after revoke"}))
+        .await;
+    assert_eq!(refused["errorCode"], "module_grant_absent", "{refused}");
+    assert_eq!(
+        f.transport.requests().len(),
+        1,
+        "no dispatch after revocation"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_assertion_is_refused_without_dispatch() {
     let f = Fixture::new();

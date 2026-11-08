@@ -9,7 +9,7 @@ use plexus_core::permissions::{row_id, Capability};
 use plexus_core::storage::github_store::{
     GithubHandle, GithubImportRow, GithubImportedGrant, GithubImportedPolicy,
 };
-use plexus_core::{MockTransport, CATALOG_PRINCIPAL};
+use plexus_core::{GrantInput, MockTransport, CATALOG_PRINCIPAL};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use subc_protocol::{
@@ -393,11 +393,10 @@ async fn grants_fold_into_three_rows_for_a_full_bot_and_one_for_a_speak_only_bot
     );
 }
 
-/// Module-layer grants (grants with no agent id: the ceilings a carrier
-/// module such as aft holds for every agent it carries) and policies are not
-/// standing grants an operator gave an agent, so they never become rows.
+/// GitHub carrier grants must stay hidden: revoking a carrier would break bot
+/// access for every agent it carries. Policies are not standing grants either.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn module_grants_and_policies_are_not_listed() {
+async fn github_carrier_grants_and_policies_are_not_listed() {
     let f = fixture();
     assert!(
         count(
@@ -417,7 +416,7 @@ async fn module_grants_and_policies_are_not_listed() {
     assert_eq!(
         (agents, rows.as_array().unwrap().len()),
         (BTreeSet::from([ALL_AGENT, SPEAK_AGENT]), 4),
-        "module-layer grants and policies must stay off the permissions page: {rows}"
+        "GitHub carrier grants and policies must stay off the permissions page: {rows}"
     );
 }
 
@@ -1069,4 +1068,151 @@ fn copied_vectors_match_their_checksums() {
 
 fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn add_module_search_grants(f: &Fixture) {
+    for (id, app, action, created, expiry) in [
+        ("search-exa", "exa_rest", "search", 2_000, None),
+        ("search-tavily", "tavily_rest", "search", 3_000, None),
+        ("search-zai", "zai", "web_search_prime", 2_500, None),
+        (
+            "search-code",
+            "grep_app",
+            "searchGitHub",
+            4_000,
+            Some(4_000_000_000_000_i64),
+        ),
+    ] {
+        f.store
+            .insert_connection(
+                "direct",
+                id,
+                app,
+                "active",
+                &json!({"required":[],"optional":[],"write_enabling":[]}),
+            )
+            .unwrap();
+        f.store
+            .insert_grant(&GrantInput {
+                grant_id: id.into(),
+                principal: "direct".into(),
+                connection_id: id.into(),
+                grantee_principal: "reserved:broca".into(),
+                risk_ceiling: "read".into(),
+                action_selectors: vec![action.into()],
+                authority_kind: "invoke".into(),
+                expires_at: expiry,
+            })
+            .unwrap();
+        sql(&f.scratch)
+            .execute(
+                "UPDATE grants SET created_at_ms = ?2 WHERE grant_id = ?1",
+                rusqlite::params![id, created],
+            )
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn module_search_rows_are_unfiltered_and_revocable_through_the_handler() {
+    let f = fixture();
+    add_module_search_grants(&f);
+    let rows = list(&f.state, json!({})).await;
+    let module_rows: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["holder"]["kind"] == "module")
+        .collect();
+    assert_eq!(module_rows.len(), 2);
+    for row in &module_rows {
+        assert_eq!(row["holder"], json!({"kind":"module","module_id":"broca"}));
+        assert_eq!(row["module"], "plexus");
+        assert!(row.get("agent_id").is_none());
+    }
+    for agent in [ALL_AGENT, "missing"] {
+        let filtered = list(&f.state, json!({"agent_id":agent})).await;
+        assert!(filtered
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["holder"]["kind"] == "agent"));
+    }
+    let web = module_rows
+        .iter()
+        .find(|row| row["scope"] == "web_search")
+        .unwrap();
+    let id = web["id"].as_str().unwrap();
+    assert_eq!(
+        revoke(&f.state, id).await,
+        json!({"result":{"outcome":"revoked"}})
+    );
+    assert_eq!(
+        revoke(&f.state, id).await,
+        json!({"result":{"outcome":"not_found"}})
+    );
+    assert_eq!(count(&f.scratch, "SELECT COUNT(*) FROM grant_revocations WHERE grant_id IN ('search-exa','search-tavily','search-zai')"), 3);
+    let after = list(&f.state, json!({})).await;
+    let expected: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["id"] != id)
+        .cloned()
+        .collect();
+    assert_eq!(
+        after,
+        json!(expected),
+        "agent and code-search rows must be untouched"
+    );
+}
+
+/// Unlike the copied Cerebellum vectors, this sample pins Plexus's actual
+/// permissions handler reply, including both agent and module holders.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plexus_module_search_list_vector_matches_handler() {
+    use sha2::{Digest, Sha256};
+
+    let f = fixture();
+    sql(&f.scratch)
+        .execute("UPDATE grants SET created_at_ms = 1000", [])
+        .unwrap();
+    add_module_search_grants(&f);
+    let request = json!({});
+    let reply = route_call(
+        &f.state,
+        reserved("cingulate"),
+        CallMode::Classic,
+        json!({"method":"permissions.list","params":request}),
+    )
+    .await;
+    assert!(reply.get("error").is_none(), "{reply}");
+    let sample = json!({
+        "tag":"plexus-module-search-list", "method":"permissions.list",
+        "route":{"principal":"reserved:cingulate","call_mode":"classic"},
+        "request":request, "reply":reply["result"],
+    });
+    let canonical = plexus_core::jcs::canonicalize(&sample).unwrap();
+    let mut pretty = serde_json::to_vec_pretty(&sample).unwrap();
+    pretty.push(b'\n');
+    let digest = format!("{}\n", hex_lower(&Sha256::digest(&canonical)));
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/permissions-v1");
+    for (extension, expected) in [
+        ("json", pretty),
+        ("jcs", canonical),
+        ("sha256", digest.into_bytes()),
+    ] {
+        let path = directory.join(format!("plexus-module-search-list.{extension}"));
+        if std::env::var("PLEXUS_REGENERATE_PERMISSIONS_FIXTURES").as_deref() == Ok("1") {
+            std::fs::write(&path, &expected).unwrap();
+            println!("updated {}", path.display());
+        } else {
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                expected,
+                "{} must match the real handler; see SOURCE.md to regenerate",
+                path.display()
+            );
+        }
+    }
 }

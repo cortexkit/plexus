@@ -1,5 +1,5 @@
-//! Store reads behind `permissions/v1`: the live agent-layer grants and the
-//! GitHub bot each one speaks through.
+//! Store reads behind `permissions/v1`: live agent GitHub bot grants and
+//! module invoke grants whose connections can be classified by the provider.
 
 use cortexkit_store::StoreError;
 use rusqlite::params;
@@ -24,12 +24,24 @@ pub struct LiveAgentGrant {
     pub repositories: Vec<String>,
 }
 
+/// A live module invoke grant with the connection facts used to identify
+/// search capabilities. Other module capabilities are not listed by the provider.
+pub struct LiveModuleGrant {
+    pub principal: String,
+    pub grant_id: String,
+    pub module_id: String,
+    pub connection_id: String,
+    pub app_key: String,
+    pub status: String,
+    pub expires_at: Option<i64>,
+    pub created_at_ms: i64,
+}
+
 impl PlexusStore {
     /// Every live agent-layer grant, optionally for one agent only.
     ///
-    /// Module-layer grants (`agent_id IS NULL`, the carrier ceilings) are never
-    /// returned, and neither are policies: both stay off the operator's
-    /// permissions page. A grant is live while `now < expires_at`; a revoked
+    /// Module-layer grants (`agent_id IS NULL`) and policies are not returned
+    /// by this agent-only query. A grant is live while `now < expires_at`; a revoked
     /// grant has already left `grants`. One read transaction answers the whole
     /// list, so the bot identities match the grants they label.
     pub fn live_agent_grants(
@@ -96,6 +108,38 @@ impl PlexusStore {
                 .collect()
         })
     }
+
+    /// Live module-layer invoke grants to principals in the `reserved:`
+    /// namespace. Revoked grants have already left `grants`.
+    pub fn live_module_grants(&self, now: i64) -> Result<Vec<LiveModuleGrant>, StoreError> {
+        self.inner.with_read(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT g.principal, g.grant_id, substr(g.grantee_principal, 10),
+                        g.connection_id, c.app_key, c.status, g.expires_at, g.created_at_ms
+                 FROM grants g
+                 JOIN connections c ON c.principal = g.principal AND c.connection_id = g.connection_id
+                 WHERE g.agent_id IS NULL AND g.authority_kind = 'invoke'
+                   AND substr(g.grantee_principal, 1, 9) = 'reserved:'
+                   AND length(g.grantee_principal) > 9
+                   AND (g.expires_at IS NULL OR g.expires_at > ?1)
+                 ORDER BY g.grantee_principal, g.principal, g.connection_id, g.grant_id",
+            )?;
+            let rows = statement
+                .query_map([now], |row| {
+                    Ok(LiveModuleGrant {
+                        principal: row.get(0)?,
+                        grant_id: row.get(1)?,
+                        module_id: row.get(2)?,
+                        connection_id: row.get(3)?,
+                        app_key: row.get(4)?,
+                        status: row.get(5)?,
+                        expires_at: row.get(6)?,
+                        created_at_ms: row.get(7)?,
+                    })
+                })?;
+            rows.collect()
+        })
+    }
 }
 
 impl AuditRecord {
@@ -113,7 +157,7 @@ impl AuditRecord {
     pub fn permissions_revocation(
         caller: &str,
         principal: &str,
-        agent_id: &str,
+        agent_id: Option<&str>,
         connection_id: &str,
         grant_id: &str,
         row_id: &str,
@@ -127,7 +171,7 @@ impl AuditRecord {
             None,
         );
         record.acting_principal = caller.to_string();
-        record.agent_id = Some(agent_id.to_string());
+        record.agent_id = agent_id.map(str::to_string);
         record.reason_code = "permissions_revoke".to_string();
         record.gate = Some("permissions_v1".to_string());
         record.args_redaction_summary = Some(format!(
