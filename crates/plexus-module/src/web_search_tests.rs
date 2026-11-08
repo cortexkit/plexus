@@ -1398,7 +1398,7 @@ async fn a_delegating_stamp_without_the_module_grant_refuses_module_grant_absent
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn permissions_revoke_ends_every_folded_web_search_authorization() {
+async fn permissions_revoke_refuses_flow_web_search_with_module_grant_absent() {
     use plexus_core::permissions::{module_row_id, revoke, RevokeOutcome, SearchCapability};
 
     let fixture = Fixture::new("permissions-revoke");
@@ -1423,6 +1423,35 @@ async fn permissions_revoke_ends_every_folded_web_search_authorization() {
         1,
         "revoked authority must never dispatch"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permissions_revoke_refuses_non_flow_web_search_with_legacy_not_granted() {
+    use plexus_core::permissions::{module_row_id, revoke, RevokeOutcome, SearchCapability};
+
+    let fixture = Fixture::new("permissions-revoke-non-flow");
+    let before = fixture
+        .search(aft(), json!({"query":"weather before revocation"}))
+        .await;
+    assert_eq!(before["isError"], false, "{before}");
+    fixture.add_connection("second-exa");
+    fixture.grant("second-aft", "second-exa", &aft());
+    let outcome = revoke(
+        &fixture.store,
+        "reserved:cingulate",
+        &module_row_id("aft", SearchCapability::Web),
+        NOW_MS,
+    )
+    .unwrap();
+    let RevokeOutcome::Revoked(grants) = outcome else {
+        panic!("module web search row must be revocable")
+    };
+    assert_eq!(grants.len(), 2);
+    let refused = fixture
+        .search(aft(), json!({"query":"weather after revocation"}))
+        .await;
+    assert_eq!(refused["errorCode"], "web_search_not_granted", "{refused}");
+    assert_eq!(fixture.requests(), 1, "no dispatch after revocation");
 }
 
 /// A stamp that does not delegate, or whose owner is not authorized to set

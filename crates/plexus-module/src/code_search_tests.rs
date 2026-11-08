@@ -239,7 +239,7 @@ async fn basal_flow_is_admitted_and_unscoped_basal_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn permissions_revoke_ends_module_code_search_authorization() {
+async fn permissions_revoke_refuses_flow_code_search_with_module_grant_absent() {
     use plexus_core::permissions::{module_row_id, revoke, RevokeOutcome, SearchCapability};
 
     let f = Fixture::new();
@@ -279,6 +279,50 @@ async fn permissions_revoke_ends_module_code_search_authorization() {
         .call(basal, Some(scope), json!({"query":"after revoke"}))
         .await;
     assert_eq!(refused["errorCode"], "module_grant_absent", "{refused}");
+    assert_eq!(
+        f.transport.requests().len(),
+        1,
+        "no dispatch after revocation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permissions_revoke_refuses_non_flow_code_search_with_legacy_not_granted() {
+    use plexus_core::permissions::{module_row_id, revoke, RevokeOutcome, SearchCapability};
+
+    let f = Fixture::new();
+    let broca = Principal::Reserved {
+        module_id: "broca".into(),
+    };
+    f.store
+        .insert_grant(&GrantInput {
+            principal: "direct".into(),
+            connection_id: "grep".into(),
+            grant_id: "broca".into(),
+            grantee_principal: "reserved:broca".into(),
+            risk_ceiling: "read".into(),
+            action_selectors: vec!["searchGitHub".into()],
+            authority_kind: "invoke".into(),
+            expires_at: None,
+        })
+        .unwrap();
+    let before = f
+        .call(broca.clone(), None, json!({"query":"before revoke"}))
+        .await;
+    assert_eq!(before["isError"], false, "{before}");
+    let outcome = revoke(
+        &f.store,
+        "reserved:cingulate",
+        &module_row_id("broca", SearchCapability::Code),
+        plexus_core::storage::now_ms(),
+    )
+    .unwrap();
+    let RevokeOutcome::Revoked(grants) = outcome else {
+        panic!("module code search row must be revocable")
+    };
+    assert_eq!(grants.len(), 1);
+    let refused = f.call(broca, None, json!({"query":"after revoke"})).await;
+    assert_eq!(refused["errorCode"], "code_search_not_granted", "{refused}");
     assert_eq!(
         f.transport.requests().len(),
         1,
