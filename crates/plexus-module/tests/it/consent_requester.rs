@@ -744,9 +744,11 @@ async fn pending_recall_resumes_wait_and_can_be_withdrawn_by_its_new_key() {
     let f = Fixture::new().await;
     let id = f.park();
     let request = f.request("recall", "hello");
+    // Budget an RPC timeout for the recall's consent.get and another for detach,
+    // plus a second for store/scheduling overhead so the recall still sends an await.
     let reply = f.engine.invoke_held(
         request,
-        Instant::now() + CONTROL_RPC_TIMEOUT + Duration::from_millis(30),
+        Instant::now() + CONTROL_RPC_TIMEOUT * 2 + Duration::from_secs(1),
     );
     assert!(
         matches!(reply, Err(Denial::AccessPending { .. })),
