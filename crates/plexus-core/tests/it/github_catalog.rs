@@ -530,3 +530,104 @@ fn pr_create_allowlist_matches_the_shipped_create_pull_request_schema() {
         .collect();
     assert_eq!(sent, declared);
 }
+
+/// Every fixed GraphQL mutation in the GitHub catalog names only input fields
+/// that GitHub's schema declares, and every required one. The facade's own
+/// tests serve canned replies, so a field name GitHub rejects passes them all
+/// and fails only live: `dequeuePullRequest` once sent `pullRequestId`, which
+/// GitHub refuses ("InputObject 'DequeuePullRequestInput' doesn't accept
+/// argument 'pullRequestId'"), because its input calls the field `id`.
+///
+/// The table is GitHub's input object for each mutation, from
+/// https://docs.github.com/en/graphql/reference/pulls. A mutation added to the
+/// catalog must be added here, after checking its input object there.
+#[test]
+fn graphql_mutation_inputs_match_githubs_input_objects() {
+    // (mutation, every input field GitHub declares, the required ones)
+    const INPUTS: &[(&str, &[&str], &[&str])] = &[
+        (
+            "enqueuePullRequest",
+            &[
+                "clientMutationId",
+                "expectedHeadOid",
+                "jump",
+                "pullRequestId",
+            ],
+            &["pullRequestId"],
+        ),
+        ("dequeuePullRequest", &["clientMutationId", "id"], &["id"]),
+        (
+            "markPullRequestReadyForReview",
+            &["clientMutationId", "pullRequestId"],
+            &["pullRequestId"],
+        ),
+        (
+            "convertPullRequestToDraft",
+            &["clientMutationId", "pullRequestId"],
+            &["pullRequestId"],
+        ),
+        (
+            "resolveReviewThread",
+            &["clientMutationId", "threadId"],
+            &["threadId"],
+        ),
+        (
+            "unresolveReviewThread",
+            &["clientMutationId", "threadId"],
+            &["threadId"],
+        ),
+    ];
+
+    fn mutations(value: &Value, found: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    match child.as_str() {
+                        Some(text) if key == "query" && text.starts_with("mutation") => {
+                            found.push(text.to_owned())
+                        }
+                        _ => mutations(child, found),
+                    }
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| mutations(item, found)),
+            _ => {}
+        }
+    }
+
+    let source = include_str!(concat!("../", "../../../catalog/github_rest.jsonc"));
+    let clean = subc_jsonc::jsonc_to_json(source).expect("shipped catalog is valid JSONC");
+    let catalog: Value = serde_json::from_str(&clean).expect("parse github REST JSONC");
+    let mut found = Vec::new();
+    mutations(&catalog, &mut found);
+    assert_eq!(
+        found.len(),
+        INPUTS.len(),
+        "each catalog mutation has a table row"
+    );
+
+    for query in found {
+        // `mutation(<variables>) { <name>(input: {<field>: $var, ...}) { ... } }`
+        let body = &query[query.find('{').expect("selection set") + 1..];
+        let name = body.trim_start().split('(').next().unwrap().trim();
+        let (_, declared, required) = INPUTS
+            .iter()
+            .find(|(mutation, _, _)| *mutation == name)
+            .unwrap_or_else(|| panic!("{name} has no input table row"));
+        let input = &body[body.find("input: {").expect("input object") + "input: {".len()..];
+        let input = &input[..input.find('}').expect("input object end")];
+        let sent: Vec<&str> = input
+            .split(',')
+            .map(|pair| pair.split(':').next().unwrap().trim())
+            .collect();
+        for field in &sent {
+            assert!(
+                declared.contains(field),
+                "{name} sends `{field}`, which GitHub's input does not declare"
+            );
+        }
+        for field in *required {
+            assert!(sent.contains(field), "{name} omits required `{field}`");
+        }
+    }
+}

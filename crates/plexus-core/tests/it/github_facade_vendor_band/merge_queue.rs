@@ -6,7 +6,7 @@ const OTHER_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const URL: &str = "https://github.com/org/repo/pull/7";
 const READ: &str = "query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { id url number author { login __typename } headRefOid state isInMergeQueue } } }";
 const ENQUEUE: &str = "mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) { enqueuePullRequest(input: {pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid}) { mergeQueueEntry { pullRequest { id url number headRefOid isInMergeQueue } } } }";
-const DEQUEUE: &str = "mutation($pullRequestId: ID!) { dequeuePullRequest(input: {pullRequestId: $pullRequestId}) { mergeQueueEntry { pullRequest { id url number headRefOid isInMergeQueue } } } }";
+const DEQUEUE: &str = "mutation($pullRequestId: ID!) { dequeuePullRequest(input: {id: $pullRequestId}) { mergeQueueEntry { pullRequest { id url number headRefOid isInMergeQueue } } } }";
 
 fn request(enqueue: bool) -> Value {
     let mut request = json!({"operation":"gh.route", "gh_route_schema":1,

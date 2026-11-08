@@ -153,11 +153,14 @@
       }
     },
     {
+      // GitHub names this input field `id`, unlike enqueue's `pullRequestId`.
+      // The variable keeps the enqueue name so both actions take the same
+      // arguments.
       "name": "dequeue_pull_request", "risk": "write", "facade_only": true,
       "http": {
         "method": "POST", "path": "/graphql",
         "request_constants": {
-          "query": "mutation($pullRequestId: ID!) { dequeuePullRequest(input: {pullRequestId: $pullRequestId}) { mergeQueueEntry { pullRequest { id url number headRefOid isInMergeQueue } } } }"
+          "query": "mutation($pullRequestId: ID!) { dequeuePullRequest(input: {id: $pullRequestId}) { mergeQueueEntry { pullRequest { id url number headRefOid isInMergeQueue } } } }"
         },
         "args_schema": {
           "type": "object", "additionalProperties": false,
