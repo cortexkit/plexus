@@ -2303,6 +2303,7 @@ fn age_relay(status: &Status, seconds: u64) {
     let mut snapshot = status.0.lock().unwrap();
     snapshot.connected_since = Some(since);
     snapshot.healthy_since = Some(since);
+    snapshot.last_delivery = Some(Instant::now());
 }
 
 fn relay_scheduler(
@@ -2318,7 +2319,7 @@ fn relay_scheduler(
 }
 
 #[test]
-fn relay_polling_requires_one_unbroken_hour_and_reports_why() {
+fn relay_polling_requires_one_delivery_evidenced_hour_and_reports_why() {
     let health = crate::health::HealthState::new();
     let status = &health.relay;
     assert_eq!(status.polling_status()["mode"], "normal");
@@ -2327,15 +2328,12 @@ fn relay_polling_requires_one_unbroken_hour_and_reports_why() {
         "process_started"
     );
     status.set(State::Connected);
+    status.committed(CommitOutcome::Stored, "issues".into());
     let snapshot = status.0.lock().unwrap();
     let start = snapshot.connected_since.unwrap();
     assert!(!Status::slow_at(
         &snapshot,
         start + Duration::from_secs(3599)
-    ));
-    assert!(Status::slow_at(
-        &snapshot,
-        start + Duration::from_secs(3600)
     ));
     drop(snapshot);
     age_relay(status, 3600);
@@ -2358,24 +2356,236 @@ fn relay_polling_requires_one_unbroken_hour_and_reports_why() {
     let polling = status.polling_status();
     assert_eq!(polling["mode"], "normal");
     assert_eq!(polling["last_clock_reset"], "overflow");
-    assert!(polling["healthy_for_ms"].as_u64().unwrap() < 1000);
+    assert_eq!(polling["healthy_for_ms"], Value::Null);
     assert!(polling["connected_for_ms"].as_u64().unwrap() >= 3_600_000);
     status.set(State::Reconnecting);
     assert_eq!(status.polling_status()["connected_for_ms"], Value::Null);
     status.set(State::Connected);
+    status.committed(CommitOutcome::Stored, "issues".into());
     let snapshot = status.0.lock().unwrap();
     let reconnected = snapshot.connected_since.unwrap();
     assert!(!Status::slow_at(
         &snapshot,
         reconnected + Duration::from_secs(3599)
     ));
-    assert!(Status::slow_at(
-        &snapshot,
-        reconnected + Duration::from_secs(3600)
-    ));
     drop(snapshot);
     assert_eq!(status.polling_status()["last_clock_reset"], "reconnecting");
     assert_eq!(Status::default().polling_status()["mode"], "normal");
+}
+
+#[test]
+fn relay_polling_connected_without_deliveries_never_slows() {
+    let status = Status::default();
+    status.connected(ORIGINAL_STREAM.into(), None);
+    let mut snapshot = status.0.lock().unwrap();
+    let now = Instant::now();
+    snapshot.connected_since = Some(now - HEALTHY_RELAY_WINDOW * 24 * 5);
+    assert!(!Status::observe(&mut snapshot, now));
+    assert!(snapshot.healthy_since.is_none());
+    drop(snapshot);
+    assert_eq!(status.polling_status()["mode"], "normal");
+    assert_eq!(status.polling_status()["delivering"], false);
+    assert_eq!(status.polling_deadline(), None);
+}
+
+#[tokio::test]
+async fn relay_polling_dropped_deliveries_count_as_evidence() {
+    let (scratch, store, _) = fixture("relay-dropped-evidence");
+    let status = Status::default();
+    let mut frame: Value = serde_json::from_str(&full_event()).unwrap();
+    frame["event"] = json!("unsupported_event");
+    replay_using_status(store, vec![hello(), frame.to_string()], true, None, &status).await;
+    assert_eq!(count(&scratch, "trigger_events"), 0);
+    let mut snapshot = status.0.lock().unwrap();
+    assert!(snapshot.healthy_since.is_some());
+    assert_eq!(snapshot.activity.stored, 0);
+    assert_eq!(snapshot.activity.dropped.values().sum::<u64>(), 1);
+    let start = snapshot.healthy_since.unwrap();
+    for minutes in (5..=60).step_by(5) {
+        Status::delivered_at(&mut snapshot, start + Duration::from_secs(minutes * 60));
+        assert_eq!(
+            Status::slow_at(&snapshot, start + Duration::from_secs(minutes * 60)),
+            minutes == 60
+        );
+    }
+}
+
+#[test]
+fn relay_polling_delivery_silence_expires_slow_mode_and_requires_a_fresh_window() {
+    let status = Status::default();
+    status.connected(ORIGINAL_STREAM.into(), None);
+    age_relay(&status, 3600);
+    let mut snapshot = status.0.lock().unwrap();
+    let last = snapshot.last_delivery.unwrap();
+    assert!(Status::observe(&mut snapshot, last));
+    assert!(!Status::observe(
+        &mut snapshot,
+        last + DELIVERY_SILENCE_LIMIT
+    ));
+    assert_eq!(snapshot.last_clock_reset, "relay_delivery_stale");
+    Status::delivered_at(&mut snapshot, last + DELIVERY_SILENCE_LIMIT);
+    assert!(!Status::slow_at(&snapshot, last + DELIVERY_SILENCE_LIMIT));
+}
+
+#[test]
+fn relay_polling_misses_leave_slow_mode_and_degrade_health_but_respect_grace() {
+    for (age_ms, missed) in [
+        (POLL_MISS_GRACE_MS, false),
+        (POLL_MISS_GRACE_MS + 1, true),
+        (3_700_000, false),
+    ] {
+        let health = crate::health::HealthState::new();
+        let status = &health.relay;
+        status.connected(ORIGINAL_STREAM.into(), None);
+        age_relay(status, 3600);
+        assert_eq!(status.polling_status()["mode"], "relay_slow");
+        let now = now_ms();
+        status.polled_at(&[now - age_ms, now - age_ms], now, now, Instant::now());
+        let subc_protocol::session::ModuleControlResponse::HealthCheck {
+            metrics: Some(metrics),
+            detail,
+            ..
+        } = health.report()
+        else {
+            panic!("health metrics")
+        };
+        let polling = &metrics["githubPolling"];
+        assert_eq!(
+            polling["mode"],
+            if missed { "normal" } else { "relay_slow" }
+        );
+        assert_eq!(polling["relay_state"], "connected");
+        assert_eq!(polling["delivering"], !missed);
+        assert_eq!(polling["missed_events"], if missed { 2 } else { 0 });
+        if missed {
+            assert_eq!(polling["last_clock_reset"], "relay_missed_events");
+            assert!(detail.unwrap().contains("connected but not delivering"));
+            assert!(status.status()["sources"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("connected but not delivering"));
+        }
+    }
+}
+
+#[test]
+fn relay_polling_miss_recovery_needs_resumed_deliveries_and_a_clean_hour() {
+    for healthy_seconds in [3599, 3600] {
+        let status = Status::default();
+        status.connected(ORIGINAL_STREAM.into(), None);
+        age_relay(&status, healthy_seconds);
+        let now = now_ms();
+        let clock = Instant::now();
+        status.polled_at(&[now - POLL_MISS_GRACE_MS - 1], now, now, clock);
+        let mut snapshot = status.0.lock().unwrap();
+        assert_eq!(snapshot.last_clock_reset, "relay_missed_events");
+        assert!(!Status::observe(
+            &mut snapshot,
+            clock + HEALTHY_RELAY_WINDOW
+        ));
+        let resumed = clock + HEALTHY_RELAY_WINDOW;
+        for minutes in (0..=60).step_by(5) {
+            let tick = resumed + Duration::from_secs(minutes * 60);
+            Status::delivered_at(&mut snapshot, tick);
+            assert_eq!(Status::slow_at(&snapshot, tick), minutes == 60);
+        }
+        assert!(!Status::slow_at(
+            &snapshot,
+            resumed + HEALTHY_RELAY_WINDOW - Duration::from_nanos(1)
+        ));
+    }
+}
+
+#[test]
+fn relay_polling_real_poll_insert_detects_a_miss_but_not_a_race_or_duplicate() {
+    for age in [POLL_MISS_GRACE_MS - 10_000, POLL_MISS_GRACE_MS + 10_000] {
+        let (scratch, store, issue) = fixture("relay-polled-miss");
+        sql(&scratch, "UPDATE catalog_actions SET schema_json='{\"type\":\"object\",\"additionalProperties\":true}' WHERE connection_id='conn-1'");
+        let generation = store
+            .connection("direct", "conn-1")
+            .unwrap()
+            .unwrap()
+            .generation;
+        assert!(store
+            .rebind_credential_reference("direct", "conn-1", generation, "test:relay-poll-test")
+            .unwrap());
+        let now = now_ms();
+        store
+            .record_repo_id_resolution("org/repo", Some(101), now)
+            .unwrap();
+        sql(
+            &scratch,
+            &format!("UPDATE trigger_subscriptions SET last_polled_at_ms={now}"),
+        );
+        let updated: String = Connection::open(scratch.path())
+            .unwrap()
+            .query_row(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', ?1 / 1000, 'unixepoch')",
+                [now - age],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let transport = Arc::new(plexus_core::MockTransport::default());
+        transport.set_response(plexus_core::MockResponse::Success(json!({"issues":[{
+            "id":7, "number":3, "created_at":updated, "updated_at":updated, "title":"polled"
+        }]})));
+        let health = crate::health::HealthState::new();
+        let status = health.relay.clone();
+        status.connected(ORIGINAL_STREAM.into(), None);
+        age_relay(&status, 3600);
+        let engine = plexus_core::GovernanceEngine::new(
+            store.clone(),
+            Arc::new(StubCredentialSource::with_default_success(
+                b"secret".to_vec(),
+            )),
+            transport,
+        );
+        let scheduler =
+            plexus_core::Scheduler::new(engine, 86_400_000).with_relay_health(status.clone());
+        sql(&scratch, &format!("UPDATE trigger_subscriptions SET last_polled_at_ms={} WHERE subscription_id='{issue}'", now - 1_800_000));
+        let outcomes = scheduler.run_pass(&["direct".into()], now);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].cycle,
+            plexus_core::PollCycle::Completed {
+                inserted: 1,
+                duplicates: 0
+            }
+        );
+        let missed = age > POLL_MISS_GRACE_MS;
+        let subc_protocol::session::ModuleControlResponse::HealthCheck {
+            metrics: Some(metrics),
+            detail,
+            ..
+        } = health.report()
+        else {
+            panic!("health metrics")
+        };
+        assert_eq!(
+            metrics["githubPolling"]["mode"],
+            if missed { "normal" } else { "relay_slow" }
+        );
+        assert_eq!(
+            metrics["githubPolling"]["missed_events"],
+            if missed { 1 } else { 0 }
+        );
+        if missed {
+            assert!(detail.unwrap().contains("connected but not delivering"));
+        }
+        // Re-polling an inserted revision must not manufacture another miss.
+        sql(&scratch, &format!("UPDATE trigger_subscriptions SET last_polled_at_ms={} WHERE subscription_id='{issue}'", now - 1_800_000));
+        assert_eq!(
+            scheduler.run_pass(&["direct".into()], now)[0].cycle,
+            plexus_core::PollCycle::Completed {
+                inserted: 0,
+                duplicates: 1
+            }
+        );
+        assert_eq!(
+            status.polling_status()["missed_events"],
+            if missed { 1 } else { 0 }
+        );
+    }
 }
 
 #[test]
@@ -2600,7 +2810,7 @@ async fn relay_polling_normal_disconnect_catches_up_once_and_reconnects_fresh() 
         .unwrap();
     wait_state(&status, State::Connected).await;
     assert_eq!(status.polling_status()["mode"], "normal");
-    assert!(status.polling_status()["healthy_for_ms"].as_u64().unwrap() < 1000);
+    assert_eq!(status.polling_status()["healthy_for_ms"], Value::Null);
     drop(stop);
     bounded(task).await.unwrap();
 }
@@ -2871,7 +3081,7 @@ async fn reconnect_scenario_with_preparation_delay(reason: &str, retry_delay: Du
                 reason
             }
         );
-        assert!(status.polling_status()["healthy_for_ms"].as_u64().unwrap() < 1000);
+        assert_eq!(status.polling_status()["healthy_for_ms"], Value::Null);
     }
     drop(stop);
     bounded(task).await.unwrap();

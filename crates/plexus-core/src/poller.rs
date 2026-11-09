@@ -1434,8 +1434,23 @@ where
 {
     engine: GovernanceEngine<C, T>,
     ci_quota_waits: Mutex<std::collections::BTreeMap<String, i64>>,
+    pub(crate) relay_health: Option<Arc<dyn crate::scheduler::RelayPollingHealth>>,
     #[cfg(test)]
     repo_identity_counts: RepoIdentityCounters,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct RelayInsertRecorder(Mutex<Vec<i64>>);
+
+#[cfg(test)]
+impl crate::scheduler::RelayPollingHealth for RelayInsertRecorder {
+    fn slow_polling(&self) -> bool {
+        false
+    }
+    fn record_poll_inserts(&self, activity_at_ms: &[i64], _: i64) {
+        self.0.lock().unwrap().extend_from_slice(activity_at_ms);
+    }
 }
 
 const REPO_IDENTITY_COUNTER_NAMES: [&str; 6] = [
@@ -1731,6 +1746,7 @@ where
     pub fn new(engine: GovernanceEngine<C, T>) -> Self {
         Self {
             engine,
+            relay_health: None,
             ci_quota_waits: Mutex::new(std::collections::BTreeMap::new()),
             #[cfg(test)]
             repo_identity_counts: RepoIdentityCounters::new(),
@@ -2442,6 +2458,14 @@ where
         }
     }
 
+    fn note_relay_poll_inserts(&self, activity_at_ms: &[i64], poll_started_at_ms: i64) {
+        if let Some(relay) = &self.relay_health {
+            if !activity_at_ms.is_empty() {
+                relay.record_poll_inserts(activity_at_ms, poll_started_at_ms);
+            }
+        }
+    }
+
     fn probe_failure_cycle(
         &self,
         principal: &str,
@@ -2715,7 +2739,8 @@ where
             })
             .into_iter()
             .collect();
-        match store.commit_keyed_poll_success(
+        let mut relay_activity = Vec::new();
+        match store.commit_keyed_poll_success_observing_relay(
             principal,
             &subscription.connection_id,
             &subscription.subscription_id,
@@ -2723,6 +2748,7 @@ where
             &inputs,
             observed_at_ms,
             &gaps,
+            self.relay_health.as_ref().map(|_| &mut relay_activity),
         ) {
             Ok(outcomes) => {
                 if repository.is_some_and(|repo| repo.repo_id.is_none()) {
@@ -2736,6 +2762,7 @@ where
                             .count() as u64,
                     );
                 }
+                self.note_relay_poll_inserts(&relay_activity, observed_at_ms);
                 accounting::record_completion(
                     &subscription.subscription_id,
                     &mut advance,

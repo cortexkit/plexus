@@ -48,8 +48,41 @@ case-insensitively and check any recorded repository id.
 Reconciliation clears each watch's `last_polled_at_ms` timestamp, making it
 eligible for the scheduler's next due-watch selection. It creates no new poller,
 does not alter cadence, and still passes through the scheduler's existing
-600-GitHub-Actions-requests-per-hour admission budget. Normal polling stays
-unchanged while the relay is connected.
+600-GitHub-Actions-requests-per-hour admission budget.
+
+### Delivery-evidenced slow polling
+
+A connected WebSocket alone is not evidence that GitHub deliveries reach the
+relay. Issue, PR and CI watches use the 30-minute polling floor only after a
+clean hour of actual deliveries, with no silence of fifteen minutes or more.
+Every committed frame counts, including unsupported and unwatched events that
+Plexus drops. A quiet installation keeps normal polling, which is safe. Release
+watches always poll at their normal cadence, and CI quota spacing is unchanged.
+
+A poll's deduplicating insert outcomes also check the pipe: a newly inserted
+issue, PR, completed workflow run or completed workflow job is a relay miss if
+its activity is more than two minutes older than the poll's start and happened
+during the current uninterrupted connection. Relay duplicates, pre-connection
+history, releases and unresolved repository identities do not count. Issue/PR
+watches must have the same principal/project counterpart required by relay
+admission; a lone watch's intentionally dropped deliveries are not misses.
+Eligibility is checked in the existing poll-insert transaction, once per
+repository/action only when inserting a new event. The grace
+allows for the 60-second relay receive watchdog, 30-second HTTP request budget
+and 30-second credential read; it is a conservative fallback policy, not a
+hosted delivery guarantee.
+
+A miss immediately restores normal polling with reason `relay_missed_events`,
+logs a WARN with the miss count, and queues reconciliation. Slow polling needs
+resumed deliveries and another clean hour. Silence expires delivery evidence
+with reason `relay_delivery_stale`. Brief same-stream reconnects still preserve
+slow mode for up to five minutes, but do not extend the delivery-silence limit;
+resets, gaps and overflow still fall back. So do this machine losing its
+connector-home role (the machine allowed to connect to the relay), another
+machine superseding its relay socket, absent or refused credentials, and the
+relay refusing to serve GitHub events for this account.
+Miss detection uses the poll transaction's existing outcomes and timestamps,
+not per-watch scheduler queries.
 
 ## Operator status and failures
 
@@ -72,6 +105,12 @@ Rejected credentials and an unserved source degrade health with the same
 operator sentence shown by status. Poll-only `no_credential` is healthy. A
 superseded socket also degrades health while reconnecting, as required by the
 wire contract; ordinary transient network reconnects do not.
+
+Health's `githubPolling` metrics retain the mode and `last_clock_reset` reason
+and add `delivering`, `last_delivery_age_ms` (null before the first delivery),
+and the process-lifetime `missed_events` count. After a miss, health is degraded
+and `relay.status` says the relay is connected but not delivering until another
+delivery arrives. `healthy_for_ms` is null until delivery evidence starts again.
 
 Binary rollback leaves the additive cursor table in place. The migration test
 opens the upgraded store with the prior binary's migration chain (through

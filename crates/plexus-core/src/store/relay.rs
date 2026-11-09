@@ -516,6 +516,37 @@ fn paired_watches(conn: &Connection, repo: &str, action: &str) -> rusqlite::Resu
             principal:r.get(0)?, connection:r.get(1)?, subscription:r.get(2)?, project:r.get(3)? }))?.collect()
 }
 
+pub(super) fn poll_coverage_action(event_name: &str) -> Option<&'static str> {
+    match event_name {
+        crate::event_key::GITHUB_ISSUE_CHANGED => Some("list_issues"),
+        crate::event_key::GITHUB_PR_CHANGED => Some("list_pull_requests"),
+        crate::event_key::GITHUB_CI_RUN_COMPLETED
+        | crate::event_key::GITHUB_CI_JOB_COMPLETED
+        | crate::event_key::GITHUB_CI_JOB_FAILED => Some("list_workflow_runs"),
+        _ => None,
+    }
+}
+
+pub(super) fn covers_poll_watch(
+    conn: &Connection,
+    principal: &str,
+    subscription_id: &str,
+    repo: &str,
+    action: &str,
+) -> rusqlite::Result<bool> {
+    // Polls may use a lone issue/PR watch, but relay admission requires its
+    // same-owner/project counterpart. Share admission's target selection so
+    // intentionally unwatched deliveries cannot become false relay misses.
+    let targets = if matches!(action, "list_issues" | "list_pull_requests") {
+        paired_watches(conn, repo, action)?
+    } else {
+        watch(conn, repo, action)?.into_iter().collect()
+    };
+    Ok(targets
+        .iter()
+        .any(|target| target.principal == principal && target.subscription == subscription_id))
+}
+
 type EventShape = (
     &'static str,
     &'static str,

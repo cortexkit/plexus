@@ -128,12 +128,16 @@ const EVENT_RETENTION_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// again.
 const CREDENTIAL_REPAIR_RETRY_MS: i64 = 3_600_000;
 
-/// Whether the GitHub webhook relay has stayed connected, with no gap or reset,
+/// Whether the GitHub webhook relay has kept delivering, with no gap or reset,
 /// long enough that polling can slow down. The module's health report reads the
 /// same in-memory relay status, so the mode it reports is the mode the
 /// scheduler is actually using.
 pub trait RelayPollingHealth: Send + Sync {
     fn slow_polling(&self) -> bool;
+
+    /// Vendor activity times of newly inserted, relay-coverable poll events.
+    /// Duplicates and events the relay cannot deliver must not be reported.
+    fn record_poll_inserts(&self, _activity_at_ms: &[i64], _poll_started_at_ms: i64) {}
 }
 
 /// After a healthy relay hour, GitHub issue, pull-request and CI-run watches
@@ -347,6 +351,7 @@ where
     }
 
     pub fn with_relay_health(mut self, relay: Arc<dyn RelayPollingHealth>) -> Self {
+        self.poller.relay_health = Some(relay.clone());
         self.relay_health = Some(relay);
         self
     }
@@ -667,6 +672,11 @@ where
                     let cycle = self
                         .poller
                         .poll_loaded(&principal, &subscription, Some(deadline));
+                    // A miss discovered by this poll releases the remaining
+                    // watches from the slow floor in this same pass, without SQL.
+                    if let Some(relay) = &self.relay_health {
+                        cadences.relay_slow = relay.slow_polling();
+                    }
                     self.note_credential_repair(&subscription.subscription_id, &cycle, now_ms);
                     outcomes.push(PassOutcome {
                         principal: principal.clone(),

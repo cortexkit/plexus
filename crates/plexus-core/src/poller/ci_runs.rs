@@ -698,7 +698,8 @@ where
                 },
             })
             .collect::<Vec<_>>();
-        match store.commit_keyed_poll_success(
+        let mut relay_activity = Vec::new();
+        match store.commit_keyed_poll_success_observing_relay(
             principal,
             &sub.connection_id,
             &sub.subscription_id,
@@ -706,8 +707,10 @@ where
             &inputs,
             now,
             gaps,
+            self.relay_health.as_ref().map(|_| &mut relay_activity),
         ) {
             Ok(outcomes) => {
+                self.note_relay_poll_inserts(&relay_activity, now);
                 RUNS_VANISHED.fetch_add(vanished, Ordering::Relaxed);
                 RUNS_EXPIRED.fetch_add(expired, Ordering::Relaxed);
                 accounting::record_ledger(
@@ -3126,6 +3129,38 @@ mod tests {
         assert!(f.markers().is_empty());
         assert!(f.store.repo_id_cache("owner/repo").unwrap().is_none());
         assert_eq!(f.cursor(), json!({}));
+    }
+
+    #[test]
+    fn relay_miss_observer_receives_new_run_and_job_inserts_only() {
+        let f = Fixture::new();
+        f.add(
+            run(1, 2, f.now, "completed", Some("failure")),
+            vec![
+                job(5, f.now, Some("failure")),
+                job(6, f.now, Some("success")),
+            ],
+            true,
+        );
+        let observer = Arc::new(RelayInsertRecorder::default());
+        let mut poller = TestPoller::new(f.engine.clone());
+        poller.relay_health = Some(observer.clone());
+        assert_eq!(
+            poller.poll_ci_runs_at(PRINCIPAL, &f.watch(), f.now),
+            PollCycle::Completed {
+                inserted: 3,
+                duplicates: 0
+            }
+        );
+        assert_eq!(
+            *observer.0.lock().unwrap(),
+            vec![f.now, f.now, f.now + 60_000]
+        );
+        assert!(matches!(
+            poller.poll_ci_runs_at(PRINCIPAL, &f.watch(), f.now + 300_000),
+            PollCycle::Completed { inserted: 0, .. }
+        ));
+        assert_eq!(observer.0.lock().unwrap().len(), 3);
     }
 
     /// Treat a local refusal or unknown CI read outcome as inconclusive. Keep

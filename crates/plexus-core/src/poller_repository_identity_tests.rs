@@ -222,6 +222,126 @@ fn issue(number: i64, updated: &str) -> Value {
 }
 
 #[test]
+fn relay_miss_observer_receives_only_new_keyed_issue_and_pr_inserts() {
+    for (action, event_type, body_key) in [
+        ("list_issues", "issues", "issue"),
+        ("list_pull_requests", "pull_request", "pull_request"),
+    ] {
+        let mut f = Fixture::new(true);
+        let watch = f.watch(action);
+        f.watch(if action == "list_issues" {
+            "list_pull_requests"
+        } else {
+            "list_issues"
+        });
+        let observer = Arc::new(RelayInsertRecorder::default());
+        f.poller.relay_health = Some(observer.clone());
+        let updated = iso8601::format_millis(now_ms().div_euclid(1000) * 1000);
+        f.store
+            .relay_hello(
+                "github",
+                &crate::storage::relay::Hello {
+                    v: 1,
+                    source: "github".into(),
+                    stream_id: "miss-dedup".into(),
+                    next_seq: 1,
+                    oldest_seq: 1,
+                    last_acked_seq: 0,
+                },
+            )
+            .unwrap();
+        f.store.commit_relay_event("github", "miss-dedup", &crate::storage::relay::Event {
+            seq: 1, delivery_id: "delivered".into(), event: event_type.into(), action: Some("edited".into()),
+            installation_id: 1, received_at: updated.clone(), stub: None,
+            body: json!({"repository":{"id":101,"full_name":"owner/repo"}, body_key: issue(1, &updated)}),
+        }).unwrap();
+        assert_eq!(
+            f.count("trigger_events"),
+            1,
+            "the relay copy must be stored before polling"
+        );
+        let items = json!([issue(1, &updated), issue(2, &updated)]);
+        f.mock.set_response_for_method(
+            action,
+            "",
+            MockResponse::Success(if action == "list_issues" {
+                json!({"issues":items})
+            } else {
+                items
+            }),
+        );
+        assert_eq!(
+            f.poll(&watch),
+            PollCycle::Completed {
+                inserted: 1,
+                duplicates: 1
+            }
+        );
+        assert_eq!(
+            *observer.0.lock().unwrap(),
+            vec![iso8601::parse_to_millis(&updated).unwrap()]
+        );
+        assert!(matches!(
+            f.poll(&watch),
+            PollCycle::Completed { inserted: 0, .. }
+        ));
+        assert_eq!(observer.0.lock().unwrap().len(), 1);
+        let release = f.watch("get_latest_release");
+        assert!(matches!(
+            f.poll(&release),
+            PollCycle::Completed { inserted: 1, .. }
+        ));
+        assert_eq!(
+            observer.0.lock().unwrap().len(),
+            1,
+            "releases are not carried by the relay"
+        );
+    }
+}
+
+#[test]
+fn relay_miss_observer_excludes_lone_issue_and_pr_watches_until_paired() {
+    for action in ["list_issues", "list_pull_requests"] {
+        let mut f = Fixture::new(true);
+        let watch = f.watch(action);
+        let observer = Arc::new(RelayInsertRecorder::default());
+        f.poller.relay_health = Some(observer.clone());
+        assert!(matches!(
+            f.poll(&watch),
+            PollCycle::Completed { inserted: 1, .. }
+        ));
+        assert!(
+            observer.0.lock().unwrap().is_empty(),
+            "the relay intentionally drops unpaired watches"
+        );
+        f.watch(if action == "list_issues" {
+            "list_pull_requests"
+        } else {
+            "list_issues"
+        });
+        let updated = "2026-10-07T00:01:00Z";
+        let items = json!([issue(42, updated)]);
+        f.mock.set_response_for_method(
+            action,
+            "",
+            MockResponse::Success(if action == "list_issues" {
+                json!({"issues":items})
+            } else {
+                items
+            }),
+        );
+        assert!(matches!(
+            f.poll(&watch),
+            PollCycle::Completed { inserted: 1, .. }
+        ));
+        assert_eq!(
+            *observer.0.lock().unwrap(),
+            vec![iso8601::parse_to_millis(updated).unwrap()]
+        );
+    }
+}
+
+#[test]
 fn identity_read_is_shared_authorized_audited_and_reserved_before_the_vendor_read() {
     let f = Fixture::new(true);
     for action in ["list_issues", "list_pull_requests", "get_latest_release"] {

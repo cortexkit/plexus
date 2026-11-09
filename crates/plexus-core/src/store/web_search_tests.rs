@@ -1,6 +1,6 @@
 use super::*;
-use crate::storage::MIGRATIONS;
-use cortexkit_store::{open_sqlite, StorageDescriptor};
+use crate::storage::{open_sqlite, MIGRATIONS};
+use cortexkit_store::StorageDescriptor;
 use cortexkit_store_types::{Isolation, StorageBackend};
 use std::sync::{mpsc, Arc, Barrier};
 use std::time::Duration;

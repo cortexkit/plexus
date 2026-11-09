@@ -1950,6 +1950,49 @@ mod tests {
         }).unwrap();
     }
 
+    #[test]
+    fn idle_scheduler_relay_health_keeps_store_calls_constant() {
+        struct Relay;
+        impl crate::scheduler::RelayPollingHealth for Relay {
+            fn slow_polling(&self) -> bool {
+                true
+            }
+        }
+        for watches in [1, 200] {
+            let store = std::sync::Arc::new(store());
+            store
+                .insert_connection("direct", "github", "github", "active", &json!({}))
+                .unwrap();
+            for i in 0..watches {
+                subscription(&store, &format!("idle-{i}"), "ordered_timestamp");
+            }
+            let now = now_ms();
+            store.inner.with_conn_fenced(|conn| {
+                conn.execute("UPDATE trigger_subscriptions SET connection_id='github',last_polled_at_ms=?1", [now - 300_000])?;
+                Ok(())
+            }).unwrap();
+            let engine = crate::GovernanceEngine::new(
+                store.clone(),
+                std::sync::Arc::new(crate::StubCredentialSource::default()),
+                std::sync::Arc::new(crate::MockTransport::default()),
+            );
+            let scheduler = crate::Scheduler::new(engine, 86_400_000)
+                .with_relay_health(std::sync::Arc::new(Relay));
+            let principals = ["direct".to_string()];
+            // Warm the minute and hourly maintenance gates. All watches are
+            // base-cadence due but held by the relay floor, as on an idle daemon.
+            assert!(scheduler.run_pass(&principals, now).is_empty());
+            let calls = store.count_store_calls_for_test(|| {
+                assert!(scheduler.run_pass(&principals, now).is_empty());
+            });
+            println!("idle relay scheduler watches={watches} store_calls={calls}");
+            assert_eq!(
+                calls, 5,
+                "fixed reconciliation/approval work, due selection and one connection snapshot must not grow per watch"
+            );
+        }
+    }
+
     fn headers(project: &str) -> EventHeaders {
         EventHeaders {
             repo: "OWNER/Repo".into(),

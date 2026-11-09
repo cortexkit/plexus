@@ -42,9 +42,18 @@ const CREDENTIAL_RECHECK: Duration = Duration::from_secs(300);
 const NOT_HOME_RECHECK: Duration = Duration::from_secs(30);
 const INITIAL_CREDENTIAL_RECHECK: Duration = Duration::from_secs(5);
 const HEALTHY_RELAY_WINDOW: Duration = Duration::from_secs(3600);
+// Require deliveries throughout the healthy hour, not just one event followed
+// by a live socket. Quiet installations safely keep normal polling; even an
+// established relay loses slow polling after fifteen minutes without a delivery.
+const DELIVERY_SILENCE_LIMIT: Duration = Duration::from_secs(900);
 const CLEAN_RECONNECT_WINDOW: Duration = Duration::from_secs(300);
 const PING_PERIOD: Duration = Duration::from_secs(30);
 const RECEIVE_DEADLINE: Duration = Duration::from_secs(60);
+// Two minutes before the poll START leaves room for the relay's 60-second
+// receive watchdog plus a 30-second vendor request and 30-second vault read.
+// Pings are not deliveries, and the hosted service promises no delivery SLA:
+// this is a conservative fallback threshold, not proof an event is lost forever.
+const POLL_MISS_GRACE_MS: i64 = 120_000;
 const SUMMARY_PERIOD: Duration = Duration::from_secs(3600);
 const SUPERSEDED_MESSAGE: &str =
     "The relay was superseded by another machine also acting as connector home.";
@@ -96,6 +105,8 @@ struct Snapshot {
     superseded: bool,
     connected_since: Option<Instant>,
     healthy_since: Option<Instant>,
+    last_delivery: Option<Instant>,
+    missed_events: u64,
     last_clock_reset: &'static str,
     stream_id: Option<String>,
     disconnected_at: Option<Instant>,
@@ -119,6 +130,8 @@ impl Default for Status {
                 superseded: false,
                 connected_since: None,
                 healthy_since: None,
+                last_delivery: None,
+                missed_events: 0,
                 last_clock_reset: "process_started",
                 stream_id: None,
                 disconnected_at: None,
@@ -133,6 +146,7 @@ impl Default for Status {
 impl Status {
     fn committed(&self, outcome: CommitOutcome, event: String) {
         let mut status = self.0.lock().unwrap();
+        Self::delivered_at(&mut status, Instant::now());
         match outcome {
             CommitOutcome::Stored => status.activity.stored += 1,
             CommitOutcome::Dropped(reason) => {
@@ -144,6 +158,17 @@ impl Status {
             }
             CommitOutcome::CursorOnly => {}
         }
+        self.1.notify_one();
+    }
+
+    fn delivered_at(status: &mut Snapshot, now: Instant) {
+        Self::observe(status, now);
+        // Dropped and cursor-only frames prove the delivery pipe works too.
+        if status.state == State::Connected {
+            status.healthy_since.get_or_insert(now);
+            status.last_delivery = Some(now);
+        }
+        Self::observe(status, now);
     }
 
     fn log_summary(&self) {
@@ -174,7 +199,6 @@ impl Status {
             if changed {
                 if state == State::Connected {
                     status.connected_since = Some(now);
-                    status.healthy_since = status.connected_since;
                     status.disconnected_at = None;
                 } else if state == State::Reconnecting && Self::slow_at(&status, now) {
                     // Cursor replay can bridge a short transport outage without a full poll.
@@ -224,7 +248,6 @@ impl Status {
         let mut status = self.0.lock().unwrap();
         Self::observe(&mut status, Instant::now());
         Self::fall_back(&mut status, reason, false);
-        status.healthy_since = status.connected_since.map(|_| Instant::now());
         Self::observe(&mut status, Instant::now());
         self.1.notify_one();
     }
@@ -255,9 +278,6 @@ impl Status {
             }
         }
         let changed = status.state != State::Connected;
-        if !clean_resume && (changed || status.healthy_since.is_none()) {
-            status.healthy_since = Some(now);
-        }
         status.connected_since = if changed {
             Some(now)
         } else {
@@ -287,6 +307,13 @@ impl Status {
         {
             Self::fall_back(status, "reconnect_timeout", true);
         }
+        if status.healthy_since.is_some()
+            && status
+                .last_delivery
+                .is_some_and(|last| now.saturating_duration_since(last) >= DELIVERY_SILENCE_LIMIT)
+        {
+            Self::fall_back(status, "relay_delivery_stale", true);
+        }
         let slow = Self::slow_at(status, now);
         if slow != status.logged_slow {
             eprintln!(info relay: "GitHub polling mode changed: mode={} reason={}", if slow { "relay_slow" } else { "normal" }, if slow { "healthy_relay_window_elapsed" } else { status.last_clock_reset });
@@ -298,10 +325,17 @@ impl Status {
         let status = self.0.lock().unwrap();
         if let Some(since) = status.disconnected_at {
             Some(since + CLEAN_RECONNECT_WINDOW + Duration::from_nanos(1))
-        } else if status.state == State::Connected && !status.logged_slow {
-            status
-                .healthy_since
-                .map(|since| since + HEALTHY_RELAY_WINDOW)
+        } else if status.state == State::Connected && status.healthy_since.is_some() {
+            let expires = status
+                .last_delivery
+                .map(|last| last + DELIVERY_SILENCE_LIMIT);
+            if status.logged_slow {
+                expires
+            } else {
+                status
+                    .healthy_since
+                    .map(|since| (since + HEALTHY_RELAY_WINDOW).min(expires.unwrap()))
+            }
         } else {
             None
         }
@@ -319,6 +353,9 @@ impl Status {
             && status
                 .healthy_since
                 .is_some_and(|since| now.saturating_duration_since(since) >= HEALTHY_RELAY_WINDOW)
+            && status
+                .last_delivery
+                .is_some_and(|last| now.saturating_duration_since(last) < DELIVERY_SILENCE_LIMIT)
     }
     pub(crate) fn polling_status(&self) -> Value {
         let mut s = self.0.lock().unwrap();
@@ -330,21 +367,38 @@ impl Status {
             "relay_state": s.state.name(),
             "connected_for_ms": s.connected_since.map(|since| now.saturating_duration_since(since).as_millis()),
             "healthy_for_ms": s.healthy_since.map(|since| now.saturating_duration_since(since).as_millis()),
+            "delivering": s.state == State::Connected && s.healthy_since.is_some(),
+            "last_delivery_age_ms": s.last_delivery.map(|last| now.saturating_duration_since(last).as_millis()),
+            "missed_events": s.missed_events,
             "last_clock_reset": s.last_clock_reset,
         })
     }
     pub fn status(&self) -> Value {
-        let s = self.0.lock().unwrap();
-        json!({"sources":[{"source":SOURCE,"state":s.state.name(),"last_event_at":s.last_event_at,"message":if s.superseded { Some(SUPERSEDED_MESSAGE) } else { s.state.message() }}]})
+        let mut s = self.0.lock().unwrap();
+        Self::observe(&mut s, Instant::now());
+        json!({"sources":[{"source":SOURCE,"state":s.state.name(),"last_event_at":s.last_event_at,"message":Self::message(&s)}]})
+    }
+    fn message(s: &Snapshot) -> Option<&'static str> {
+        if s.superseded {
+            Some(SUPERSEDED_MESSAGE)
+        } else if s.state == State::Connected
+            && s.last_clock_reset == "relay_missed_events"
+            && s.healthy_since.is_none()
+        {
+            Some("The GitHub relay is connected but not delivering events; normal polling is active.")
+        } else {
+            s.state.message()
+        }
     }
     pub(crate) fn degraded_message(&self) -> Option<&'static str> {
-        let snapshot = self.0.lock().unwrap();
+        let mut snapshot = self.0.lock().unwrap();
+        Self::observe(&mut snapshot, Instant::now());
         if snapshot.superseded {
             return Some(SUPERSEDED_MESSAGE);
         }
         let s = snapshot.state;
-        (snapshot.superseded || matches!(s, State::CredentialRejected | State::SourceNotServed))
-            .then(|| s.message())
+        (s == State::Connected || matches!(s, State::CredentialRejected | State::SourceNotServed))
+            .then(|| Self::message(&snapshot))
             .flatten()
     }
 }
@@ -354,6 +408,53 @@ impl plexus_core::scheduler::RelayPollingHealth for Status {
         let slow = Self::observe(&mut self.0.lock().unwrap(), Instant::now());
         self.1.notify_one();
         slow
+    }
+
+    fn record_poll_inserts(&self, activity_at_ms: &[i64], poll_started_at_ms: i64) {
+        self.polled_at(
+            activity_at_ms,
+            poll_started_at_ms,
+            plexus_core::storage::now_ms(),
+            Instant::now(),
+        );
+    }
+}
+
+impl Status {
+    fn polled_at(
+        &self,
+        activity_at_ms: &[i64],
+        poll_started_at_ms: i64,
+        now_ms: i64,
+        now: Instant,
+    ) {
+        let mut status = self.0.lock().unwrap();
+        Self::observe(&mut status, now);
+        let Some(connected) = status
+            .connected_since
+            .filter(|_| status.state == State::Connected)
+        else {
+            return;
+        };
+        let connected_ms = now
+            .saturating_duration_since(connected)
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let misses = activity_at_ms
+            .iter()
+            .filter(|&&activity| {
+                poll_started_at_ms.saturating_sub(activity) > POLL_MISS_GRACE_MS
+                    && activity >= now_ms.saturating_sub(connected_ms)
+            })
+            .count() as u64;
+        if misses == 0 {
+            return;
+        }
+        status.missed_events = status.missed_events.saturating_add(misses);
+        Self::fall_back(&mut status, "relay_missed_events", true);
+        plexus_core::diag!(warn relay: "GitHub relay connected but not delivering: reason=relay_missed_events count={misses}");
+        Self::observe(&mut status, now);
+        self.1.notify_one();
     }
 }
 

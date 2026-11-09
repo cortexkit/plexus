@@ -11,8 +11,12 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cortexkit_store::{open_sqlite, Migration, SqliteStore, StorageDescriptor, StoreError};
+#[cfg(not(test))]
+use cortexkit_store::{open_sqlite, SqliteStore};
+use cortexkit_store::{Migration, StorageDescriptor, StoreError};
 use cortexkit_store_types::StorageBackend;
+#[cfg(test)]
+use counted_store::{open_sqlite, SqliteStore};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,6 +29,79 @@ use crate::withdraw::{
     WithdrawAnswer, WITHDRAW_OUTCOME_UNKNOWN, WITHDRAW_REFUSED_DENIED, WITHDRAW_REFUSED_EXPIRED,
     WITHDRAW_REFUSED_SCOPE_ENDED,
 };
+
+#[cfg(test)]
+mod counted_store {
+    use super::{Connection, StorageDescriptor, StoreError};
+    use std::cell::Cell;
+
+    thread_local! {
+        static CALLS: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    // Count all store-boundary reads and transactions, not just selected
+    // scheduler methods. A new per-watch lookup must spend this budget too.
+    pub(super) struct SqliteStore(cortexkit_store::SqliteStore);
+
+    impl std::ops::Deref for SqliteStore {
+        type Target = cortexkit_store::SqliteStore;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    fn record() {
+        CALLS.with(|calls| {
+            if let Some(count) = calls.get() {
+                calls.set(Some(count + 1));
+            }
+        });
+    }
+
+    impl SqliteStore {
+        pub(super) fn with_read<T>(
+            &self,
+            f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
+            record();
+            self.0.with_read(f)
+        }
+
+        pub(super) fn with_conn_fenced<T>(
+            &self,
+            f: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
+            record();
+            self.0.with_conn_fenced(f)
+        }
+
+        #[allow(deprecated)]
+        pub(super) fn with_conn<T>(
+            &self,
+            f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
+            record();
+            self.0.with_conn(f)
+        }
+    }
+
+    pub(super) fn open_sqlite(descriptor: &StorageDescriptor) -> Result<SqliteStore, StoreError> {
+        cortexkit_store::open_sqlite(descriptor).map(SqliteStore)
+    }
+
+    pub(super) fn count_calls(work: impl FnOnce()) -> usize {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                CALLS.with(|calls| calls.set(None));
+            }
+        }
+        let _guard = Guard;
+        CALLS.with(|calls| calls.set(Some(0)));
+        work();
+        CALLS.with(|calls| calls.get().unwrap())
+    }
+}
 
 /// A scope epoch is an unsigned 64-bit number and SQLite stores signed 64-bit
 /// integers, so the bits are stored as they are. The round trip through
@@ -3039,6 +3116,11 @@ pub struct PlexusStore {
 }
 
 impl PlexusStore {
+    #[cfg(test)]
+    pub(crate) fn count_store_calls_for_test(&self, work: impl FnOnce()) -> usize {
+        counted_store::count_calls(work)
+    }
+
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, StoreError> {
         let grant_journal = grant_journal_path(descriptor);
         // Parse before opening SQLite: malformed restore evidence must cause no writes.
@@ -5619,6 +5701,32 @@ impl PlexusStore {
         at_ms: i64,
         coverage_gaps: &[PollGapInput<'_>],
     ) -> Result<Vec<TriggerEventInsertOutcome>, PollCommitError> {
+        self.commit_keyed_poll_success_observing_relay(
+            principal,
+            connection_id,
+            subscription_id,
+            cursor_state,
+            events,
+            at_ms,
+            coverage_gaps,
+            None,
+        )
+    }
+
+    /// Collect relay-coverable activity only from new inserts, in the same
+    /// transaction that checks watch eligibility and wins the deduplication race.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_keyed_poll_success_observing_relay(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        subscription_id: &str,
+        cursor_state: &Value,
+        events: &[KeyedPollEventInput<'_>],
+        at_ms: i64,
+        coverage_gaps: &[PollGapInput<'_>],
+        relay_activity: Option<&mut Vec<i64>>,
+    ) -> Result<Vec<TriggerEventInsertOutcome>, PollCommitError> {
         if events
             .iter()
             .any(|event| event.event.vendor_event_id.trim().is_empty())
@@ -5629,7 +5737,7 @@ impl PlexusStore {
         }
         let cursor_json = serde_json::to_string(cursor_state)
             .map_err(|error| StoreError::Backend(error.to_string()))?;
-        let outcomes = self
+        let (outcomes, activity) = self
             .inner
             .with_conn_fenced(|conn| {
                 let advanced = conn.execute(
@@ -5650,14 +5758,51 @@ impl PlexusStore {
                     return Ok(None);
                 }
                 let mut outcomes = Vec::with_capacity(events.len());
+                let mut activity = Vec::new();
+                let mut coverage = std::collections::HashMap::new();
                 for event in events {
-                    outcomes.push(insert_keyed_event_row(
+                    let outcome = insert_keyed_event_row(
                         conn,
                         principal,
                         connection_id,
                         subscription_id,
                         event,
-                    )?);
+                    )?;
+                    if relay_activity.is_some()
+                        && matches!(outcome, TriggerEventInsertOutcome::Inserted { .. })
+                    {
+                        if let Some((identity, time, action)) =
+                            event.identity.as_ref().and_then(|identity| {
+                                Some((
+                                    identity,
+                                    event.event.activity_at_ms?,
+                                    relay::poll_coverage_action(identity.event_name)?,
+                                ))
+                            })
+                        {
+                            // Read coverage once per repository/action in an
+                            // actual inserting poll, never on an idle scheduler pass.
+                            let key = (&identity.headers.repo, action);
+                            let covered = match coverage.get(&key) {
+                                Some(&covered) => covered,
+                                None => {
+                                    let covered = relay::covers_poll_watch(
+                                        conn,
+                                        principal,
+                                        subscription_id,
+                                        &identity.headers.repo,
+                                        action,
+                                    )?;
+                                    coverage.insert(key, covered);
+                                    covered
+                                }
+                            };
+                            if covered {
+                                activity.push(time);
+                            }
+                        }
+                    }
+                    outcomes.push(outcome);
                 }
                 // Written inside the SAME transaction as the cursor advance, which
                 // is the only ordering that cannot lie. A gap recorded afterwards
@@ -5677,7 +5822,7 @@ impl PlexusStore {
                         at_ms,
                     )?;
                 }
-                Ok(Some(outcomes))
+                Ok(Some((outcomes, activity)))
             })?
             .ok_or(PollCommitError::Inactive)?;
         if events.iter().zip(&outcomes).any(|(event, outcome)| {
@@ -5685,6 +5830,9 @@ impl PlexusStore {
                 && matches!(outcome, TriggerEventInsertOutcome::Inserted { .. })
         }) {
             self.outbox_ready.notify_one();
+        }
+        if let Some(relay_activity) = relay_activity {
+            relay_activity.extend(activity);
         }
         Ok(outcomes)
     }
