@@ -60,19 +60,19 @@ Plexus drops. A quiet installation keeps normal polling, which is safe. Release
 watches always poll at their normal cadence, and CI quota spacing is unchanged.
 
 A poll's deduplicating insert outcomes also check the pipe: a newly inserted
-issue, PR, completed workflow run or completed workflow job is a relay miss if
-its activity is more than two minutes older than the poll's start and happened
-during the current uninterrupted connection. Relay duplicates, pre-connection
-history, releases and unresolved repository identities do not count. The relay
-stores issue and PR events for a repository only when the same principal and
-project watch both its issues and its pull requests. An issue watch without its
-matching PR watch, or the reverse, gets no relay deliveries by design, so its
-polled events are not misses.
-Eligibility is checked in the existing poll-insert transaction, once per
-repository/action only when inserting a new event. The grace
-allows for the 60-second relay receive watchdog, 30-second HTTP request budget
-and 30-second credential read; it is a conservative fallback policy, not a
-hosted delivery guarantee.
+completed workflow run or completed workflow job is a relay miss if its
+activity is more than two minutes older than the poll's start and happened
+during the current uninterrupted connection. GitHub sends exactly one
+"completed" webhook for each run and job, so a poll finding one first means the
+relay lost it. Issue and PR inserts never count: their `updated_at` also moves
+on activity no stored webhook carries (a comment on a pull request becomes a
+re-read, not an event), so a polled change proves nothing. Relay duplicates,
+pre-connection history, releases and unresolved repository identities do not
+count either. Eligibility is checked in the existing poll-insert transaction,
+once per repository/action only when inserting a new event. The grace allows
+for the 60-second relay receive watchdog, 30-second HTTP request budget and
+30-second credential read; it is a conservative fallback policy, not a hosted
+delivery guarantee.
 
 A miss immediately restores normal polling with reason `relay_missed_events`,
 logs a WARN with the miss count, and queues reconciliation. Slow polling needs

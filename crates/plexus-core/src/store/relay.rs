@@ -516,10 +516,18 @@ fn paired_watches(conn: &Connection, repo: &str, action: &str) -> rusqlite::Resu
             principal:r.get(0)?, connection:r.get(1)?, subscription:r.get(2)?, project:r.get(3)? }))?.collect()
 }
 
+/// The watch action whose polled inserts can prove the relay missed a delivery.
+///
+/// Only completed CI runs and jobs qualify: GitHub sends exactly one
+/// `workflow_run` or `workflow_job` "completed" webhook for each, and the relay
+/// stores it under the same event key a poll would derive. Issues and pull
+/// requests do not: their `updated_at` also moves on activity the relay
+/// carries no webhook for, or turns into a re-read instead of a stored event
+/// (a comment on a pull request). A polled issue or PR change is therefore
+/// not evidence that the relay lost anything, and counting it raised false
+/// "connected but not delivering" warnings in production.
 pub(super) fn poll_coverage_action(event_name: &str) -> Option<&'static str> {
     match event_name {
-        crate::event_key::GITHUB_ISSUE_CHANGED => Some("list_issues"),
-        crate::event_key::GITHUB_PR_CHANGED => Some("list_pull_requests"),
         crate::event_key::GITHUB_CI_RUN_COMPLETED
         | crate::event_key::GITHUB_CI_JOB_COMPLETED
         | crate::event_key::GITHUB_CI_JOB_FAILED => Some("list_workflow_runs"),
@@ -534,17 +542,11 @@ pub(super) fn covers_poll_watch(
     repo: &str,
     action: &str,
 ) -> rusqlite::Result<bool> {
-    // Polls may use a lone issue/PR watch, but relay admission requires its
-    // same-owner/project counterpart. Share admission's target selection so
-    // intentionally unwatched deliveries cannot become false relay misses.
-    let targets = if matches!(action, "list_issues" | "list_pull_requests") {
-        paired_watches(conn, repo, action)?
-    } else {
-        watch(conn, repo, action)?.into_iter().collect()
-    };
-    Ok(targets
-        .iter()
-        .any(|target| target.principal == principal && target.subscription == subscription_id))
+    // Share admission's target selection, so a delivery the relay would have
+    // dropped as unwatched for this subscription can never count as a miss.
+    Ok(watch(conn, repo, action)?.is_some_and(|target| {
+        target.principal == principal && target.subscription == subscription_id
+    }))
 }
 
 type EventShape = (
