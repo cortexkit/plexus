@@ -2498,16 +2498,42 @@ fn relay_polling_miss_recovery_needs_resumed_deliveries_and_a_clean_hour() {
 
 #[test]
 fn relay_polling_real_poll_insert_detects_a_miss_but_not_a_race_or_duplicate() {
-    for age in [POLL_MISS_GRACE_MS - 10_000, POLL_MISS_GRACE_MS + 10_000] {
+    for (action, age) in [
+        ("list_workflow_runs", POLL_MISS_GRACE_MS + 10_000),
+        ("list_workflow_runs", POLL_MISS_GRACE_MS - 10_000),
+        ("list_issues", POLL_MISS_GRACE_MS + 10_000),
+    ] {
         let (scratch, store, issue) = fixture("relay-polled-miss");
-        sql(&scratch, "UPDATE catalog_actions SET schema_json='{\"type\":\"object\",\"additionalProperties\":true}' WHERE connection_id='conn-1'");
+        let ci = action == "list_workflow_runs";
+        let (watch, connection) = if ci {
+            let watch = kind_watch(&store, action);
+            store
+                .insert_grant(&plexus_core::GrantInput {
+                    grant_id: "poll-ci-followups".into(),
+                    principal: "direct".into(),
+                    connection_id: "conn-github-actions".into(),
+                    grantee_principal: "direct".into(),
+                    risk_ceiling: "read".into(),
+                    action_selectors: vec![
+                        "get_workflow_run".into(),
+                        "list_jobs_for_workflow_run_attempt".into(),
+                    ],
+                    authority_kind: "poll".into(),
+                    expires_at: None,
+                })
+                .unwrap();
+            (watch, "conn-github-actions")
+        } else {
+            sql(&scratch, "UPDATE catalog_actions SET schema_json='{\"type\":\"object\",\"additionalProperties\":true}' WHERE connection_id='conn-1'");
+            (issue, "conn-1")
+        };
         let generation = store
-            .connection("direct", "conn-1")
+            .connection("direct", connection)
             .unwrap()
             .unwrap()
             .generation;
         assert!(store
-            .rebind_credential_reference("direct", "conn-1", generation, "test:relay-poll-test")
+            .rebind_credential_reference("direct", connection, generation, "test:relay-poll-test")
             .unwrap());
         let now = now_ms();
         store
@@ -2517,18 +2543,52 @@ fn relay_polling_real_poll_insert_detects_a_miss_but_not_a_race_or_duplicate() {
             &scratch,
             &format!("UPDATE trigger_subscriptions SET last_polled_at_ms={now}"),
         );
-        let updated: String = Connection::open(scratch.path())
+        // A new CI watch ignores completions from before its creation.
+        sql(
+            &scratch,
+            &format!(
+                "UPDATE trigger_subscriptions SET created_at_ms={} WHERE subscription_id='{watch}'",
+                now - 86_400_000
+            ),
+        );
+        let (started, completed): (String, String) = Connection::open(scratch.path())
             .unwrap()
             .query_row(
-                "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', ?1 / 1000, 'unixepoch')",
+                "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', (?1 - 60000) / 1000, 'unixepoch'), strftime('%Y-%m-%dT%H:%M:%SZ', ?1 / 1000, 'unixepoch')",
                 [now - age],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         let transport = Arc::new(plexus_core::MockTransport::default());
-        transport.set_response(plexus_core::MockResponse::Success(json!({"issues":[{
-            "id":7, "number":3, "created_at":updated, "updated_at":updated, "title":"polled"
-        }]})));
+        if ci {
+            let run = json!({
+                "id":7, "run_attempt":1, "created_at":started, "run_started_at":started,
+                "updated_at":completed, "status":"completed", "conclusion":"success",
+                "head_branch":"feature", "pull_requests":[{"number":3}],
+                "event":"pull_request", "repository":{"id":101}
+            });
+            for (action, body) in [
+                (
+                    "list_workflow_runs",
+                    json!({"total_count":1,"workflow_runs":[run.clone()]}),
+                ),
+                ("get_workflow_run", run),
+                (
+                    "list_jobs_for_workflow_run_attempt",
+                    json!({"total_count":0,"jobs":[]}),
+                ),
+            ] {
+                transport.set_response_for_method(
+                    action,
+                    "",
+                    plexus_core::MockResponse::Success(body),
+                );
+            }
+        } else {
+            transport.set_response(plexus_core::MockResponse::Success(json!({"issues":[{
+                "id":7, "number":3, "created_at":started, "updated_at":completed, "title":"polled"
+            }]})));
+        }
         let health = crate::health::HealthState::new();
         let status = health.relay.clone();
         status.connected(ORIGINAL_STREAM.into(), None);
@@ -2542,9 +2602,11 @@ fn relay_polling_real_poll_insert_detects_a_miss_but_not_a_race_or_duplicate() {
         );
         let scheduler =
             plexus_core::Scheduler::new(engine, 86_400_000).with_relay_health(status.clone());
-        sql(&scratch, &format!("UPDATE trigger_subscriptions SET last_polled_at_ms={} WHERE subscription_id='{issue}'", now - 1_800_000));
+        assert_eq!(status.polling_status()["mode"], "relay_slow");
+        sql(&scratch, &format!("UPDATE trigger_subscriptions SET last_polled_at_ms={} WHERE subscription_id='{watch}'", now - 1_800_000));
         let outcomes = scheduler.run_pass(&["direct".into()], now);
         assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].subscription_id, watch);
         assert_eq!(
             outcomes[0].cycle,
             plexus_core::PollCycle::Completed {
@@ -2552,7 +2614,8 @@ fn relay_polling_real_poll_insert_detects_a_miss_but_not_a_race_or_duplicate() {
                 duplicates: 0
             }
         );
-        let missed = age > POLL_MISS_GRACE_MS;
+        // Issue updates can reflect activity with no corresponding stored webhook.
+        let missed = ci && age > POLL_MISS_GRACE_MS;
         let subc_protocol::session::ModuleControlResponse::HealthCheck {
             metrics: Some(metrics),
             detail,
@@ -2572,13 +2635,16 @@ fn relay_polling_real_poll_insert_detects_a_miss_but_not_a_race_or_duplicate() {
         if missed {
             assert!(detail.unwrap().contains("connected but not delivering"));
         }
-        // Re-polling an inserted revision must not manufacture another miss.
-        sql(&scratch, &format!("UPDATE trigger_subscriptions SET last_polled_at_ms={} WHERE subscription_id='{issue}'", now - 1_800_000));
+        // CI skips an already-stored completed run; issue inserts deduplicate at commit.
+        // Neither kind of re-poll may manufacture another miss.
+        sql(&scratch, &format!("UPDATE trigger_subscriptions SET last_polled_at_ms={} WHERE subscription_id='{watch}'", now - 1_800_000));
+        let outcomes = scheduler.run_pass(&["direct".into()], now);
+        assert_eq!(outcomes.len(), 1);
         assert_eq!(
-            scheduler.run_pass(&["direct".into()], now)[0].cycle,
+            outcomes[0].cycle,
             plexus_core::PollCycle::Completed {
                 inserted: 0,
-                duplicates: 1
+                duplicates: if ci { 0 } else { 1 }
             }
         );
         assert_eq!(
