@@ -63,9 +63,11 @@ A poll's deduplicating insert outcomes also check the pipe: a newly inserted
 issue, PR, completed workflow run or completed workflow job is a relay miss if
 its activity is more than two minutes older than the poll's start and happened
 during the current uninterrupted connection. Relay duplicates, pre-connection
-history, releases and unresolved repository identities do not count. Issue/PR
-watches must have the same principal/project counterpart required by relay
-admission; a lone watch's intentionally dropped deliveries are not misses.
+history, releases and unresolved repository identities do not count. The relay
+stores issue and PR events for a repository only when the same principal and
+project watch both its issues and its pull requests. An issue watch without its
+matching PR watch, or the reverse, gets no relay deliveries by design, so its
+polled events are not misses.
 Eligibility is checked in the existing poll-insert transaction, once per
 repository/action only when inserting a new event. The grace
 allows for the 60-second relay receive watchdog, 30-second HTTP request budget
