@@ -132,6 +132,31 @@ INSERT INTO web_search_allowance_counts (principal, provider, month_utc, used) V
     assert_eq!(scalar::<i64>(&new, "SELECT used FROM web_search_allowance_counts WHERE principal='former-owner' AND provider='exa' AND month_utc='2024-02'"), 1);
 }
 
+/// A person's revoke of an automatically connected search provider is kept
+/// in these rows. If a cutover dropped them, the next vault notice on the new
+/// store would reconnect that provider and append it to the order again.
+#[test]
+fn stored_search_key_records_survive_store_cutover() {
+    let f = Fixture::new();
+    let source = open_sqlite(&descriptor(&f.from).unwrap()).unwrap();
+    source.migrate("plexus", MIGRATIONS).unwrap();
+    source.with_conn_fenced(|conn| conn.execute_batch(r#"
+INSERT INTO web_search_auto_connections (principal, provider, credential_id, incarnation, record_version, connection_id, appended_at_ms, revoked_at_ms)
+VALUES ('direct','tavily','apikey:tavily','00000000000000000000000000000001',2,'conn-web-search-tavily',1000,2000),
+       ('direct','brave','apikey:brave','00000000000000000000000000000002',1,'conn-web-search-brave',3000,NULL);
+"#)).unwrap();
+    drop(source);
+    let report = f.import();
+    let row = report
+        .iter()
+        .find(|row| row.table == "web_search_auto_connections")
+        .unwrap();
+    assert_eq!((row.read, row.carried, row.scrubbed), (2, 2, 0));
+    let new = f.destination();
+    assert_eq!(scalar::<i64>(&new, "SELECT revoked_at_ms FROM web_search_auto_connections WHERE provider='tavily' AND incarnation='00000000000000000000000000000001' AND record_version=2 AND connection_id='conn-web-search-tavily'"), 2000);
+    assert_eq!(scalar::<i64>(&new, "SELECT appended_at_ms FROM web_search_auto_connections WHERE provider='brave' AND revoked_at_ms IS NULL"), 3000);
+}
+
 #[test]
 fn outbox_failures_follow_only_retained_publication_markers_on_import() {
     assert_eq!(
@@ -461,7 +486,8 @@ fn production_v23_round_trip_dispositions_and_routing() {
             | "event_outbox_counters"
             | "gmail_accounts"
             | "sent_text"
-            | "sent_text_settings" => (0, 0, 0),
+            | "sent_text_settings"
+            | "web_search_auto_connections" => (0, 0, 0),
             _ => (1, 1, 0),
         };
         assert_eq!(

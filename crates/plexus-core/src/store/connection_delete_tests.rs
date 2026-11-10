@@ -12,14 +12,16 @@ use crate::test_scratch::Scratch;
 
 /// Tables that hold a connection's rows but are not in
 /// [`CONNECTION_KEYED_TABLES`]: the connection row itself, the audit trail
-/// that `delete_connection` keeps, and the handle table whose connections it
-/// refuses, together with repository bindings owned by those handles.
-const KEPT_OR_REFUSED: [&str; 5] = [
+/// that `delete_connection` keeps, the handle table whose connections it
+/// refuses together with repository bindings owned by those handles, and the
+/// stored-search-key records that must outlive a deleted connection.
+const KEPT_OR_REFUSED: [&str; 6] = [
     "connections",
     "audit_journal",
     "grant_revocations",
     "github_app_handle",
     "github_repo_binding",
+    "web_search_auto_connections",
 ];
 
 // Migration 40 deleted from the tables that existed at that schema version.

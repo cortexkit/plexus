@@ -1432,6 +1432,10 @@ const GITHUB_HANDLE_CONNECTION_PREFIX: &str = "github-handle-";
 /// - `grant_revocations`: immutable evidence kept indefinitely at runtime;
 ///   migration 40 was a one-time exception for eligible revoked connections.
 /// - `github_app_handle`: a connection it references is refused instead.
+/// - `web_search_auto_connections`: the record that a stored vault key
+///   created this connection. It must outlive the connection: once the key's
+///   connection has completed, the next vault notice treats a missing
+///   connection as the person's revoke, so the same key never reconnects.
 ///
 /// The schema test `every_connection_keyed_table_is_deleted_or_deliberately_kept`
 /// fails when a table gains a `connection_id` column without being listed

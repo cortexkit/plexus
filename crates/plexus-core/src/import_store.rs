@@ -61,6 +61,10 @@ const TABLES: &[&str] = &[
     "web_search_allowance_counts",
     // Operator-set per-minute limits for each web search backend.
     "web_search_limits",
+    // Which stored vault key created which search connection, and whether the
+    // person revoked it. Without these rows the new store would reconnect a
+    // provider the person revoked, or append it to the order again.
+    "web_search_auto_connections",
     // The answer cursor from when plexus read card answers from prefrontal.
     // Nothing reads or advances it now (Cingulate answers each held call
     // directly), but the table stays because migrations are additive, so an
@@ -405,6 +409,9 @@ fn identity(table: &str, row: &Record) -> String {
         "gmail_accounts" => vec!["principal", "connection_id"],
         "sent_text" => vec!["row_id"],
         "sent_text_settings" => vec![],
+        "web_search_auto_connections" => {
+            vec!["principal", "provider", "credential_id", "incarnation"]
+        }
         "recipient_allowlist" => vec!["connection_id", "recipient"],
         "grants" => vec!["principal", "grant_id"],
         "policies" => vec!["principal", "policy_id"],
@@ -545,6 +552,10 @@ fn transform(old: &Connection, new: &Connection, table: &str, row: &mut Record) 
     {
         // A deleted handle can leave an unreconcilable result with no connection
         // ID. It records the uncertain write, but cannot authorize another call.
+    } else if table == "web_search_auto_connections" {
+        // These rows deliberately outlive a deleted connection: a missing
+        // connection is how the person's revoke is remembered. They grant
+        // nothing themselves, so a dangling connection id is carried as is.
     } else if row.contains_key("connection_id") {
         let exists: bool = new
             .query_row(
