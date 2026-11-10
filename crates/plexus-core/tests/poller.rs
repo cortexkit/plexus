@@ -6480,7 +6480,8 @@ fn skipped_watermark_item_balances_the_drop_ledger() {
                 "initialBaseline": 0,
                 "unchangedObservation": 0,
                 "unchangedBoundaryReplay": 0,
-                "alreadyDelivered": 1
+                "alreadyDelivered": 1,
+                "carriedOverJob": 0
             },
             "lateRowsBySubscription": {},
             "credentialNeedsRepairByConnection": {}
