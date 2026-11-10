@@ -138,16 +138,17 @@ fn gmail_migration_58_forward_rollback_and_reforward() {
     };
     let inner = cortexkit_store::open_sqlite(&descriptor).unwrap();
     let boundary = MIGRATIONS.iter().position(|m| m.version == 58).unwrap();
+    let through_58 = &MIGRATIONS[..=boundary];
     let prior = &MIGRATIONS[..boundary];
     inner.migrate("plexus", prior).unwrap();
     inner.with_conn_fenced(|c| c.execute_batch("INSERT INTO connections(principal,connection_id,app_key,status,created_at_ms,updated_at_ms) VALUES ('direct','before','fixture','active',1,1)")).unwrap();
-    assert_eq!(inner.migrate("plexus", MIGRATIONS).unwrap().applied, 1);
+    assert_eq!(inner.migrate("plexus", through_58).unwrap().applied, 1);
     inner.with_conn_fenced(|c| c.execute_batch("INSERT INTO gmail_accounts(principal,connection_id,mailbox) VALUES ('direct','mail','owner@example.com'); INSERT INTO sent_text VALUES ('row','direct','mail','hash','key',x'01',x'02',999999,1);")).unwrap();
     let rollback = inner.migrate("plexus", prior).unwrap();
     assert!(rollback.store_ahead());
     assert_eq!(rollback.applied, 0);
     inner.with_conn_fenced(|c| c.execute_batch("INSERT INTO connections(principal,connection_id,app_key,status,created_at_ms,updated_at_ms) VALUES ('direct','older-write','fixture','active',1,1)")).unwrap();
-    assert_eq!(inner.migrate("plexus", MIGRATIONS).unwrap().applied, 0);
+    assert_eq!(inner.migrate("plexus", through_58).unwrap().applied, 0);
     let counts: (i64, i64) = inner
         .with_read(|c| {
             Ok((

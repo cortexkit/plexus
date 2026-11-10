@@ -657,7 +657,7 @@ fn gmail_ckcred_wire_fixture_decoders_and_reserved_encoders() {
         hex::encode(Sha256::digest(include_bytes!(
             "../../tests/fixtures/vault-wire/enrollment_wire_contract.json"
         ))),
-        "eb0ef07ed7eb97e7bf9e7aefdd6bfa1322d2253e46b2e4fe91d05b1113523802"
+        "1f9a48ce76b03cbea143fcdb7f83b940e32884d890dc51f9bdc594045962a941"
     );
     let op = |name: &str| {
         fixture["operations"]

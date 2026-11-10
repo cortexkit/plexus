@@ -482,6 +482,31 @@ pub trait CkcredRoutePeer: Send + Sync {
         operation: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, CkcredRouteError>;
+
+    /// Hold the scoped metadata watch on the same authenticated vault route.
+    fn watch_scoped(&self) -> Result<CkcredWatch, CkcredRouteError> {
+        Err(CkcredRouteError::Transport)
+    }
+}
+
+/// Dropping the watch cancels its forwarding task and the held subscription.
+pub struct CkcredWatch {
+    pub events: tokio::sync::mpsc::Receiver<serde_json::Value>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl CkcredWatch {
+    pub fn from_events(events: tokio::sync::mpsc::Receiver<serde_json::Value>) -> Self {
+        Self { events, task: None }
+    }
+}
+
+impl Drop for CkcredWatch {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }
 
 /// Claustrum vault credential source speaking the shipped `credential.get` and
@@ -875,6 +900,54 @@ impl SubcCkcredRoutePeer {
 }
 
 impl CkcredRoutePeer for SubcCkcredRoutePeer {
+    fn watch_scoped(&self) -> Result<CkcredWatch, CkcredRouteError> {
+        let runtime = self.runtime.as_ref().ok_or(CkcredRouteError::Transport)?;
+        let consumer = self.consumer.clone();
+        let target = self.target.clone();
+        let identity = self.identity.clone();
+        let mut subscription = run_on(runtime, async move {
+            consumer
+                .subscribe(
+                    target,
+                    identity,
+                    br#"{"method":"auth.watch_scoped","params":{}}"#.to_vec(),
+                    subc_client_rs::SubscribeOptions::default(),
+                )
+                .await
+                .map_err(|_| CkcredRouteError::NotSent)
+        })?;
+        let (sender, events) = tokio::sync::mpsc::channel(16);
+        let task = runtime.spawn(async move {
+            while let Some(bytes) = subscription.events().recv().await {
+                let Ok(notice) = serde_json::from_slice(&bytes) else {
+                    return;
+                };
+                if sender.send(notice).await.is_err() {
+                    return;
+                }
+            }
+            // Preserve the terminal refusal: an old vault's unknown_method
+            // must disable automatic connection rather than be treated as a
+            // metadata-change notice.
+            let terminal = match subscription.ended().await {
+                subc_client_rs::SubscriptionEnd::Response(bytes) => {
+                    serde_json::from_slice(&bytes).ok()
+                }
+                subc_client_rs::SubscriptionEnd::Error(error) => {
+                    Some(serde_json::json!({"code":error.code}))
+                }
+                _ => None,
+            };
+            if let Some(terminal) = terminal {
+                let _ = sender.send(terminal).await;
+            }
+        });
+        Ok(CkcredWatch {
+            events,
+            task: Some(task),
+        })
+    }
+
     fn call(
         &self,
         operation: &str,

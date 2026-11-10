@@ -1,0 +1,173 @@
+{
+  "cases": [
+    {
+      "case": "catalog_and_lifecycle",
+      "frame_type": "Response",
+      "reply": {
+        "result": {
+          "credentials": [
+            {
+              "auth_method": "apikey",
+              "categories": [
+                "web-search"
+              ],
+              "id": "apikey:brave",
+              "incarnation": "00000000000000000000000000000003",
+              "operations": [
+                "list"
+              ],
+              "plan_tier_observed_at_ms": null,
+              "provider": "brave",
+              "provider_ids": [],
+              "record_version": 1,
+              "serves": [],
+              "state": "needs_reauth",
+              "type": "apikey"
+            },
+            {
+              "auth_method": "apikey",
+              "categories": [
+                "web-search"
+              ],
+              "id": "apikey:exa",
+              "incarnation": "00000000000000000000000000000001",
+              "operations": [
+                "list"
+              ],
+              "plan_tier_observed_at_ms": null,
+              "provider": "exa",
+              "provider_ids": [],
+              "record_version": 1,
+              "serves": [],
+              "state": "active",
+              "type": "apikey"
+            },
+            {
+              "auth_method": "apikey",
+              "categories": [
+                "llm-provider",
+                "web-search"
+              ],
+              "id": "apikey:kimi-for-coding",
+              "incarnation": "00000000000000000000000000000002",
+              "operations": [
+                "list"
+              ],
+              "plan_tier": "pro",
+              "plan_tier_observed_at_ms": 1700000000000,
+              "plan_tier_source": "detected",
+              "provider": "kimi-for-coding",
+              "provider_ids": [],
+              "record_version": 1,
+              "serves": [
+                "moonshot"
+              ],
+              "state": "active",
+              "type": "apikey"
+            },
+            {
+              "auth_method": "apikey",
+              "categories": [
+                "web-search"
+              ],
+              "id": "apikey:tavily",
+              "incarnation": "00000000000000000000000000000004",
+              "operations": [
+                "list"
+              ],
+              "plan_tier_observed_at_ms": null,
+              "provider": "tavily",
+              "provider_ids": [],
+              "record_version": 1,
+              "serves": [],
+              "state": "retired",
+              "type": "apikey"
+            }
+          ],
+          "grant_tuples": [
+            {
+              "operation": "list",
+              "selector": "web-search",
+              "selector_kind": "category"
+            }
+          ],
+          "grants": 1,
+          "view": "yEo9dqvgBXRON38vDLg81AXNMxUaQJ9zPr/FYwsGP9A="
+        }
+      },
+      "reply_b64url": "eyJyZXN1bHQiOnsiY3JlZGVudGlhbHMiOlt7ImF1dGhfbWV0aG9kIjoiYXBpa2V5IiwiY2F0ZWdvcmllcyI6WyJ3ZWItc2VhcmNoIl0sImlkIjoiYXBpa2V5OmJyYXZlIiwiaW5jYXJuYXRpb24iOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMyIsIm9wZXJhdGlvbnMiOlsibGlzdCJdLCJwbGFuX3RpZXJfb2JzZXJ2ZWRfYXRfbXMiOm51bGwsInByb3ZpZGVyIjoiYnJhdmUiLCJwcm92aWRlcl9pZHMiOltdLCJyZWNvcmRfdmVyc2lvbiI6MSwic2VydmVzIjpbXSwic3RhdGUiOiJuZWVkc19yZWF1dGgiLCJ0eXBlIjoiYXBpa2V5In0seyJhdXRoX21ldGhvZCI6ImFwaWtleSIsImNhdGVnb3JpZXMiOlsid2ViLXNlYXJjaCJdLCJpZCI6ImFwaWtleTpleGEiLCJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwib3BlcmF0aW9ucyI6WyJsaXN0Il0sInBsYW5fdGllcl9vYnNlcnZlZF9hdF9tcyI6bnVsbCwicHJvdmlkZXIiOiJleGEiLCJwcm92aWRlcl9pZHMiOltdLCJyZWNvcmRfdmVyc2lvbiI6MSwic2VydmVzIjpbXSwic3RhdGUiOiJhY3RpdmUiLCJ0eXBlIjoiYXBpa2V5In0seyJhdXRoX21ldGhvZCI6ImFwaWtleSIsImNhdGVnb3JpZXMiOlsibGxtLXByb3ZpZGVyIiwid2ViLXNlYXJjaCJdLCJpZCI6ImFwaWtleTpraW1pLWZvci1jb2RpbmciLCJpbmNhcm5hdGlvbiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAyIiwib3BlcmF0aW9ucyI6WyJsaXN0Il0sInBsYW5fdGllciI6InBybyIsInBsYW5fdGllcl9vYnNlcnZlZF9hdF9tcyI6MTcwMDAwMDAwMDAwMCwicGxhbl90aWVyX3NvdXJjZSI6ImRldGVjdGVkIiwicHJvdmlkZXIiOiJraW1pLWZvci1jb2RpbmciLCJwcm92aWRlcl9pZHMiOltdLCJyZWNvcmRfdmVyc2lvbiI6MSwic2VydmVzIjpbIm1vb25zaG90Il0sInN0YXRlIjoiYWN0aXZlIiwidHlwZSI6ImFwaWtleSJ9LHsiYXV0aF9tZXRob2QiOiJhcGlrZXkiLCJjYXRlZ29yaWVzIjpbIndlYi1zZWFyY2giXSwiaWQiOiJhcGlrZXk6dGF2aWx5IiwiaW5jYXJuYXRpb24iOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwNCIsIm9wZXJhdGlvbnMiOlsibGlzdCJdLCJwbGFuX3RpZXJfb2JzZXJ2ZWRfYXRfbXMiOm51bGwsInByb3ZpZGVyIjoidGF2aWx5IiwicHJvdmlkZXJfaWRzIjpbXSwicmVjb3JkX3ZlcnNpb24iOjEsInNlcnZlcyI6W10sInN0YXRlIjoicmV0aXJlZCIsInR5cGUiOiJhcGlrZXkifV0sImdyYW50X3R1cGxlcyI6W3sib3BlcmF0aW9uIjoibGlzdCIsInNlbGVjdG9yIjoid2ViLXNlYXJjaCIsInNlbGVjdG9yX2tpbmQiOiJjYXRlZ29yeSJ9XSwiZ3JhbnRzIjoxLCJ2aWV3IjoieUVvOWRxdmdCWFJPTjM4dkRMZzgxQVhOTXhVYVFKOXpQci9GWXdzR1A5QT0ifX0",
+      "reply_sha256": "cc3f9b2149430f6afc616826ef331f5f2f87e859eba08024e9190f8ed9c00477",
+      "request": {
+        "method": "credential.list_scoped",
+        "params": {}
+      }
+    },
+    {
+      "case": "watch_opening",
+      "frame_type": "StreamData",
+      "reply": {
+        "epoch": "00000000000000000000000000000000",
+        "keys": "gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=",
+        "kind": "changed",
+        "seq": 1,
+        "view": "yEo9dqvgBXRON38vDLg81AXNMxUaQJ9zPr/FYwsGP9A="
+      },
+      "reply_b64url": "eyJlcG9jaCI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwia2V5cyI6ImdXWXByUWgrTlBtbXRnMlpyS0JyT3Y5WC9GOUJZQWlLKzZydGFIUjJ4eEE9Iiwia2luZCI6ImNoYW5nZWQiLCJzZXEiOjEsInZpZXciOiJ5RW85ZHF2Z0JYUk9OMzh2RExnODFBWE5NeFVhUUo5elByL0ZZd3NHUDlBPSJ9",
+      "reply_sha256": "f4c818a0bc9a093611d3bbad2fb1cf3ced36d4f9886c2b74374ed5fe10070080",
+      "request": {
+        "method": "auth.watch_scoped",
+        "params": {}
+      }
+    },
+    {
+      "case": "watch_category_changed",
+      "frame_type": "StreamData",
+      "reply": {
+        "epoch": "00000000000000000000000000000000",
+        "keys": "gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=",
+        "kind": "changed",
+        "seq": 2,
+        "view": "KWMd4dOej7NufVRXy9p62xNUwamTdnUpEybTipdt5n4="
+      },
+      "reply_b64url": "eyJlcG9jaCI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwia2V5cyI6ImdXWXByUWgrTlBtbXRnMlpyS0JyT3Y5WC9GOUJZQWlLKzZydGFIUjJ4eEE9Iiwia2luZCI6ImNoYW5nZWQiLCJzZXEiOjIsInZpZXciOiJLV01kNGRPZWo3TnVmVlJYeTlwNjJ4TlV3YW1UZG5VcEV5YlRpcGR0NW40PSJ9",
+      "reply_sha256": "f6eb2299caec1d7b76022130c4f934e0a3fdff6cab2f2fb066a401a095e7fba9",
+      "request": {
+        "method": "auth.watch_scoped",
+        "params": {}
+      }
+    },
+    {
+      "case": "watch_revoked",
+      "frame_type": "Response",
+      "reply": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "reply_b64url": "eyJyZXN1bHQiOnsiZXJyb3IiOnsiY2xhc3MiOiJwZXJtYW5lbnQiLCJjb2RlIjoibm90X2ZvdW5kIn19fQ",
+      "reply_sha256": "0bce0b6798d1e653a331c727c1fbba4472705a50990aec74fb56e2762a14b235",
+      "request": {
+        "method": "auth.watch_scoped",
+        "params": {}
+      }
+    },
+    {
+      "case": "older_vault_unknown_method",
+      "frame_type": "Error",
+      "reply": {
+        "code": "unknown_method",
+        "message": "unknown method 'auth.watch_scoped.unsupported'"
+      },
+      "reply_b64url": "eyJjb2RlIjoidW5rbm93bl9tZXRob2QiLCJtZXNzYWdlIjoidW5rbm93biBtZXRob2QgJ2F1dGgud2F0Y2hfc2NvcGVkLnVuc3VwcG9ydGVkJyJ9",
+      "reply_sha256": "2443481b1728d0346cf4357b65219c3c58cffb9ab8dc81a49be6720fb4d9af39",
+      "request": {
+        "method": "auth.watch_scoped.unsupported",
+        "params": {}
+      }
+    }
+  ],
+  "v": "ck-list-scoped-vectors/v2"
+}

@@ -34,7 +34,7 @@ fn validate_provider(provider: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn order_on_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Option<Vec<String>>> {
+pub(super) fn order_on_conn(conn: &rusqlite::Connection) -> rusqlite::Result<Option<Vec<String>>> {
     conn.query_row(
         "SELECT providers FROM web_search_order WHERE singleton = 1",
         [],

@@ -62,6 +62,7 @@ use test_support::{
     with_call_tool_result,
 };
 mod tool_provider;
+mod web_search_auto;
 mod web_search_health;
 mod web_search_provider_admin;
 mod widen_and_grant_admin;
@@ -668,18 +669,23 @@ fn spawn_background_tasks(state: Arc<ModuleState>, config: &ModuleConfig) -> Bac
     let (relay_shutdown, relay_stop) = mpsc::channel::<()>(1);
     let relay_task = relay::spawn(Arc::clone(&state), relay_stop);
 
+    let (search_shutdown, search_stop) = mpsc::channel::<()>(1);
+    let search_task = web_search_auto::spawn(Arc::clone(&state), search_stop);
+
     BackgroundTasks {
         shutdown: vec![
             claim_shutdown,
             scheduler_shutdown,
             outbox_shutdown,
             relay_shutdown,
+            search_shutdown,
         ],
         tasks: vec![
             ("connector-home refresh", claim_task, TASK_SHUTDOWN_GRACE),
             ("trigger scheduler", scheduler_task, TASK_SHUTDOWN_GRACE),
             ("outbox drain", outbox_task, BUS_SHUTDOWN_GRACE),
             ("relay", relay_task, BUS_SHUTDOWN_GRACE),
+            ("search key watch", search_task, TASK_SHUTDOWN_GRACE),
         ],
     }
 }

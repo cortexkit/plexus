@@ -1,6 +1,23 @@
 {
   "operations": [
     {
+      "op": "admin.enroll_approve",
+      "display_name_success": "{\"result\":{\"display_name\":\"Approved Pi label\",\"enrollment_id\":\"enrollment-id\",\"name\":\"consumer\"}}",
+      "display_name_request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\",\"display_name\":\"Approved Pi label\"}",
+      "request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\"}",
+      "keep_grants_request": "{\"op\":\"admin.enroll_approve\",\"v\":2,\"request_id\":\"request-id\",\"final_name\":\"consumer\",\"keep_grants\":true}",
+      "success": [
+        "{\"result\":{\"enrollment_id\":\"enrollment-id\",\"name\":\"consumer\"}}"
+      ]
+    },
+    {
+      "op": "admin.enroll_revoke",
+      "request": "{\"op\":\"admin.enroll_revoke\",\"v\":2,\"name\":\"consumer\"}",
+      "success": [
+        "{\"result\":{\"removed_grants\":[{\"created_at_ms\":1800000000000,\"credential_prefix\":\"apikey:zai\",\"operation\":\"read\",\"principal_id\":\"consumer\",\"principal_kind\":\"enrolled\",\"selector_kind\":\"exact\"}],\"revoked\":true}}"
+      ]
+    },
+    {
       "op": "credential.account_token",
       "request": "{\"audience\":\"cortexkit-runners\"}",
       "success": [
@@ -18,12 +35,13 @@
         "changed snapshot seq 2 (epoch normalized)"
       ],
       "success": [
-        "{\"epoch\":\"00000000000000000000000000000000\",\"keys\":\"gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=\",\"kind\":\"changed\",\"seq\":1,\"view\":\"WJ4kwtxL+iITIKBjbo2xVnNBe5EIH6Xu+QGOrGBoIKs=\"}",
-        "{\"epoch\":\"00000000000000000000000000000000\",\"keys\":\"gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=\",\"kind\":\"changed\",\"seq\":2,\"view\":\"voJahchvv3WOVUvaYC1dqSvNT7k4hUZZrrLYEujPSkg=\"}"
+        "{\"epoch\":\"00000000000000000000000000000000\",\"keys\":\"gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=\",\"kind\":\"changed\",\"seq\":1,\"view\":\"+skaLPyrcLeF01AH35WtFtgjkrAcAc4AmXU0xzLgTbs=\"}",
+        "{\"epoch\":\"00000000000000000000000000000000\",\"keys\":\"gWYprQh+NPmmtg2ZrKBrOv9X/F9BYAiK+6rtaHR2xxA=\",\"kind\":\"changed\",\"seq\":2,\"view\":\"YDo4I9eAWt7JGIeAHyD4My3SJT58kkfmNB+7Kw/Tl0c=\"}"
       ]
     },
     {
       "op": "auth.enroll_propose",
+      "display_name_request": "{\"proposed_name\":\"consumer\",\"request_secret_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"display_name\":\"Claude sign-in for Pi\"}",
       "request": "{\"proposed_name\":\"consumer\",\"request_secret_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
       "success": [
         "{\"result\":{\"request_id\":\"request-id\"}}"
@@ -49,9 +67,9 @@
       "op": "credential.list_scoped",
       "request": "{\"enrollment_token\":\"tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt\"}",
       "success": "pinned by the wire-key contract tests beside each op, which assert presence AND absence without materialising a decrypted payload",
-      "row": "{\"id\":\"oauth:anthropic\",\"categories\":[\"llm-provider\"],\"type\":\"oauth\",\"serves\":[\"anthropic\"],\"refresh_adapter\":\"anthropic\",\"state\":\"active\",\"record_version\":232,\"operations\":[\"read\"],\"provider_ids\":[\"anthropic\"],\"plan_tier\":\"max_5x\",\"plan_tier_source\":\"operator\",\"auth_method\":\"oauth\"}",
-      "reply": "{\"result\":{\"credentials\":[{\"auth_method\":\"antigravity\",\"categories\":[\"llm-provider\"],\"id\":\"antigravity:google\",\"operations\":[\"read\"],\"provider_ids\":[\"google-antigravity\"],\"record_version\":5,\"refresh_adapter\":\"antigravity\",\"serves\":[\"google\",\"anthropic\",\"openai\"],\"state\":\"active\",\"type\":\"oauth\"},{\"auth_method\":\"apikey\",\"categories\":[\"llm-provider\"],\"id\":\"apikey:openrouter\",\"operations\":[\"read\"],\"provider_ids\":[\"openrouter\"],\"record_version\":3,\"serves\":[\"anthropic\",\"openai\",\"google\",\"xai\",\"deepseek\",\"mistral\",\"moonshot\",\"zhipu\",\"meta\",\"qwen\",\"perplexity\",\"nvidia\",\"minimax\",\"xiaomi\",\"stepfun\",\"inception\"],\"state\":\"active\",\"type\":\"apikey\"},{\"auth_method\":\"chatgpt\",\"categories\":[\"llm-provider\"],\"id\":\"chatgpt:openai\",\"operations\":[\"read\"],\"plan_tier\":\"pro_200\",\"plan_tier_source\":\"detected\",\"provider_ids\":[],\"record_version\":11,\"refresh_adapter\":\"openai\",\"serves\":[\"openai\"],\"state\":\"active\",\"type\":\"oauth\"},{\"categories\":[\"github-app-native\"],\"id\":\"github_app:plex-alfonso\",\"operations\":[\"read\"],\"provider_ids\":[],\"record_version\":2,\"refresh_adapter\":\"github_app\",\"serves\":[],\"state\":\"active\",\"type\":\"github_app\"},{\"account_id\":\"00000000-0000-4000-8000-000000000000\",\"auth_method\":\"oauth\",\"categories\":[\"anthropic-native\",\"llm-provider\"],\"email\":\"consumer@example.invalid\",\"id\":\"oauth:anthropic\",\"operations\":[\"read\"],\"org_name\":\"Example Org\",\"plan_tier\":\"max_20x\",\"plan_tier_source\":\"operator\",\"provider_ids\":[\"anthropic\",\"claude-code\"],\"record_version\":232,\"refresh_adapter\":\"anthropic\",\"serves\":[\"anthropic\"],\"state\":\"active\",\"type\":\"oauth\"}],\"grant_tuples\":[{\"operation\":\"read\",\"selector\":\"llm-provider\",\"selector_kind\":\"category\"},{\"operation\":\"read\",\"selector\":\"github-app-native\",\"selector_kind\":\"category\"}],\"grants\":2,\"view\":\"z6YPRoaEbsvZCVjeHcMgtww8l+K7efcxytUM+ysoaDI=\"}}",
-      "list_only_reply": "{\"result\":{\"credentials\":[{\"account_id\":\"00000000-0000-4000-8000-000000000000\",\"auth_method\":\"oauth\",\"categories\":[\"llm-provider\"],\"email\":\"consumer@example.invalid\",\"id\":\"oauth:anthropic\",\"operations\":[\"list\"],\"org_name\":\"Example Org\",\"plan_tier\":\"max_5x\",\"plan_tier_source\":\"detected\",\"provider_ids\":[\"anthropic\"],\"record_version\":232,\"refresh_adapter\":\"anthropic\",\"serves\":[\"anthropic\"],\"state\":\"active\",\"type\":\"oauth\"}],\"grant_tuples\":[{\"operation\":\"list\",\"selector\":\"llm-provider\",\"selector_kind\":\"category\"}],\"grants\":1,\"view\":\"0GMjpr28i6Slz1xMqyevm73ZGL6qMU/yR0DehAT6OsA=\"}}"
+      "row": "{\"id\":\"oauth:anthropic\",\"provider\":\"anthropic\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"plan_tier_observed_at_ms\":null,\"categories\":[\"llm-provider\"],\"type\":\"oauth\",\"serves\":[\"anthropic\"],\"refresh_adapter\":\"anthropic\",\"state\":\"active\",\"record_version\":232,\"operations\":[\"read\"],\"provider_ids\":[\"anthropic\"],\"plan_tier\":\"max_5x\",\"plan_tier_source\":\"operator\",\"auth_method\":\"oauth\"}",
+      "reply": "{\"result\":{\"credentials\":[{\"auth_method\":\"antigravity\",\"categories\":[\"llm-provider\"],\"id\":\"antigravity:google\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"read\"],\"plan_tier_observed_at_ms\":null,\"provider\":\"antigravity\",\"provider_ids\":[\"google-antigravity\"],\"record_version\":5,\"refresh_adapter\":\"antigravity\",\"serves\":[\"google\",\"anthropic\",\"openai\"],\"state\":\"active\",\"type\":\"oauth\"},{\"auth_method\":\"apikey\",\"categories\":[\"llm-provider\"],\"id\":\"apikey:openrouter\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"read\"],\"plan_tier_observed_at_ms\":null,\"provider\":\"openrouter\",\"provider_ids\":[\"openrouter\"],\"record_version\":3,\"serves\":[\"anthropic\",\"openai\",\"google\",\"xai\",\"deepseek\",\"mistral\",\"moonshot\",\"zhipu\",\"meta\",\"qwen\",\"perplexity\",\"nvidia\",\"minimax\",\"xiaomi\",\"stepfun\",\"inception\"],\"state\":\"active\",\"type\":\"apikey\"},{\"auth_method\":\"chatgpt\",\"categories\":[\"llm-provider\"],\"id\":\"chatgpt:openai\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"read\"],\"plan_tier\":\"pro_200\",\"plan_tier_observed_at_ms\":null,\"plan_tier_source\":\"detected\",\"provider\":\"openai\",\"provider_ids\":[],\"record_version\":11,\"refresh_adapter\":\"openai\",\"serves\":[\"openai\"],\"state\":\"active\",\"type\":\"oauth\"},{\"categories\":[\"github-app-native\"],\"id\":\"github_app:plex-alfonso\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"read\"],\"plan_tier_observed_at_ms\":null,\"provider\":null,\"provider_ids\":[],\"record_version\":2,\"refresh_adapter\":\"github_app\",\"serves\":[],\"state\":\"active\",\"type\":\"github_app\"},{\"account_id\":\"00000000-0000-4000-8000-000000000000\",\"auth_method\":\"oauth\",\"categories\":[\"anthropic-native\",\"llm-provider\"],\"email\":\"consumer@example.invalid\",\"id\":\"oauth:anthropic\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"read\"],\"org_name\":\"Example Org\",\"plan_tier\":\"max_20x\",\"plan_tier_observed_at_ms\":null,\"plan_tier_source\":\"operator\",\"provider\":\"anthropic\",\"provider_ids\":[\"anthropic\",\"claude-code\"],\"record_version\":232,\"refresh_adapter\":\"anthropic\",\"serves\":[\"anthropic\"],\"state\":\"active\",\"type\":\"oauth\"}],\"grant_tuples\":[{\"operation\":\"read\",\"selector\":\"llm-provider\",\"selector_kind\":\"category\"},{\"operation\":\"read\",\"selector\":\"github-app-native\",\"selector_kind\":\"category\"}],\"grants\":2,\"view\":\"+hVsGpurYe8HLf5URcObYYtmrde+iBAkEGnKYWo4WKM=\"}}",
+      "list_only_reply": "{\"result\":{\"credentials\":[{\"account_id\":\"00000000-0000-4000-8000-000000000000\",\"auth_method\":\"oauth\",\"categories\":[\"llm-provider\"],\"email\":\"consumer@example.invalid\",\"id\":\"oauth:anthropic\",\"incarnation\":\"0123456789abcdef0123456789abcdef\",\"operations\":[\"list\"],\"org_name\":\"Example Org\",\"plan_tier\":\"max_5x\",\"plan_tier_observed_at_ms\":null,\"plan_tier_source\":\"detected\",\"provider\":\"anthropic\",\"provider_ids\":[\"anthropic\"],\"record_version\":232,\"refresh_adapter\":\"anthropic\",\"serves\":[\"anthropic\"],\"state\":\"active\",\"type\":\"oauth\"}],\"grant_tuples\":[{\"operation\":\"list\",\"selector\":\"llm-provider\",\"selector_kind\":\"category\"}],\"grants\":1,\"view\":\"uwFwpdF/kjLYzixwV6c44qDX41GonCY4TorjPAG/E+M=\"}}"
     },
     {
       "op": "credential.get_scoped",

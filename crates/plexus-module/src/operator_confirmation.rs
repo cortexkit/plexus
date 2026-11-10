@@ -210,7 +210,19 @@ pub(crate) async fn confirm(
     writer: &mpsc::Sender<Frame>,
     pending: &Arc<PendingControlReplies>,
 ) -> Result<(), Refusal> {
+    #[cfg(test)]
+    TEST_CONFIRMATION_CALLS.with(|calls| calls.set(calls.get() + 1));
     confirm_with_timeout(operation, summary, route, writer, pending, CONFIRM_TIMEOUT).await
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIRMATION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_confirmation_calls() -> usize {
+    TEST_CONFIRMATION_CALLS.with(std::cell::Cell::get)
 }
 
 pub(crate) async fn confirm_with_timeout(

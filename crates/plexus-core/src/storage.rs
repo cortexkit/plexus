@@ -1256,6 +1256,22 @@ BEGIN
 END;
 "#,
     },
+    Migration {
+        version: 59,
+        statements: r#"
+CREATE TABLE web_search_auto_connections (
+    principal TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    incarnation TEXT NOT NULL,
+    record_version INTEGER NOT NULL CHECK(record_version > 0),
+    connection_id TEXT NOT NULL,
+    appended_at_ms INTEGER,
+    revoked_at_ms INTEGER,
+    PRIMARY KEY (principal, provider, credential_id, incarnation, record_version)
+);
+"#,
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
@@ -1329,6 +1345,9 @@ pub use recipients_store::RecipientChange;
 
 #[path = "store/web_search.rs"]
 pub mod web_search_store;
+
+#[path = "store/web_search_auto.rs"]
+pub mod web_search_auto;
 
 #[path = "store/github/mod.rs"]
 pub mod github_store;

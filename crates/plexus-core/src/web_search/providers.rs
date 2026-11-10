@@ -86,10 +86,55 @@ pub fn provider_named(name: &str) -> Option<&'static ProviderName> {
     PROVIDER_NAMES.iter().find(|provider| provider.name == name)
 }
 
+/// Vault service identities, not model-routing aliases or credential names.
+/// SearXNG needs an operator-selected instance and is deliberately absent.
+pub const VAULT_SEARCH_PROVIDERS: &[(&str, &str)] = &[
+    ("exa", "exa"),
+    ("tavily", "tavily"),
+    ("brave", "brave"),
+    ("deepseek", "deepseek"),
+    ("firecrawl", "firecrawl"),
+    ("jina", "jina"),
+    ("kagi", "kagi"),
+    ("kimi-for-coding", "kimi"),
+    ("ollama-cloud", "ollama"),
+    ("parallel", "parallel"),
+    ("perplexity", "perplexity"),
+    ("synthetic", "synthetic"),
+    ("tinyfish", "tinyfish"),
+    ("zai", "zai"),
+];
+
+pub fn provider_for_vault_service(service: &str) -> Option<&'static ProviderName> {
+    VAULT_SEARCH_PROVIDERS
+        .iter()
+        .find(|(vault, _)| *vault == service)
+        .and_then(|(_, provider)| provider_named(provider))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::web_search::{ExaRestBackend, WebSearchBackend};
+
+    #[test]
+    fn vault_services_are_explicit_and_exclude_searxng() {
+        assert_eq!(VAULT_SEARCH_PROVIDERS.len(), PROVIDER_NAMES.len() - 1);
+        for (service, provider) in VAULT_SEARCH_PROVIDERS {
+            assert_eq!(provider_for_vault_service(service).unwrap().name, *provider);
+        }
+        assert_eq!(
+            provider_for_vault_service("kimi-for-coding").unwrap().name,
+            "kimi"
+        );
+        assert_eq!(
+            provider_for_vault_service("ollama-cloud").unwrap().name,
+            "ollama"
+        );
+        for excluded in ["searxng", "kimi", "ollama", "moonshot", "EXA", "unknown"] {
+            assert!(provider_for_vault_service(excluded).is_none(), "{excluded}");
+        }
+    }
 
     #[test]
     fn provider_table_pins_names_and_bindings() {

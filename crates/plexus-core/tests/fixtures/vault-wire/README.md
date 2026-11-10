@@ -1,8 +1,18 @@
 # Vault wire fixture
 
 `enrollment_wire_contract.json` is copied byte for byte from claustrum commit
-`bf5405f3059edb023945322ba015b52d3fcab44d`, supplied by CKCRED. SHA-256:
-`eb0ef07ed7eb97e7bf9e7aefdd6bfa1322d2253e46b2e4fe91d05b1113523802`.
+`c5b8ee7e66f7853eac6807aa6e5607e536b09212` (tag `list-scoped-vectors-v2`,
+tag object `9a5ed8aec45d953b86392f5511138fe29c5bea11`), supplied by CKCRED. SHA-256:
+`1f9a48ce76b03cbea143fcdb7f83b940e32884d890dc51f9bdc594045962a941`.
+Besides the scoped list/watch additions, this version includes additive
+`admin.enroll_approve`, `admin.enroll_revoke` and enrollment display-name examples.
+
+`list-scoped-v2.json` is copied byte for byte from the same commit and tag,
+from `crates/credentials-module/tests/vectors/list-scoped-v2.json`. SHA-256:
+`e9dfb2140ff4d92ece55de09da5987b27d8ca1a2023f0f9c50439499c3c3d603`.
+Its five real-handler cases pin scoped provider/incarnation metadata, opening
+and changed watch notices, terminal revocation and an older vault's refusal.
+Tests decode `reply_b64url` and verify each `reply_sha256`, not reconstructed JSON.
 
 Its public-key, scoped-token and versioned auth-report examples are protocol
 fixtures, not production keys or credentials. Plexus authenticates as the daemon's

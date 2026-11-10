@@ -80,6 +80,7 @@ impl Transport for VendorTransportRouter {
 }
 
 pub struct ModuleRuntime {
+    pub(crate) vault_peer: Option<Arc<dyn plexus_core::credentials::CkcredRoutePeer>>,
     pub connector_home: Arc<crate::connector_home::ConnectorHome>,
     pub store: Arc<PlexusStore>,
     pub engine: FacadeEngine,
@@ -112,7 +113,7 @@ impl ModuleRuntime {
     pub fn production(store: Arc<PlexusStore>, connection_file: &Path) -> Self {
         let mcp_transport = Arc::new(McpRemoteTransport::default());
         let rest_transport = Arc::new(RestTransport::default());
-        let credentials = production_credential_source(connection_file);
+        let (credentials, vault_peer) = production_credential_source(connection_file);
         let agent_registry = production_agent_registry(connection_file);
         let github_handle_credentials = production_handle_credential_provider(connection_file);
         let consent_cards = production_consent_cards(connection_file);
@@ -155,6 +156,7 @@ impl ModuleRuntime {
         )
         .with_rest_transport(Arc::clone(&rest_transport));
         Self {
+            vault_peer,
             connector_home,
             store: Arc::clone(&store),
             engine,
@@ -201,6 +203,7 @@ impl ModuleRuntime {
         )
         .with_rest_transport(Arc::clone(&rest_transport));
         Self {
+            vault_peer: None,
             connector_home: Arc::new(crate::connector_home::ConnectorHome::test_admitted()),
             store: Arc::clone(&store),
             engine,
@@ -245,6 +248,7 @@ impl ModuleRuntime {
         )
         .with_rest_transport(Arc::clone(&rest_transport));
         Self {
+            vault_peer: None,
             connector_home: Arc::new(crate::connector_home::ConnectorHome::test_admitted()),
             store: Arc::clone(&store),
             engine,
@@ -381,9 +385,14 @@ fn production_gmail_backend(
     )))
 }
 
-fn production_credential_source(connection_file: &Path) -> Arc<dyn CredentialSource> {
+fn production_credential_source(
+    connection_file: &Path,
+) -> (
+    Arc<dyn CredentialSource>,
+    Option<Arc<dyn plexus_core::credentials::CkcredRoutePeer>>,
+) {
     let Some(module_id) = credentials_route_module_id() else {
-        return Arc::new(FailClosedCredentialSource);
+        return (Arc::new(FailClosedCredentialSource), None);
     };
     let identity = plexus_bind_identity();
     match configured_peer(
@@ -391,8 +400,14 @@ fn production_credential_source(connection_file: &Path) -> Arc<dyn CredentialSou
         "credential source",
         &module_id,
     ) {
-        Some(peer) => Arc::new(CkcredCredentialSource::new(Arc::new(peer))),
-        None => Arc::new(FailClosedCredentialSource),
+        Some(peer) => {
+            let peer = Arc::new(peer);
+            (
+                Arc::new(CkcredCredentialSource::new(peer.clone())),
+                Some(peer),
+            )
+        }
+        None => (Arc::new(FailClosedCredentialSource), None),
     }
 }
 

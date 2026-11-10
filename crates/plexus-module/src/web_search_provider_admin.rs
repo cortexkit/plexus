@@ -83,7 +83,7 @@ impl ConnectionStep {
 struct Plan {
     provider: &'static ProviderName,
     /// The vault reference name to bind, or `None` for anonymous SearXNG.
-    credential: Option<&'static str>,
+    credential: Option<String>,
     instance: Option<InstanceUrl>,
     step: ConnectionStep,
     /// The connection this run creates or reuses: the provider table's id,
@@ -126,6 +126,15 @@ pub(crate) async fn add(
 }
 
 fn plan(state: &Arc<ModuleState>, principal: &str, params: &Value) -> Result<Plan, Value> {
+    plan_with_credential(state, principal, params, None)
+}
+
+fn plan_with_credential(
+    state: &Arc<ModuleState>,
+    principal: &str,
+    params: &Value,
+    auto_credential: Option<&str>,
+) -> Result<Plan, Value> {
     let request = serde_json::from_value::<Request>(params.clone()).map_err(|_| {
         refusal(
             "invalid_request",
@@ -161,6 +170,7 @@ fn plan(state: &Arc<ModuleState>, principal: &str, params: &Value) -> Result<Pla
             ))
         }
     };
+    let credential = auto_credential.or(credential);
     // The reviewed manifest must be installed and must allow a read ceiling on
     // the provider's action; this is the check the ticket itself makes first.
     match state.store().ceiling_within_manifest(
@@ -179,8 +189,14 @@ fn plan(state: &Arc<ModuleState>, principal: &str, params: &Value) -> Result<Pla
         }
     }
     let instance = instance(state, provider, request.instance_url.as_deref())?;
-    let (step, connection_id) =
-        connection_step(state, principal, provider, credential, instance.as_ref())?;
+    let (step, connection_id) = connection_step(
+        state,
+        principal,
+        provider,
+        credential,
+        instance.as_ref(),
+        auto_credential.is_some(),
+    )?;
     let (grantees, grantees_source) = match request.grantees {
         Some(named) => (named_principals(named)?, "explicit"),
         None => (
@@ -188,7 +204,7 @@ fn plan(state: &Arc<ModuleState>, principal: &str, params: &Value) -> Result<Pla
             "existing_search_grants",
         ),
     };
-    if grantees.is_empty() {
+    if grantees.is_empty() && auto_credential.is_none() {
         return Err(refusal(
             "grantees_required",
             "no caller holds a search grant on an existing web search provider; name each caller with --grantee",
@@ -202,7 +218,7 @@ fn plan(state: &Arc<ModuleState>, principal: &str, params: &Value) -> Result<Pla
     };
     Ok(Plan {
         provider,
-        credential,
+        credential: credential.map(str::to_owned),
         instance,
         step,
         connection_id,
@@ -259,6 +275,7 @@ fn connection_step(
     provider: &ProviderName,
     credential: Option<&str>,
     instance: Option<&InstanceUrl>,
+    auto: bool,
 ) -> Result<(ConnectionStep, String), Value> {
     let store = state.store();
     let read_failure = |error: &dyn std::fmt::Display| {
@@ -297,6 +314,21 @@ fn connection_step(
                 .iter()
                 .any(|connection| connection.connection_id == table_id)
             {
+                if auto {
+                    // Revocation is final. A newly stored key may consent to a
+                    // new connection, never to resurrecting the revoked one.
+                    let mut suffix = 1_u64;
+                    loop {
+                        let id = format!("conn-web-search-{}-{suffix}", provider.name);
+                        if !connections
+                            .iter()
+                            .any(|connection| connection.connection_id == id)
+                        {
+                            return Ok((ConnectionStep::Create, id));
+                        }
+                        suffix += 1;
+                    }
+                }
                 return Err(refusal(
                     "connection_revoked",
                     format!(
@@ -546,7 +578,7 @@ fn step_failure(
     )
 }
 
-/// Run the confirmed plan through the paths the manual commands use: the
+/// Run the consented plan through the paths the manual commands use: the
 /// ticket ceremony, the facade connect (with its discovery), then the grants.
 fn apply(state: &Arc<ModuleState>, principal: &str, plan: &Plan) -> Value {
     let provider = plan.provider;
@@ -559,7 +591,7 @@ fn apply(state: &Arc<ModuleState>, principal: &str, plan: &Plan) -> Value {
                 "risk_ceiling": GRANT_RISK,
                 "action_selectors": [provider.action],
             });
-            if let Some(credential) = plan.credential {
+            if let Some(credential) = &plan.credential {
                 ticket["credential_id"] = json!(credential);
             }
             if let Some(instance) = &plan.instance {
@@ -649,4 +681,31 @@ fn apply(state: &Arc<ModuleState>, principal: &str, plan: &Plan) -> Value {
     result["discovery"] = json!(discovery.outcome);
     result["grants"] = json!(plan.grants_json(&present, &minted));
     json!({ "result": result })
+}
+
+/// Use the same ticket, discovery and grant writes as the operator command.
+/// The caller durably records the key/connection association before applying.
+pub(crate) fn auto_plan_and_apply(
+    state: &Arc<ModuleState>,
+    principal: &str,
+    provider: &ProviderName,
+    credential_id: &str,
+    before_apply: impl FnOnce(&str) -> Result<(), Value>,
+) -> Result<(String, Value), Value> {
+    if let Some(refusal) = state.runtime.connector_home.refusal() {
+        return Err(refusal);
+    }
+    let plan = plan_with_credential(
+        state,
+        principal,
+        &json!({"provider": provider.name, "dry_run": false}),
+        Some(credential_id),
+    )?;
+    before_apply(&plan.connection_id)?;
+    // Under the first-party grants model, storing a search key consents to
+    // connecting its provider for callers that already hold search grants.
+    // Only this vault-key path skips confirm_operator; manual
+    // enrollment and every other widening still use composite_admin::run.
+    let result = apply(state, principal, &plan);
+    Ok((plan.connection_id, result))
 }
