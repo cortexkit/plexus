@@ -121,13 +121,24 @@ echo "==> WASI SDK $wasi_sdk_version ($wasi_sdk_platform) sha256 $actual_sha256"
 
 # Asked of cargo rather than assumed: CARGO_TARGET_DIR (set on shared build
 # hosts) moves generated C sources and the output away from the guest's target/.
-target_dir="$(cargo metadata --manifest-path "$guest_root/Cargo.toml" --format-version 1 \
-  --no-deps --offline | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+metadata="$(cargo metadata --manifest-path "$guest_root/Cargo.toml" --format-version 1 \
+  --no-deps --offline)"
+target_dir="$(printf '%s' "$metadata" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+# CARGO_BUILD_BUILD_DIR (set per checkout on the shared build servers) moves
+# intermediate output, including rquickjs-sys's generated C sources, out of
+# the target directory. The committed guest was built with both in one place,
+# so the build directory gets the target directory's neutral name; otherwise
+# its real path ends up in the wasm and the rebuild no longer matches.
+build_dir="$(printf '%s' "$metadata" | python3 -c 'import json, sys; d = json.load(sys.stdin); print(d.get("build_directory") or d["target_directory"])')"
 # Panic locations and C file names must not expose the checkout or SDK paths.
 # Put nested roots last so the Cargo cache and SDK get their own neutral names.
 mkdir -p "${CARGO_HOME:-$HOME/.cargo}"
 cargo_home="$(cd "${CARGO_HOME:-$HOME/.cargo}" && pwd)"
-path_maps=("$repo_root=/plexus" "$target_dir=/plexus-target" "$cargo_home=/cargo" "$sdk_dir=/wasi-sdk")
+path_maps=("$repo_root=/plexus" "$target_dir=/plexus-target")
+if [ "$build_dir" != "$target_dir" ]; then
+  path_maps+=("$build_dir=/plexus-target")
+fi
+path_maps+=("$cargo_home=/cargo" "$sdk_dir=/wasi-sdk")
 # rquickjs-sys overwrites generic CFLAGS with its sysroot. cc also consumes
 # target-specific flags, so add the C path mappings there instead.
 export CFLAGS_wasm32_wasip1="${CFLAGS_wasm32_wasip1:-}"
