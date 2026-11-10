@@ -702,10 +702,11 @@ pub(crate) fn auto_plan_and_apply(
         Some(credential_id),
     )?;
     before_apply(&plan.connection_id)?;
-    // Under the first-party grants model, storing a search key consents to
-    // connecting its provider for callers that already hold search grants.
-    // Only this vault-key path skips confirm_operator; manual
-    // enrollment and every other widening still use composite_admin::run.
+    // The operator approved treating a stored search key as consent to use
+    // it: storing the key connects its provider for callers that already hold
+    // search grants, with no second confirmation. Only this vault-key path
+    // skips confirm_operator; manual enrollment and every other widening
+    // still use composite_admin::run.
     let result = apply(state, principal, &plan);
     Ok((plan.connection_id, result))
 }
