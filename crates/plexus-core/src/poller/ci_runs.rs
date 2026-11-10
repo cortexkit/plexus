@@ -503,6 +503,7 @@ where
             // Jobs carry the run's actor, event and fork status in their v2
             // envelope. Take them from this run read; no extra request.
             let run_attribution = crate::event_envelope::CiRunAttribution::from_run(&run);
+            let attempt_started_at = timestamp(&run, "run_started_at");
             // A replacement watch must keep following attempts still in flight
             // when it was created. Only completed attempts can be historical;
             // use the same updated_at completion time as the run envelope.
@@ -592,6 +593,22 @@ where
                         continue;
                     }
                     examined += 1;
+                    // GitHub copies successful jobs into reruns without running
+                    // them again, so it sends no workflow_job webhook for them.
+                    if attempt.run.run_attempt > 1
+                        && timestamp(&job, "started_at")
+                            .or_else(|| timestamp(&job, "completed_at"))
+                            .zip(attempt_started_at)
+                            .is_some_and(|(job_started, attempt_started)| {
+                                job_started < attempt_started
+                            })
+                    {
+                        dropped.push((
+                            format!("job:{}:{}", job["id"], attempt.run.run_attempt),
+                            DropReason::CarriedOverJob,
+                        ));
+                        continue;
+                    }
                     match ci_event(
                         job,
                         &attempt.run,
@@ -3163,6 +3180,202 @@ mod tests {
         assert_eq!(observer.0.lock().unwrap().len(), 3);
     }
 
+    #[test]
+    fn carried_over_jobs_are_dropped_without_relay_misses() {
+        const TEST: &str =
+            "poller::ci_runs::tests::carried_over_jobs_are_dropped_without_relay_misses";
+        const CHILD: &str = "PLEXUS_CI_CARRIED_OVER_LEDGER_CHILD";
+        // Isolate process-wide poll accounting counters from other test polls.
+        if std::env::var_os(CHILD).is_none() {
+            let output = crate::test_http::bounded::child_test_output(
+                TEST,
+                &[(CHILD, "1")],
+                std::time::Duration::from_secs(60),
+                "CI carried-over ledger test child",
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "CI carried-over ledger child failed: {stdout} {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let f = Fixture::new();
+        let mut r = run(1, 2, f.now - 60_000, "in_progress", None);
+        r["run_started_at"] = json!(iso8601::format_millis(f.now));
+        let mut carried = job(5, f.now + 1_000, Some("success"));
+        carried["started_at"] = json!(iso8601::format_millis(f.now - 1));
+        f.add(r, vec![carried], true);
+        // Only the attempt read has the current start; discovery is stale.
+        f.script.lock().unwrap().discovery[0]["run_started_at"] =
+            json!(iso8601::format_millis(f.now - 60_000));
+        let observer = Arc::new(RelayInsertRecorder::default());
+        let mut poller = TestPoller::new(f.engine.clone());
+        poller.relay_health = Some(observer.clone());
+        assert_eq!(
+            poller.poll_ci_runs_at(PRINCIPAL, &f.watch(), f.now),
+            PollCycle::Completed {
+                inserted: 0,
+                duplicates: 0
+            },
+            "carried-over jobs must not become events"
+        );
+        assert!(f.events().is_empty());
+        assert!(f.markers().is_empty());
+        assert!(observer.0.lock().unwrap().is_empty());
+        assert_eq!(
+            f.requests()
+                .iter()
+                .map(|request| request.action.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "list_workflow_runs",
+                "list_workflow_runs",
+                RUN_READ,
+                JOBS_READ
+            ],
+            "carry-over detection must use the existing attempt read"
+        );
+        assert_eq!(
+            crate::poller::poll_accounting_metrics(),
+            json!({
+                "itemsExamined": 1,
+                "eventsInserted": 0,
+                "identityViolations": 0,
+                "droppedByReason": {
+                    "olderThanWatermark": 0,
+                    "initialBaseline": 0,
+                    "unchangedObservation": 0,
+                    "unchangedBoundaryReplay": 0,
+                    "alreadyDelivered": 0,
+                    "carriedOverJob": 1
+                },
+                "lateRowsBySubscription": {},
+                "credentialNeedsRepairByConnection": {}
+            })
+        );
+    }
+
+    #[test]
+    fn carried_over_filter_keeps_jobs_started_at_or_after_the_attempt() {
+        let f = Fixture::new();
+        let mut carried = job(5, f.now - 1, Some("success"));
+        carried["started_at"] = json!(iso8601::format_millis(f.now - 2));
+        let mut after = job(6, f.now + 2_000, Some("failure"));
+        after["started_at"] = json!(iso8601::format_millis(f.now + 1_000));
+        let mut equal = job(7, f.now + 3_000, Some("success"));
+        equal["started_at"] = json!(iso8601::format_millis(f.now));
+        f.add(
+            run(1, 2, f.now, "in_progress", None),
+            vec![carried, after, equal],
+            true,
+        );
+        let observer = Arc::new(RelayInsertRecorder::default());
+        let mut poller = TestPoller::new(f.engine.clone());
+        poller.relay_health = Some(observer.clone());
+        assert_eq!(
+            poller.poll_ci_runs_at(PRINCIPAL, &f.watch(), f.now),
+            PollCycle::Completed {
+                inserted: 2,
+                duplicates: 0
+            }
+        );
+        assert_eq!(
+            f.events()
+                .iter()
+                .map(|(_, body, _)| body["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![6, 7]
+        );
+        assert_eq!(
+            *observer.0.lock().unwrap(),
+            vec![f.now + 2_000, f.now + 3_000]
+        );
+    }
+
+    #[test]
+    fn carried_over_jobs_fall_back_to_completed_at() {
+        for started in [None, Some(json!("not-a-timestamp")), Some(json!(42))] {
+            let f = Fixture::new();
+            let mut carried = job(5, f.now - 1, Some("success"));
+            let mut reran = job(6, f.now + 1, Some("failure"));
+            if let Some(started) = started {
+                carried["started_at"] = started.clone();
+                reran["started_at"] = started;
+            }
+            f.add(
+                run(1, 2, f.now, "in_progress", None),
+                vec![carried, reran],
+                true,
+            );
+            assert_eq!(f.poll_checked(0), 1);
+            assert_eq!(f.events()[0].1["id"], 6);
+        }
+    }
+
+    #[test]
+    fn carried_over_filter_needs_a_parseable_attempt_start() {
+        for started in [None, Some(json!("not-a-timestamp")), Some(json!(42))] {
+            let f = Fixture::new();
+            let mut r = run(1, 2, f.now, "in_progress", None);
+            r.as_object_mut().unwrap().remove("run_started_at");
+            if let Some(started) = started {
+                r["run_started_at"] = started;
+            }
+            let mut uncertain = job(5, f.now - 1, Some("success"));
+            uncertain["started_at"] = json!(iso8601::format_millis(f.now - 2));
+            f.add(r, vec![uncertain], true);
+            f.add(
+                run(2, 2, f.now, "in_progress", None),
+                vec![job(6, f.now - 1, Some("success"))],
+                true,
+            );
+            assert_eq!(f.poll_checked(0), 1);
+            assert_eq!(f.events()[0].1["id"], 5);
+        }
+    }
+
+    #[test]
+    fn carried_over_filter_leaves_attempt_one_unchanged() {
+        let f = Fixture::new();
+        let mut early = job(5, f.now - 1, Some("success"));
+        early["started_at"] = json!(iso8601::format_millis(f.now - 2));
+        f.add(
+            run(1, 1, f.now, "in_progress", None),
+            vec![early.clone()],
+            true,
+        );
+        f.add(run(2, 2, f.now, "in_progress", None), vec![early], true);
+        assert_eq!(f.poll_checked(0), 1);
+        assert_eq!(f.events()[0].1["run"]["run_attempt"], 1);
+    }
+
+    #[test]
+    fn carried_over_filter_preserves_missing_job_time_validation() {
+        for invalid_time in [Value::Null, json!("not-a-timestamp")] {
+            let f = Fixture::new();
+            let r = run(1, 2, f.now, "in_progress", None);
+            f.add(r.clone(), vec![job(5, f.now - 1, Some("success"))], true);
+            assert_eq!(f.poll_checked(0), 0);
+            let before = f.cursor();
+            let mut malformed = job(6, f.now, Some("success"));
+            malformed.as_object_mut().unwrap().remove("completed_at");
+            if !invalid_time.is_null() {
+                malformed["started_at"] = invalid_time.clone();
+                malformed["completed_at"] = invalid_time;
+            }
+            f.add(r, vec![malformed], false);
+            assert!(matches!(
+                f.poll(1),
+                PollCycle::VendorFailed { code } if code == RESPONSE_SHAPE_INVALID
+            ));
+            assert_eq!(f.cursor(), before);
+            assert!(f.events().is_empty());
+            assert!(f.markers().is_empty());
+        }
+    }
+
     /// Treat a local refusal or unknown CI read outcome as inconclusive. Keep
     /// the subscription active without advancing its cursor or increasing its
     /// consecutive vendor-failure count. These outcomes must not trigger the
@@ -3293,7 +3506,8 @@ mod tests {
                     "initialBaseline": 0,
                     "unchangedObservation": 0,
                     "unchangedBoundaryReplay": 0,
-                    "alreadyDelivered": 0
+                    "alreadyDelivered": 0,
+                    "carriedOverJob": 0
                 },
                 "lateRowsBySubscription": {},
                 "credentialNeedsRepairByConnection": {}

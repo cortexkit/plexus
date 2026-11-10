@@ -18,15 +18,17 @@ pub enum DropReason {
     UnchangedObservation,
     UnchangedBoundaryReplay,
     AlreadyDelivered,
+    CarriedOverJob,
 }
 
 impl DropReason {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::OlderThanWatermark,
         Self::InitialBaseline,
         Self::UnchangedObservation,
         Self::UnchangedBoundaryReplay,
         Self::AlreadyDelivered,
+        Self::CarriedOverJob,
     ];
 
     fn slot(self) -> usize {
@@ -36,6 +38,7 @@ impl DropReason {
             Self::UnchangedObservation => 2,
             Self::UnchangedBoundaryReplay => 3,
             Self::AlreadyDelivered => 4,
+            Self::CarriedOverJob => 5,
         }
     }
 
@@ -46,6 +49,7 @@ impl DropReason {
             Self::UnchangedObservation => "unchangedObservation",
             Self::UnchangedBoundaryReplay => "unchangedBoundaryReplay",
             Self::AlreadyDelivered => "alreadyDelivered",
+            Self::CarriedOverJob => "carriedOverJob",
         }
     }
 }
@@ -54,7 +58,7 @@ struct Counters {
     examined: AtomicU64,
     inserted: AtomicU64,
     violations: AtomicU64,
-    dropped: [AtomicU64; 5],
+    dropped: [AtomicU64; DropReason::ALL.len()],
     /// Count, per subscription, of rows an ordered-timestamp watch saw late: a
     /// new row whose timestamp lies well below the watermark the previous poll
     /// reached, so it was not yet visible when that span was first read. The
@@ -80,7 +84,7 @@ impl Counters {
             examined: AtomicU64::new(0),
             inserted: AtomicU64::new(0),
             violations: AtomicU64::new(0),
-            dropped: [const { AtomicU64::new(0) }; 5],
+            dropped: [const { AtomicU64::new(0) }; DropReason::ALL.len()],
             late_rows: Mutex::new(BTreeMap::new()),
             credential_repair: Mutex::new(BTreeMap::new()),
         }
@@ -108,7 +112,7 @@ impl Counters {
         self.inserted.fetch_add(inserted as u64, Ordering::Relaxed);
         self.violations
             .fetch_add(u64::from(!balanced), Ordering::Relaxed);
-        let mut counts = [0u64; 5];
+        let mut counts = [0u64; DropReason::ALL.len()];
         for (_, reason) in dropped {
             counts[reason.slot()] += 1;
         }
@@ -392,7 +396,7 @@ mod tests {
             counters.snapshot(),
             json!({
                 "itemsExamined": 6, "eventsInserted": 1, "identityViolations": 1,
-                "droppedByReason": {"olderThanWatermark": 0, "initialBaseline": 0, "unchangedObservation": 0, "unchangedBoundaryReplay": 0, "alreadyDelivered": 4},
+                "droppedByReason": {"olderThanWatermark": 0, "initialBaseline": 0, "unchangedObservation": 0, "unchangedBoundaryReplay": 0, "alreadyDelivered": 4, "carriedOverJob": 0},
                 "lateRowsBySubscription": {},
                 "credentialNeedsRepairByConnection": {}
             })
