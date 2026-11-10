@@ -70,10 +70,20 @@ pub fn trust_for_principal(principal: &Option<Principal>) -> PrincipalTrust {
 /// `cingulate` serves the operator's permissions page and calls
 /// `permissions.list` and `permissions.revoke` here. Standing only lets it
 /// bind: it holds no grants, so every facade tool still refuses it.
+///
+/// `striatum` is the routing module's new id, accepted ahead of its rename
+/// from `prefrontal-routing`; both stay until no build can run under the old
+/// one.
 fn is_first_party_module_id(module_id: &str) -> bool {
     matches!(
         module_id,
-        "prefrontal-core" | "prefrontal-routing" | "aft" | "broca" | "basal" | "cingulate"
+        "prefrontal-core"
+            | "prefrontal-routing"
+            | "striatum"
+            | "aft"
+            | "broca"
+            | "basal"
+            | "cingulate"
     )
 }
 
@@ -105,6 +115,7 @@ mod tests {
         for module_id in [
             "prefrontal-core",
             "prefrontal-routing",
+            "striatum",
             "aft",
             "broca",
             "basal",
@@ -181,6 +192,8 @@ mod tests {
             "cingulate-x",
             "cingulatex",
             "Cingulate",
+            "striatum-x",
+            "Striatum",
             "",
         ] {
             assert_eq!(
