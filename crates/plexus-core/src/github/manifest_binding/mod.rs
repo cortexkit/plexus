@@ -357,8 +357,11 @@ impl ApprovalPass<'_> {
                                 }
                                 Ok(CardReply::Conflict) => {
                                     // Another session already holds the card for
-                                    // this statement. Filing again cannot help;
-                                    // the vault's manifest watch reports the outcome.
+                                    // this statement. Filing again cannot help. If
+                                    // the owner approves, the vault stores a new
+                                    // manifest version and its `manifest.watch`
+                                    // notice carries that version, which `notice`
+                                    // matches against this record.
                                     record.state = "card_conflict".into();
                                     self.save(&mut record, None)?;
                                     self.log_once(
