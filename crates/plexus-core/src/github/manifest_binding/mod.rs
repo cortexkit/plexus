@@ -317,35 +317,74 @@ impl ApprovalPass<'_> {
                     .strip_prefix("github_app:")
                     .filter(|s| !s.is_empty())
                     .ok_or("app_slug_missing")?;
-                match self.call::<Proposal>("manifest.propose_binding",json!({"agent_id":handle.agent_id,"app_id":handle.app_id,"app_slug":slug,"repo":record.repository})) {
+                let params = json!({
+                    "agent_id": handle.agent_id,
+                    "app_id": handle.app_id,
+                    "app_slug": slug,
+                    "repo": record.repository,
+                });
+                match self.call::<Proposal>("manifest.propose_binding", params) {
                     Ok(proposal) => {
-                        if proposal.statement(&handle.agent_id,slug,&record.repository).is_err() || proposal.expires_at_ms <= now {
-                            self.failure(Failure::InvalidReply,None,now)?; break;
+                        let statement_matches = proposal
+                            .statement(&handle.agent_id, slug, &record.repository)
+                            .is_ok();
+                        if !statement_matches || proposal.expires_at_ms <= now {
+                            self.failure(Failure::InvalidReply, None, now)?;
+                            break;
                         }
                         if record.proposal_id.as_deref() != Some(&proposal.proposal_id) {
-                            record.proposal_id = Some(proposal.proposal_id.clone()); record.manifest_version=Some(proposal.manifest_version);
-                            record.manifest_sha256=Some(proposal.manifest_sha256.clone()); record.statement_b64url=Some(proposal.statement_b64url.clone());
-                            record.expires_at_ms=Some(proposal.expires_at_ms); record.state="pending".into(); record.card_id=None;
-                            self.save(&mut record,Some("github_manifest_proposed"))?;
+                            record.proposal_id = Some(proposal.proposal_id.clone());
+                            record.manifest_version = Some(proposal.manifest_version);
+                            record.manifest_sha256 = Some(proposal.manifest_sha256.clone());
+                            record.statement_b64url = Some(proposal.statement_b64url.clone());
+                            record.expires_at_ms = Some(proposal.expires_at_ms);
+                            record.state = "pending".into();
+                            record.card_id = None;
+                            self.save(&mut record, Some("github_manifest_proposed"))?;
                         }
-                        if record.card_id.is_none() && record.state!="card_conflict" && self.admitted() {
-                            match self.cards.manifest_binding_card(CardRequest::File{handle:&handle,proposal:&proposal}) {
+                        if record.card_id.is_none()
+                            && record.state != "card_conflict"
+                            && self.admitted()
+                        {
+                            let filed = self.cards.manifest_binding_card(CardRequest::File {
+                                handle: &handle,
+                                proposal: &proposal,
+                            });
+                            match filed {
                                 Ok(CardReply::Filed(id)) if !id.is_empty() => {
-                                    record.card_id=Some(id); self.save(&mut record,Some("github_manifest_card_filed"))?;
+                                    record.card_id = Some(id);
+                                    self.save(&mut record, Some("github_manifest_card_filed"))?;
                                 }
                                 Ok(CardReply::Conflict) => {
-                                    record.state="card_conflict".into();self.save(&mut record,None)?;
-                                    self.log_once(format!("card-conflict:{}:{}",handle.app_handle_id,record.repository),"elicitation_request_conflict");
+                                    // Another session already holds the card for
+                                    // this statement. Filing again cannot help;
+                                    // the vault's manifest watch reports the outcome.
+                                    record.state = "card_conflict".into();
+                                    self.save(&mut record, None)?;
+                                    self.log_once(
+                                        format!(
+                                            "card-conflict:{}:{}",
+                                            handle.app_handle_id, record.repository
+                                        ),
+                                        "elicitation_request_conflict",
+                                    );
                                 }
                                 _ => return Err("manifest_binding_card_unavailable".into()),
                             }
                         }
                     }
-                    Err(Failure::Domain(ref refusal)) if refusal.code == "already_bound" && refusal.remedy() == Remedy::Retry => {
-                        record.manifest_version=refusal.version; record.manifest_sha256=refusal.manifest_sha256.clone(); record.state="awaiting_active".into();
-                        self.save(&mut record,None)?;
+                    // The vault already maps this repository to this agent in a
+                    // stored version, so no card is needed: bind once that
+                    // version is active everywhere.
+                    Err(Failure::Domain(ref refusal))
+                        if refusal.code == "already_bound" && refusal.remedy() == Remedy::Retry =>
+                    {
+                        record.manifest_version = refusal.version;
+                        record.manifest_sha256 = refusal.manifest_sha256.clone();
+                        record.state = "awaiting_active".into();
+                        self.save(&mut record, None)?;
                     }
-                    Err(failure) => self.failure(failure,Some(&mut record),now)?,
+                    Err(failure) => self.failure(failure, Some(&mut record), now)?,
                 }
             }
         }
