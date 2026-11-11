@@ -487,6 +487,21 @@ pub trait CkcredRoutePeer: Send + Sync {
     fn watch_scoped(&self) -> Result<CkcredWatch, CkcredRouteError> {
         Err(CkcredRouteError::Transport)
     }
+
+    fn watch_manifest(&self) -> Result<CkcredWatch, CkcredRouteError> {
+        Err(CkcredRouteError::Transport)
+    }
+
+    /// Manifest replies contain no credentials. Transport Error frames have
+    /// no domain-refusal class: preserve their codes so an unsupported method
+    /// stops the worker, while a broken route can reconnect and retry.
+    fn manifest_call(
+        &self,
+        operation: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, CkcredRouteError> {
+        self.call(operation, params)
+    }
 }
 
 /// Dropping the watch cancels its forwarding task and the held subscription.
@@ -899,8 +914,8 @@ impl SubcCkcredRoutePeer {
     }
 }
 
-impl CkcredRoutePeer for SubcCkcredRoutePeer {
-    fn watch_scoped(&self) -> Result<CkcredWatch, CkcredRouteError> {
+impl SubcCkcredRoutePeer {
+    fn watch_operation(&self, operation: &'static str) -> Result<CkcredWatch, CkcredRouteError> {
         let runtime = self.runtime.as_ref().ok_or(CkcredRouteError::Transport)?;
         let consumer = self.consumer.clone();
         let target = self.target.clone();
@@ -910,7 +925,8 @@ impl CkcredRoutePeer for SubcCkcredRoutePeer {
                 .subscribe(
                     target,
                     identity,
-                    br#"{"method":"auth.watch_scoped","params":{}}"#.to_vec(),
+                    serde_json::to_vec(&serde_json::json!({"method":operation,"params":{}}))
+                        .map_err(|_| CkcredRouteError::NotSent)?,
                     subc_client_rs::SubscribeOptions::default(),
                 )
                 .await
@@ -945,6 +961,55 @@ impl CkcredRoutePeer for SubcCkcredRoutePeer {
         Ok(CkcredWatch {
             events,
             task: Some(task),
+        })
+    }
+}
+
+impl CkcredRoutePeer for SubcCkcredRoutePeer {
+    fn watch_scoped(&self) -> Result<CkcredWatch, CkcredRouteError> {
+        self.watch_operation("auth.watch_scoped")
+    }
+
+    fn watch_manifest(&self) -> Result<CkcredWatch, CkcredRouteError> {
+        self.watch_operation("manifest.watch")
+    }
+
+    fn manifest_call(
+        &self,
+        operation: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, CkcredRouteError> {
+        let runtime = self.runtime.as_ref().ok_or(CkcredRouteError::Transport)?;
+        let consumer = self.consumer.clone();
+        let target = self.target.clone();
+        let identity = self.identity.clone();
+        let body = serde_json::to_vec(&serde_json::json!({"method":operation,"params":params}))
+            .map_err(|_| CkcredRouteError::NotSent)?;
+        run_on(runtime, async move {
+            // Proposing performs bounded upstream reads before its serialized
+            // commit. Repeating the same agent/repository pair returns the
+            // live proposal, or its stored version if approval already won.
+            let options = subc_client_rs::CallOptions {
+                timeout: std::time::Duration::from_secs(120),
+                ..Default::default()
+            };
+            match consumer.call(target, identity, body, options).await {
+                Ok(bytes) => {
+                    serde_json::from_slice(&bytes).map_err(|_| CkcredRouteError::Transport)
+                }
+                Err(error) => {
+                    if let Some(body) = error.route_open_refusal() {
+                        return Ok(serde_json::json!({"code":body.code}));
+                    }
+                    match error {
+                        subc_client_rs::CallError::Module(body) => {
+                            Ok(serde_json::json!({"code":body.code}))
+                        }
+                        subc_client_rs::CallError::NotSent(_) => Err(CkcredRouteError::NotSent),
+                        _ => Err(CkcredRouteError::OutcomeUnknown),
+                    }
+                }
+            }
         })
     }
 

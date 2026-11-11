@@ -79,10 +79,17 @@ impl ElicitationCallError {
     }
 }
 
-/// Calls Cingulate under the held call's daemon scope selector. The timeout
-/// covers route admission and the reply; implementations must not fall back to
-/// an unscoped route when admission fails.
+/// Calls Cingulate either under a held call's daemon scope or as Plexus itself.
+/// A failed scoped call must never fall back to the unscoped route.
 pub trait ElicitationRoute: Send + Sync {
+    fn call_unscoped(
+        &self,
+        _operation: &str,
+        _params: Value,
+        _timeout: Duration,
+    ) -> Result<Value, ElicitationCallError> {
+        Err(ElicitationCallError::NotSent)
+    }
     fn call_scoped(
         &self,
         scope: &CallScope,
@@ -245,11 +252,152 @@ fn truncate_chars_with_ellipsis(text: &str, max: usize) -> String {
     }
 }
 
-/// The requester for approval cards. All id operations use the original
-/// approval's scope, including withdrawal after a held call has returned.
+/// The requester for approval cards. Held-call cards retain their original
+/// scope; manifest-binding cards use Plexus's own unscoped owner.
 pub struct ConsentCards {
     route: Arc<dyn ElicitationRoute>,
 }
+
+impl crate::github::manifest_binding::BindingCards for ConsentCards {
+    fn manifest_binding_card(
+        &self,
+        request: crate::github::manifest_binding::CardRequest<'_>,
+    ) -> Result<crate::github::manifest_binding::CardReply, String> {
+        use crate::github::manifest_binding::{CardReply, CardRequest};
+        match request {
+            CardRequest::Available => Ok(CardReply::Available),
+            CardRequest::File { proposal, .. } => {
+                let body = json!({"kind":"manifest_binding","manifest_binding":{"statement_b64url":proposal.statement_b64url}});
+                match self
+                    .route
+                    .call_unscoped(CONSENT_REQUEST, body, CONTROL_RPC_TIMEOUT)
+                {
+                    Ok(reply) => Ok(CardReply::Filed(
+                        reply["elicitation_id"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .ok_or("manifest_binding_card_reply_invalid")?
+                            .into(),
+                    )),
+                    Err(error) if error.code() == "elicitation_request_conflict" => {
+                        Ok(CardReply::Conflict)
+                    }
+                    Err(error) => Err(error.code().into()),
+                }
+            }
+            CardRequest::Get {
+                card_id,
+                statement_b64url,
+            } => {
+                let record = self
+                    .route
+                    .call_unscoped(
+                        CONSENT_GET,
+                        json!({"elicitation_id":card_id}),
+                        CONTROL_RPC_TIMEOUT,
+                    )
+                    .map_err(|e| e.code().to_owned())?;
+                manifest_binding_answer(record, card_id, statement_b64url).map(CardReply::State)
+            }
+            CardRequest::Await {
+                card_id,
+                statement_b64url,
+                timeout_ms,
+            } => {
+                let timeout_ms = timeout_ms.min(AWAIT_MAX_MS as u64);
+                let record = self
+                    .route
+                    .call_unscoped(
+                        CONSENT_AWAIT,
+                        json!({"elicitation_id":card_id,"timeout_ms":timeout_ms}),
+                        Duration::from_millis(timeout_ms) + CONTROL_RPC_TIMEOUT,
+                    )
+                    .map_err(|e| e.code().to_owned())?;
+                manifest_binding_answer(record, card_id, statement_b64url).map(CardReply::State)
+            }
+        }
+    }
+}
+
+fn manifest_binding_answer(
+    record: Value,
+    card_id: &str,
+    expected_statement: &str,
+) -> Result<crate::github::manifest_binding::CardState, String> {
+    use crate::github::manifest_binding::{
+        wire::{valid_hash, Statement},
+        CardState,
+    };
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let invalid = || "manifest_binding_card_reply_invalid".to_owned();
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(expected_statement)
+        .map_err(|_| invalid())?;
+    let statement: Statement = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let binding = &record["manifest_binding"];
+    if record["elicitation_id"] != card_id
+        || record["kind"] != "manifest_binding"
+        || binding["statement_b64url"] != expected_statement
+        || binding["statement_sha256"] != hash
+        || binding["agent_id"] != statement.agent_id
+        || binding["app_slug"] != statement.app_slug
+        || binding["repo"] != statement.repo
+        || binding["installation_permissions"]
+            != serde_json::to_value(&statement.installation_permissions).map_err(|_| invalid())?
+        || record["expires_at_ms"] != statement.expires_at_ms
+    {
+        return Err(invalid());
+    }
+    match record["state"].as_str() {
+        Some("pending")
+            if record.get("manifest_binding_answer").is_none()
+                && record.get("answered_choice_id").is_none() =>
+        {
+            Ok(CardState::Pending)
+        }
+        Some("expired")
+            if record.get("manifest_binding_answer").is_none()
+                && record.get("answered_choice_id").is_none() =>
+        {
+            Ok(CardState::Expired)
+        }
+        Some("answered") => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Answer {
+                decision: String,
+                statement_sha256: String,
+                envelope_sha256: Option<String>,
+            }
+            let answer: Answer = serde_json::from_value(record["manifest_binding_answer"].clone())
+                .map_err(|_| invalid())?;
+            let device = record["answered_device"].as_str().ok_or_else(invalid)?;
+            if answer.statement_sha256 != hash
+                || device.len() != 32
+                || !device
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                || record["answered_choice_id"] != answer.decision
+            {
+                return Err(invalid());
+            }
+            match answer.decision.as_str() {
+                "allow" if answer.envelope_sha256.as_deref().is_some_and(valid_hash) => {
+                    Ok(CardState::Approved)
+                }
+                "decline" if answer.envelope_sha256.is_none() => Ok(CardState::Declined),
+                _ => Err(invalid()),
+            }
+        }
+        _ => Err(invalid()),
+    }
+}
+
+#[cfg(test)]
+#[path = "manifest_binding_card_tests.rs"]
+mod manifest_binding;
 
 impl ConsentCards {
     pub fn new(route: Arc<dyn ElicitationRoute>) -> Self {

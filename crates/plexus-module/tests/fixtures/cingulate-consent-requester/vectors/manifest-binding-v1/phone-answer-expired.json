@@ -1,0 +1,17 @@
+{
+  "method": "consent.answer",
+  "params": {
+    "choiceId": "allow",
+    "clientFeatures": [
+      "manifest-binding-approval"
+    ],
+    "elicitationId": "el_1",
+    "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiIsInYiOiJjay1tYW5pZmVzdC1iaW5kaW5nLWVudmVsb3BlL3YxIn0"
+  },
+  "reply": {
+    "error": {
+      "code": "elicitation_expired",
+      "message": "elicitation_expired: manifest_binding.expires_at_ms has passed"
+    }
+  }
+}

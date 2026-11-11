@@ -259,6 +259,14 @@ impl PrefrontalRoutePeer for SubcPrefrontalRoutePeer {
 /// success as `{"result": value}` and a refusal as an error frame with an
 /// `elicitation_*` code, which is kept so the caller can log and branch on it.
 impl crate::consent_card::ElicitationRoute for SubcPrefrontalRoutePeer {
+    fn call_unscoped(
+        &self,
+        operation: &str,
+        params: Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value, crate::consent_card::ElicitationCallError> {
+        elicitation_result(self.call_value_scoped(operation, params, None, Some(timeout)))
+    }
     fn call_scoped(
         &self,
         scope: &crate::scope::CallScope,
@@ -274,15 +282,22 @@ impl crate::consent_card::ElicitationRoute for SubcPrefrontalRoutePeer {
             scope.scope_ref.clone(),
             Some(scope.scope_epoch),
         );
-        match self.call_value_scoped(operation, params, Some(selector), Some(timeout)) {
-            Ok(mut reply) => Ok(reply.get_mut("result").map(Value::take).unwrap_or(reply)),
-            Err(RouteCallFailure::Module { code, message, .. }) => {
-                Err(ElicitationCallError::Refused { code, message })
-            }
-            Err(RouteCallFailure::NotSent) => Err(ElicitationCallError::NotSent),
-            Err(RouteCallFailure::OutcomeUnknown) => Err(ElicitationCallError::OutcomeUnknown),
-            Err(RouteCallFailure::Transport) => Err(ElicitationCallError::Transport),
+        elicitation_result(self.call_value_scoped(operation, params, Some(selector), Some(timeout)))
+    }
+}
+
+fn elicitation_result(
+    result: Result<Value, RouteCallFailure>,
+) -> Result<Value, crate::consent_card::ElicitationCallError> {
+    use crate::consent_card::ElicitationCallError;
+    match result {
+        Ok(mut reply) => Ok(reply.get_mut("result").map(Value::take).unwrap_or(reply)),
+        Err(RouteCallFailure::Module { code, message, .. }) => {
+            Err(ElicitationCallError::Refused { code, message })
         }
+        Err(RouteCallFailure::NotSent) => Err(ElicitationCallError::NotSent),
+        Err(RouteCallFailure::OutcomeUnknown) => Err(ElicitationCallError::OutcomeUnknown),
+        Err(RouteCallFailure::Transport) => Err(ElicitationCallError::Transport),
     }
 }
 

@@ -1,0 +1,14 @@
+{
+  "method": "consent.request",
+  "params": {
+    "kind": "manifest_binding",
+    "manifest_binding": {
+      "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50XzQ0NDQ0NDQ0NDQ0NDQ0NDQiLCJhcHBfc2x1ZyI6InBsZXgtYWxmb25zbyIsImV4cGlyZXNfYXRfbXMiOjE3OTQ0NDE3MDAxMjMsImluc3RhbGxhdGlvbl9wZXJtaXNzaW9ucyI6eyJjb250ZW50cyI6InJlYWQiLCJpc3N1ZXMiOiJ3cml0ZSIsIm1ldGFkYXRhIjoicmVhZCIsInB1bGxfcmVxdWVzdHMiOiJ3cml0ZSJ9LCJtYW5pZmVzdF9zaGEyNTYiOiI5NGNmODk0ZTE3NDYyY2VjMDljNzM3YjA0MmUzZjJjNDJkYmRkOTVmZmRjYWUxMDdiN2IwMGJjN2Q5ZTZjOGYzIiwibWFuaWZlc3RfdmVyc2lvbiI6MjksInByaW9yX3NoYTI1NiI6IjkxMjQ0ODkxYzQ5OGIzZTUxOTk3NjA0ZTllZGYzMGY3NWI2YmYxMGVkZmQyMDIxYzVmZWZlZWY1MTgzODRiYjUiLCJwcmlvcl92ZXJzaW9uIjoyOCwicHJvcG9zYWxfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcG8iOiJPY3RvLU93bmVyL05ldy1SZXBvIiwidiI6ImNrLW1hbmlmZXN0LWJpbmRpbmctc3RhdGVtZW50L3YxIn0"
+    }
+  },
+  "reply": {
+    "result": {
+      "elicitation_id": "el_1"
+    }
+  }
+}

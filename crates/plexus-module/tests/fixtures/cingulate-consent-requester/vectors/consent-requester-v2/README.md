@@ -1,12 +1,12 @@
 # Generic consent requester additions, v2
 
-This corpus adds generic-consent requests from Cerebellum and Plexus to the
-requester v2 contract. Existing v1 corpora are unchanged. Requests/replies are
-actual envelopes served by the handler over scratch SQLite stores with a
-deterministic clock and ids. The stamped principals are `reserved:cerebellum`
-and `reserved:plexus`, with carried subject agent `agent-alf`; neither identity
-is supplied in request params. Phone records use the daemon-attested Callosum
-phone surface. Outcome records are read through the daemon-stamped
+This corpus adds generic-consent requests from Cerebellum, Plexus and Broca to
+the requester v2 contract. Existing v1 corpora are unchanged. Requests/replies
+are actual envelopes served by the handler over scratch SQLite stores with a
+deterministic clock and ids. The stamped principals are `reserved:cerebellum`,
+`reserved:plexus` and `reserved:broca`, with carried subject agent `agent-alf`;
+neither identity is supplied in request params. Phone records use the
+daemon-attested Callosum phone surface. Outcome records are read through the daemon-stamped
 `reserved:prefrontal-core` route.
 
 - `cerebellum-*`: a generic request without `requester_ref`.
@@ -15,6 +15,8 @@ phone surface. Outcome records are read through the daemon-stamped
   get/list omitting it.
 - `cerebellum-non-consent-*`: a valid flow decision refused for Cerebellum.
 - `plexus-*`: a generic request from Plexus, with a valid flow decision refused
+  for its non-consent-kind vector.
+- `broca-*`: a generic request from Broca, with a valid flow decision refused
   for its non-consent-kind vector.
 
 Regenerate the corpus and its SHA256SUMS using the existing generator:

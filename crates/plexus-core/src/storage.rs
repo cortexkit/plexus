@@ -1272,6 +1272,28 @@ CREATE TABLE web_search_auto_connections (
 );
 "#,
     },
+    Migration {
+        version: 60,
+        statements: r#"
+CREATE TABLE github_manifest_binding (
+    app_handle_id TEXT NOT NULL REFERENCES github_app_handle(app_handle_id) ON DELETE CASCADE,
+    repository TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    proposal_id TEXT,
+    manifest_version INTEGER,
+    manifest_sha256 TEXT,
+    statement_b64url TEXT,
+    expires_at_ms INTEGER,
+    state TEXT NOT NULL CHECK(state IN ('observed','pending','card_conflict','awaiting_active','declined','expired','terminal','bound')),
+    card_id TEXT,
+    present INTEGER NOT NULL CHECK(present IN (0,1)),
+    revision INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(app_handle_id, repository)
+);
+CREATE UNIQUE INDEX github_manifest_proposal_id ON github_manifest_binding(proposal_id)
+    WHERE proposal_id IS NOT NULL;
+"#,
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
@@ -1354,6 +1376,9 @@ pub mod github_store;
 
 #[path = "store/github_bot_reads.rs"]
 pub mod github_bot_reads_store;
+
+#[path = "store/github_manifest_binding.rs"]
+pub mod github_manifest_binding;
 
 #[path = "store/permissions.rs"]
 pub mod permissions_store;

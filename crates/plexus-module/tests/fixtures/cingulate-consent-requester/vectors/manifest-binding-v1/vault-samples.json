@@ -1,0 +1,61 @@
+{
+  "source_tag": "manifest-binding-vectors-v1",
+  "source_commit": "c2a9ce2eaf99da646160eeb0c73d6b11d9341cbf",
+  "samples": {
+    "statement": {
+      "statement": {
+        "agent_id": "agent_4444444444444444",
+        "app_slug": "plex-alfonso",
+        "expires_at_ms": 1794441700123,
+        "installation_permissions": {
+          "contents": "read",
+          "issues": "write",
+          "metadata": "read",
+          "pull_requests": "write"
+        },
+        "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+        "manifest_version": 29,
+        "prior_sha256": "91244891c498b3e51997604e9edf30f75b6bf10edfd2021c5fefeef518384bb5",
+        "prior_version": 28,
+        "proposal_id": "01HF7YAT000000000000000001",
+        "repo": "Octo-Owner/New-Repo",
+        "v": "ck-manifest-binding-statement/v1"
+      },
+      "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50XzQ0NDQ0NDQ0NDQ0NDQ0NDQiLCJhcHBfc2x1ZyI6InBsZXgtYWxmb25zbyIsImV4cGlyZXNfYXRfbXMiOjE3OTQ0NDE3MDAxMjMsImluc3RhbGxhdGlvbl9wZXJtaXNzaW9ucyI6eyJjb250ZW50cyI6InJlYWQiLCJpc3N1ZXMiOiJ3cml0ZSIsIm1ldGFkYXRhIjoicmVhZCIsInB1bGxfcmVxdWVzdHMiOiJ3cml0ZSJ9LCJtYW5pZmVzdF9zaGEyNTYiOiI5NGNmODk0ZTE3NDYyY2VjMDljNzM3YjA0MmUzZjJjNDJkYmRkOTVmZmRjYWUxMDdiN2IwMGJjN2Q5ZTZjOGYzIiwibWFuaWZlc3RfdmVyc2lvbiI6MjksInByaW9yX3NoYTI1NiI6IjkxMjQ0ODkxYzQ5OGIzZTUxOTk3NjA0ZTllZGYzMGY3NWI2YmYxMGVkZmQyMDIxYzVmZWZlZWY1MTgzODRiYjUiLCJwcmlvcl92ZXJzaW9uIjoyOCwicHJvcG9zYWxfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcG8iOiJPY3RvLU93bmVyL05ldy1SZXBvIiwidiI6ImNrLW1hbmlmZXN0LWJpbmRpbmctc3RhdGVtZW50L3YxIn0",
+      "statement_sha256": "eaf608fe6ac940d93f289b86ae0517a36838a5d9d84ee119be1495cf0f5b14e6",
+      "statement_utf8": "{\"agent_id\":\"agent_4444444444444444\",\"app_slug\":\"plex-alfonso\",\"expires_at_ms\":1794441700123,\"installation_permissions\":{\"contents\":\"read\",\"issues\":\"write\",\"metadata\":\"read\",\"pull_requests\":\"write\"},\"manifest_sha256\":\"94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3\",\"manifest_version\":29,\"prior_sha256\":\"91244891c498b3e51997604e9edf30f75b6bf10edfd2021c5fefeef518384bb5\",\"prior_version\":28,\"proposal_id\":\"01HF7YAT000000000000000001\",\"repo\":\"Octo-Owner/New-Repo\",\"v\":\"ck-manifest-binding-statement/v1\"}"
+    },
+    "envelope": {
+      "approval_public_key_sec1_hex": "041e18532fd4754c02f3041d9c75ceb33b83ffd81ac7ce4fe882ccb1c98bc5896ea46c311c4e2ff40dd96a3653e6e45445d32dfe486eced75c7a90c6a18881c0a3",
+      "envelope": {
+        "decision": "allow",
+        "device_fingerprint": "11111111111111111111111111111111",
+        "issued_at_ms": 1794355300123,
+        "proposal_id": "01HF7YAT000000000000000001",
+        "statement_sha256": "eaf608fe6ac940d93f289b86ae0517a36838a5d9d84ee119be1495cf0f5b14e6",
+        "v": "ck-manifest-binding-envelope/v1"
+      },
+      "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiIsInYiOiJjay1tYW5pZmVzdC1iaW5kaW5nLWVudmVsb3BlL3YxIn0",
+      "envelope_utf8": "{\"decision\":\"allow\",\"device_fingerprint\":\"11111111111111111111111111111111\",\"issued_at_ms\":1794355300123,\"proposal_id\":\"01HF7YAT000000000000000001\",\"statement_sha256\":\"eaf608fe6ac940d93f289b86ae0517a36838a5d9d84ee119be1495cf0f5b14e6\",\"v\":\"ck-manifest-binding-envelope/v1\"}",
+      "signature_b64url": "MEQCIAZF7e1xy2QYfTHt43uKDjXtDfmdhMM9IVUPQ8Dw3H1pAiBZvyBy94PV9_AjDd9k8yMkXO9wuJQUo7G9FeqE63JWXg",
+      "test_only_private_scalar_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+    },
+    "propose.reply": {
+      "result": {
+        "expires_at_ms": 1794441700123,
+        "manifest_sha256": "94cf894e17462cec09c737b042e3f2c42dbdd95ffdcae107b7b00bc7d9e6c8f3",
+        "manifest_version": 29,
+        "proposal_id": "01HF7YAT000000000000000001",
+        "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50XzQ0NDQ0NDQ0NDQ0NDQ0NDQiLCJhcHBfc2x1ZyI6InBsZXgtYWxmb25zbyIsImV4cGlyZXNfYXRfbXMiOjE3OTQ0NDE3MDAxMjMsImluc3RhbGxhdGlvbl9wZXJtaXNzaW9ucyI6eyJjb250ZW50cyI6InJlYWQiLCJpc3N1ZXMiOiJ3cml0ZSIsIm1ldGFkYXRhIjoicmVhZCIsInB1bGxfcmVxdWVzdHMiOiJ3cml0ZSJ9LCJtYW5pZmVzdF9zaGEyNTYiOiI5NGNmODk0ZTE3NDYyY2VjMDljNzM3YjA0MmUzZjJjNDJkYmRkOTVmZmRjYWUxMDdiN2IwMGJjN2Q5ZTZjOGYzIiwibWFuaWZlc3RfdmVyc2lvbiI6MjksInByaW9yX3NoYTI1NiI6IjkxMjQ0ODkxYzQ5OGIzZTUxOTk3NjA0ZTllZGYzMGY3NWI2YmYxMGVkZmQyMDIxYzVmZWZlZWY1MTgzODRiYjUiLCJwcmlvcl92ZXJzaW9uIjoyOCwicHJvcG9zYWxfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcG8iOiJPY3RvLU93bmVyL05ldy1SZXBvIiwidiI6ImNrLW1hbmlmZXN0LWJpbmRpbmctc3RhdGVtZW50L3YxIn0",
+        "status": "approval_required"
+      }
+    },
+    "approve.request": {
+      "method": "manifest.approve",
+      "params": {
+        "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiIsInYiOiJjay1tYW5pZmVzdC1iaW5kaW5nLWVudmVsb3BlL3YxIn0",
+        "signature_b64url": "MEQCIAZF7e1xy2QYfTHt43uKDjXtDfmdhMM9IVUPQ8Dw3H1pAiBZvyBy94PV9_AjDd9k8yMkXO9wuJQUo7G9FeqE63JWXg"
+      }
+    }
+  }
+}

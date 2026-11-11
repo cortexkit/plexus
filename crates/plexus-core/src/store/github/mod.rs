@@ -2382,6 +2382,30 @@ impl PlexusStore {
         &self,
         bind: &GithubHandleBind,
     ) -> Result<Result<Value, String>, StoreError> {
+        self.bind_github_handle_repos_inner(bind, None)
+    }
+
+    pub(crate) fn bind_github_manifest_repository(
+        &self,
+        record: &super::github_manifest_binding::BindingRecord,
+        installation: Vec<String>,
+    ) -> Result<Result<Value, String>, StoreError> {
+        self.bind_github_handle_repos_inner(
+            &GithubHandleBind {
+                app_handle_id: record.app_handle_id.clone(),
+                repositories: vec![record.repository.clone()],
+                installation,
+                dry_run: false,
+            },
+            Some(record),
+        )
+    }
+
+    fn bind_github_handle_repos_inner(
+        &self,
+        bind: &GithubHandleBind,
+        manifest: Option<&super::github_manifest_binding::BindingRecord>,
+    ) -> Result<Result<Value, String>, StoreError> {
         use serde_json::json;
         let refusal = std::sync::Mutex::new(None::<String>);
         // Compared and stored in canonical form; a name listed twice in
@@ -2483,6 +2507,9 @@ impl PlexusStore {
                     |row| row.get(0),
                 )?
             };
+            if let Some(record) = manifest {
+                super::github_manifest_binding::finish_bind(tx, record)?;
+            }
             Ok(json!({
                 "app_handle_id": bind.app_handle_id,
                 "connection_id": connection_id,

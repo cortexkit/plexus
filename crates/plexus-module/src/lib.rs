@@ -61,6 +61,7 @@ use test_support::{
     assert_bind_ack, facade_tool_reply, run_health_probes, test_mcp_manifest, test_write_manifest,
     with_call_tool_result,
 };
+mod manifest_binding;
 mod tool_provider;
 mod web_search_auto;
 mod web_search_health;
@@ -672,6 +673,9 @@ fn spawn_background_tasks(state: Arc<ModuleState>, config: &ModuleConfig) -> Bac
     let (search_shutdown, search_stop) = mpsc::channel::<()>(1);
     let search_task = web_search_auto::spawn(Arc::clone(&state), search_stop);
 
+    let (manifest_shutdown, manifest_stop) = mpsc::channel::<()>(1);
+    let manifest_task = manifest_binding::spawn(Arc::clone(&state), manifest_stop);
+
     BackgroundTasks {
         shutdown: vec![
             claim_shutdown,
@@ -679,6 +683,7 @@ fn spawn_background_tasks(state: Arc<ModuleState>, config: &ModuleConfig) -> Bac
             outbox_shutdown,
             relay_shutdown,
             search_shutdown,
+            manifest_shutdown,
         ],
         tasks: vec![
             ("connector-home refresh", claim_task, TASK_SHUTDOWN_GRACE),
@@ -686,6 +691,7 @@ fn spawn_background_tasks(state: Arc<ModuleState>, config: &ModuleConfig) -> Bac
             ("outbox drain", outbox_task, BUS_SHUTDOWN_GRACE),
             ("relay", relay_task, BUS_SHUTDOWN_GRACE),
             ("search key watch", search_task, TASK_SHUTDOWN_GRACE),
+            ("manifest binding", manifest_task, TASK_SHUTDOWN_GRACE),
         ],
     }
 }

@@ -1596,6 +1596,10 @@ where
         self
     }
 
+    pub fn consent_card_client(&self) -> Option<&ConsentCards> {
+        self.consent_cards.as_deref()
+    }
+
     /// Attach executor capacity management around pending consent waits.
     pub fn with_consent_wait_hook(mut self, hook: Arc<dyn ConsentWaitHook>) -> Self {
         self.consent_wait_hook = Some(hook);

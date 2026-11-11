@@ -10,7 +10,24 @@ wrap the result in `{result: ...}`. Refusals are transport errors with string
 [generated corpus](../../test-vectors/consent-requester-v1/README.md) pins actual
 request envelopes and untouched handler response bytes with a fixed clock and
 fresh temporary stores. The [phone contract](consent-phone-v1.md) describes the
-other side of these cards.
+other side of these cards. The optional `source` and `dry_run_text` fields and
+their requester readbacks are specified in [consent-card-text-v1](consent-card-text-v1.md).
+
+## Optional author explanations
+
+With `consent-card-explanations/v1`, `consent.request` also accepts optional
+`explanation: {label, text}` and `changes: {label, text}`, only on `package` and
+`flow_install`. Both are plain author text shown with the labels core supplies.
+Each string is nonempty; labels are at most 64 Unicode scalar values and text
+at most 8,192 UTF-8 bytes. C0/C1 controls (U+0000–U+001F, U+007F–U+009F) are
+refused except newline U+000A, including in labels. Invalid members or members
+on other kinds return `elicitation_invalid_request` naming the field. Objects
+are closed and null is not absence.
+
+`consent.get` returns both objects unchanged. App `consent.list_pending` records
+also include them; absent members are omitted and notifications never carry
+them. The [explanations contract](consent-card-explanations-v1.md) defines storage,
+display semantics and checksum-pinned phone/desktop samples.
 
 ## Identity and admission
 
@@ -19,6 +36,9 @@ is the pair of requester principal and attested bind session. An attested scoped
 session includes its owner, reference and epoch; a reused reference with a new
 epoch cannot read the previous session's cards. Unscoped binds have an empty bind
 session. Body session references are card content, not ownership credentials.
+Federated-stamped consent carriers use the paired-subject ownership exception
+in [consent-requester-v2](consent-requester-v2.md#federated-consent-carriers),
+not the scope reference and epoch. Local ownership is unchanged.
 
 | Requester principal | Allowed request kinds |
 |---|---|
@@ -27,6 +47,9 @@ session. Body session references are card content, not ownership credentials.
 | `reserved:cerebellum`, `reserved:plexus`, `reserved:entorhinal` | `consent`; must also carry a nonblank daemon-attested subject agent |
 | `direct` | `consent`; displayed as an unverified local process |
 | Anything else, including absent / unverified / `reserved:callosum` | No requests |
+
+The dedicated `secret_use` and `manifest_binding` filing rules are in
+[requester v2](consent-requester-v2.md), not the generic-consent admission above.
 
 Disallowed principals or principal/kind combinations refuse
 `elicitation_requester_refused`. Requesters need an admitted daemon route but
@@ -57,9 +80,9 @@ except the explicitly spelled `requestedSchema`. No camelCase aliases exist.
 | `urgency` | String | Required: `low`, `normal`, or `high`. |
 | `on_expiry` | String | Required: `deny`. |
 | `material_damage` | Boolean | Required. |
-| `late_execution` | String | Required: `execute` or `notify_only`. The existing decision examples use `notify_only`. Neither value causes Cingulate to execute a choice. |
+| `late_execution` | String | Required: `execute` or `notify_only`. It states what the requester does with an answer that arrives after its own wait ended. `execute`: a late grant still takes effect, either by running the held action or by recording a grant the next attempt uses. `notify_only`: a late answer is recorded and reported but has no effect. Neither value causes Cingulate to execute a choice. |
 | `target` | Object | Required: exactly string `kind` and `label`, both nonblank. |
-| `expires_in_ms` | Signed-64-bit integer | Required; 1–86,400,000. |
+| `expires_in_ms` | Signed-64-bit integer | Optional; when present, 1–86,400,000. Omitted or null means no deadline; requires `consent-no-expiry/v1`. |
 | `scope` | JSON value | Optional, but either non-null scope or nonblank `args_digest` must be supplied. Contents are opaque. |
 | `args_digest` | String | Optional; needed if no scope. |
 | `dedup_key` | String | Optional; owner-scoped pending-card key, described below. |
@@ -79,6 +102,22 @@ Success result is exactly `{elicitation_id: string}` for creation, in-place
 refresh and replacement. The reply alone does not distinguish those cases: a
 refresh preserves id, a replacement returns a new id. Use requester get or await
 with the returned id to read the current record.
+
+For every v1 card kind, requesters may omit `expires_in_ms` only after checking
+that Cingulate's `catalog.list` entry advertises `consent-no-expiry/v1` in
+`capabilities.provides`. Older Cingulate requires the field and refuses omission.
+A supplied integer retains its existing bounds and fail-closed expiry behavior.
+Without a deadline the card stays pending until answered or withdrawn; it is
+never expired by a maintenance sweep or a wait timeout. Pending payloads are not
+retention-pruned. `on_expiry: "deny"` and a decline default remain required, but
+silence never selects a choice. No-deadline requester records omit both
+`expires_in_ms` and `expires_at_ms`; phone cards omit `expiresInMs` and
+`expiresAtMs`. See the additive
+[no-expiry vectors](../../test-vectors/consent-no-expiry-v1/README.md).
+The phone pending list orders all cards oldest first by creation time, then id,
+regardless of deadline. Its new continuation is a JSON object keyed by
+`created_at_ms` and `elicitation_id`; the previous expiry-keyed input remains
+accepted for one release as described in the phone contract.
 
 ### Three decision bodies and choices
 
@@ -165,9 +204,11 @@ records retain their script and manifest bodies. Optional unanswered fields are
 omitted, not null.
 
 Unknown / another owner's id refuses `elicitation_not_owner`; an owned but
-acknowledged or no-longer-retained id refuses `elicitation_not_found`. Get sweeps
-expiry before serving an owned record. Answered, expired and withdrawn records
-remain readable until acknowledged or 24 hours after settlement.
+acknowledged or no-longer-retained id refuses `elicitation_not_found` on requester
+get. Get sweeps expiry before serving an owned record. Requester get and the
+answer feed stop exposing a settlement after acknowledgment; the phone's separate
+`consent.get` continues to return a settled card until its payload is pruned 24
+hours after settlement.
 
 ## `consent.answers`: read the owner's settlement feed
 
@@ -198,29 +239,35 @@ Required param: `cursor`, a nonnegative signed-64-bit integer. Success:
 `{ok: true}`. Acknowledgment is cumulative for this owner through that cursor,
 including withdrawals even though answers omits them. It hides those settled
 records from requester get/await and future answers; it does not affect pending
-cards or another owner's records, or undo an answer. Rows are physically pruned
-only after retention. A future cursor is accepted, but does not pre-acknowledge
-settlements created later. Send only a cursor whose page(s) you processed: an
-arbitrary high cursor can discard unread existing answers.
+cards or another owner's records, or undo an answer. It does not hide the card from
+phone `consent.get`, which remains available until the 24-hour retention prune.
+Ack as soon as the answer is durably saved; reporting the effect may happen later.
+`consent.report_execution` still accepts an acknowledged answered card while its
+record is retained. Ack neither reports execution nor extends retention.
+Rows are physically pruned only after retention. A future cursor is accepted, but
+does not pre-acknowledge settlements created later. Send only a cursor whose
+page(s) you processed: an arbitrary high cursor can discard unread existing answers.
 
 ## `consent.await`: wait without granting on timeout
 
 Required params: string `elicitation_id` and nonnegative signed-64-bit integer
 `timeout_ms`. The timeout is capped at 120,000 ms. Success is the current full
 requester record, **not** an answer wrapper. `timeout_ms: 0` is an immediate read.
-Otherwise wait until settlement, deadline, or card expiry, whichever is first.
+Otherwise wait until settlement, the caller's wait deadline, or card expiry
+(when present), whichever is first.
 A timeout can return `state: "pending"`; inspect state/choice, never infer approval
 from a completed wait. Dedup refresh wakes the waiter to re-read the card, but
 does not extend the call's timeout. While waiting, pending phone/get projections
-carry `blockUntilMs` / `block_until_ms`, capped at expiry. Dropping/cancelling the
+carry `blockUntilMs` / `block_until_ms`, capped at expiry only when the card has
+one. A no-deadline card uses only the caller's wait bound. Dropping/cancelling the
 wait removes its registration. Same owner/not-found refusals as requester get.
 
 ## `consent.report_execution`
 
 Required params: string `elicitation_id` and string `execution`, one of
-`executed`, `approved_not_executed`, `outcome_unknown`. Success is the updated
-full requester record with `execution`. This only reports a requester outcome:
-the module does not execute anything, and adds no new answer-log row/cursor.
+`executed`, `approved_not_executed`, `outcome_unknown`. Success is the full
+requester record with the stored `execution`. The module does not execute
+anything, and reporting adds no new answer-log row/cursor.
 
 **Flow decisions cannot report execution**, even if answered:
 `elicitation_invalid_execution`. That code also covers an unsupported execution
@@ -228,6 +275,43 @@ string. For other kinds, the card must already be answered or the refusal is
 `elicitation_store_error`. The implementation requires answered state, not a
 particular grant effect; requesters remain responsible for acting only on an
 appropriate explicit answer. Ownership and retention checks still apply.
+Unlike get, await and answers, reporting is allowed after acknowledgment while
+the answered record is retained (24 hours after settlement). After an acknowledged
+record is physically pruned, reporting refuses `elicitation_not_owner`, the same
+uniform refusal as an unknown id because the stored owner is gone. A requester
+which already acked that card treats this as **too late, drop it**, not a reason
+to retry or repeat the effect. If an owner tombstone still exists after retention,
+reporting refuses `elicitation_not_found`. Owner checks are unchanged.
+
+Optional `reason` is accepted **only** with `execution: "approved_not_executed"`.
+It is an open-set code of 1–64 bytes matching `^[a-z][a-z0-9_]{0,63}$`; null,
+non-strings, malformed codes, or a reason with any other execution value refuse
+`elicitation_invalid_execution` with `reason` in the diagnostic. Known codes are
+`session_ended`, `target_gone`, `grant_store_unavailable` and
+`refused_at_dispatch`. Cingulate stores any well-formed code, including unknown
+ones, with the execution report. Requester reads use `execution_reason`; phone
+reads use `executionReason`. Both omit it when absent. Each valid requester report
+replaces execution and reason together in one store transaction, so reporting
+without a reason clears any previous reason. This includes replacing an earlier
+requester report (for example, `outcome_unknown` followed by `executed`) or
+Cingulate's session-ended backstop: the requester knows what actually happened,
+whereas the backstop only infers non-execution from session liveness.
+
+On the maintenance cadence, Cingulate itself records
+`execution: "approved_not_executed"`, `execution_reason: "session_ended"` for a
+retained, answered card of kind `consent` with no execution report whose recorded
+asker scope has definitely ended. The asker is the scope stamped at
+`consent.request` (a worker's own scope, not its parent). Liveness follows the
+permission-ask `scope.describe` rules: an ended scope, a replaced epoch, or a
+definitively non-live scope counts; unknown, unsynced or unreachable liveness
+does not. Cards without a recorded scope are left alone. Passes are bounded and
+uncertain lookups use the existing bounded exponential maintenance backoff.
+Acknowledgment does not exclude a retained card. Pending cards, `flow_decision`
+cards and permission asks are not backstopped. The backstop atomically rechecks
+that no report exists and never overwrites any report. A requester report always
+replaces the backstop, including when the two race. These fields describe a recorded
+outcome, not permission to execute anything. Served examples are pinned in
+[consent-session-ended-v1](../../test-vectors/consent-session-ended-v1/README.md).
 
 ## Updating or withdrawing an open card
 
@@ -237,8 +321,10 @@ request. No key means always create. Matching content ignores expiry duration,
 the key itself, discarded answer schema, and resolved subject label, but compares
 all other request data and subject agent/head ids:
 
-* Same content: refresh in place, same id and creation time, expiry moves to
-  current time plus requested lifetime. A newly resolved display label may
+* Same content: refresh in place, same id and creation time. A supplied lifetime
+  moves expiry to current time plus that lifetime; an omitted lifetime leaves
+  the refreshed card without a deadline, including when the old card had one.
+  A no-deadline refresh of a no-deadline card stays no-deadline. A newly resolved display label may
   update. Waiters wake; no new-card pointer is delivered. The phone's revision
   changes when persisted pending content/expiry changes, so it receives the
   refreshed card on its next poll.

@@ -1,0 +1,75 @@
+{
+  "method": "consent.answer",
+  "params": {
+    "choiceId": "allow",
+    "clientFeatures": [
+      "manifest-binding-approval"
+    ],
+    "elicitationId": "el_1",
+    "envelope_b64url": "eyJkZWNpc2lvbiI6ImFsbG93IiwiZGV2aWNlX2ZpbmdlcnByaW50IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJpc3N1ZWRfYXRfbXMiOjE3OTQzNTUzMDAxMjMsInByb3Bvc2FsX2lkIjoiMDFIRjdZQVQwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdGF0ZW1lbnRfc2hhMjU2IjoiZWFmNjA4ZmU2YWM5NDBkOTNmMjg5Yjg2YWUwNTE3YTM2ODM4YTVkOWQ4NGVlMTE5YmUxNDk1Y2YwZjViMTRlNiIsInYiOiJjay1tYW5pZmVzdC1iaW5kaW5nLWVudmVsb3BlL3YxIn0"
+  },
+  "reply": {
+    "result": {
+      "alreadyAnswered": false,
+      "elicitation": {
+        "answeredAtMs": 1794355300123,
+        "answeredChoiceId": "allow",
+        "answeredDevice": "11111111111111111111111111111111",
+        "createdAtMs": 1794355300123,
+        "default": "decline",
+        "elicitationId": "el_1",
+        "expiresAtMs": 1794441700123,
+        "facts": [],
+        "kind": "manifest_binding",
+        "lateExecution": "notify_only",
+        "manifestBinding": {
+          "agent_id": "agent_4444444444444444",
+          "app_slug": "plex-alfonso",
+          "installation_permissions": {
+            "contents": "read",
+            "issues": "write",
+            "metadata": "read",
+            "pull_requests": "write"
+          },
+          "repo": "Octo-Owner/New-Repo",
+          "statement_b64url": "eyJhZ2VudF9pZCI6ImFnZW50XzQ0NDQ0NDQ0NDQ0NDQ0NDQiLCJhcHBfc2x1ZyI6InBsZXgtYWxmb25zbyIsImV4cGlyZXNfYXRfbXMiOjE3OTQ0NDE3MDAxMjMsImluc3RhbGxhdGlvbl9wZXJtaXNzaW9ucyI6eyJjb250ZW50cyI6InJlYWQiLCJpc3N1ZXMiOiJ3cml0ZSIsIm1ldGFkYXRhIjoicmVhZCIsInB1bGxfcmVxdWVzdHMiOiJ3cml0ZSJ9LCJtYW5pZmVzdF9zaGEyNTYiOiI5NGNmODk0ZTE3NDYyY2VjMDljNzM3YjA0MmUzZjJjNDJkYmRkOTVmZmRjYWUxMDdiN2IwMGJjN2Q5ZTZjOGYzIiwibWFuaWZlc3RfdmVyc2lvbiI6MjksInByaW9yX3NoYTI1NiI6IjkxMjQ0ODkxYzQ5OGIzZTUxOTk3NjA0ZTllZGYzMGY3NWI2YmYxMGVkZmQyMDIxYzVmZWZlZWY1MTgzODRiYjUiLCJwcmlvcl92ZXJzaW9uIjoyOCwicHJvcG9zYWxfaWQiOiIwMUhGN1lBVDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcG8iOiJPY3RvLU93bmVyL05ldy1SZXBvIiwidiI6ImNrLW1hbmlmZXN0LWJpbmRpbmctc3RhdGVtZW50L3YxIn0",
+          "statement_sha256": "eaf608fe6ac940d93f289b86ae0517a36838a5d9d84ee119be1495cf0f5b14e6"
+        },
+        "manifestBindingAnswer": {
+          "decision": "allow",
+          "envelope_sha256": "77c83ccc4a9ed90e5f379b6f96d243c9015a740bf8e4e73e88358fed7b481262",
+          "statement_sha256": "eaf608fe6ac940d93f289b86ae0517a36838a5d9d84ee119be1495cf0f5b14e6"
+        },
+        "materialDamage": false,
+        "onExpiry": "deny",
+        "options": [
+          {
+            "effect": "grant",
+            "id": "allow",
+            "label": "Allow"
+          },
+          {
+            "effect": "decline",
+            "id": "decline",
+            "label": "Decline"
+          }
+        ],
+        "prompt": "Review the vault's repository binding.",
+        "requesterLabel": "reserved:plexus",
+        "requesterName": "Plexus",
+        "scope": {},
+        "state": "answered",
+        "subject": {
+          "label": "Plexus"
+        },
+        "target": {
+          "kind": "manifest_binding",
+          "label": "Repository binding"
+        },
+        "title": "Repository binding approval",
+        "urgency": "normal"
+      },
+      "ok": true
+    }
+  }
+}
