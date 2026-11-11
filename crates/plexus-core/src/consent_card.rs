@@ -304,7 +304,7 @@ impl crate::github::manifest_binding::BindingCards for ConsentCards {
                 statement_b64url,
                 timeout_ms,
             } => {
-                let timeout_ms = timeout_ms.min(AWAIT_MAX_MS as u64);
+                let timeout_ms = timeout_ms.min(AWAIT_MAX_MS);
                 let record = self
                     .route
                     .call_unscoped(
