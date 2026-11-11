@@ -46,6 +46,10 @@ const TABLES: &[&str] = &[
     // replayed request nonce from acting twice.
     "github_app_handle",
     "github_repo_binding",
+    // One-tap repository proposals and their phone cards. Without them the new
+    // store would propose again and file a second card from a session that
+    // cannot claim the first, so the owner's answer would be lost.
+    "github_manifest_binding",
     "github_bot_receipt",
     "action_requests",
     "consent_call_keys",
@@ -423,6 +427,7 @@ fn identity(table: &str, row: &Record) -> String {
         "relay_cursor" => vec!["source"],
         "github_app_handle" => vec!["app_handle_id"],
         "github_repo_binding" => vec!["repository"],
+        "github_manifest_binding" => vec!["app_handle_id", "repository"],
         "github_bot_receipt" => vec!["agent_id", "request_nonce"],
         "pending_write_reconciliations" | "write_reconciliation_results" => {
             vec!["principal", "request_id"]

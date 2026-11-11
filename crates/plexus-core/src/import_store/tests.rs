@@ -473,6 +473,7 @@ fn production_v23_round_trip_dispositions_and_routing() {
             | "relay_cursor"
             | "github_app_handle"
             | "github_repo_binding"
+            | "github_manifest_binding"
             | "github_bot_receipt"
             | "pending_write_reconciliations"
             | "write_reconciliation_results"
