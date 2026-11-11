@@ -71,19 +71,12 @@ pub fn trust_for_principal(principal: &Option<Principal>) -> PrincipalTrust {
 /// `permissions.list` and `permissions.revoke` here. Standing only lets it
 /// bind: it holds no grants, so every facade tool still refuses it.
 ///
-/// `striatum` is the routing module's new id, accepted ahead of its rename
-/// from `prefrontal-routing`; both stay until no build can run under the old
-/// one.
+/// `striatum` is the routing module. It was `prefrontal-routing` until the
+/// rename settled on 2026-11-11; the old id is retired below.
 fn is_first_party_module_id(module_id: &str) -> bool {
     matches!(
         module_id,
-        "prefrontal-core"
-            | "prefrontal-routing"
-            | "striatum"
-            | "aft"
-            | "broca"
-            | "basal"
-            | "cingulate"
+        "prefrontal-core" | "striatum" | "aft" | "broca" | "basal" | "cingulate"
     )
 }
 
@@ -114,7 +107,6 @@ mod tests {
     fn every_first_party_module_id_is_accepted() {
         for module_id in [
             "prefrontal-core",
-            "prefrontal-routing",
             "striatum",
             "aft",
             "broca",
@@ -144,10 +136,12 @@ mod tests {
             })),
             PrincipalTrust::Untrusted
         );
-        // The pre-rename ids of prefrontal-core and prefrontal-routing. Their
-        // binaries are gone from the deploy path, so nothing legitimate can
-        // register them; a module that did must not inherit first-party standing.
-        for retired in ["alfonso-core", "alfonso-routing"] {
+        // Retired ids: core's and routing's earlier names (alfonso-core,
+        // alfonso-routing, then prefrontal-routing before routing became
+        // striatum). Their binaries are gone from the deploy path, so nothing
+        // legitimate can register them; a module that did must not inherit
+        // first-party standing.
+        for retired in ["alfonso-core", "alfonso-routing", "prefrontal-routing"] {
             assert_eq!(
                 trust_for_principal(&Some(Principal::Reserved {
                     module_id: retired.to_string(),
