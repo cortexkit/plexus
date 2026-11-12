@@ -28,7 +28,7 @@ fn poll_store() -> Arc<PlexusStore> {
             storage_namespace: "rest-sweep-scheduler".into(),
             isolation: cortexkit_store_types::Isolation::Module,
             backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: plexus_core::test_scratch::store_path(),
             },
         })
         .unwrap(),

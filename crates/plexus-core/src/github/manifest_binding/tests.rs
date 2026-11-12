@@ -428,7 +428,7 @@ fn store() -> PlexusStore {
         storage_namespace: crate::storage::new_id("manifest-binding"),
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: crate::test_scratch::store_path(),
         },
     })
     .unwrap();

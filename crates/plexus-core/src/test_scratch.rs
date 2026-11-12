@@ -24,7 +24,7 @@ use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The name every scratch entry starts with, and the only name the sweep will
@@ -97,6 +97,24 @@ fn sanitize(label: &str) -> String {
     } else {
         mapped
     }
+}
+
+/// Give each test store an independent, empty file-backed database.
+///
+/// The process retains the parent scratch directory because stores and their
+/// descriptors may outlive the thread that creates them. A later run's scratch
+/// sweep removes the process directory after it ages out. Creating a store
+/// refreshes the process directory, but writes to an existing store do not, so
+/// a run idle for over an hour could be swept by another test process.
+pub fn store_path() -> String {
+    static PROCESS: OnceLock<Scratch> = OnceLock::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let root = PROCESS.get_or_init(|| Scratch::directory("test-stores"));
+    let directory = root
+        .path()
+        .join(NEXT.fetch_add(1, Ordering::Relaxed).to_string());
+    fs::create_dir(&directory).expect("create private test store directory");
+    directory.join("store.db").to_string_lossy().into_owned()
 }
 
 /// A scratch path under [`root`], whose directory is removed when this value
@@ -352,6 +370,55 @@ fn timestamp(metadata: &fs::Metadata) -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_paths_isolate_databases_and_contain_leases() {
+        use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+
+        let first = store_path();
+        let second = store_path();
+        let first_dir = Path::new(&first).parent().unwrap();
+        let second_dir = Path::new(&second).parent().unwrap();
+        assert_ne!(first_dir, second_dir);
+        assert!(first_dir.starts_with(root()));
+        assert!(second_dir.starts_with(root()));
+        let open = |path: &str| {
+            cortexkit_store::open_sqlite(&StorageDescriptor {
+                module_id: "plexus".into(),
+                storage_namespace: "scratch-regression".into(),
+                isolation: Isolation::Module,
+                backend: StorageBackend::Sqlite { path: path.into() },
+            })
+            .unwrap()
+        };
+        let first_store = open(&first);
+        first_store
+            .with_conn_fenced(|conn| conn.execute_batch("CREATE TABLE marker (id INTEGER)"))
+            .unwrap();
+        let second_store = open(&second);
+        assert_eq!(
+            second_store
+                .with_read(|conn| conn.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name = 'marker'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                ))
+                .unwrap(),
+            0
+        );
+        for directory in [first_dir, second_dir] {
+            assert!(
+                fs::read_dir(directory).unwrap().any(|entry| {
+                    entry
+                        .unwrap()
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "lease")
+                }),
+                "lease should be beside the database"
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]

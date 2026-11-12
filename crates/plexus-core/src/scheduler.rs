@@ -1138,7 +1138,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".to_string(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let store = Arc::new(PlexusStore::open(&descriptor).expect("open scheduler store"));

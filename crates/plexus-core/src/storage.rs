@@ -11606,7 +11606,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".to_string(),
+                path: crate::test_scratch::store_path(),
             },
         };
         PlexusStore::open(&descriptor).expect("open audit retention store")
@@ -11741,7 +11741,7 @@ mod tests {
             storage_namespace: "searxng-migration".into(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let inner = open_sqlite(&descriptor).unwrap();
@@ -11861,7 +11861,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".to_string(),
+                path: crate::test_scratch::store_path(),
             },
         };
         PlexusStore::open(&descriptor).expect("open reservation retention store")
@@ -11956,7 +11956,7 @@ mod tests {
             storage_namespace: "migration41".into(),
             isolation: cortexkit_store_types::Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let inner = open_sqlite(&descriptor).unwrap();
@@ -12076,7 +12076,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let inner = open_sqlite(&descriptor).unwrap();
@@ -12154,7 +12154,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let store = open_sqlite(&descriptor).expect("open migration store");
@@ -12236,7 +12236,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let store = open_sqlite(&descriptor).expect("open migration store");
@@ -12311,7 +12311,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let store = open_sqlite(&descriptor).expect("open migration store");
@@ -12368,7 +12368,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let inner = open_sqlite(&descriptor).unwrap();
@@ -12464,7 +12464,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let inner = open_sqlite(&descriptor).unwrap();
@@ -12569,7 +12569,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let inner = open_sqlite(&descriptor).unwrap();
@@ -12697,7 +12697,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let inner = open_sqlite(&descriptor).unwrap();
@@ -12799,7 +12799,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let inner = open_sqlite(&descriptor).unwrap();
@@ -12876,7 +12876,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let inner = open_sqlite(&descriptor).unwrap();
@@ -12993,7 +12993,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let inner = open_sqlite(&descriptor).unwrap();
@@ -13226,7 +13226,7 @@ mod tests {
             storage_namespace: format!("projection-parity-{serial}"),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".to_string(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let store = PlexusStore::open(&descriptor).expect("open store");
@@ -13313,7 +13313,7 @@ mod tests {
             storage_namespace: format!("ask-first-closed-{serial}"),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".to_string(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let store = PlexusStore::open(&descriptor).expect("open store");
@@ -13593,7 +13593,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".to_string(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let store = PlexusStore::open(&descriptor).expect("open trigger store");
@@ -14529,7 +14529,7 @@ mod tests {
             storage_namespace: format!("seed-backstop-{serial}"),
             isolation: cortexkit_store_types::Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".to_string(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let store = PlexusStore::open(&descriptor).expect("open store");
@@ -17758,7 +17758,7 @@ mod tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".to_string(),
+                path: crate::test_scratch::store_path(),
             },
         };
         let store = PlexusStore::open(&descriptor).expect("open store");
@@ -18096,7 +18096,7 @@ mod tests {
                 ),
                 isolation: Isolation::Module,
                 backend: StorageBackend::Sqlite {
-                    path: ":memory:".to_string(),
+                    path: crate::test_scratch::store_path(),
                 },
             };
             let store = PlexusStore::open(&descriptor).expect("open");
@@ -18377,7 +18377,7 @@ mod exact_argument_tests {
             storage_namespace: "exact-arguments".into(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         })
         .unwrap();

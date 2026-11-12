@@ -1168,7 +1168,7 @@ mod tests {
             storage_namespace: new_id("relay-rewind"),
             isolation: cortexkit_store_types::Isolation::Module,
             backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         })
         .unwrap();
@@ -1217,7 +1217,7 @@ mod tests {
                 storage_namespace: new_id("relay-release-only"),
                 isolation: cortexkit_store_types::Isolation::Module,
                 backend: cortexkit_store_types::StorageBackend::Sqlite {
-                    path: ":memory:".into(),
+                    path: crate::test_scratch::store_path(),
                 },
             })
             .unwrap();
@@ -1343,7 +1343,7 @@ mod tests {
             storage_namespace: new_id("relay-ci-run-cache"),
             isolation: cortexkit_store_types::Isolation::Module,
             backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         })
         .unwrap();

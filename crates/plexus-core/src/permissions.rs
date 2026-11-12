@@ -552,7 +552,7 @@ mod tests {
             storage_namespace: "permission-expiry".into(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         })
         .unwrap();

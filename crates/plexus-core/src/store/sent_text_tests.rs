@@ -6,7 +6,7 @@ fn store() -> PlexusStore {
         storage_namespace: new_id("sent-text"),
         isolation: cortexkit_store_types::Isolation::Module,
         backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: crate::test_scratch::store_path(),
         },
     })
     .unwrap()
@@ -133,7 +133,7 @@ fn gmail_migration_58_forward_rollback_and_reforward() {
         storage_namespace: "gmail-migration".into(),
         isolation: cortexkit_store_types::Isolation::Module,
         backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: crate::test_scratch::store_path(),
         },
     };
     let inner = cortexkit_store::open_sqlite(&descriptor).unwrap();

@@ -895,7 +895,7 @@ fn facade_test_engine() -> (
     GovernanceEngine<StubCredentialSource, MockTransport>,
     Arc<TestHandleSeams>,
 ) {
-    facade_test_engine_at(":memory:")
+    facade_test_engine_at(&crate::test_scratch::store_path())
 }
 
 fn facade_test_engine_at(
@@ -1901,7 +1901,7 @@ fn authority_changes_and_claim_marker_stop_transmission() {
 }
 
 fn hash_test_engine() -> GovernanceEngine<StubCredentialSource, MockTransport> {
-    hash_test_engine_at(":memory:")
+    hash_test_engine_at(&crate::test_scratch::store_path())
 }
 
 fn hash_test_engine_at(path: &str) -> GovernanceEngine<StubCredentialSource, MockTransport> {
@@ -2097,7 +2097,7 @@ fn reservation_argument_mismatch_aborts_before_dispatch() {
 /// matching for other vendors' filter values.
 #[test]
 fn github_owner_and_repo_filters_match_case_insensitively() {
-    let engine = hash_test_engine_at(":memory:");
+    let engine = hash_test_engine_at(&crate::test_scratch::store_path());
     let store = engine.store();
     let filters = serde_json::json!({
         "values": {"owner": "cortexkit", "repo": ["aft"]},

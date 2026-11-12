@@ -1946,13 +1946,14 @@ mod tests {
         }
     }
 
+    // File-backed like production, including for the ignored measurement.
     fn store() -> PlexusStore {
         PlexusStore::open(&StorageDescriptor {
             module_id: "plexus".into(),
             storage_namespace: new_id("outbox-test"),
             isolation: cortexkit_store_types::Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         })
         .unwrap()

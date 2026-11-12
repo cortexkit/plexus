@@ -101,7 +101,7 @@ async fn hello(
         storage_namespace: namespace.into(),
         isolation: cortexkit_store_types::Isolation::Module,
         backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: plexus_core::test_scratch::store_path(),
         },
     };
     hello_ack(input, Some(serde_json::to_value(descriptor).unwrap())).await;

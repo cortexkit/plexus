@@ -687,7 +687,7 @@ mod tests {
     }
 
     fn fixture(ci: bool) -> PlexusStore {
-        fixture_at(ci, ":memory:")
+        fixture_at(ci, &crate::test_scratch::store_path())
     }
 
     fn fixture_at(ci: bool, path: &str) -> PlexusStore {

@@ -15,7 +15,7 @@ fn state() -> Arc<ModuleState> {
             storage_namespace: namespace,
             isolation: cortexkit_store_types::Isolation::Module,
             backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: plexus_core::test_scratch::store_path(),
             },
         })
         .unwrap(),

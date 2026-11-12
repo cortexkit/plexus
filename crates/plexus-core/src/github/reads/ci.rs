@@ -178,7 +178,7 @@ mod tests {
             storage_namespace: "ci-read-quota".into(),
             isolation: cortexkit_store_types::Isolation::Module,
             backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         })
         .unwrap();

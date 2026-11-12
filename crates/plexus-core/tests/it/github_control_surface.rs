@@ -21,7 +21,7 @@ fn store() -> PlexusStore {
         ),
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: plexus_core::test_scratch::store_path(),
         },
     })
     .unwrap();

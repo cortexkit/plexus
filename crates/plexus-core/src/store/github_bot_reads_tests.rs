@@ -1,14 +1,13 @@
 use super::*;
 
-/// A fresh in-memory store. Each test names its own namespace: tests run in
-/// parallel, and the store's lease is per namespace.
+/// A fresh scratch-backed store with a test-specific namespace.
 fn store(namespace: &str) -> PlexusStore {
     PlexusStore::open(&cortexkit_store_types::StorageDescriptor {
         module_id: "plexus".into(),
         storage_namespace: namespace.into(),
         isolation: cortexkit_store_types::Isolation::Module,
         backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: crate::test_scratch::store_path(),
         },
     })
     .unwrap()

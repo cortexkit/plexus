@@ -231,7 +231,7 @@ mod tests {
             storage_namespace: new_id("widen-ceiling"),
             isolation: cortexkit_store_types::Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         })
         .unwrap();

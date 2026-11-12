@@ -13,8 +13,9 @@ fn store(path: &str) -> PlexusStore {
     })
     .unwrap()
 }
+// File-backed like production, including for the ignored measurements.
 fn fixture() -> PlexusStore {
-    let store = store(":memory:");
+    let store = store(&crate::test_scratch::store_path());
     store
         .insert_connection("owner", "connection", "fixture", "active", &json!({}))
         .unwrap();
@@ -1944,7 +1945,7 @@ fn health_setter_refuses_revocation_without_writing() {
 
 #[test]
 fn audit_app_handle_is_explicit_and_independent_of_nonce_or_agent_handle() {
-    let store = store(":memory:");
+    let store = store(&crate::test_scratch::store_path());
     let mut record = AuditRecord::ceremony("owner", None, None, "inspect", "read", None);
     record.app_handle_id = Some("app-explicit".into());
     record.agent_handle = Some("not-the-app-handle".into());

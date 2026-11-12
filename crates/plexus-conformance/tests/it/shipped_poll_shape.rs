@@ -55,7 +55,7 @@ fn seeded_engine(
         storage_namespace: format!("shipped-poll-{action}-{}", std::process::id()),
         isolation: cortexkit_store_types::Isolation::Module,
         backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
+            path: plexus_core::test_scratch::store_path(),
         },
     };
     let store = plexus_core::PlexusStore::open(&descriptor).expect("test store");

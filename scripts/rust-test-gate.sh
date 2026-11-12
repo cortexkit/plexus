@@ -154,6 +154,7 @@ refuse_raw_temp_dir() {
 }
 
 run_phase "no raw std::env::temp_dir() under crates/" refuse_raw_temp_dir
+run_phase "no raw in-memory store paths under crates/" python3 scripts/check-no-memory-store.py
 
 # Test waits that depend on a reply or child exit must carry a deadline. Keep the
 # match on the actual method statement so a helper-wrapped call remains allowed.

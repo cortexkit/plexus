@@ -2817,7 +2817,7 @@ async fn widen_ceiling_is_management_only_and_requires_a_direct_principal() {
             storage_namespace: "widen-ceiling-gate".into(),
             isolation: cortexkit_store_types::Isolation::Module,
             backend: cortexkit_store_types::StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: plexus_core::test_scratch::store_path(),
             },
         })
         .unwrap(),
@@ -2983,7 +2983,7 @@ fn handle_poll_grant_unknown_handle_has_a_bare_code_and_detail() {
         storage_namespace: "poll-grant-unknown-handle-detail".into(),
         isolation: cortexkit_store_types::Isolation::Module,
         backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: plexus_core::test_scratch::store_path(),
         },
     };
     let store = Arc::new(PlexusStore::open(&descriptor).unwrap());
@@ -3009,7 +3009,7 @@ async fn handle_unbind_is_direct_only_and_needs_no_credentials() {
         storage_namespace: format!("handle-unbind-gate-{}", plexus_core::now_ms()),
         isolation: cortexkit_store_types::Isolation::Module,
         backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
+            path: plexus_core::test_scratch::store_path(),
         },
     };
     let store = Arc::new(PlexusStore::open(&descriptor).unwrap());

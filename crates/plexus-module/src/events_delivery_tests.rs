@@ -11,7 +11,7 @@ fn consume_authority_store(test_name: &str) -> Arc<PlexusStore> {
         ),
         isolation: cortexkit_store_types::Isolation::Module,
         backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
+            path: plexus_core::test_scratch::store_path(),
         },
     };
     let store = Arc::new(PlexusStore::open(&descriptor).expect("test store"));

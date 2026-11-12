@@ -49,7 +49,7 @@ fn memory_descriptor(label: &str) -> StorageDescriptor {
         storage_namespace: format!("{label}-{}", new_id("ns")),
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: crate::test_scratch::store_path(),
         },
     }
 }

@@ -935,7 +935,7 @@ fn poll_store_with_shape(poll_shape: Value) -> (Arc<PlexusStore>, StubCredential
         ),
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
+            path: crate::test_scratch::store_path(),
         },
     };
     let store = Arc::new(PlexusStore::open(&descriptor).expect("open poll store"));
@@ -1472,7 +1472,7 @@ fn ordered_poll_engine(
         ),
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
+            path: crate::test_scratch::store_path(),
         },
     };
     let store = Arc::new(PlexusStore::open(&descriptor).expect("open ordered poll store"));

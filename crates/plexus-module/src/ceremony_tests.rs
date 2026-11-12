@@ -42,7 +42,7 @@ fn grant_test_state(label: &str) -> (Arc<ModuleState>, Arc<PlexusStore>) {
         storage_namespace: label.to_string(),
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
+            path: plexus_core::test_scratch::store_path(),
         },
     };
     grant_test_state_with_descriptor(&descriptor)

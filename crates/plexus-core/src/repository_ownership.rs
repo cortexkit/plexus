@@ -436,7 +436,7 @@ mod resume_tests {
             ),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         })
         .unwrap();

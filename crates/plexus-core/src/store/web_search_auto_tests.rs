@@ -7,7 +7,7 @@ fn migration_59_forward_rollback_and_reforward_preserves_consent() {
         storage_namespace: "search-auto-migration".into(),
         isolation: cortexkit_store_types::Isolation::Module,
         backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: crate::test_scratch::store_path(),
         },
     };
     let inner = cortexkit_store::open_sqlite(&descriptor).unwrap();

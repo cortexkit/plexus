@@ -294,7 +294,7 @@ fn governed_engine(
             storage_namespace: format!("artifact-tests-{}", crate::storage::new_id("store")),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: ":memory:".into(),
+                path: crate::test_scratch::store_path(),
             },
         })
         .unwrap(),

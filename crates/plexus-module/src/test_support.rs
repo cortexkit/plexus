@@ -407,16 +407,15 @@ pub(crate) fn open_file_store(path: &std::path::Path) -> plexus_core::PlexusStor
     .expect("open the test store file")
 }
 
-/// A migrated in-memory store. `namespace` keeps stores that are open at the
-/// same time apart.
+/// A migrated store in a fresh private scratch directory.
 pub(crate) fn open_memory_store(namespace: impl Into<String>) -> plexus_core::PlexusStore {
     plexus_core::PlexusStore::open(&cortexkit_store_types::StorageDescriptor {
         module_id: crate::DEFAULT_MODULE_ID.to_string(),
         storage_namespace: namespace.into(),
         isolation: cortexkit_store_types::Isolation::Module,
         backend: cortexkit_store_types::StorageBackend::Sqlite {
-            path: ":memory:".to_string(),
+            path: plexus_core::test_scratch::store_path(),
         },
     })
-    .expect("open the in-memory test store")
+    .expect("open the scratch test store")
 }

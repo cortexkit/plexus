@@ -28,7 +28,7 @@ fn store() -> Arc<PlexusStore> {
         ),
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: plexus_core::test_scratch::store_path(),
         },
     };
     Arc::new(PlexusStore::open(&descriptor).expect("open catalog store"))

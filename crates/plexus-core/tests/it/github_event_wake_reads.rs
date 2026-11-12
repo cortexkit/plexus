@@ -66,7 +66,7 @@ fn setup() -> (
         ),
         isolation: Isolation::Module,
         backend: StorageBackend::Sqlite {
-            path: ":memory:".into(),
+            path: plexus_core::test_scratch::store_path(),
         },
     };
     let store = Arc::new(PlexusStore::open(&descriptor).unwrap());
