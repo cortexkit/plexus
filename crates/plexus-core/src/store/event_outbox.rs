@@ -422,8 +422,10 @@ impl PlexusStore {
         self.outbox_ready.notified().await;
     }
 
-    /// Lookup without a visibility check, for the outbox publisher only.
+    /// Lookup without a visibility check, for internal callers only.
     /// User-facing reads must use `event_by_key` to enforce access permissions.
+    /// It reads the stored body; a caller that only needs to know whether the
+    /// event exists should use `canonical_event_exists`.
     pub fn canonical_event_by_key(&self, key: &str) -> Result<Option<CanonicalEvent>, StoreError> {
         self.inner.with_read(|conn| {
             conn.query_row(
@@ -432,6 +434,21 @@ impl PlexusStore {
                 canonical_row,
             )
             .optional()
+        })
+    }
+
+    /// Whether `canonical_event_by_key` would find this key, without reading
+    /// the body. The CI poller asks this for every run on every page it lists,
+    /// so reading each stored body there was most of a poll's disk reads.
+    pub fn canonical_event_exists(&self, key: &str) -> Result<bool, StoreError> {
+        self.inner.with_read(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM event_outbox o
+                 JOIN trigger_events e ON e.event_id = o.event_id
+                 WHERE o.event_key = ?1)",
+                [key],
+                |row| row.get(0),
+            )
         })
     }
 
@@ -3964,6 +3981,16 @@ mod tests {
             0
         );
         assert!(store.canonical_event_by_key(KEY).unwrap().is_some());
+    }
+
+    #[test]
+    fn existence_check_agrees_with_the_full_lookup() {
+        let store = store();
+        assert!(!store.canonical_event_exists(KEY).unwrap());
+        old_row(&store, "ci_runs", 10000000, None);
+        assert!(store.canonical_event_by_key(KEY).unwrap().is_some());
+        assert!(store.canonical_event_exists(KEY).unwrap());
+        assert!(!store.canonical_event_exists("missing-key").unwrap());
     }
 
     #[test]

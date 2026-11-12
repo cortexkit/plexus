@@ -390,9 +390,9 @@ where
                 continue;
             }
             match run_key(&run, &meta) {
-                Ok(Some(key)) => match store.canonical_event_by_key(&key) {
-                    Ok(Some(_)) => continue,
-                    Ok(None) => {}
+                Ok(Some(key)) => match store.canonical_event_exists(&key) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
                     Err(error) => return Err(store_failed(error)),
                 },
                 Ok(None) => {}
