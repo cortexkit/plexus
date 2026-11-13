@@ -10,7 +10,7 @@ pub(super) fn reply(
     let agent = plexus_core::scope::basal_flow_read_agent(principal, scope);
     let result = (|| {
         if let Some(field) = arguments.keys().find(|field| field.as_str() != "action") {
-            return json!({"error":{"code":"invalid_request","field":field}});
+            return json!({"error":{"code":"invalid_request","field":plexus_core::text::refusal_echo(field)}});
         }
         let mut result = match state.store().read_github_bindings_for_module(principal) {
             Ok(result) => result,

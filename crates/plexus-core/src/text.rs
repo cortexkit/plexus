@@ -14,6 +14,23 @@ pub fn prefix_within_bytes(text: &str, max_bytes: usize) -> &str {
     &text[..end]
 }
 
+/// Maximum UTF-8 bytes in one caller-supplied refusal echo, including its marker.
+/// Keeping each echo small leaves room for context and JSON escaping within a
+/// provider's 64 KiB model-visible result limit.
+pub const REFUSAL_ECHO_BYTES: usize = 256;
+
+/// Preserve ordinary argument names verbatim, but visibly shorten large echoes.
+pub fn refusal_echo(text: &str) -> std::borrow::Cow<'_, str> {
+    const MARKER: &str = "[shortened]";
+    if text.len() <= REFUSAL_ECHO_BYTES {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(format!(
+        "{}{MARKER}",
+        prefix_within_bytes(text, REFUSAL_ECHO_BYTES - MARKER.len())
+    ))
+}
+
 /// The first `max_chars` characters of `text`, and whether any were left out.
 pub fn prefix_within_chars(text: &str, max_chars: usize) -> (&str, bool) {
     match text.char_indices().nth(max_chars) {
@@ -53,5 +70,24 @@ mod tests {
         assert_eq!(prefix_within_chars(text, 4), ("aé😀b", false), "{counted}");
         assert_eq!(prefix_within_chars(text, 9), ("aé😀b", false), "{counted}");
         assert_eq!(prefix_within_chars("", 0), ("", false), "{counted}");
+    }
+}
+
+#[cfg(test)]
+mod refusal_echo_tests {
+    use super::refusal_echo;
+
+    #[test]
+    fn ordinary_echoes_are_identical_and_large_echoes_keep_utf8_and_a_marker() {
+        for text in ["", "typo", &"x".repeat(256), &"🦀".repeat(64)] {
+            assert_eq!(refusal_echo(text), text);
+        }
+        for text in ["x".repeat(70_000), "🦀".repeat(17_500), "\0".repeat(70_000)] {
+            let echo = refusal_echo(&text);
+            assert!(echo.len() <= 256);
+            let prefix = echo.strip_suffix("[shortened]").unwrap();
+            assert!(text.starts_with(prefix));
+            assert!(prefix.len() >= 241);
+        }
     }
 }

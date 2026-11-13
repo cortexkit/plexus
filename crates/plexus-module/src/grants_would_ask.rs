@@ -5,6 +5,7 @@ use plexus_core::grant_refusal::{GrantTarget, Layer};
 pub const METHOD: &str = "grants.would_ask";
 
 fn invalid(field: &str, reason: &str) -> Value {
+    let field = plexus_core::text::refusal_echo(field);
     json!({"error":{"code":"invalid_request", "field":field, "reason":reason, "message":format!("{reason}: {field}")}})
 }
 

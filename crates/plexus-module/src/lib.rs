@@ -3103,8 +3103,8 @@ fn facade_tool_reply_inner(
         if !plexus_core::github::reads::ACTIONS.contains(&action) {
             return Ok(json!({"error": {
                 "code": "read_action_unsupported",
-                "action": action,
-                "message": format!("GitHub read action {action:?} is not supported"),
+                "action": plexus_core::text::refusal_echo(action),
+                "message": format!("GitHub read action {:?} is not supported", plexus_core::text::refusal_echo(action)),
             }}));
         }
         if arguments
@@ -3226,7 +3226,7 @@ fn facade_tool_reply_inner(
                 .map(String::as_str)
                 .or_else(|| agent_id.is_none().then_some("agent_id"));
             let mut response = if let Some(field) = invalid_field {
-                json!({"error":{"code":"invalid_request","field":field}})
+                json!({"error":{"code":"invalid_request","field":plexus_core::text::refusal_echo(field)}})
             } else {
                 match plexus_core::github::control::bindings_read_for_agent(
                     state.store(),
@@ -3739,6 +3739,7 @@ fn configure_outcome_response(
             json!({"error": {"code": "manifest_missing", "message": "vendor manifest is not in the catalog"}})
         }
         Ok(ConfigureOutcome::UndeclaredFilter(key)) => {
+            let key = plexus_core::text::refusal_echo(&key);
             json!({"error": {"code": "undeclared_filter", "message": format!("filter key '{key}' is not declared by the vendor manifest"), "key": key}})
         }
         // Distinct from undeclared_filter because the fixes differ:
@@ -3748,6 +3749,7 @@ fn configure_outcome_response(
         // actually mistyped `write_enabling` sends them to read
         // vendor documentation for a spelling mistake.
         Ok(ConfigureOutcome::UnreadFilterKey { key, accepted }) => {
+            let key = plexus_core::text::refusal_echo(&key);
             json!({"error": {
                 "code": "unread_filter_key",
                 "message": format!(
@@ -3759,6 +3761,7 @@ fn configure_outcome_response(
             }})
         }
         Ok(ConfigureOutcome::MalformedFilters { field, expected }) => {
+            let field = plexus_core::text::refusal_echo(&field);
             json!({"error": {
                 "code": "malformed_filters",
                 "message": format!("resource_filters {field} must be {expected}"),
@@ -4599,7 +4602,7 @@ fn facade_events_set_actor_source(call: &FacadeArguments<'_>) -> Result<Value, M
                 Err(error) => {
                     return Ok(json!({"error": {
                         "code": "invalid_request",
-                        "message": format!("actor_source is invalid: {error}")
+                        "message": format!("actor_source is invalid: {}", plexus_core::text::refusal_echo(&error.to_string()))
                     }}));
                 }
             },
@@ -4762,7 +4765,8 @@ fn event_get_reply(
                     "event_name_mismatch",
                     &format!(
                         "event_name mismatch: expected {}, got {}",
-                        event.event_name, event_name
+                        plexus_core::text::refusal_echo(&event.event_name),
+                        plexus_core::text::refusal_echo(event_name)
                     ),
                 )
             } else {
@@ -5069,8 +5073,8 @@ fn denial_response(denial: &plexus_core::Denial) -> Value {
     } = denial
     {
         let text = CONSENT_PENDING_TEXT
-            .replace("<service>", service)
-            .replace("<action>", action);
+            .replace("<service>", &plexus_core::text::refusal_echo(service))
+            .replace("<action>", &plexus_core::text::refusal_echo(action));
         return json!({"error": {"code": "access_pending", "message": text, "elicitation_id": elicitation_id}});
     }
     if let plexus_core::Denial::ConsentRefused {
@@ -5109,9 +5113,10 @@ fn denial_response(denial: &plexus_core::Denial) -> Value {
     // Name the refused argument so the caller can drop it. Only the name is
     // echoed, never the argument's value.
     if let plexus_core::Denial::ArgumentUndeclared { field } = denial {
-        response["error"]["field"] = Value::String(field.clone());
+        response["error"]["field"] = json!(plexus_core::text::refusal_echo(field));
     }
     if let plexus_core::Denial::ConsentUnavailable { action } = denial {
+        let action = plexus_core::text::refusal_echo(action);
         response["error"]["action"] = json!(action);
         response["error"]["message"] = json!(format!(
             "consent_unavailable for action '{action}': no admissible session or consent route is available"
@@ -5127,6 +5132,7 @@ fn denial_response(denial: &plexus_core::Denial) -> Value {
         limit,
     } = denial
     {
+        let action = plexus_core::text::refusal_echo(action);
         response["error"]["action"] = json!(action);
         response["error"]["message"] = json!(format!("approval_preview_too_long for action '{action}': {length} bytes exceeds {limit} byte frame-body limit"));
         response["error"]["length"] = json!(length);
@@ -5758,9 +5764,19 @@ fn search_content_result(tool: &str, mut legacy: Value, code_search_repo: Option
         };
         ToolResult::new(vec![ContentPart::text(text)]).with_error(code)
     } else {
-        let parsed = legacy.get("result").cloned().unwrap_or(Value::Null);
+        let mut parsed = legacy.get("result").cloned().unwrap_or(Value::Null);
         let text = if tool == manifest::WEB_SEARCH_TOOL {
-            web_search_text(&parsed)
+            let (text, shown) = web_search_text(&parsed);
+            if let Some(results) = parsed.get_mut("results").and_then(Value::as_array_mut) {
+                let found = results.len();
+                if shown < found {
+                    results.truncate(shown);
+                    parsed["results_shown"] = json!(shown);
+                    parsed["results_found"] = json!(found);
+                    parsed["results_omitted"] = json!(found - shown);
+                }
+            }
+            text
         } else {
             serde_json::from_value::<plexus_core::code_search::CodeSearchResponse>(parsed.clone())
                 .ok()
@@ -5834,9 +5850,10 @@ fn refusal_text(error: &Value) -> String {
 /// The text a model reads for a web search: a count line, then each result
 /// numbered with title, url, publication day and excerpt. Until this moved
 /// here, Prefrontal (the agent runtime) authored the web_search tool and
-/// rendered this same text from plexus's reply. Keeping it byte-identical means
-/// switching the tool's provider changes nothing a model sees.
-fn web_search_text(result: &Value) -> String {
+/// rendered this same text from plexus's reply. Ordinary replies stay identical;
+/// larger replies stop at a whole result and disclose how many were omitted.
+fn web_search_text(result: &Value) -> (String, usize) {
+    use cortexkit_role_tool_provider::result::MAX_MODEL_VISIBLE_BYTES;
     let cached = result.get("cached").and_then(Value::as_bool) == Some(true);
     let cached_note = if cached { " (cached)" } else { "" };
     let results = result
@@ -5845,7 +5862,7 @@ fn web_search_text(result: &Value) -> String {
         .map(Vec::as_slice)
         .unwrap_or_default();
     if results.is_empty() {
-        return format!("No web results{cached_note}.");
+        return (format!("No web results{cached_note}."), 0);
     }
     let noun = if results.len() == 1 {
         "result"
@@ -5853,28 +5870,39 @@ fn web_search_text(result: &Value) -> String {
         "results"
     };
     let mut text = format!("{} web {noun}{cached_note}:", results.len());
+    // Reserve the longest closing note before accepting a result. Text is the
+    // only model-visible part of this ToolResult; structured data is not counted.
+    let note = |shown| {
+        format!("\n\nShown {shown} of {} results found; the rest were left out to keep the reply under the size limit.", results.len())
+    };
+    let budget = MAX_MODEL_VISIBLE_BYTES - note(results.len()).len();
     for (index, item) in results.iter().enumerate() {
-        text.push_str(&format!(
+        let mut entry = format!(
             "\n\n{}. {}",
             index + 1,
             web_search_text_field(item, "title")
                 .map(web_search_collapse_whitespace)
                 .unwrap_or_else(|| "(untitled)".to_string())
-        ));
+        );
         if let Some(url) = web_search_text_field(item, "url") {
-            text.push_str(&format!("\n   {url}"));
+            entry.push_str(&format!("\n   {url}"));
         }
         if let Some(published) = web_search_text_field(item, "published_at") {
             // RFC 3339 timestamps carry precision the model does not need;
             // show only the publication day.
             let day = published.split('T').next().unwrap_or(published);
-            text.push_str(&format!("\n   Published {day}"));
+            entry.push_str(&format!("\n   Published {day}"));
         }
         if let Some(excerpt) = web_search_text_field(item, "excerpt") {
-            text.push_str(&format!("\n   {}", web_search_collapse_whitespace(excerpt)));
+            entry.push_str(&format!("\n   {}", web_search_collapse_whitespace(excerpt)));
         }
+        if text.len() + entry.len() > budget {
+            text.push_str(&note(index));
+            return (text, index);
+        }
+        text.push_str(&entry);
     }
-    text
+    (text, results.len())
 }
 
 fn web_search_text_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -6123,6 +6151,9 @@ mod web_search_tests;
 
 #[cfg(test)]
 mod web_search_rendering_tests;
+
+#[cfg(test)]
+mod refusal_echo_tests;
 
 #[cfg(test)]
 mod rest_pool_tests;

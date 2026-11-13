@@ -1276,6 +1276,50 @@ async fn events_get_refusals_and_mismatches() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_get_mismatching_names_have_bounded_refusal_echoes() {
+    use cortexkit_role_tool_provider::result::{
+        legacy_model_visible_bytes, model_visible_bytes, ToolResult, MAX_MODEL_VISIBLE_BYTES,
+    };
+    let (_scratch, store, path) = test_store("events-get-name-echo");
+    let (issue_key, _) = seed_test_events(&path, &store);
+    for name in ["typo".to_string(), "x".repeat(70_000), "🦀".repeat(17_500)] {
+        for tool in [manifest::EVENTS_GET_TOOL, manifest::EVENTS_TOOL] {
+            let mut arguments = json!({"event_key":issue_key, "event_name":name});
+            if tool == manifest::EVENTS_TOOL {
+                arguments["op"] = json!("get");
+            }
+            let reply = execute_tool_call(
+                store.clone(),
+                Principal::Reserved {
+                    module_id: "prefrontal-core".into(),
+                },
+                None,
+                tool,
+                arguments,
+            )
+            .await;
+            assert_eq!(reply["error"]["code"], "event_name_mismatch");
+            let message = reply["error"]["message"].as_str().unwrap();
+            if name.len() <= 256 {
+                assert_eq!(
+                    message,
+                    "event_name mismatch: expected github_issue_changed, got typo"
+                );
+            } else {
+                assert!(message.ends_with("[shortened]"));
+                assert!(message.len() < 400);
+            }
+            assert!(legacy_model_visible_bytes(&reply) <= MAX_MODEL_VISIBLE_BYTES);
+            let rendered = with_call_tool_result(Some(tool), reply);
+            assert!(
+                model_visible_bytes(&serde_json::from_value::<ToolResult>(rendered).unwrap())
+                    <= MAX_MODEL_VISIBLE_BYTES
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_get_agent_owned_flow_and_unbind() {
     let (_scratch, store, path) = test_store("events_get_agent_flow");
     let (issue_key, _) = seed_test_events(&path, &store);

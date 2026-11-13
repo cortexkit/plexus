@@ -47,8 +47,11 @@ pub(crate) fn reaction_request(arguments: &Map<String, Value>) -> Result<Reactio
         .find(|field| !FIELDS.contains(&field.as_str()))
     {
         return Err(refuse(
-            field,
-            format!("github_react does not accept the field {field}"),
+            &plexus_core::text::refusal_echo(field),
+            format!(
+                "github_react does not accept the field {}",
+                plexus_core::text::refusal_echo(field)
+            ),
         ));
     }
     if let Some(field) = FIELDS.iter().find(|field| !arguments.contains_key(**field)) {
@@ -72,7 +75,7 @@ pub(crate) fn reaction_request(arguments: &Map<String, Value>) -> Result<Reactio
         .as_object()
         .ok_or_else(|| refuse("target", "target must be an object".into()))?;
     if let Some(field) = target.keys().find(|field| field.as_str() != "number") {
-        let field = format!("target.{field}");
+        let field = plexus_core::text::refusal_echo(&format!("target.{field}")).into_owned();
         return Err(refuse(
             &field,
             format!("github_react does not accept the field {field}"),

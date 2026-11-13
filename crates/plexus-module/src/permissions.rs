@@ -34,6 +34,7 @@ fn admitted(caller: &str, mode: Option<&CallMode>, scope: Option<&CallScope>) ->
 }
 
 fn invalid(field: &str, reason: &str) -> Value {
+    let field = plexus_core::text::refusal_echo(field);
     json!({"error":{"code":"invalid_request", "field":field, "reason":reason, "message":format!("{reason}: {field}")}})
 }
 

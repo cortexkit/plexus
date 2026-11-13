@@ -78,6 +78,63 @@ fn results_render_numbered_with_url_published_day_and_excerpt() {
 }
 
 #[test]
+fn maximal_web_results_keep_whole_entries_with_a_bounded_counted_note() {
+    use cortexkit_role_tool_provider::result::{
+        model_visible_bytes, ToolResult, MAX_MODEL_VISIBLE_BYTES,
+    };
+    let results: Vec<_> = (0..20)
+        .map(|index| {
+            let prefix = format!("https://example.com/{index}/");
+            json!({
+                "title": "🦀".repeat(300),
+                "excerpt": "🦀".repeat(600),
+                "url": format!("{prefix}{}", "u".repeat(2048 - prefix.len())),
+                "published_at": "2026-09-18T00:00:00Z"
+            })
+        })
+        .collect();
+    let legacy = json!({"result": {"results": results}});
+    let reply = with_call_tool_result(Some(WEB_SEARCH_TOOL), legacy.clone());
+    let measured =
+        model_visible_bytes(&serde_json::from_value::<ToolResult>(reply.clone()).unwrap());
+    assert!(
+        measured <= MAX_MODEL_VISIBLE_BYTES,
+        "model-visible bytes: {measured}"
+    );
+    assert_eq!(reply["isError"], false);
+    let shown = reply["structuredContent"]["results_shown"]
+        .as_u64()
+        .unwrap() as usize;
+    assert!(shown > 0 && shown < 20);
+    assert_eq!(reply["structuredContent"]["results_found"], 20);
+    assert_eq!(reply["structuredContent"]["results_omitted"], 20 - shown);
+    assert_eq!(
+        reply["structuredContent"]["results"],
+        json!(&results[..shown])
+    );
+    assert_eq!(
+        reply["result"], legacy["result"],
+        "the relay keeps the provider data"
+    );
+    let text = reply["content"][0]["text"].as_str().unwrap();
+    let mut expected = "20 web results:".to_string();
+    for (index, result) in results.iter().take(shown).enumerate() {
+        expected.push_str(&format!(
+            "\n\n{}. {}\n   {}\n   Published 2026-09-18\n   {}",
+            index + 1,
+            result["title"].as_str().unwrap(),
+            result["url"].as_str().unwrap(),
+            result["excerpt"].as_str().unwrap()
+        ));
+    }
+    expected.push_str(&format!("\n\nShown {shown} of 20 results found; the rest were left out to keep the reply under the size limit."));
+    assert_eq!(
+        text, expected,
+        "each accepted entry is complete and ordered"
+    );
+}
+
+#[test]
 fn cached_results_say_cached_once() {
     let mut reply = live_reply();
     reply["result"]["cached"] = json!(true);

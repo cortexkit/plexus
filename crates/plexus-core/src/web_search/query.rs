@@ -96,7 +96,7 @@ impl WebSearchQuery {
     /// misspelled filter never silently widens a search.
     pub fn parse(arguments: &Map<String, Value>) -> Result<Self, WebSearchRefusal> {
         let invalid = |field: &str| WebSearchRefusal::InvalidQuery {
-            field: field.to_string(),
+            field: crate::text::refusal_echo(field).into_owned(),
         };
         let mut unknown: Vec<&String> = arguments
             .keys()

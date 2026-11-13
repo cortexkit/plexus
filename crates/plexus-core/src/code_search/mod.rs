@@ -100,7 +100,7 @@ impl CodeSearchRefusal {
     }
     pub fn invalid(field: &str) -> Self {
         Self {
-            field: Some(field.to_string()),
+            field: Some(crate::text::refusal_echo(field).into_owned()),
             ..Self::new(RefusalCode::InvalidQuery)
         }
     }

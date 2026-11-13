@@ -5,7 +5,6 @@ use cortexkit_role_tool_provider::{
         check_modes, schema_digest, serves_call_mode, CatalogAnswer, CatalogRequest, CatalogTool,
     },
     describe::{Major, RoleDescribe},
-    errors::invalid_request,
     ops, PROVIDES,
 };
 use serde_json::{Map, Value};
@@ -16,6 +15,14 @@ use subc_protocol::{
 };
 
 use crate::manifest::{self, CODE_SEARCH_CAPABILITY, CODE_SEARCH_TOOL, WEB_SEARCH_TOOL};
+use plexus_core::text::refusal_echo;
+
+fn invalid_request(field: &str, message: impl Into<String>) -> ErrorBody {
+    cortexkit_role_tool_provider::errors::invalid_request(
+        &refusal_echo(field),
+        refusal_echo(&message.into()).into_owned(),
+    )
+}
 
 /// Advertised in `role.describe` so a consumer sends `params.capabilities`
 /// only to a provider that selects tools by it. Present means preflight and
@@ -250,11 +257,11 @@ fn tools_for(
         if !TOOL_CAPABILITIES.iter().any(|(_, own)| own.contains(tag)) {
             return Err(invalid_request(
                 &format!("params.capabilities[{index}]"),
-                format!("plexus serves no capability {tag}"),
+                format!("plexus serves no capability {}", refusal_echo(tag)),
             )
             .with_detail(serde_json::json!({
                 "field": format!("params.capabilities[{index}]"),
-                "capability": tag,
+                "capability": refusal_echo(tag),
             })));
         }
     }

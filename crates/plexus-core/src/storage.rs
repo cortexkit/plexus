@@ -2220,7 +2220,8 @@ impl std::fmt::Display for SubscriptionRefusal {
             // cursor kind reads -- not merely that theirs was wrong.
             Self::CursorStateKeyUnknown { key, accepted } => write!(
                 formatter,
-                "cursor_state key '{key}' is not read by this cursor kind (accepted: {})",
+                "cursor_state key '{}' is not read by this cursor kind (accepted: {})",
+                crate::text::refusal_echo(key),
                 accepted.join(", ")
             ),
             Self::ActionUnavailable(reason) => write!(formatter, "action is unavailable: {reason}"),
@@ -2240,19 +2241,23 @@ impl std::fmt::Display for SubscriptionRefusal {
             Self::FixedArgsMustBeObject => formatter.write_str("fixed_args must be an object"),
             Self::FixedArgCursorOwned(key) => write!(
                 formatter,
-                "fixed_args key '{key}' is owned by the cursor strategy"
+                "fixed_args key '{}' is owned by the cursor strategy",
+                crate::text::refusal_echo(key)
             ),
             Self::FixedArgRequestConstant(key) => write!(
                 formatter,
-                "fixed_args key '{key}' collides with a manifest request constant"
+                "fixed_args key '{}' collides with a manifest request constant",
+                crate::text::refusal_echo(key)
             ),
             Self::FixedArgNotDeclared(key) => write!(
                 formatter,
-                "fixed_args key '{key}' is not declared by the action schema"
+                "fixed_args key '{}' is not declared by the action schema",
+                crate::text::refusal_echo(key)
             ),
             Self::FixedArgRequiredMissing(key) => write!(
                 formatter,
-                "the action requires '{key}', which fixed_args must supply"
+                "the action requires '{}', which fixed_args must supply",
+                crate::text::refusal_echo(key)
             ),
             Self::FixedArgTypeMismatch {
                 key,
@@ -2260,10 +2265,15 @@ impl std::fmt::Display for SubscriptionRefusal {
                 actual,
             } => write!(
                 formatter,
-                "fixed_args key '{key}' has type {actual}, expected {expected}"
+                "fixed_args key '{}' has type {actual}, expected {expected}",
+                crate::text::refusal_echo(key)
             ),
             Self::ActionNotCoveredByGrant { action } => {
-                write!(formatter, "poll grant does not cover action '{action}'")
+                write!(
+                    formatter,
+                    "poll grant does not cover action '{}'",
+                    crate::text::refusal_echo(action)
+                )
             }
             Self::ProbeNameRequired => formatter.write_str("probe name must be non-empty"),
             Self::ProbeScriptRequired => {
@@ -2278,7 +2288,11 @@ impl std::fmt::Display for SubscriptionRefusal {
                 formatter.write_str("probe must declare at least one action")
             }
             Self::ProbeReturnSchemaInvalid(reason) => {
-                write!(formatter, "probe return_schema is invalid: {reason}")
+                write!(
+                    formatter,
+                    "probe return_schema is invalid: {}",
+                    crate::text::refusal_echo(reason)
+                )
             }
             Self::ProbeRearmInvalid => {
                 formatter.write_str("probe rearm must be 'once' or 'always'")
