@@ -531,8 +531,8 @@ fn dispatch_states_and_execution_evidence_survive_discarded_output() {
 }
 
 #[test]
-fn exclusions_are_explicit_and_the_rollout_is_disabled() {
-    assert!(!std::hint::black_box(remaining_tool_guard::ENABLED));
+fn exclusions_are_explicit_and_the_guard_ships_enabled() {
+    assert!(std::hint::black_box(remaining_tool_guard::ENABLED));
     for tool in TOOLS {
         assert!(remaining_tool_guard::covers(Some(tool)));
     }

@@ -4,10 +4,12 @@ use super::{manifest, reply_guard, with_call_tool_result_with_repo, Frame};
 use reply_guard::{EffectiveFormat, ExecutionState};
 use serde_json::{json, Value};
 
-// Off until the readers of these tools' replies (Basal flows, core's event
-// readers, Broca's model-facing tools and the plexus operator client) approve
-// the samples in tests/fixtures/reply-too-large-v1/.
-pub(super) const ENABLED: bool = false;
+// On since the readers of these tools' replies (Basal flows and codemode,
+// core, Broca and Agent Runner) passed the samples in
+// tests/fixtures/reply-too-large-v1/. `ck-plexus-admin issue-ticket` reads
+// `catalog op:apps`, about 12 KB today: if that ever nears the limit, page it
+// before the guard refuses it.
+pub(super) const ENABLED: bool = true;
 
 pub(super) fn covers(tool: Option<&str>) -> bool {
     matches!(
