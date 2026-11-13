@@ -301,15 +301,29 @@ impl ApprovalPass<'_> {
                 {
                     continue;
                 }
-                if matches!(record.state.as_str(), "awaiting_active" | "card_conflict") {
+                if record.state == "awaiting_active" {
                     continue;
                 }
                 if self.card_settlement(&mut record)? {
                     continue;
                 }
+                // Proposals share a base manifest version, so approving one
+                // supersedes the others. Keep one owner decision outstanding;
+                // the store orders existing waiters by handle and repository.
+                let waiting = self
+                    .store
+                    .github_manifest_bindings()
+                    .map_err(|_| "store_error")?
+                    .into_iter()
+                    .find(|r| r.present && matches!(r.state.as_str(), "pending" | "card_conflict"));
+                if waiting.is_some_and(|r| {
+                    r.app_handle_id != record.app_handle_id || r.repository != record.repository
+                }) {
+                    continue;
+                }
                 // Do not create a vault proposal unless its statement can be
                 // put in front of the owner. No generic card can substitute.
-                if !available || !self.admitted() {
+                if record.state == "card_conflict" || !available || !self.admitted() {
                     continue;
                 }
                 let slug = handle
