@@ -2093,7 +2093,12 @@ async fn protocol_move_refuses_federated_stamp_before_binding_a_first_party_prin
     handle_control_request(frame, &writer, &state, &routes)
         .await
         .unwrap();
-    let response = responses.recv().await.unwrap();
+    let response = recv_within(
+        responses.recv(),
+        std::time::Duration::from_secs(5),
+        "federated bind refusal",
+    )
+    .await;
     assert_eq!(response.header.ty, FrameType::Error);
     let body: Value = serde_json::from_slice(&response.body).unwrap();
     assert_eq!(body["code"], "principal_denied");
@@ -2115,7 +2120,12 @@ async fn protocol_move_keeps_unstamped_callosum_refusal_unchanged() {
     )
     .await
     .unwrap();
-    let response = responses.recv().await.unwrap();
+    let response = recv_within(
+        responses.recv(),
+        std::time::Duration::from_secs(5),
+        "unstamped callosum refusal",
+    )
+    .await;
     assert_eq!(response.header.ty, FrameType::Error);
     let body: Value = serde_json::from_slice(&response.body).unwrap();
     assert_eq!(body["code"], "principal_denied");
