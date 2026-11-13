@@ -3,6 +3,8 @@
 use cortexkit_role_tool_provider::result::{legacy_model_visible_bytes, MAX_MODEL_VISIBLE_BYTES};
 use serde_json::{json, Value};
 
+use super::reply_guard::{self, EffectiveFormat, ExecutionState};
+
 // Tails can discard their oldest bytes after measuring JSON escaping. Ranges
 // cannot: transport redaction/ANSI removal changes text byte positions, while
 // offset/length count raw bytes for paging. 10000 * 6 = 60000 leaves 5536 bytes
@@ -88,11 +90,14 @@ pub(super) fn shape_tail(action: &str, mut reply: Value) -> Value {
 
 /// Measure the exact lean legacy body. Keep refusals' execution state rather
 /// than implying that a read which was already sent is safe to retry.
-pub(super) fn guard(action: &str, reply: Value) -> Value {
-    let size = legacy_model_visible_bytes(&reply);
-    if size <= MAX_MODEL_VISIBLE_BYTES {
+pub(super) fn guard(action: &str, reply: Value, _reads_tool_result_v1: bool) -> Value {
+    // Bind capabilities are available for a later negotiation change. GitHub
+    // reads still use their existing lean legacy body on every route.
+    let format = EffectiveFormat::Legacy;
+    if format.fits(&reply) {
         return reply;
     }
+    let size = format.model_visible_bytes(&reply).expect("legacy body");
     plexus_core::diag!(warn wire:
         "github_read action {} returned {size} model-visible bytes; refusing oversized reply",
         super::diagnostic_label(action)
@@ -108,9 +113,10 @@ pub(super) fn guard(action: &str, reply: Value) -> Value {
                 "sent"
             }
         });
-    json!({"error": {
-            "code": "response_too_large",
-            "message": "GitHub read reply exceeds the tool's 65536-byte limit and was not returned; narrow the request with a smaller path, per_page, or page",
-            "transmission": transmission,
-    }})
+    reply_guard::fallback(
+        format,
+        "GitHub read reply exceeds the tool's 65536-byte limit and was not returned; narrow the request with a smaller path, per_page, or page",
+        ExecutionState { transmission },
+    )
+    .expect("GitHub read transmission labels and size refusal fit the legacy limit")
 }

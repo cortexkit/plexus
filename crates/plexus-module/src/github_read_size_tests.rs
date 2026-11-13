@@ -30,6 +30,12 @@ fn tail_shape_vectors_pin_short_and_escaped_lengths() {
                 result["path"] = json!("logs/shard.log");
             }
             let reply = github_read_tool::shape_tail(action, json!({"result":result}));
+            for reads_tool_result_v1 in [false, true] {
+                assert_eq!(
+                    github_read_tool::guard(action, reply.clone(), reads_tool_result_v1),
+                    reply
+                );
+            }
             assert_eq!(reply["result"]["max_bytes"], 60_000);
             let length = reply["result"]["length"].as_u64().unwrap();
             assert!(length < 60_000);
@@ -81,12 +87,12 @@ fn tail_trimming_keeps_utf8_suffixes_and_guard_limit_is_inclusive() {
     let exact = json!({"result":"x".repeat(65_523)});
     assert_eq!(legacy_model_visible_bytes(&exact), 65_536);
     assert_eq!(
-        github_read_tool::guard("github.issue.get", exact.clone()),
+        github_read_tool::guard("github.issue.get", exact.clone(), false),
         exact
     );
     let over = json!({"result":"x".repeat(65_524)});
     assert_eq!(
-        github_read_tool::guard("github.issue.get", over)["error"]["code"],
+        github_read_tool::guard("github.issue.get", over, false)["error"]["code"],
         "response_too_large"
     );
 }
@@ -247,17 +253,57 @@ async fn large_repo_and_search_bodies_are_refused_whole_after_send() {
 fn final_guard_replaces_oversize_other_actions_and_preserves_transmission() {
     let rendered = json!({"result":{"items":["x".repeat(65536)]}});
     assert!(legacy_model_visible_bytes(&rendered) > MAX_MODEL_VISIBLE_BYTES);
-    let reply = github_read_tool::guard("github.pulls.open", rendered.clone());
+    let reply = github_read_tool::guard("github.pulls.open", rendered.clone(), false);
     assert_eq!(reply["error"]["code"], "response_too_large");
     assert_eq!(reply["error"]["transmission"], "sent");
     assert!(reply.get("result").is_none());
     assert_bounded(&reply);
-    let local = github_read_tool::guard("github.bindings.list", rendered);
+    let local = github_read_tool::guard("github.bindings.list", rendered, false);
     assert_eq!(local["error"]["transmission"], "not_sent");
     for transmission in ["sent", "not_sent", "unknown", "failed"] {
         let refusal = json!({"error":{"transmission":transmission,"detail":"x".repeat(65536)}});
-        let reply = github_read_tool::guard("github.issue.get", refusal);
+        let reply = github_read_tool::guard("github.issue.get", refusal, false);
         assert_eq!(reply["error"]["transmission"], transmission);
         assert_bounded(&reply);
+    }
+}
+
+#[test]
+fn extracted_guard_keeps_existing_fallback_bytes_for_both_bind_formats() {
+    for (action, original, transmission) in [
+        (
+            "github.issue.get",
+            json!({"result":"x".repeat(65_536)}),
+            "sent",
+        ),
+        (
+            "github.bindings.list",
+            json!({"result":"x".repeat(65_536)}),
+            "not_sent",
+        ),
+        (
+            "github.issue.get",
+            json!({"error":{"detail":"x".repeat(65_536)}}),
+            "not_sent",
+        ),
+        (
+            "github.issue.get",
+            json!({"error":{"outcome":{"transmission":"unknown"},"detail":"x".repeat(65_536)}}),
+            "unknown",
+        ),
+        (
+            "github.issue.get",
+            json!({"error":{"transmission":"failed","outcome":{"transmission":"sent"},"detail":"x".repeat(65_536)}}),
+            "failed",
+        ),
+    ] {
+        let expected = format!(
+            r#"{{"error":{{"code":"response_too_large","message":"GitHub read reply exceeds the tool's 65536-byte limit and was not returned; narrow the request with a smaller path, per_page, or page","transmission":"{transmission}"}}}}"#
+        );
+        for capability in [false, true] {
+            let body = github_read_tool::guard(action, original.clone(), capability);
+            assert_eq!(serde_json::to_vec(&body).unwrap(), expected.as_bytes());
+            assert_bounded(&body);
+        }
     }
 }
