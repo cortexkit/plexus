@@ -2,8 +2,8 @@ use super::*;
 use crate::credentials::{CkcredRouteError, ResolvedCredential};
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use std::{
-    cell::Cell,
-    collections::BTreeMap,
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
@@ -268,6 +268,7 @@ fn unknown_or_malformed_commitments_fail_closed() {
 struct Vault {
     calls: Mutex<Vec<(String, Value)>>,
     reply: Mutex<Value>,
+    repository_replies: Mutex<BTreeMap<String, Value>>,
     status: Mutex<Value>,
 }
 impl Vault {
@@ -275,6 +276,7 @@ impl Vault {
         Self {
             calls: Mutex::new(vec![]),
             reply: Mutex::new(sample("propose.reply")),
+            repository_replies: Mutex::new(BTreeMap::new()),
             status: Mutex::new(sample("active_status.not_ready")),
         }
     }
@@ -289,9 +291,17 @@ impl Vault {
 }
 impl CkcredRoutePeer for Vault {
     fn call(&self, method: &str, params: Value) -> Result<Value, CkcredRouteError> {
-        self.calls.lock().unwrap().push((method.into(), params));
+        self.calls
+            .lock()
+            .unwrap()
+            .push((method.into(), params.clone()));
         Ok(if method == "manifest.propose_binding" {
-            self.reply.lock().unwrap().clone()
+            self.repository_replies
+                .lock()
+                .unwrap()
+                .get(params["repo"].as_str().unwrap())
+                .cloned()
+                .unwrap_or_else(|| self.reply.lock().unwrap().clone())
         } else {
             assert_eq!(method, "manifest.active_status");
             self.status.lock().unwrap().clone()
@@ -306,6 +316,10 @@ struct Cards {
     attempts: Cell<usize>,
     lose_reply: Cell<bool>,
     conflict: Cell<bool>,
+    statements: RefCell<BTreeMap<String, String>>,
+    states: RefCell<BTreeMap<String, CardState>>,
+    filed_ids: RefCell<BTreeSet<String>>,
+    checked: RefCell<Vec<String>>,
 }
 impl Cards {
     fn new() -> Self {
@@ -316,6 +330,16 @@ impl Cards {
             attempts: Cell::new(0),
             lose_reply: Cell::new(false),
             conflict: Cell::new(false),
+            statements: RefCell::new(BTreeMap::from([(
+                sample("propose.reply")["result"]["statement_b64url"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                "card-1".into(),
+            )])),
+            states: RefCell::new(BTreeMap::new()),
+            filed_ids: RefCell::new(BTreeSet::new()),
+            checked: RefCell::new(Vec::new()),
         }
     }
 }
@@ -328,23 +352,28 @@ impl BindingCards for Cards {
             CardRequest::Available => CardReply::Available,
             CardRequest::File { handle, proposal } => {
                 assert_eq!(handle.app_id, 4617236);
-                assert_eq!(
-                    proposal.statement_b64url,
-                    sample("propose.reply")["result"]["statement_b64url"]
-                );
+                let id = self.statements.borrow()[&proposal.statement_b64url].clone();
                 self.attempts.set(self.attempts.get() + 1);
                 if self.conflict.get() {
                     return Ok(CardReply::Conflict);
                 }
-                self.filed.set(1);
+                self.filed_ids.borrow_mut().insert(id.clone());
+                self.filed.set(self.filed_ids.borrow().len());
                 if self.lose_reply.replace(false) {
                     return Err("lost_reply".into());
                 }
-                CardReply::Filed("card-1".into())
+                CardReply::Filed(id)
             }
             CardRequest::Get { card_id, .. } | CardRequest::Await { card_id, .. } => {
-                assert_eq!(card_id, "card-1");
-                CardReply::State(self.state.get())
+                assert!(self.statements.borrow().values().any(|id| id == card_id));
+                self.checked.borrow_mut().push(card_id.into());
+                CardReply::State(
+                    self.states
+                        .borrow()
+                        .get(card_id)
+                        .copied()
+                        .unwrap_or_else(|| self.state.get()),
+                )
             }
         })
     }
@@ -501,6 +530,297 @@ impl Fixture {
     fn notice(&mut self) {
         self.pass().notice(sample("watch.stored"), NOW).unwrap();
     }
+
+    fn repositories(&self, repositories: &[&str]) {
+        *self.reader.pages.borrow_mut() = vec![listing(repositories)];
+        for (index, repository) in repositories.iter().enumerate() {
+            self.proposal_for(&handle(), repository, 28, index);
+        }
+    }
+
+    fn proposal_for(
+        &self,
+        handle: &GithubHandle,
+        repository: &str,
+        prior_version: i64,
+        index: usize,
+    ) -> Proposal {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+        let mut reply = sample("propose.reply");
+        let result = &mut reply["result"];
+        let mut statement: Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(result["statement_b64url"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        result["proposal_id"] = json!(format!("{:026}", index + 1));
+        result["manifest_version"] = json!(prior_version + 1);
+        result["manifest_sha256"] = json!(format!("{:064x}", prior_version + 1));
+        for field in [
+            "proposal_id",
+            "manifest_version",
+            "manifest_sha256",
+            "expires_at_ms",
+        ] {
+            statement[field] = result[field].clone();
+        }
+        statement["repo"] = json!(repository);
+        statement["agent_id"] = json!(handle.agent_id);
+        statement["app_slug"] = json!(handle.app_handle_id);
+        statement["prior_version"] = json!(prior_version);
+        statement["prior_sha256"] = json!(format!("{prior_version:064x}"));
+        result["statement_b64url"] =
+            json!(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&statement).unwrap()));
+        let proposal: Proposal = wire::response(reply.clone()).unwrap();
+        self.cards.statements.borrow_mut().insert(
+            proposal.statement_b64url.clone(),
+            format!("card-{}", proposal.proposal_id),
+        );
+        self.vault
+            .repository_replies
+            .lock()
+            .unwrap()
+            .insert(repository.into(), reply);
+        proposal
+    }
+
+    fn seed_waiting(&self, handle: &GithubHandle, repository: &str, index: usize) -> BindingRecord {
+        let proposal = self.proposal_for(handle, repository, 28, index);
+        let mut record = BindingRecord::observed(handle, repository);
+        record.proposal_id = Some(proposal.proposal_id.clone());
+        record.manifest_version = Some(proposal.manifest_version);
+        record.manifest_sha256 = Some(proposal.manifest_sha256);
+        record.statement_b64url = Some(proposal.statement_b64url);
+        record.expires_at_ms = Some(proposal.expires_at_ms);
+        record.state = "pending".into();
+        record.card_id = Some(format!("card-{}", proposal.proposal_id));
+        assert!(self
+            .store
+            .save_github_manifest_binding(&record, None)
+            .unwrap());
+        record.revision += 1;
+        record
+    }
+
+    fn record_for(&self, handle: &GithubHandle, repository: &str) -> BindingRecord {
+        self.store
+            .github_manifest_bindings()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.app_handle_id == handle.app_handle_id && r.repository == repository)
+            .unwrap()
+    }
+}
+
+#[test]
+fn two_repositories_share_one_owner_slot() {
+    let mut f = Fixture::new();
+    f.repositories(&["octo-owner/z-repo", REPO]);
+    f.discover();
+    assert_eq!(f.vault.proposals(), 1);
+    assert_eq!(f.cards.attempts.get(), 1);
+    assert_eq!(f.cards.filed.get(), 1);
+    assert_eq!(f.vault.calls.lock().unwrap()[0].1["repo"], REPO);
+    assert_eq!(f.record().state, "pending");
+    assert!(!f.progress.stopped());
+}
+
+#[test]
+fn decline_or_expiry_frees_the_owner_slot_in_the_same_pass() {
+    for (answer, state) in [
+        (CardState::Declined, "declined"),
+        (CardState::Expired, "expired"),
+    ] {
+        let mut f = Fixture::new();
+        f.repositories(&[REPO, "octo-owner/z-repo"]);
+        f.discover();
+        let first = f.record();
+        f.cards
+            .states
+            .borrow_mut()
+            .insert(first.card_id.unwrap(), answer);
+        f.discover();
+        assert_eq!(f.record_for(&handle(), REPO).state, state);
+        assert_eq!(f.vault.proposals(), 2);
+        assert_eq!(f.cards.filed.get(), 2);
+        assert_eq!(
+            f.record_for(&handle(), "octo-owner/z-repo").state,
+            "pending"
+        );
+    }
+}
+
+#[test]
+fn approval_notice_frees_the_owner_slot_on_the_new_base_next_pass() {
+    let mut f = Fixture::new();
+    f.repositories(&[REPO, "octo-owner/z-repo"]);
+    f.discover();
+    let first = f.record();
+    let mut notice = sample("watch.stored");
+    notice["version"] = json!(29);
+    notice["manifest_sha256"] = json!(first.manifest_sha256.unwrap());
+    f.pass().notice(notice, NOW).unwrap();
+    assert_eq!(f.record().state, "awaiting_active");
+    assert_eq!(f.vault.proposals(), 1);
+    f.proposal_for(&handle(), "octo-owner/z-repo", 29, 2);
+    f.discover();
+    assert_eq!(f.vault.proposals(), 2);
+    assert_eq!(f.cards.filed.get(), 2);
+    let second = f.record_for(&handle(), "octo-owner/z-repo");
+    assert_eq!(second.state, "pending");
+    let proposal: Proposal =
+        wire::response(f.vault.repository_replies.lock().unwrap()["octo-owner/z-repo"].clone())
+            .unwrap();
+    let statement = proposal
+        .statement(AGENT, SLUG, "octo-owner/z-repo")
+        .unwrap();
+    assert_eq!(statement.prior_version, 29);
+    assert_eq!(second.manifest_version, Some(30));
+    assert_eq!(f.record_for(&handle(), REPO).state, "awaiting_active");
+}
+
+#[test]
+fn five_existing_waiters_only_repropose_the_first_by_handle_then_repository() {
+    for first_has_card in [false, true] {
+        let mut f = Fixture::new();
+        let repositories = [
+            REPO,
+            "octo-owner/a",
+            "octo-owner/b",
+            "octo-owner/c",
+            "octo-owner/z",
+        ];
+        f.repositories(&repositories);
+        let mut earlier = handle();
+        earlier.app_handle_id = "aaa".into();
+        earlier.agent_id = "agent_5555555555555555".into();
+        earlier.credential_reference = "github_app:aaa".into();
+        earlier.connection_id = "earlier-handle-connection".into();
+        f.store
+            .insert_connection(
+                "direct",
+                &earlier.connection_id,
+                "github_rest",
+                "active",
+                &json!({}),
+            )
+            .unwrap();
+        f.store.put_github_handle(&earlier).unwrap();
+        let current = handle();
+        // Insert in reverse order so neither insertion nor listing order selects the slot.
+        for (index, repository) in repositories.iter().enumerate().rev() {
+            let owner = if index >= 3 { &earlier } else { &current };
+            let mut record = f.seed_waiting(owner, repository, index);
+            if index == 3 && !first_has_card {
+                record.card_id = None;
+                assert!(f.store.save_github_manifest_binding(&record, None).unwrap());
+            }
+        }
+        f.discover();
+        assert_eq!(f.vault.proposals(), 1);
+        assert_eq!(f.vault.calls.lock().unwrap()[0].1["app_slug"], "aaa");
+        assert_eq!(f.vault.calls.lock().unwrap()[0].1["repo"], "octo-owner/c");
+        assert_eq!(f.cards.attempts.get(), usize::from(!first_has_card));
+        assert_eq!(
+            f.cards.checked.borrow().len(),
+            4 + usize::from(first_has_card)
+        );
+        assert_eq!(f.store.github_manifest_bindings().unwrap().len(), 5);
+    }
+}
+
+#[test]
+fn card_conflict_occupies_the_slot_without_reproposing_or_refiling() {
+    let mut f = Fixture::new();
+    f.repositories(&[REPO, "octo-owner/z-repo"]);
+    f.cards.conflict.set(true);
+    f.discover();
+    f.discover();
+    assert_eq!(f.record().state, "card_conflict");
+    assert_eq!(f.vault.proposals(), 1);
+    assert_eq!(f.cards.attempts.get(), 1);
+    assert_eq!(f.cards.filed.get(), 0);
+}
+
+#[test]
+fn card_conflict_with_a_saved_card_settles_before_the_slot_decision() {
+    for answer in [CardState::Declined, CardState::Expired] {
+        let mut f = Fixture::new();
+        f.repositories(&[REPO, "octo-owner/z-repo"]);
+        let mut first = f.seed_waiting(&handle(), REPO, 0);
+        first.state = "card_conflict".into();
+        assert!(f.store.save_github_manifest_binding(&first, None).unwrap());
+        f.cards
+            .states
+            .borrow_mut()
+            .insert(first.card_id.unwrap(), answer);
+        f.discover();
+        assert_eq!(f.cards.checked.borrow().len(), 1);
+        assert_eq!(f.vault.proposals(), 1);
+        assert_eq!(
+            f.vault.calls.lock().unwrap()[0].1["repo"],
+            "octo-owner/z-repo"
+        );
+    }
+}
+
+#[test]
+fn a_waiter_outside_the_slot_still_settles_its_card() {
+    let mut f = Fixture::new();
+    f.repositories(&[REPO, "octo-owner/z-repo"]);
+    f.seed_waiting(&handle(), REPO, 0);
+    let second = f.seed_waiting(&handle(), "octo-owner/z-repo", 1);
+    f.cards
+        .states
+        .borrow_mut()
+        .insert(second.card_id.unwrap(), CardState::Declined);
+    f.discover();
+    assert_eq!(f.cards.checked.borrow().len(), 2);
+    assert_eq!(
+        f.record_for(&handle(), "octo-owner/z-repo").state,
+        "declined"
+    );
+    assert_eq!(f.vault.proposals(), 1);
+    assert_eq!(f.vault.calls.lock().unwrap()[0].1["repo"], REPO);
+}
+
+#[test]
+fn an_absent_waiter_does_not_occupy_the_slot() {
+    let mut f = Fixture::new();
+    f.repositories(&["octo-owner/z-repo"]);
+    f.seed_waiting(&handle(), REPO, 1);
+    f.discover();
+    assert!(!f.record_for(&handle(), REPO).present);
+    assert_eq!(f.vault.proposals(), 1);
+    assert_eq!(
+        f.vault.calls.lock().unwrap()[0].1["repo"],
+        "octo-owner/z-repo"
+    );
+}
+
+#[test]
+fn already_bound_frees_the_owner_slot_in_the_same_pass() {
+    let mut f = Fixture::new();
+    f.repositories(&[REPO, "octo-owner/z-repo"]);
+    f.discover();
+    let mut already = sample("refusal.already_bound");
+    already["result"]["error"]["version"] = json!(29);
+    already["result"]["error"]["manifest_sha256"] = json!(f.record().manifest_sha256.unwrap());
+    f.vault
+        .repository_replies
+        .lock()
+        .unwrap()
+        .insert(REPO.into(), already);
+    f.discover();
+    assert_eq!(f.record_for(&handle(), REPO).state, "awaiting_active");
+    assert_eq!(
+        f.record_for(&handle(), "octo-owner/z-repo").state,
+        "pending"
+    );
+    assert_eq!(f.vault.proposals(), 3);
+    assert_eq!(f.cards.filed.get(), 2);
 }
 
 #[test]
