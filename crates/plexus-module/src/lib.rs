@@ -34,6 +34,7 @@ mod consent_capacity_tests;
 mod consent_test_support;
 pub mod daemon_runtime;
 mod engram_catalog;
+mod federated;
 mod github_bindings_list;
 mod github_bot_admin;
 mod github_read_tool;
@@ -41,6 +42,7 @@ pub mod health;
 pub mod manifest;
 pub mod operator_confirmation;
 pub mod principal;
+pub use federated::FEDERATED_CALLERS_ENABLED;
 pub mod relay;
 mod remaining_tool_guard;
 mod reply_guard;
@@ -1444,7 +1446,10 @@ async fn handle_frame(
         }
         FrameType::Request => {
             let budget = request_execution::RequestBudget::new();
-            if frame.body.len() > MAX_REQUEST_BYTES {
+            let binding = route_bindings.binding(frame.header.channel, frame.header.epoch);
+            let federated_route = matches!(&binding, Ok(Some(binding))
+                if federated::is_callosum(Some(&binding.principal)));
+            if !federated_route && frame.body.len() > MAX_REQUEST_BYTES {
                 send_tool_error(
                     writer,
                     frame.header.ver,
@@ -1457,7 +1462,7 @@ async fn handle_frame(
                 .await?;
                 return Ok(true);
             }
-            let binding = match route_bindings.binding(frame.header.channel, frame.header.epoch) {
+            let binding = match binding {
                 Ok(Some(binding)) => binding,
                 Ok(None) => {
                     send_tool_error(
@@ -1487,6 +1492,49 @@ async fn handle_frame(
                     return Ok(true);
                 }
             };
+            // Classify federated frames as soon as the binding is known, before
+            // capacity, deadline, identity validation or method/tool dispatch.
+            if federated_route {
+                let body = (frame.body.len() <= MAX_REQUEST_BYTES)
+                    .then(|| serde_json::from_slice::<Value>(&frame.body).ok())
+                    .flatten();
+                let object = body.as_ref().and_then(Value::as_object);
+                if !object.is_some_and(federated::serves) {
+                    send_tool_response(
+                        writer,
+                        frame.header.ver,
+                        frame.header.channel,
+                        frame.header.epoch,
+                        frame.header.corr,
+                        federated::caller_not_allowed(),
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+                let name = object
+                    .and_then(|object| object.get("name"))
+                    .and_then(Value::as_str)
+                    .expect("served federated frames have a tool name");
+                if !tool_provider::is_metadata_op(name) {
+                    // Do not pass a federated call to a local handler while its
+                    // restricted metadata reply or federated consent path is
+                    // still absent.
+                    let refusal = match tool_provider::mode_refusal(name, &binding.mode) {
+                        Some(error) => json!({"error": error}),
+                        None => federated::pending_handler(),
+                    };
+                    send_tool_response(
+                        writer,
+                        frame.header.ver,
+                        frame.header.channel,
+                        frame.header.epoch,
+                        frame.header.corr,
+                        refusal,
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+            }
             let principal_permit = binding.admission.try_acquire_owned();
             let permit = route_bindings.in_flight.clone().try_acquire_owned();
             let (Ok(permit), Ok(principal_permit)) = (permit, principal_permit) else {
@@ -1660,6 +1708,15 @@ async fn handle_control_request(
     let request: ModuleControlRequest = match serde_json::from_slice(&frame.body) {
         Ok(request) => request,
         Err(error) => {
+            if let Some(principal) = federated::unknown_claim_bind(&frame.body) {
+                return send_principal_denied(
+                    writer,
+                    frame.header.ver,
+                    frame.header.corr,
+                    &principal,
+                )
+                .await;
+            }
             eprintln!(warn wire: "refused undecodable control request: {error}");
             let response = wire::build_error_frame(
                 frame.header.ver,
@@ -1682,16 +1739,11 @@ async fn handle_control_request(
             consumer_capabilities,
             ..
         } => {
-            // New scope kinds must not inherit local authority before Plexus
-            // implements their admission and authorization rules.
-            if scope.as_ref().is_some_and(|stamp| {
-                !matches!(
-                    stamp.kind,
-                    subc_protocol::scope::ScopeKind::Head
-                        | subc_protocol::scope::ScopeKind::Worker
-                        | subc_protocol::scope::ScopeKind::Ephemeral
-                )
-            }) {
+            if !state
+                .runtime
+                .federated_admission
+                .admits_scope(&principal, scope.as_ref())
+            {
                 return send_principal_denied(
                     writer,
                     frame.header.ver,
@@ -1716,14 +1768,15 @@ async fn handle_control_request(
                 .map_err(|error| ModuleError::Message(error.to_string()))?;
                 return send(writer, response).await;
             }
-            let trust = principal::trust_for_principal(&principal);
-            // Keep refused binds visible to operators; log binds that pass the
-            // first-party check at debug level when tracing a consumer's arrival.
+            // Federated admission was checked against the stamp above. It does
+            // not put Callosum on the first-party list.
             let bind_label = principal
                 .as_ref()
                 .map(principal::principal_key)
                 .unwrap_or_else(|| "absent".into());
-            if !trust.is_first_party() {
+            if !federated::is_callosum(principal.as_ref())
+                && !principal::trust_for_principal(&principal).is_first_party()
+            {
                 eprintln!(info wire:
                     "route bind from principal '{bind_label}' on channel {route_channel}: REFUSED (not first-party)"
                 );
@@ -1739,7 +1792,7 @@ async fn handle_control_request(
                 "route bind from principal '{bind_label}' on channel {route_channel}: ACCEPTED"
             );
             let accepted = principal.ok_or_else(|| {
-                ModuleError::Message("first-party trust classification lost principal".to_string())
+                ModuleError::Message("route admission lost principal".to_string())
             })?;
             // The daemon stamps the scope a route was opened under: the
             // session it belongs to and the agent it may act for. Plexus takes
@@ -3152,6 +3205,7 @@ fn facade_tool_reply_inner(
     if let Some(refusal) = tool_provider::mode_refusal(name, &mode) {
         return Ok(json!({"error": refusal}));
     }
+    let federated_route = federated::is_callosum(Some(&principal));
     if name == manifest::GITHUB_TOOL {
         let operation = arguments.get("op").and_then(Value::as_str);
         if !matches!(
@@ -3165,10 +3219,11 @@ fn facade_tool_reply_inner(
             }}));
         }
     }
-    if (mode == CallMode::Flow
-        || route_scope
-            .as_ref()
-            .is_some_and(|scope| scope.flow_id.is_some()))
+    if !federated_route
+        && (mode == CallMode::Flow
+            || route_scope
+                .as_ref()
+                .is_some_and(|scope| scope.flow_id.is_some()))
         && !ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str())
     {
         eprintln!(info wire: "tool call refused: flow carrier {principal_key} is not admitted (tool '{log_name}')");
@@ -3183,7 +3238,8 @@ fn facade_tool_reply_inner(
     // authority. Basal reads them on an unscoped route when it installs a flow,
     // before any flow scope exists, so they are exempt from the flow-scope
     // requirement; every real tool still needs a flow scope from Basal.
-    if !tool_provider::is_metadata_op(name)
+    if !federated_route
+        && !tool_provider::is_metadata_op(name)
         && (mode == CallMode::Flow || ADMITTED_FLOW_CARRIERS.contains(&principal_key.as_str()))
         && !route_scope
             .as_ref()
@@ -6459,6 +6515,8 @@ mod relay_vectors;
 mod call_mode_tests;
 #[cfg(test)]
 mod code_search_tests;
+#[cfg(test)]
+mod federated_tests;
 #[cfg(test)]
 mod web_search_tests;
 

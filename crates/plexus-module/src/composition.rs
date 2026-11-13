@@ -80,6 +80,7 @@ impl Transport for VendorTransportRouter {
 }
 
 pub struct ModuleRuntime {
+    pub(crate) federated_admission: crate::federated::Admission,
     pub(crate) vault_peer: Option<Arc<dyn plexus_core::credentials::CkcredRoutePeer>>,
     pub connector_home: Arc<crate::connector_home::ConnectorHome>,
     pub store: Arc<PlexusStore>,
@@ -106,6 +107,12 @@ pub struct ModuleRuntime {
 }
 
 impl ModuleRuntime {
+    /// Override dormant admission only in Rust tests, never through the wire.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_federated_callers_enabled_for_test(&mut self, enabled: bool) {
+        self.federated_admission.set_for_test(enabled);
+    }
+
     /// Production composition: REST and remote MCP transports,
     /// and credentials supplied by the claustrum vault when its route is
     /// configured and reachable. Missing or unreachable credential routes fail
@@ -156,6 +163,7 @@ impl ModuleRuntime {
         )
         .with_rest_transport(Arc::clone(&rest_transport));
         Self {
+            federated_admission: crate::federated::Admission::default(),
             vault_peer,
             connector_home,
             store: Arc::clone(&store),
@@ -203,6 +211,7 @@ impl ModuleRuntime {
         )
         .with_rest_transport(Arc::clone(&rest_transport));
         Self {
+            federated_admission: crate::federated::Admission::default(),
             vault_peer: None,
             connector_home: Arc::new(crate::connector_home::ConnectorHome::test_admitted()),
             store: Arc::clone(&store),
@@ -248,6 +257,7 @@ impl ModuleRuntime {
         )
         .with_rest_transport(Arc::clone(&rest_transport));
         Self {
+            federated_admission: crate::federated::Admission::default(),
             vault_peer: None,
             connector_home: Arc::new(crate::connector_home::ConnectorHome::test_admitted()),
             store: Arc::clone(&store),
