@@ -4,7 +4,9 @@ These JSON files are the exact compact response-frame bodies emitted by
 `handle_tool_request_with_reply_guard`, with its test-only rollout argument on.
 The production gate, `remaining_tool_guard::ENABLED`, is **false**. No result
 format, schema, semantics version, existing fixture or live reply changes here.
-Consumer owners must approve these samples before the gate is enabled.
+The readers of these tools' replies must approve these samples before the gate
+is enabled: Basal flows, core's event readers, Broca's model-facing tools and
+the plexus operator client (`ck-plexus-admin`).
 
 Each covered tool has a small reply and an oversized reply on both a `legacy`
 route and a `capable` route whose real `route.bind` declares `tool-result/v1`.
@@ -14,7 +16,8 @@ Route capability alone cannot opt a tool into negotiated accounting.
 
 The test compares every small reply byte for byte with the disabled handler.
 It also verifies that each oversized disabled reply exceeds 65,536 bytes, that
-the enabled final body fits using the provider's canonical legacy counter, and
+the enabled final body fits the 65,536-byte limit as measured over the whole
+legacy reply by `cortexkit-role-tool-provider`'s legacy counter, and
 that invoking the guard never dispatches a second vendor request.
 
 Oversized witnesses:

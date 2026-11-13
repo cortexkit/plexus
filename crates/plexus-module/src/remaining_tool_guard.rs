@@ -4,7 +4,9 @@ use super::{manifest, reply_guard, with_call_tool_result_with_repo, Frame};
 use reply_guard::{EffectiveFormat, ExecutionState};
 use serde_json::{json, Value};
 
-// Enable only after consumer owners approve the pinned refusal samples.
+// Off until the readers of these tools' replies (Basal flows, core's event
+// readers, Broca's model-facing tools and the plexus operator client) approve
+// the samples in tests/fixtures/reply-too-large-v1/.
 pub(super) const ENABLED: bool = false;
 
 pub(super) fn covers(tool: Option<&str>) -> bool {
