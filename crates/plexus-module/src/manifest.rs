@@ -746,7 +746,7 @@ fn tool(name: &str, description: &str, execution_mode: ExecutionMode, operations
             }));
         }
         CONNECTIONS_TOOL => {
-            properties.insert("resource_filters".into(), json!({}));
+            properties.insert("resource_filters".into(), json!({"type":"object"}));
         }
         _ => {}
     }

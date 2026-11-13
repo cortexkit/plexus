@@ -101,7 +101,7 @@ fn searxng_connections_schema_digest_stays_unchanged_and_excludes_instance_url()
         .schema;
     assert_eq!(
         plexus_core::jcs_sha256(schema).unwrap(),
-        "sha256:bb9507643e8d6c3c7c45cce4699c7baa12311b8523b1b0fa04af676ae6cce895"
+        "sha256:65cd8ba0e1085470a52879b513024622ab009ca8917a236725a9e8778180f6e0"
     );
     assert_eq!(schema["additionalProperties"], false);
     assert!(schema["properties"].get("instance_url").is_none());

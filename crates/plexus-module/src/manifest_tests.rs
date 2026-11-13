@@ -131,6 +131,10 @@ fn regression_github_and_connection_schemas_admit_handler_fields() {
         &connections.schema,
         &json!({"op":"configure", "connection":"github-bot", "resource_filters":{"repositories":["org/repo"]}}),
     );
+    assert_eq!(
+        connections.schema["properties"]["resource_filters"],
+        json!({"type": "object"})
+    );
 }
 
 fn assert_object_schema_accepts(schema: &serde_json::Value, call: &serde_json::Value) {

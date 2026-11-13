@@ -40,6 +40,55 @@ fn catalog_matches_every_advertised_definition() {
     assert!(answer.tools.iter().all(|tool| !tool.name.contains('.')));
 }
 
+// Call the lint directly because the conformance kit exposes only run_suite,
+// which needs a real daemon route and harness.
+#[tokio::test]
+async fn catalog_schemas_portable() {
+    use std::collections::BTreeSet;
+    use subc_protocol::{FrameType, Principal};
+
+    let description = send_metadata(Principal::Direct, ops::ROLE_DESCRIBE, json!({})).await;
+    assert_eq!(description.header.ty, FrameType::Response);
+    let description: RoleDescribe = serde_json::from_slice(&description.body).unwrap();
+    let frame = send_metadata(
+        Principal::Direct,
+        ops::TOOL_CATALOG,
+        json!({"params": {"capabilities": description.tool_capabilities}}),
+    )
+    .await;
+    assert_eq!(frame.header.ty, FrameType::Response);
+    let answer: CatalogAnswer = serde_json::from_slice(&frame.body).unwrap();
+    let declared: BTreeSet<_> = advertised_tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    let linted: BTreeSet<_> = answer.tools.iter().map(|tool| tool.name.clone()).collect();
+    assert!(
+        !declared.is_empty(),
+        "the declared tool list must not be empty"
+    );
+    assert_eq!(
+        linted, declared,
+        "lint every declared tool, not a filtered subset"
+    );
+    assert_eq!(
+        answer.tools.len(),
+        linted.len(),
+        "tool names must be unique"
+    );
+
+    let findings: Vec<_> = answer
+        .tools
+        .iter()
+        .flat_map(|tool| {
+            cortexkit_role_tool_provider::lint_input_schema(&tool.input_schema)
+                .into_iter()
+                .map(move |lint| format!("{} input_schema {lint}", tool.name))
+        })
+        .collect();
+    assert!(findings.is_empty(), "{}", findings.join("; "));
+}
+
 #[test]
 fn only_search_tools_opt_into_tool_result_v1() {
     let answer = catalog(&all_capabilities_request(), &advertised_tools()).unwrap();

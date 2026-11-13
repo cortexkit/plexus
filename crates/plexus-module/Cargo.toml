@@ -27,11 +27,9 @@ path = "src/bin/ck-plexus-admin.rs"
 [dependencies]
 cortexkit-log = { workspace = true }
 # The tool-provider role crate defines tool.catalog, capability tags, call
-# modes and the tool-result/v1 result shape. Each release line is built against
-# one subc-protocol version (0.14 pairs with 0.34), and mixing lines would
-# put two copies of the wire types in one build, so it moves only with the subc
-# block.
-cortexkit-role-tool-provider = "=0.14.0"
+# modes and the tool-result/v1 result shape. Its protocol range must include the
+# workspace's exact subc-protocol pin so the build shares one set of wire types.
+cortexkit-role-tool-provider = "=0.15.6"
 plexus-core = { path = "../plexus-core" }
 # `--smoke-probe` runs a guest through the probe sandbox directly. Already linked
 # through plexus-core, so this adds no new code to the binary.
