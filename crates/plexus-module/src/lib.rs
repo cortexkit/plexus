@@ -5798,9 +5798,11 @@ fn diagnostic_label(value: &str) -> String {
     label
 }
 
-// Core already negotiates tool-result/v1 but still reads web search's legacy
-// result/error members. Enable only after Core deploys its structuredContent reader.
-const CORE_WEB_SEARCH_TOOL_RESULT_V1_READER_READY: bool = false;
+// On routes that negotiated tool-result/v1, web search replies drop the legacy
+// result/error members. Enabled once core's web search readers read
+// structuredContent/isError/errorCode (core 0493ea5e25); set it back to false
+// if a negotiated consumer turns out to read only the legacy members.
+const CORE_WEB_SEARCH_TOOL_RESULT_V1_READER_READY: bool = true;
 
 fn with_call_tool_result_with_repo(
     tool: Option<&str>,

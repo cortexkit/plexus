@@ -177,11 +177,22 @@ async fn same_principal_routes_are_independent_and_arguments_cannot_change_forma
                 .body,
             );
         }
-        assert_eq!(
-            replies[replies.len() - 2],
-            replies[replies.len() - 1],
-            "{name}"
-        );
+        let (negotiated, legacy) = (&replies[replies.len() - 2], &replies[replies.len() - 1]);
+        if name == manifest::WEB_SEARCH_TOOL {
+            // Web search follows each route's own negotiation: the pure body
+            // on channel 17 and the legacy members on channel 18. Arguments
+            // naming a format cannot move either route.
+            let negotiated: Value = serde_json::from_slice(negotiated).unwrap();
+            let legacy: Value = serde_json::from_slice(legacy).unwrap();
+            assert!(negotiated.get("error").is_none(), "{negotiated}");
+            assert!(
+                negotiated.get("structuredContent").is_some(),
+                "{negotiated}"
+            );
+            assert!(legacy.get("error").is_some(), "{legacy}");
+        } else {
+            assert_eq!(negotiated, legacy, "{name}");
+        }
     }
     assert!(routes.binding(17, 3).unwrap().unwrap().reads_tool_result_v1);
     assert!(!routes.binding(18, 3).unwrap().unwrap().reads_tool_result_v1);
@@ -189,9 +200,11 @@ async fn same_principal_routes_are_independent_and_arguments_cannot_change_forma
     assert!(!routes.binding(18, 3).unwrap().unwrap().reads_tool_result_v1);
 }
 
+// Web search's negotiated body is pinned by web_search_tool_result_v1_tests;
+// code search's body never depends on the route.
 #[test]
-fn rendering_is_byte_identical_for_both_bind_formats() {
-    for tool in [manifest::WEB_SEARCH_TOOL, manifest::CODE_SEARCH_TOOL] {
+fn code_search_rendering_is_byte_identical_for_both_bind_formats() {
+    for tool in [manifest::CODE_SEARCH_TOOL] {
         for facade in [
             json!({"error":{"code":"invalid_args","message":"Query is required"}}),
             json!({"result":{"query":"needle","backend":"exa","cached":false,"results":[],"matches":[]}}),

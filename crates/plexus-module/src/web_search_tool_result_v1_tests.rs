@@ -56,13 +56,23 @@ fn core_reader_gate_only_changes_negotiated_web_search_replies() {
     ];
     for (facade, legacy, pure) in cases {
         let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
-        // The shipped gate must keep even negotiated routes byte-identical.
+        // The shipped build serves the pure body on negotiated routes and
+        // today's bytes on legacy ones.
+        assert_eq!(
+            with_call_tool_result_with_repo(
+                Some(manifest::WEB_SEARCH_TOOL),
+                facade.clone(),
+                None,
+                true,
+            ),
+            pure
+        );
         assert_eq!(
             serde_json::to_vec(&with_call_tool_result_with_repo(
                 Some(manifest::WEB_SEARCH_TOOL),
                 facade.clone(),
                 None,
-                true,
+                false,
             ))
             .unwrap(),
             legacy_bytes
@@ -285,14 +295,17 @@ async fn handler_reply_fixtures_match_bytes() {
         true,
     )
     .await;
-    let gate_off = handler_body(
+    let shipped = handler_body(
         &fixture("gated-reply", two_results()),
         query,
         true,
         CORE_WEB_SEARCH_TOOL_RESULT_V1_READER_READY,
     )
     .await;
-    assert_eq!(gate_off, legacy, "the shipped gate preserves today's bytes");
+    assert_eq!(
+        shipped, success,
+        "the shipped build serves the pure tool-result/v1 body on negotiated routes"
+    );
     let parsed: Value = serde_json::from_slice(&success).unwrap();
     let legacy_parsed: Value = serde_json::from_slice(&legacy).unwrap();
     assert_eq!(parsed["isError"], false);

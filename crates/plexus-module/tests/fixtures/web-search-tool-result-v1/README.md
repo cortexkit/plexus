@@ -6,9 +6,9 @@ compact and have no trailing newline, exactly like the response frame body.
 
 `web_search_tests::tool_result_v1::handler_reply_fixtures_match_bytes` invokes
 `handle_tool_request_with_web_search_reader`, the same handler used by routes.
-Its explicit rollout argument enables the otherwise-disabled
-`CORE_WEB_SEARCH_TOOL_RESULT_V1_READER_READY` gate without changing the shipped
-default. The test uses route.bind negotiation, a fixed search clock and a local
+Its explicit rollout argument sets the `CORE_WEB_SEARCH_TOOL_RESULT_V1_READER_READY`
+gate per call, so the samples stay the same whichever way the shipped constant
+is set. It ships enabled since core's readers read this shape. The test uses route.bind negotiation, a fixed search clock and a local
 mock provider; no public search service or credential is used. The fixture's
 backend delegates to the real Exa adapter with a fixed `fetched_at` timestamp,
 because the service clock deliberately does not replace the event clock.
