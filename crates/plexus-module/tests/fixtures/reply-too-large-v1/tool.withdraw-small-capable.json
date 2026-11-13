@@ -1,0 +1,1 @@
+{"content":[{"text":"invalid_request: tool.withdraw requires arguments.call_key field: arguments.call_key","type":"text"}],"error":{"code":"invalid_request","field":"arguments.call_key","message":"tool.withdraw requires arguments.call_key"},"isError":true}

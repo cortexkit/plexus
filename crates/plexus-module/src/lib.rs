@@ -42,6 +42,7 @@ pub mod manifest;
 pub mod operator_confirmation;
 pub mod principal;
 pub mod relay;
+mod remaining_tool_guard;
 mod reply_guard;
 mod request_execution;
 pub mod scope_reader;
@@ -1492,8 +1493,8 @@ async fn handle_frame(
                 let response = Frame::build_with_version(
                     frame.header.ver, FrameType::Error, wire::control_flags(),
                     frame.header.channel, frame.header.epoch, frame.header.corr,
-                    serde_json::to_vec(&json!({"code":"resource_exhausted", "retryable":true,
-                        "retry_after_ms":1000, "message":"Plexus request capacity is full; retry in one second."}))
+                    serde_json::to_vec(&remaining_tool_guard::error_frame(json!({"code":"resource_exhausted", "retryable":true,
+                        "retry_after_ms":1000, "message":"Plexus request capacity is full; retry in one second."})))
                         .map_err(ModuleError::Json)?,
                 ).map_err(|error| ModuleError::Message(error.to_string()))?;
                 send(writer, response).await?;
@@ -2607,6 +2608,27 @@ async fn handle_tool_request_with_web_search_reader(
     budget: Arc<request_execution::RequestBudget>,
     core_web_search_reader_ready: bool,
 ) -> Result<(), ModuleError> {
+    handle_tool_request_with_reply_guard(
+        frame,
+        writer,
+        state,
+        route_bindings,
+        budget,
+        core_web_search_reader_ready,
+        remaining_tool_guard::ENABLED,
+    )
+    .await
+}
+
+async fn handle_tool_request_with_reply_guard(
+    frame: Frame,
+    writer: &mpsc::Sender<Frame>,
+    state: &Arc<ModuleState>,
+    route_bindings: &Arc<RouteBindings>,
+    budget: Arc<request_execution::RequestBudget>,
+    core_web_search_reader_ready: bool,
+    remaining_guard_enabled: bool,
+) -> Result<(), ModuleError> {
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
     let correlation = frame.header.corr;
@@ -2631,7 +2653,7 @@ async fn handle_tool_request_with_web_search_reader(
             channel,
             epoch,
             correlation,
-            expired,
+            remaining_tool_guard::early(&frame, expired, remaining_guard_enabled),
         )
         .await;
     }
@@ -2817,6 +2839,8 @@ async fn handle_tool_request_with_web_search_reader(
     let reads_tool_result_v1 = route_bindings
         .binding(channel, epoch)?
         .is_some_and(|binding| binding.reads_tool_result_v1);
+    let guarded_facade =
+        (remaining_guard_enabled && remaining_tool_guard::covers(tool)).then(|| reply.clone());
     let reply = if tool == Some(manifest::GITHUB_READ_TOOL) {
         let action = object
             .get("arguments")
@@ -2839,6 +2863,10 @@ async fn handle_tool_request_with_web_search_reader(
             reads_tool_result_v1,
             core_web_search_reader_ready,
         )
+    };
+    let reply = match guarded_facade {
+        Some(facade) => remaining_tool_guard::guard(tool, facade, reply),
+        None => reply,
     };
     send_tool_response(writer, frame.header.ver, channel, epoch, correlation, reply).await
 }
@@ -5353,6 +5381,8 @@ fn github_read_failure(outcome: TransportOutcome) -> Value {
 }
 
 fn dispatch_response(outcome: DispatchOutcome) -> Value {
+    #[cfg(test)]
+    let outcome = remaining_tool_guard_tests::stable_dispatch_identity(outcome);
     let (transmission, result, message) = match outcome.outcome {
         TransportOutcome::Completed { response } => ("completed", response, None),
         TransportOutcome::VendorFailed { code, message } => {
@@ -5679,15 +5709,15 @@ async fn send_tool_error(
     code: &str,
     message: &str,
 ) -> Result<(), ModuleError> {
-    send_tool_response(
-        writer,
-        version,
-        channel,
-        epoch,
-        correlation,
-        with_event_get_retryable(tool_error(code, message)),
-    )
-    .await
+    // These are fixed ingress/worker refusals, not rendered tool or program
+    // results. Keep their old bytes while measuring their final legacy body.
+    let reply = with_event_get_retryable(tool_error(code, message));
+    let reply = if remaining_tool_guard::ENABLED {
+        remaining_tool_guard::guard(None, reply.clone(), reply)
+    } else {
+        reply
+    };
+    send_tool_response(writer, version, channel, epoch, correlation, reply).await
 }
 
 /// The route error body `{"error": {"code", "message"}}`.
@@ -6340,6 +6370,9 @@ mod github_react_tests;
 mod recipient_tests;
 #[cfg(test)]
 mod route_format_tests;
+
+#[cfg(test)]
+mod remaining_tool_guard_tests;
 
 #[cfg(test)]
 mod permissions_tests;

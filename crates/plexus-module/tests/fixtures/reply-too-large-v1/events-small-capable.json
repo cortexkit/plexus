@@ -1,0 +1,1 @@
+{"content":[{"text":"{\n  \"result\": {\n    \"events\": [],\n    \"events_consume_authority\": {\n      \"grants\": []\n    },\n    \"subscriptions\": []\n  }\n}","type":"text"}],"isError":false,"result":{"events":[],"events_consume_authority":{"grants":[]},"subscriptions":[]},"structuredContent":{"events":[],"events_consume_authority":{"grants":[]},"subscriptions":[]}}
