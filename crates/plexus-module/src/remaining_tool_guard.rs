@@ -60,6 +60,13 @@ pub(super) fn guard(tool: Option<&str>, facade: Value, rendered: Value) -> Value
     if facade.get("error").is_some() {
         return refusal(tool, facade);
     }
+    // An oversized `events op:list` page passes unchanged until event pages are
+    // cut by bytes. Refusing it would return no `next_after`, so a consumer
+    // paging through a backlog could never move past that page. Its model text
+    // is already summarized by the listing renderer.
+    if tool == Some(manifest::EVENTS_TOOL) && facade["result"]["events"].is_array() {
+        return rendered;
+    }
     if facade["result"]["transmission"].is_string() {
         let transmission = facade["result"]["transmission"]
             .as_str()

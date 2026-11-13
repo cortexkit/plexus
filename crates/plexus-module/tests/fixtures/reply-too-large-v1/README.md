@@ -1,12 +1,10 @@
-# Disabled remaining-tool reply guard: owner approval samples
+# Remaining-tool reply guard: samples the readers approved
 
 These JSON files are the exact compact response-frame bodies emitted by
-`handle_tool_request_with_reply_guard`, with its test-only rollout argument on.
-The production gate, `remaining_tool_guard::ENABLED`, is **false**. No result
-format, schema, semantics version, existing fixture or live reply changes here.
-The readers of these tools' replies must approve these samples before the gate
-is enabled: Basal flows, core's event readers, Broca's model-facing tools and
-the plexus operator client (`ck-plexus-admin`).
+`handle_tool_request_with_reply_guard`, with its rollout argument set per call.
+The production gate, `remaining_tool_guard::ENABLED`, is on: Basal (flows and
+codemode), core, Broca and Agent Runner passed these samples before it was
+turned on. No result format, schema or semantics version changes here.
 
 Each covered tool has a small reply and an oversized reply on both a `legacy`
 route and a `capable` route whose real `route.bind` declares `tool-result/v1`.
@@ -14,8 +12,8 @@ The remaining tools do **not** advertise that result format in their catalog,
 so both routes still use legacy whole-body accounting and existing envelopes.
 Route capability alone cannot opt a tool into negotiated accounting.
 
-The test compares every small reply byte for byte with the disabled handler.
-It also verifies that each oversized disabled reply exceeds 65,536 bytes, that
+The test compares every small reply byte for byte with the unguarded handler.
+It also verifies that each oversized unguarded reply exceeds 65,536 bytes, that
 the enabled final body fits the 65,536-byte limit as measured over the whole
 legacy reply by `cortexkit-role-tool-provider`'s legacy counter, and
 that invoking the guard never dispatches a second vendor request.
@@ -27,7 +25,7 @@ Oversized witnesses:
 | `connections` | Connection list with one large stored identifier | Top-level `error`, `transmission:"completed"` |
 | `catalog` | Connection action list with one large schema | Same completed error |
 | `requests` | Request list with a large stored `args_snapshot` | Same completed error |
-| `events` | Empty event list with large subscription cursor metadata | Same completed error; no metadata silently omitted |
+| `events` | `op:get` of an exact immutable stored body | Completed error, `retryable:false`, as `events_get`. An oversized `op:list` page passes unguarded until event pages are cut by bytes, because refusing it would leave no `next_after` to page past it |
 | `invoke` | Completed mock vendor output | Keep dispatch envelope; replace only `result.response` with a nested error |
 | `events_get` | Exact immutable stored version-1 body | Completed error, `retryable:false`; no store writes |
 | `tool.withdraw` | Oversized malformed-preset refusal before withdrawal | Preserve `invalid_request` and `field`; bound the preset echo |
@@ -38,12 +36,12 @@ The invoke output error is
 `{error:{code:"response_too_large",message,output_discarded:true}}` inside
 `result.response`; reservation identity, transmission, retryability and
 reconciliation remain execution evidence. Its message explicitly forbids replay.
-`output_discarded` is a **proposal**, not a previously shipped member.
+`output_discarded` is new with this guard.
 
 Oversized refusals retain their own error code, retry hints and other operational
 members. Caller-controlled string echoes are bounded with `refusal_echo`. If
-needed, only free-form `detail` is dropped, with `detail_omitted:true` (also a
-**proposal**). If the remaining refusal still cannot fit, a final measured
+needed, only free-form `detail` is dropped, with `detail_omitted:true` (also
+new). If the remaining refusal still cannot fit, a final measured
 `response_too_large` refusal is used; a malformed preset containing tens of
 thousands of non-string elements exercises this last resort in the tests.
 Oversized `access_pending` remains pending and keeps its elicitation identity;

@@ -272,16 +272,15 @@ fn sample_case(tool: &str, large: bool) -> (Fixture, Value) {
             }
             json!({"op":"list"})
         }
+        // `op:list` pages pass unguarded until they are cut by bytes (see the
+        // guard), so the oversized sample is the guarded `op:get` read.
         manifest::EVENTS_TOOL => {
             if large {
-                fixture.connection("conn-sample");
-                fixture.sql().execute(
-                    "INSERT INTO trigger_subscriptions(subscription_id,principal,connection_id,action,cadence_s,cursor_kind,cursor_state,schema_hash,status,created_at_ms)
-                     VALUES ('subscription-sample','direct','conn-sample','sample',300,'ordered_timestamp',?1,'hash','active',1)",
-                    [json!({"data":"x".repeat(70_000)}).to_string()],
-                ).unwrap();
+                let (key, _) = fixture.event(true);
+                json!({"op":"get","event_key":key,"event_name":"github_issue_changed"})
+            } else {
+                json!({"op":"list"})
             }
-            json!({"op":"list"})
         }
         manifest::INVOKE_TOOL => {
             fixture.invoke(large);
