@@ -82,8 +82,7 @@ pub(super) async fn send_bound(
     let routes = Arc::new(RouteBindings::new());
     routes
         .insert_bound(
-            frame.header.channel,
-            frame.header.epoch,
+            (frame.header.channel, frame.header.epoch),
             Principal::Reserved {
                 module_id: carrier.into(),
             },
@@ -92,6 +91,7 @@ pub(super) async fn send_bound(
             scope
                 .as_ref()
                 .and_then(|stamp| stamp.attributes.on_behalf_of_agent.clone()),
+            false,
         )
         .unwrap();
     handle_tool_request(frame, &writer, runtime, &routes)

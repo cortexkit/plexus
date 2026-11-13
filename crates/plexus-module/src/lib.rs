@@ -42,6 +42,7 @@ pub mod manifest;
 pub mod operator_confirmation;
 pub mod principal;
 pub mod relay;
+mod reply_guard;
 mod request_execution;
 pub mod scope_reader;
 pub mod smoke;
@@ -154,6 +155,8 @@ struct RouteBinding {
     principal: Principal,
     scope: Option<CallScope>,
     mode: CallMode,
+    /// Bind-scoped format support, not authority or a per-call option.
+    reads_tool_result_v1: bool,
     /// A worker scope's `on_behalf_of_agent` from the bind stamp: the agent
     /// whose bot serves the worker's GitHub bot reads. Kept beside the scope,
     /// not in it, so nothing that reads the scope's agent can mistake it for
@@ -212,17 +215,17 @@ impl RouteBindings {
         scope: Option<CallScope>,
         mode: CallMode,
     ) -> Result<(), ModuleError> {
-        self.insert_bound(channel, epoch, principal, scope, mode, None)
+        self.insert_bound((channel, epoch), principal, scope, mode, None, false)
     }
 
     fn insert_bound(
         &self,
-        channel: u16,
-        epoch: u32,
+        (channel, epoch): (u16, u32),
         principal: Principal,
         scope: Option<CallScope>,
         mode: CallMode,
         on_behalf_of_agent: Option<String>,
+        reads_tool_result_v1: bool,
     ) -> Result<(), ModuleError> {
         let mut routes = self
             .inner
@@ -259,6 +262,7 @@ impl RouteBindings {
                 scope,
                 mode,
                 on_behalf_of_agent,
+                reads_tool_result_v1,
             },
         );
         Ok(())
@@ -1674,6 +1678,7 @@ async fn handle_control_request(
             principal,
             scope,
             call_mode,
+            consumer_capabilities,
             ..
         } => {
             let mode = call_mode.unwrap_or_else(|| derive_call_mode(scope.as_ref()));
@@ -1741,12 +1746,14 @@ async fn handle_control_request(
                 );
             }
             match route_bindings.insert_bound(
-                route_channel,
-                epoch,
+                (route_channel, epoch),
                 accepted,
                 scope,
                 mode,
                 on_behalf_of_agent,
+                cortexkit_role_tool_provider::consumer_reads_tool_result_v1(
+                    consumer_capabilities.as_deref(),
+                ),
             ) {
                 Ok(()) => {}
                 Err(ModuleError::RouteCapacity) => {
@@ -2697,7 +2704,7 @@ async fn handle_tool_request_with_budget(
             channel,
             epoch,
             correlation,
-            with_call_tool_result_with_repo(Some(manifest::GITHUB_READ_TOOL), reply, None),
+            with_call_tool_result_with_repo(Some(manifest::GITHUB_READ_TOOL), reply, None, false),
         )
         .await;
     }
@@ -2788,13 +2795,20 @@ async fn handle_tool_request_with_budget(
     // GitHub programs read the facade directly. Do not duplicate it into MCP
     // fields: every copy counts toward the legacy tool's model-visible limit.
     // The bulk operation returned above deliberately keeps its old wrapper.
+    let reads_tool_result_v1 = route_bindings
+        .binding(channel, epoch)?
+        .is_some_and(|binding| binding.reads_tool_result_v1);
     let reply = if tool == Some(manifest::GITHUB_READ_TOOL) {
         let action = object
             .get("arguments")
             .and_then(|arguments| arguments.get("action"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        github_read_tool::guard(action, github_read_tool::shape_tail(action, reply))
+        github_read_tool::guard(
+            action,
+            github_read_tool::shape_tail(action, reply),
+            reads_tool_result_v1,
+        )
     } else {
         with_call_tool_result_with_repo(
             tool,
@@ -2803,6 +2817,7 @@ async fn handle_tool_request_with_budget(
                 .get("arguments")
                 .and_then(|arguments| arguments.get("repo"))
                 .and_then(Value::as_str),
+            reads_tool_result_v1,
         )
     };
     send_tool_response(writer, frame.header.ver, channel, epoch, correlation, reply).await
@@ -5765,6 +5780,7 @@ fn with_call_tool_result_with_repo(
     tool: Option<&str>,
     mut reply: Value,
     code_search_repo: Option<&str>,
+    _reads_tool_result_v1: bool,
 ) -> Value {
     if reply["error"]["code"] == "access_pending" {
         let text = reply["error"]["message"].as_str().unwrap_or_default();
@@ -6247,6 +6263,8 @@ mod github_react_tests;
 
 #[cfg(test)]
 mod recipient_tests;
+#[cfg(test)]
+mod route_format_tests;
 
 #[cfg(test)]
 mod permissions_tests;

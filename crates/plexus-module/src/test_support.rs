@@ -283,7 +283,7 @@ pub(crate) fn with_call_tool_result(
     tool: Option<&str>,
     reply: serde_json::Value,
 ) -> serde_json::Value {
-    crate::with_call_tool_result_with_repo(tool, reply, None)
+    crate::with_call_tool_result_with_repo(tool, reply, None, false)
 }
 
 /// Fail unless `frame` accepts a `route.bind`.
