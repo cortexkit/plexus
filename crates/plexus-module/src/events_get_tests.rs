@@ -46,6 +46,14 @@ fn unbind_repo(path: &Path, repo: &str) {
 }
 
 pub(super) fn seed_test_events(path: &Path, store: &PlexusStore) -> (String, String) {
+    seed_test_events_with_issue_payload(path, store, json!({"id": 1, "title": "bug report"}))
+}
+
+fn seed_test_events_with_issue_payload(
+    path: &Path,
+    store: &PlexusStore,
+    issue_payload: Value,
+) -> (String, String) {
     let conn = rusqlite::Connection::open(path).expect("open test db");
     conn.execute_batch(
             "INSERT INTO connections (connection_id, principal, app_key, status, created_at_ms, updated_at_ms)
@@ -77,7 +85,6 @@ pub(super) fn seed_test_events(path: &Path, store: &PlexusStore) -> (String, Str
 
     // Insert issue event
     let issue_key = "0000000000000000000000000000000000000000000000000000000000000001".to_string();
-    let issue_payload = json!({"id": 1, "title": "bug report"});
     let issue_headers = EventHeaders {
         repo: "owner/repo".to_string(),
         project: Some("project-1".to_string()),
@@ -281,33 +288,37 @@ async fn event_list_without_limit_returns_a_bounded_page_and_a_cursor() {
     )
     .await;
     let first_events = first["result"]["events"].as_array().unwrap().clone();
-    assert_eq!(
-        first_events.len(),
-        DEFAULT_EVENTS_LIST_LIMIT,
-        "an omitted limit must return one bounded page"
-    );
+    assert!(!first_events.is_empty());
+    assert!(first_events.len() <= DEFAULT_EVENTS_LIST_LIMIT);
+    assert!(reply_guard::EffectiveFormat::Legacy.fits(&first));
     assert_eq!(DEFAULT_EVENTS_LIST_LIMIT, 500);
     assert!(first["result"]["next_after"].is_object());
 
-    let second = execute_tool_call(
-        store.clone(),
-        Principal::Direct,
-        None,
-        manifest::EVENTS_TOOL,
-        json!({"op":"list","after":first["result"]["next_after"]}),
-    )
-    .await;
-    let second_events = second["result"]["events"].as_array().unwrap().clone();
-    assert_eq!(second_events.len(), 100);
-    assert!(second["result"].get("next_after").is_none());
-
-    // The two pages together are the whole backlog in order: nothing is
-    // repeated and nothing is skipped.
     let mut collected = first_events;
-    collected.extend(second_events);
+    let mut cursor = first["result"]["next_after"].clone();
+    while !cursor.is_null() {
+        assert!(
+            collected.len() < expected.len(),
+            "cursor must make progress"
+        );
+        let page = execute_tool_call(
+            store.clone(),
+            Principal::Direct,
+            None,
+            manifest::EVENTS_TOOL,
+            json!({"op":"list","after":cursor}),
+        )
+        .await;
+        assert!(reply_guard::EffectiveFormat::Legacy.fits(&page));
+        let rows = page["result"]["events"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        assert!(rows.len() <= DEFAULT_EVENTS_LIST_LIMIT);
+        collected.extend(rows.iter().cloned());
+        cursor = page["result"]["next_after"].clone();
+    }
     assert_eq!(json!(collected), json!(expected));
 
-    // An explicit limit still sets the page size, up to the 1000 maximum.
+    // An explicit limit remains a row-count ceiling, not a promise to fill it.
     let explicit = execute_tool_call(
         store.clone(),
         Principal::Direct,
@@ -316,7 +327,9 @@ async fn event_list_without_limit_returns_a_bounded_page_and_a_cursor() {
         json!({"op":"list","limit":550}),
     )
     .await;
-    assert_eq!(explicit["result"]["events"].as_array().unwrap().len(), 550);
+    let rows = explicit["result"]["events"].as_array().unwrap();
+    assert!(!rows.is_empty() && rows.len() <= 550);
+    assert!(reply_guard::EffectiveFormat::Legacy.fits(&explicit));
     assert!(explicit["result"]["next_after"].is_object());
     let maximum = execute_tool_call(
         store,
@@ -326,8 +339,251 @@ async fn event_list_without_limit_returns_a_bounded_page_and_a_cursor() {
         json!({"op":"list","limit":1000}),
     )
     .await;
-    assert_eq!(json!(maximum["result"]["events"]), json!(expected));
-    assert!(maximum["result"].get("next_after").is_none());
+    let rows = maximum["result"]["events"].as_array().unwrap();
+    assert!(!rows.is_empty() && rows.len() <= 1000);
+    assert_eq!(json!(rows), json!(&expected[..rows.len()]));
+    assert_eq!(
+        maximum["result"].get("next_after").is_some(),
+        rows.len() < expected.len()
+    );
+    assert!(reply_guard::EffectiveFormat::Legacy.fits(&maximum));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn event_byte_pages_preserve_backlog_and_timestamp_ties() {
+    let (_scratch, store, path) = test_store("event_byte_pages");
+    seed_test_events(&path, &store);
+    let mut conn = rusqlite::Connection::open(&path).unwrap();
+    let tx = conn.transaction().unwrap();
+    let payload = json!({"body": "😀\\\"\n".repeat(64)}).to_string();
+    // A null last_success_at_ms leaves subscriptions.cursor_age_ms null instead
+    // of increasing the elapsed time since the last success between page reads.
+    tx.execute(
+        "UPDATE trigger_subscriptions SET last_success_at_ms=NULL",
+        [],
+    )
+    .unwrap();
+    tx.execute(
+        "UPDATE trigger_events SET created_at_ms=123, payload=?1",
+        [&payload],
+    )
+    .unwrap();
+    for n in 0..598 {
+        tx.execute(
+            "INSERT INTO trigger_events(event_id,principal,connection_id,subscription_id,vendor_event_id,payload_hash,payload,kind,observed_at_ms,created_at_ms)
+             VALUES (?1,'direct','conn-github','issue-sub-1',?1,?1,?2,'event',1,123)",
+            rusqlite::params![format!("bulk-{n:04}"), payload],
+        ).unwrap();
+    }
+    tx.commit().unwrap();
+    for principal in [
+        Principal::Direct,
+        Principal::Reserved {
+            module_id: "prefrontal-core".into(),
+        },
+    ] {
+        let mut expected = store.list_events("direct", None, None).unwrap();
+        assert_eq!(expected.len(), 600);
+        if !matches!(principal, Principal::Direct) {
+            expected.retain(|event| event.connection_id == "conn-github");
+        }
+        let mut collected = Vec::new();
+        let mut arguments = json!({"op":"list"});
+        let mut metadata = None;
+        loop {
+            let page = execute_tool_call(
+                store.clone(),
+                principal.clone(),
+                None,
+                manifest::EVENTS_TOOL,
+                arguments,
+            )
+            .await;
+            assert!(reply_guard::EffectiveFormat::Legacy.fits(&page));
+            let rows = page["result"]["events"].as_array().unwrap();
+            assert!(!rows.is_empty() && rows.len() < DEFAULT_EVENTS_LIST_LIMIT);
+            let current_metadata = json!({
+                "subscriptions":page["result"]["subscriptions"],
+                "authority":page["result"]["events_consume_authority"]
+            });
+            if let Some(metadata) = &metadata {
+                assert_eq!(&current_metadata, metadata);
+            } else {
+                metadata = Some(current_metadata);
+            }
+            collected.extend(rows.iter().cloned());
+            assert_eq!(json!(collected), json!(&expected[..collected.len()]));
+            let Some(cursor) = page["result"].get("next_after") else {
+                break;
+            };
+            assert!(
+                collected.len() < expected.len(),
+                "terminal page must not claim more events"
+            );
+            let last = rows.last().unwrap();
+            assert_eq!(
+                *cursor,
+                json!({"created_at_ms":123,"event_id":last["event_id"]})
+            );
+            arguments = json!({"op":"list","after":cursor});
+        }
+        assert_eq!(json!(collected), json!(expected));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn event_list_oversized_body_marker_advances_with_or_without_outbox() {
+    for with_outbox in [true, false] {
+        let (_scratch, store, path) = test_store("event_oversized_marker");
+        let (key, _) = seed_test_events_with_issue_payload(
+            &path,
+            &store,
+            json!({"body":"😀\\\"\n".repeat(20_000)}),
+        );
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("UPDATE trigger_events SET created_at_ms=CASE connection_id WHEN 'conn-github' THEN 0 ELSE 1 END", []).unwrap();
+        if !with_outbox {
+            conn.execute("DELETE FROM event_outbox WHERE event_key=?1", [&key])
+                .unwrap();
+        }
+        let expected = store.list_events("direct", None, None).unwrap();
+        let page = execute_tool_call(
+            store.clone(),
+            Principal::Direct,
+            None,
+            manifest::EVENTS_TOOL,
+            json!({"op":"list"}),
+        )
+        .await;
+        assert!(reply_guard::EffectiveFormat::Legacy.fits(&page));
+        let rows = page["result"]["events"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let mut marker = json!(expected[0]);
+        marker.as_object_mut().unwrap().remove("payload");
+        marker["event_key"] = if with_outbox { json!(key) } else { Value::Null };
+        marker["error"] = json!({"code":"event_body_too_large", "message":if with_outbox {
+            "Read this event with events op:get or events_get using event_key."
+        } else {
+            "This event's body is too large to list and has no stored outbox copy to read separately."
+        }});
+        assert_eq!(rows[0], marker);
+        assert_eq!(
+            page["result"]["next_after"],
+            json!({"created_at_ms":0,"event_id":expected[0].event_id})
+        );
+        let next = execute_tool_call(
+            store.clone(),
+            Principal::Direct,
+            None,
+            manifest::EVENTS_TOOL,
+            json!({"op":"list","after":page["result"]["next_after"]}),
+        )
+        .await;
+        assert!(reply_guard::EffectiveFormat::Legacy.fits(&next));
+        assert_eq!(next["result"]["events"], json!(&expected[1..]));
+        assert!(next["result"].get("next_after").is_none());
+        assert_eq!(
+            store.list_events("direct", None, None).unwrap(),
+            expected,
+            "listing must not rewrite stored payloads"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn event_list_metadata_stays_complete_or_returns_a_measured_refusal() {
+    let (_scratch, store, path) = test_store("event_metadata_budget");
+    seed_test_events(&path, &store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("UPDATE trigger_events SET acked_at_ms=1", [])
+        .unwrap();
+    for principal in [
+        Principal::Direct,
+        Principal::Reserved {
+            module_id: "prefrontal-core".into(),
+        },
+    ] {
+        let page = execute_tool_call(
+            store.clone(),
+            principal.clone(),
+            None,
+            manifest::EVENTS_TOOL,
+            json!({"op":"list"}),
+        )
+        .await;
+        assert_eq!(page["result"]["events"], json!([]));
+        assert!(reply_guard::EffectiveFormat::Legacy.fits(&page));
+        println!(
+            "empty-feed metadata for {principal:?}: {} model-visible bytes",
+            reply_guard::EffectiveFormat::Legacy
+                .model_visible_bytes(&page)
+                .unwrap()
+        );
+        assert_eq!(
+            page["result"]["subscriptions"].as_array().unwrap().len(),
+            if matches!(principal, Principal::Direct) {
+                2
+            } else {
+                1
+            }
+        );
+        assert_eq!(
+            page["result"]["events_consume_authority"]["grants"]
+                .as_array()
+                .unwrap()
+                .len(),
+            if matches!(principal, Principal::Direct) {
+                0
+            } else {
+                1
+            }
+        );
+    }
+    conn.execute(
+        "UPDATE trigger_subscriptions SET cursor_state=?1",
+        [json!({"data":"x".repeat(70_000)}).to_string()],
+    )
+    .unwrap();
+    let subscription_overflow = execute_tool_call(
+        store.clone(),
+        Principal::Direct,
+        None,
+        manifest::EVENTS_TOOL,
+        json!({"op":"list"}),
+    )
+    .await;
+    assert_eq!(subscription_overflow["error"]["code"], "response_too_large");
+    assert_eq!(subscription_overflow["error"]["transmission"], "completed");
+    assert!(reply_guard::EffectiveFormat::Legacy.fits(&subscription_overflow));
+    conn.execute("UPDATE trigger_subscriptions SET cursor_state='{}'", [])
+        .unwrap();
+    let connection_id = "c".repeat(70_000);
+    conn.execute("INSERT INTO connections(connection_id,principal,app_key,status,created_at_ms,updated_at_ms) VALUES (?1,'direct','github','active',1,1)", [&connection_id]).unwrap();
+    store
+        .insert_grant(&GrantInput {
+            grant_id: "large-metadata-grant".into(),
+            principal: "direct".into(),
+            connection_id,
+            grantee_principal: "reserved:prefrontal-core".into(),
+            risk_ceiling: "read".into(),
+            action_selectors: vec!["list_issues".into()],
+            authority_kind: "events_consume".into(),
+            expires_at: Some(i64::MAX / 2),
+        })
+        .unwrap();
+    let authority_overflow = execute_tool_call(
+        store,
+        Principal::Reserved {
+            module_id: "prefrontal-core".into(),
+        },
+        None,
+        manifest::EVENTS_TOOL,
+        json!({"op":"list"}),
+    )
+    .await;
+    assert_eq!(authority_overflow["error"]["code"], "response_too_large");
+    assert_eq!(authority_overflow["error"]["transmission"], "completed");
+    assert!(reply_guard::EffectiveFormat::Legacy.fits(&authority_overflow));
 }
 
 fn basal_flow_scope(agent_id: Option<&str>) -> CallScope {

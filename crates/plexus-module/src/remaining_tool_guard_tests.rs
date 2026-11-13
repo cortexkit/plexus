@@ -272,8 +272,8 @@ fn sample_case(tool: &str, large: bool) -> (Fixture, Value) {
             }
             json!({"op":"list"})
         }
-        // `op:list` pages pass unguarded until they are cut by bytes (see the
-        // guard), so the oversized sample is the guarded `op:get` read.
+        // List pages cut by bytes; the immutable detail read instead exercises
+        // the guard's oversized-event refusal.
         manifest::EVENTS_TOOL => {
             if large {
                 let (key, _) = fixture.event(true);

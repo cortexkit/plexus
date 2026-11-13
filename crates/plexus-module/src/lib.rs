@@ -4381,11 +4381,80 @@ fn facade_events_resume(call: &FacadeArguments<'_>) -> Result<Value, ModuleError
     })
 }
 
-/// Page size `events op:list` uses when the caller gives no `limit`. A reply
-/// carrying every unacknowledged event could outgrow a frame once a backlog
-/// builds up, so an omitted limit returns this many and a `next_after` cursor
-/// while more remain.
+/// Row-count upper bound when `events op:list` has no explicit `limit`.
+/// The rendered byte budget can end a page before this many rows fit.
 const DEFAULT_EVENTS_LIST_LIMIT: usize = 500;
+
+fn events_list_reply_fits(reply: &Value) -> bool {
+    reply_guard::EffectiveFormat::Legacy.fits(&with_call_tool_result_with_repo(
+        Some(manifest::EVENTS_TOOL),
+        reply.clone(),
+        None,
+        false,
+    ))
+}
+
+fn byte_budget_events_page(store: &PlexusStore, mut reply: Value, has_more: bool) -> Value {
+    let events = std::mem::take(reply["result"]["events"].as_array_mut().unwrap());
+    // Subscriptions and grants are complete authority metadata, not event rows.
+    // Trimming either could make a missing entry look like absent authority.
+    if !events_list_reply_fits(&reply) {
+        return remaining_tool_guard::completed_fallback();
+    }
+    let count = events.len();
+    for (index, mut event) in events.into_iter().enumerate() {
+        let mut candidate = reply.clone();
+        if has_more || index + 1 < count {
+            candidate["result"]["next_after"] = json!({
+                "created_at_ms": event["created_at_ms"], "event_id": event["event_id"]
+            });
+        } else {
+            candidate["result"]
+                .as_object_mut()
+                .unwrap()
+                .remove("next_after");
+        }
+        candidate["result"]["events"]
+            .as_array_mut()
+            .unwrap()
+            .push(event.clone());
+        if events_list_reply_fits(&candidate) {
+            reply = candidate;
+            continue;
+        }
+        if !reply["result"]["events"].as_array().unwrap().is_empty() {
+            // The retained page already carries its own last event's cursor.
+            break;
+        }
+        // A row that cannot fit alone must still advance the cursor. Keep its
+        // identity intact and disclose whether an exact outbox copy is readable.
+        let key = match store.event_key_for_trigger_event(event["event_id"].as_str().unwrap()) {
+            Ok(key) => key,
+            Err(error) => {
+                return crate::wire::store_failure(
+                    "event identity read",
+                    "event identity could not be read",
+                    &error,
+                )
+            }
+        };
+        let message = if key.is_some() {
+            "Read this event with events op:get or events_get using event_key."
+        } else {
+            "This event's body is too large to list and has no stored outbox copy to read separately."
+        };
+        event.as_object_mut().unwrap().remove("payload");
+        event["event_key"] = json!(key);
+        event["error"] = json!({"code": "event_body_too_large", "message": message});
+        candidate["result"]["events"][0] = event;
+        return if events_list_reply_fits(&candidate) {
+            candidate
+        } else {
+            remaining_tool_guard::completed_fallback()
+        };
+    }
+    reply
+}
 
 fn facade_events_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
     let state = call.state;
@@ -4457,16 +4526,12 @@ fn facade_events_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> 
             ),
         ) {
             (Ok((listing, has_more)), Ok(subscriptions)) => {
-                let next_after = has_more.then(|| listing.events.last().map(|event| json!({"created_at_ms":event.created_at_ms,"event_id":event.event_id}))).flatten();
-                let mut reply = json!({"result": {
+                let reply = json!({"result": {
                     "events": listing.events,
                     "subscriptions": subscriptions,
                     "events_consume_authority": {"grants": listing.consume_authority}
                 }});
-                if let Some(cursor) = next_after {
-                    reply["result"]["next_after"] = cursor;
-                }
-                reply
+                byte_budget_events_page(state.store(), reply, has_more)
             }
             // Each failed read is logged with its cause; the reply stays
             // the same generic store_failure.

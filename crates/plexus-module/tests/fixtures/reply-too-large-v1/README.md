@@ -25,7 +25,7 @@ Oversized witnesses:
 | `connections` | Connection list with one large stored identifier | Top-level `error`, `transmission:"completed"` |
 | `catalog` | Connection action list with one large schema | Same completed error |
 | `requests` | Request list with a large stored `args_snapshot` | Same completed error |
-| `events` | `op:get` of an exact immutable stored body | Completed error, `retryable:false`, as `events_get`. An oversized `op:list` page passes unguarded until event pages are cut by bytes, because refusing it would leave no `next_after` to page past it |
+| `events` | `op:get` of an exact immutable stored body | Completed error, `retryable:false`, as `events_get`. `op:list` cuts event rows by the final rendered byte budget, preserving `next_after`; oversized metadata receives the completed error |
 | `invoke` | Completed mock vendor output | Keep dispatch envelope; replace only `result.response` with a nested error |
 | `events_get` | Exact immutable stored version-1 body | Completed error, `retryable:false`; no store writes |
 | `tool.withdraw` | Oversized malformed-preset refusal before withdrawal | Preserve `invalid_request` and `field`; bound the preset echo |

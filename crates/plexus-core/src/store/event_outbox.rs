@@ -374,6 +374,9 @@ const LOOKUP_METADATA: &str = "SELECT o.repo, e.principal, e.connection_id, e.su
     FROM event_outbox o JOIN trigger_events e ON e.event_id = o.event_id
     WHERE o.event_key = ?1";
 
+const KEY_FOR_TRIGGER_EVENT: &str =
+    "SELECT event_key FROM event_outbox WHERE event_id = ?1 LIMIT 1";
+
 pub(super) const BINDING_EXISTS_SQL: &str =
     "SELECT EXISTS(SELECT 1 FROM github_repo_binding WHERE lower(repository) = lower(?1))";
 
@@ -434,6 +437,19 @@ impl PlexusStore {
                 canonical_row,
             )
             .optional()
+        })
+    }
+
+    /// Find the detail handle for an already-authorized trigger event without
+    /// reading its body. Legacy events may have no outbox copy. This does not
+    /// authorize detail reads; those must still use `event_by_key`.
+    pub fn event_key_for_trigger_event(
+        &self,
+        event_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.inner.with_read(|conn| {
+            conn.query_row(KEY_FOR_TRIGGER_EVENT, [event_id], |row| row.get(0))
+                .optional()
         })
     }
 
@@ -3992,6 +4008,59 @@ mod tests {
         assert!(store.canonical_event_by_key(KEY).unwrap().is_some());
         assert!(store.canonical_event_exists(KEY).unwrap());
         assert!(!store.canonical_event_exists("missing-key").unwrap());
+    }
+
+    #[test]
+    fn trigger_event_detail_key_lookup_is_optional_and_indexed() {
+        let store = store();
+        subscription(&store, "a", "ordered_timestamp");
+        commit(
+            &store,
+            "a",
+            &[input(&json!({"number": 7}), KEY, &headers("p"))],
+        );
+        let event = store.canonical_event_by_key(KEY).unwrap().unwrap();
+        assert_eq!(
+            store
+                .event_key_for_trigger_event(&event.event_id)
+                .unwrap()
+                .as_deref(),
+            Some(KEY)
+        );
+        assert_eq!(store.event_key_for_trigger_event("missing").unwrap(), None);
+        store
+            .insert_event("direct", "a", "a", "legacy", &json!({"legacy":true}), 1)
+            .unwrap();
+        let legacy = store
+            .list_events("direct", None, None)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.vendor_event_id.as_deref() == Some("legacy"))
+            .unwrap();
+        assert_eq!(
+            store.event_key_for_trigger_event(&legacy.event_id).unwrap(),
+            None
+        );
+        let plan = store
+            .inner
+            .with_read(|conn| {
+                let mut query =
+                    conn.prepare(&format!("EXPLAIN QUERY PLAN {KEY_FOR_TRIGGER_EVENT}"))?;
+                let rows = query
+                    .query_map([&event.event_id], |row| row.get::<_, String>(3))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows.join("; "))
+            })
+            .unwrap();
+        println!("trigger event detail key: {plan}");
+        assert!(
+            plan.contains("SEARCH event_outbox USING INDEX"),
+            "lookup must use the unique event_id index: {plan}"
+        );
+        assert!(
+            !plan.contains("SCAN"),
+            "lookup must not scan the outbox: {plan}"
+        );
     }
 
     #[test]
