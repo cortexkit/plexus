@@ -1,0 +1,1 @@
+{"method":"permissions.revoke","now_ms":1060000,"reply":{"outcome":"revoked"},"request":{"id":"invented-federated-exact-agent","module":"plexus"},"route":{"operator_surface":true,"principal":"reserved:callosum","sim_surface":false},"tag":"permissions-v1"}

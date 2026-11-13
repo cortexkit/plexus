@@ -1,0 +1,1 @@
+{"method":"permissions.list_all","now_ms":1060000,"reply":{"modules":[{"grants":[],"module":"plexus","status":"ok"}],"version":"006502d57c4523d92a26887849d99154a25c63e2f8c841c454ff1ef5677c1cf7"},"request":{"agent_id":"Sage"},"route":{"operator_surface":true,"principal":"reserved:callosum","sim_surface":false},"tag":"permissions-v1"}
