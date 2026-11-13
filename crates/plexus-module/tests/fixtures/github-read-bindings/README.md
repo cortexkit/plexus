@@ -2,9 +2,10 @@
 
 `list.request.json` is the exact tool-call body for an agentless global flow
 on a route authenticated as the Basal module (`reserved:basal`).
-`list.reply.json` is the complete reply body,
-including MCP `structuredContent` and JSON text content. Both are compact JSON
-without a trailing newline. The focused
+`list.reply.json` is the complete reply body: the facade object `{"result": …}`
+alone. `github_read` replies carry no MCP `structuredContent` or text copy,
+because every copy would count toward the tool's 64 KiB model-visible limit.
+Both files are compact JSON without a trailing newline. The focused
 `github_bindings_list::tests::example_replays_exact_request_and_reply_bytes`
 test sends the request bytes through the real tool handler and compares the
 reply bytes exactly.

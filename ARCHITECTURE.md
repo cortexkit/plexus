@@ -67,7 +67,9 @@ Plexus serves tool-provider/v1's `tool.catalog` with per-tool capability tags fr
 **Live repository bindings.** The Pure `github_read` action
 `{"action":"github.bindings.list"}` takes no `repository`, `args`, or other
 fields. It returns `{"result":{"generation":6,"bindings":[{"repository":"owner/name","agent_id":"agent-id","app_handle_id":"handle-id"}]}}`
-(with the usual MCP structured and text mirrors). Bindings are lowercase and
+as that object alone: `github_read` tool replies carry no MCP structured or
+text mirror, because each copy would count toward the tool's 64 KiB
+model-visible limit. Bindings are lowercase and
 sorted by repository, include only enabled handles with an active module invoke
 grant for the caller, and are further restricted to an agent-stamped Basal
 flow's own agent or an agentless workspace flow's audience. Global agentless

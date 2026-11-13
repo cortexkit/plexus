@@ -148,13 +148,8 @@ async fn lists_sorted_enabled_granted_bindings_without_home_vendor_or_budget() {
         json!({"action":"github.bindings.list"}),
     )
     .await;
-    assert_eq!(reply["result"], expected());
-    assert_eq!(reply["structuredContent"], expected());
-    assert_eq!(reply["isError"], false);
-    assert_eq!(
-        serde_json::from_str::<Value>(reply["content"][0]["text"].as_str().unwrap()).unwrap(),
-        json!({"result":expected()})
-    );
+    // github_read replies carry the facade object once, with no MCP mirrors.
+    assert_eq!(reply, json!({"result":expected()}));
     assert!(transport.requests().is_empty());
     assert_audit(&scratch, None, "allowed");
 }
@@ -225,7 +220,7 @@ async fn flow_lists_intersect_agent_or_workspace_visibility_with_module_grants()
                 .collect::<Vec<_>>(),
             repositories
         );
-        assert_eq!(reply["structuredContent"], reply["result"]);
+        assert!(reply.get("structuredContent").is_none(), "{reply}");
         assert!(transport.requests().is_empty());
         assert_audit(&scratch, agent, "allowed");
     }

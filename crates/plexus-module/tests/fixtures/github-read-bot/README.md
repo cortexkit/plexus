@@ -40,8 +40,9 @@ and review the diff: these replies are a contract AFT reads.
 
 The tool sends a lean legacy envelope, not `tool-result/v1`: success is
 `{"result": R}`. It retains any other facade members, but adds no `content`,
-`structuredContent` or `isError` copies. Basal programs and AFT's fallback
-decoder read the top-level facade members. The non-tool `github.read.bulk`
+`structuredContent` or `isError` copies. Basal flows and codemode programs,
+and the fallback decoder in AFT's `gh` shim (used only when Plexus doesn't
+advertise `github.read.bulk`), read the top-level facade members. The non-tool `github.read.bulk`
 operation intentionally keeps its older wrapped bytes and larger limits.
 For tool successes, R is
 
