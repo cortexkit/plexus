@@ -490,6 +490,109 @@ async fn event_list_oversized_body_marker_advances_with_or_without_outbox() {
     }
 }
 
+#[test]
+fn event_byte_budget_uses_logarithmically_many_measurements() {
+    let (_scratch, store, _path) = test_store("event_measurement_count");
+    let events: Vec<_> = (0..500)
+        .map(|n| {
+            json!({
+                "event_id":format!("bulk-{n:04}"), "created_at_ms":123,
+                "payload":{"body":"x".repeat(512)}
+            })
+        })
+        .collect();
+    for has_more in [false, true] {
+        let mut measurements = 0;
+        let page = byte_budget_events_page_with_measure(
+            &store,
+            json!({"result":{
+                "events":events, "subscriptions":[], "events_consume_authority":{"grants":[]}
+            }}),
+            has_more,
+            |candidate| {
+                measurements += 1;
+                events_list_reply_fits(candidate)
+            },
+        );
+        let maximum_measurements = 2 * (events.len().ilog2() as usize + 1) + 2;
+        assert!(
+            measurements <= maximum_measurements,
+            "500 rows took {measurements} measurements; bound is {maximum_measurements}"
+        );
+        println!("500-row page, has_more={has_more}: {measurements} measurements");
+        let rows = page["result"]["events"].as_array().unwrap();
+        assert!(!rows.is_empty() && rows.len() < events.len());
+        assert_eq!(rows, &events[..rows.len()]);
+        assert!(events_list_reply_fits(&page));
+        assert!(!events_list_reply_fits(&events_page_prefix(
+            &json!({"result":{
+                "subscriptions":[], "events_consume_authority":{"grants":[]}
+            }}),
+            &events[..rows.len() + 1],
+            true
+        )));
+        assert_eq!(
+            page["result"]["next_after"],
+            json!({"created_at_ms":123,"event_id":rows.last().unwrap()["event_id"]})
+        );
+    }
+}
+
+#[test]
+fn event_byte_budget_keeps_odd_length_ids_bounded_and_advancing() {
+    let (_scratch, store, _path) = test_store("event_odd_length_ids");
+    let events = [
+        json!({"event_id":"a", "created_at_ms":123, "payload":"x".repeat(1000)}),
+        json!({"event_id":format!("b{}", "x".repeat(7000)), "created_at_ms":123, "payload":"x".repeat(7000)}),
+        json!({"event_id":"c", "created_at_ms":123, "payload":{}}),
+        json!({"event_id":"d", "created_at_ms":123, "payload":"x".repeat(70_000)}),
+    ];
+    let metadata = json!({"result":{"subscriptions":[],"events_consume_authority":{"grants":[]}}});
+    // Replacing the long second ID's cursor with the third ID can make a longer
+    // prefix smaller. A conservative binary search may miss that larger fit.
+    assert!(!events_list_reply_fits(&events_page_prefix(
+        &metadata,
+        &events[..2],
+        true
+    )));
+    assert!(events_list_reply_fits(&events_page_prefix(
+        &metadata,
+        &events[..3],
+        true
+    )));
+    let mut collected = Vec::new();
+    while collected.len() < events.len() {
+        let start = collected.len();
+        let mut input = metadata.clone();
+        input["result"]["events"] = json!(&events[start..]);
+        let page = byte_budget_events_page(&store, input, false);
+        assert!(events_list_reply_fits(&page));
+        let rows = page["result"]["events"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        for (offset, row) in rows.iter().enumerate() {
+            assert_eq!(row["event_id"], events[start + offset]["event_id"]);
+            collected.push(row["event_id"].clone());
+        }
+        assert_eq!(
+            page["result"].get("next_after").is_some(),
+            collected.len() < events.len()
+        );
+        if collected.len() < events.len() {
+            assert_eq!(
+                page["result"]["next_after"],
+                json!({"created_at_ms":123,"event_id":rows.last().unwrap()["event_id"]})
+            );
+        }
+    }
+    assert_eq!(
+        collected,
+        events
+            .iter()
+            .map(|row| row["event_id"].clone())
+            .collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn event_list_metadata_stays_complete_or_returns_a_measured_refusal() {
     let (_scratch, store, path) = test_store("event_metadata_budget");

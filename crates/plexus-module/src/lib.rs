@@ -4394,66 +4394,92 @@ fn events_list_reply_fits(reply: &Value) -> bool {
     ))
 }
 
-fn byte_budget_events_page(store: &PlexusStore, mut reply: Value, has_more: bool) -> Value {
+fn events_page_prefix(metadata: &Value, events: &[Value], has_more: bool) -> Value {
+    let mut result = metadata["result"].as_object().unwrap().clone();
+    result.insert("events".to_string(), json!(events));
+    if has_more {
+        let event = events.last().unwrap();
+        result.insert(
+            "next_after".to_string(),
+            json!({
+                "created_at_ms": event["created_at_ms"], "event_id": event["event_id"]
+            }),
+        );
+    }
+    json!({"result": result})
+}
+
+fn byte_budget_events_page(store: &PlexusStore, reply: Value, has_more: bool) -> Value {
+    byte_budget_events_page_with_measure(store, reply, has_more, events_list_reply_fits)
+}
+
+fn byte_budget_events_page_with_measure(
+    store: &PlexusStore,
+    mut reply: Value,
+    has_more: bool,
+    mut fits: impl FnMut(&Value) -> bool,
+) -> Value {
     let events = std::mem::take(reply["result"]["events"].as_array_mut().unwrap());
     // Subscriptions and grants are complete authority metadata, not event rows.
     // Trimming either could make a missing entry look like absent authority.
-    if !events_list_reply_fits(&reply) {
+    if !fits(&reply) {
         return remaining_tool_guard::completed_fallback();
     }
     let count = events.len();
-    for (index, mut event) in events.into_iter().enumerate() {
-        let mut candidate = reply.clone();
-        if has_more || index + 1 < count {
-            candidate["result"]["next_after"] = json!({
-                "created_at_ms": event["created_at_ms"], "event_id": event["event_id"]
-            });
-        } else {
-            candidate["result"]
-                .as_object_mut()
-                .unwrap()
-                .remove("next_after");
-        }
-        candidate["result"]["events"]
-            .as_array_mut()
-            .unwrap()
-            .push(event.clone());
-        if events_list_reply_fits(&candidate) {
-            reply = candidate;
-            continue;
-        }
-        if !reply["result"]["events"].as_array().unwrap().is_empty() {
-            // The retained page already carries its own last event's cursor.
-            break;
-        }
-        // A row that cannot fit alone must still advance the cursor. Keep its
-        // identity intact and disclose whether an exact outbox copy is readable.
-        let key = match store.event_key_for_trigger_event(event["event_id"].as_str().unwrap()) {
-            Ok(key) => key,
-            Err(error) => {
-                return crate::wire::store_failure(
-                    "event identity read",
-                    "event identity could not be read",
-                    &error,
-                )
-            }
-        };
-        let message = if key.is_some() {
-            "Read this event with events op:get or events_get using event_key."
-        } else {
-            "This event's body is too large to list and has no stored outbox copy to read separately."
-        };
-        event.as_object_mut().unwrap().remove("payload");
-        event["event_key"] = json!(key);
-        event["error"] = json!({"code": "event_body_too_large", "message": message});
-        candidate["result"]["events"][0] = event;
-        return if events_list_reply_fits(&candidate) {
-            candidate
-        } else {
-            remaining_tool_guard::completed_fallback()
-        };
+    if count == 0 {
+        return reply;
     }
-    reply
+    // Try the full prefix first because terminal pages omit the cursor. Normal
+    // generated IDs make prefix fit monotonic, so binary search avoids rendering
+    // every row. Odd-length stored IDs can make the search miss a larger fit;
+    // only return an actually measured prefix, so that can shorten a page but
+    // never make it oversized or skip events.
+    let full = events_page_prefix(&reply, &events, has_more);
+    if fits(&full) {
+        return full;
+    }
+    let (mut low, mut high) = (0, count);
+    let mut retained = None;
+    while low + 1 < high {
+        let middle = low + (high - low) / 2;
+        let candidate = events_page_prefix(&reply, &events[..middle], true);
+        if fits(&candidate) {
+            low = middle;
+            retained = Some(candidate);
+        } else {
+            high = middle;
+        }
+    }
+    if let Some(retained) = retained {
+        return retained;
+    }
+    // A row that cannot fit alone must still advance the cursor. Keep its
+    // identity intact and disclose whether an exact outbox copy is readable.
+    let mut event = events[0].clone();
+    let key = match store.event_key_for_trigger_event(event["event_id"].as_str().unwrap()) {
+        Ok(key) => key,
+        Err(error) => {
+            return crate::wire::store_failure(
+                "event identity read",
+                "event identity could not be read",
+                &error,
+            )
+        }
+    };
+    let message = if key.is_some() {
+        "Read this event with events op:get or events_get using event_key."
+    } else {
+        "This event's body is too large to list and has no stored outbox copy to read separately."
+    };
+    event.as_object_mut().unwrap().remove("payload");
+    event["event_key"] = json!(key);
+    event["error"] = json!({"code": "event_body_too_large", "message": message});
+    let candidate = events_page_prefix(&reply, &[event], has_more || count > 1);
+    if fits(&candidate) {
+        candidate
+    } else {
+        remaining_tool_guard::completed_fallback()
+    }
 }
 
 fn facade_events_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
