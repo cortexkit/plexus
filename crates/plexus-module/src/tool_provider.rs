@@ -336,12 +336,16 @@ pub(crate) fn reply(name: &str, arguments: &Map<String, Value>) -> Result<Value,
                     ops::ROLE_DESCRIBE.to_owned(),
                     ops::TOOL_CATALOG.to_owned(),
                     ops::TOOL_WITHDRAW.to_owned(),
+                    plexus_core::github::reads::bot::BULK_METHOD.to_owned(),
                 ],
                 stability: "alpha".to_owned(),
             }],
             env!("CARGO_PKG_VERSION"),
         )
-        .with_capabilities(vec![CAPABILITY_FILTER.to_owned()])
+        .with_capabilities(vec![
+            CAPABILITY_FILTER.to_owned(),
+            "plexus:github.read.bulk/v1".to_owned(),
+        ])
         .with_tool_capabilities(tool_capability_union());
         return Ok(serde_json::to_value(describe).expect("role description serializes"));
     }

@@ -861,9 +861,18 @@ async fn role_describe_route_lists_required_ops_and_is_cacheable() {
     assert!(description.major("tool-provider/v1").unwrap().holds_calls());
     assert_eq!(
         body["capabilities"],
-        json!(["tool-catalog-capability-filter/v1"]),
-        "role.describe must advertise capability-tag selection"
+        json!([
+            "tool-catalog-capability-filter/v1",
+            "plexus:github.read.bulk/v1"
+        ]),
+        "role.describe must advertise capability-tag selection and the non-tool bulk read"
     );
+    assert!(description
+        .major("tool-provider/v1")
+        .unwrap()
+        .ops
+        .iter()
+        .any(|op| op == plexus_core::github::reads::bot::BULK_METHOD));
 }
 
 fn frozen_catalog_request(preset: &str) -> Value {

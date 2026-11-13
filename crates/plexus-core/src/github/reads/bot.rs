@@ -30,6 +30,15 @@ pub const ACTIONS: &[&str] = &[
     "github.pulls.open",
 ];
 
+/// Non-tool operation for programmatic reads on AFT's stamped route.
+pub const BULK_METHOD: &str = "github.read.bulk";
+pub const BULK_ACTIONS: &[&str] = &[
+    "github.repo.get",
+    "github.search.code",
+    "github.search.issues",
+    "github.actions.job_log",
+];
+
 /// The catalog action the bot form of a job log read checks the job with.
 pub(crate) const JOB_GET_ACTION: &str = "github.actions.job.get";
 pub(crate) const JOB_LOG_ACTION: &str = "github.actions.job_log";
@@ -226,7 +235,7 @@ pub enum BotReadError {
 
 fn not_allowed(field: &str) -> BotReadError {
     BotReadError::EndpointNotAllowed {
-        field: field.to_owned(),
+        field: crate::text::refusal_echo(field).into_owned(),
     }
 }
 
@@ -354,6 +363,7 @@ struct BotCall<'a, C: CredentialSource + ?Sized, T: Transport + ?Sized> {
     identity: BotReadIdentity,
     scope: Option<&'a CallScope>,
     handle: GithubHandle,
+    diagnostic_tool: &'static str,
 }
 
 impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> BotCall<'_, C, T> {
@@ -372,7 +382,7 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> BotCall<'_, C, T> {
             action,
             Value::Object(args),
         )
-        .with_diagnostic_tool("github")
+        .with_diagnostic_tool(self.diagnostic_tool)
         .with_resolved_repository(self.repository.clone());
         if let Some(scope) = self.scope {
             // Reads use the calling module's grants. The stamp's agent is
@@ -491,6 +501,7 @@ fn prepare<'a, C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     repository: &Value,
     scope: Option<&'a CallScope>,
     on_behalf_of_agent: Option<&str>,
+    diagnostic_tool: &'static str,
 ) -> Result<BotCall<'a, C, T>, BotReadError> {
     let identity = crate::scope::bot_read_identity(scope, on_behalf_of_agent)
         .ok_or(BotReadError::AgentIdentityRequired)?;
@@ -507,6 +518,7 @@ fn prepare<'a, C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         identity,
         scope,
         handle,
+        diagnostic_tool,
     })
 }
 
@@ -523,7 +535,22 @@ pub fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     scope: Option<&CallScope>,
     on_behalf_of_agent: Option<&str>,
 ) -> Result<Value, BotReadError> {
-    let call = prepare(engine, principal, repository, scope, on_behalf_of_agent)?;
+    let call = prepare(
+        engine,
+        principal,
+        repository,
+        scope,
+        on_behalf_of_agent,
+        "github",
+    )?;
+    read_prepared(call, action, args)
+}
+
+fn read_prepared<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+    call: BotCall<'_, C, T>,
+    action: &str,
+    args: &Value,
+) -> Result<Value, BotReadError> {
     let (owner, repo) = resolver::split_repository(&call.repository)
         .map_err(|_| BotReadError::RepositoryNotVisible)?;
     let vendor = vendor_args(action, owner, repo, args)?;
@@ -566,7 +593,51 @@ pub fn job_log<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     scope: Option<&CallScope>,
     on_behalf_of_agent: Option<&str>,
 ) -> Result<Value, BotReadError> {
-    let call = prepare(engine, principal, repository, scope, on_behalf_of_agent)?;
+    let call = prepare(
+        engine,
+        principal,
+        repository,
+        scope,
+        on_behalf_of_agent,
+        "github",
+    )?;
+    job_log_prepared(call, args)
+}
+
+/// Reuse the tool's bot, grants, budget and projections, but distinguish the
+/// programmatic operation in governance diagnostics.
+/// Caller admission belongs to the route handler, not to this read engine.
+pub fn read_bulk<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+    engine: &GovernanceEngine<C, T>,
+    principal: &str,
+    action: &str,
+    repository: &Value,
+    args: &Value,
+    scope: Option<&CallScope>,
+    on_behalf_of_agent: Option<&str>,
+) -> Result<Value, BotReadError> {
+    if !BULK_ACTIONS.contains(&action) {
+        return Err(not_allowed("action"));
+    }
+    let call = prepare(
+        engine,
+        principal,
+        repository,
+        scope,
+        on_behalf_of_agent,
+        BULK_METHOD,
+    )?;
+    if action == JOB_LOG_ACTION {
+        job_log_prepared(call, args)
+    } else {
+        read_prepared(call, action, args)
+    }
+}
+
+fn job_log_prepared<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+    call: BotCall<'_, C, T>,
+    args: &Value,
+) -> Result<Value, BotReadError> {
     let fields = arguments(args, &["job_id", "offset", "length"])?;
     let job_id = fields
         .get("job_id")

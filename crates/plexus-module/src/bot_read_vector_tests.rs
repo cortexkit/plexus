@@ -7,6 +7,9 @@ use super::bot_read_tests::send_bound;
 use super::*;
 use subc_protocol::scope::{ScopeAttributes, ScopeKind, ScopeStamp};
 
+#[path = "github_read_bulk_tests.rs"]
+mod bulk_tests;
+
 const REGENERATE: &str = "PLEXUS_REGENERATE_BOT_READ_VECTORS";
 
 fn vector_dir() -> std::path::PathBuf {

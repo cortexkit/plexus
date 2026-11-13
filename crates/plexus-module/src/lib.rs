@@ -2658,7 +2658,11 @@ async fn handle_tool_request_with_budget(
             .await;
         }
     };
-    if object.contains_key("method") {
+    // Bulk reads use the facade's identical validation and refusal rendering.
+    if object.contains_key("method")
+        && object.get("method").and_then(Value::as_str)
+            != Some(plexus_core::github::reads::bot::BULK_METHOD)
+    {
         if let Some(field) = object
             .get("params")
             .and_then(Value::as_object)
@@ -2677,6 +2681,25 @@ async fn handle_tool_request_with_budget(
     }
     // Management-surface calls arrive on the same route frame type as tool calls
     // but carry {method, params} rather than {name, arguments}.
+    if object.get("method").and_then(Value::as_str)
+        == Some(plexus_core::github::reads::bot::BULK_METHOD)
+    {
+        // Programmatic bulk reads reuse the facade's stamped route and all of
+        // its authority checks. Keep the legacy reply bytes for AFT's decoder;
+        // the method request is an operation, not a tool invocation.
+        let reply = blocking_section(|| {
+            facade_tool_reply_with_budget(&frame, object, state, route_bindings, budget)
+        })?;
+        return send_tool_response(
+            writer,
+            frame.header.ver,
+            channel,
+            epoch,
+            correlation,
+            with_call_tool_result_with_repo(Some(manifest::GITHUB_READ_TOOL), reply, None),
+        )
+        .await;
+    }
     if object.get("method").and_then(Value::as_str) == Some(grants_would_ask::METHOD) {
         let reply = match route_bindings.binding(channel, epoch)? {
             Some(binding) => blocking_section(|| {
@@ -2887,7 +2910,22 @@ fn facade_tool_reply_inner(
     let held_deadline = budget.deadline;
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
+    let bulk_read = object.get("method").and_then(Value::as_str)
+        == Some(plexus_core::github::reads::bot::BULK_METHOD);
+    if bulk_read {
+        if let Some(field) = object
+            .keys()
+            .find(|key| !matches!(key.as_str(), "method" | "params"))
+        {
+            return Ok(json!({"error": {
+                "code": "invalid_request",
+                "field": plexus_core::text::refusal_echo(field),
+                "message": "github.read.bulk requires only method and params",
+            }}));
+        }
+    }
     let name = match object.get("name").and_then(Value::as_str) {
+        _ if bulk_read => manifest::GITHUB_READ_TOOL,
         Some(name) => name,
         None => {
             return Ok(tool_error(
@@ -2897,7 +2935,10 @@ fn facade_tool_reply_inner(
         }
     };
     let log_name = diagnostic_label(name);
-    let arguments = match object.get("arguments").and_then(Value::as_object) {
+    let arguments = match object
+        .get(if bulk_read { "params" } else { "arguments" })
+        .and_then(Value::as_object)
+    {
         Some(arguments) => arguments,
         None => {
             return Ok(tool_error(
@@ -3014,6 +3055,13 @@ fn facade_tool_reply_inner(
         ));
     };
     let principal_key = principal::principal_key(&principal);
+    if bulk_read && principal_key != plexus_core::github::AFT_PRINCIPAL {
+        return Ok(json!({"error": {
+            "code": "caller_not_allowed",
+            "message": "github.read.bulk is reserved for AFT",
+            "transmission": "not_sent",
+        }}));
+    }
     if let Some(refusal) = tool_provider::mode_refusal(name, &mode) {
         return Ok(json!({"error": refusal}));
     }
@@ -3089,7 +3137,7 @@ fn facade_tool_reply_inner(
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if action == "github.bindings.list" {
+        if !bulk_read && action == "github.bindings.list" {
             return Ok(github_bindings_list::reply(
                 state,
                 &principal_key,
@@ -3100,7 +3148,12 @@ fn facade_tool_reply_inner(
         }
         // Refuse by action name before inspecting repository/args, secrets, or
         // connection authority. The read-only surface cannot carry a bot write.
-        if !plexus_core::github::reads::ACTIONS.contains(&action) {
+        let actions = if bulk_read {
+            plexus_core::github::reads::bot::BULK_ACTIONS
+        } else {
+            plexus_core::github::reads::ACTIONS
+        };
+        if !actions.contains(&action) {
             return Ok(json!({"error": {
                 "code": "read_action_unsupported",
                 "action": plexus_core::text::refusal_echo(action),
@@ -3280,6 +3333,17 @@ fn facade_tool_reply_inner(
                 .unwrap_or("");
             let repository = arguments.get("repository").cloned().unwrap_or(Value::Null);
             let args = arguments.get("args").cloned().unwrap_or_else(|| json!({}));
+            if bulk_read {
+                return Ok(bot_read_reply(plexus_core::github::reads::bot::read_bulk(
+                    &state.runtime.engine,
+                    &principal_key,
+                    action,
+                    &repository,
+                    &args,
+                    route_scope.as_ref(),
+                    on_behalf_of_agent.as_deref(),
+                )));
+            }
             if let Some(bot_read) = BotReadForm::of(action, &principal_key, &args) {
                 return Ok(blocking_section(|| {
                     let engine = &state.runtime.engine;
