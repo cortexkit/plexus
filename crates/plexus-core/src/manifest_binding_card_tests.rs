@@ -157,6 +157,91 @@ fn get_and_await_decode_allowed_declined_and_expired_samples() {
 }
 
 #[test]
+fn unscoped_withdraw_accepts_repeat_and_already_settled_cards() {
+    let mut withdrawn: Value = serde_json::from_slice(
+        &std::fs::read(format!("{ROOT}../consent-requester-v1/withdraw-reply.json")).unwrap(),
+    )
+    .unwrap();
+    withdrawn["result"]["kind"] = json!("manifest_binding");
+    withdrawn["result"]["elicitation_id"] = json!("el_1");
+    let withdrawn = withdrawn["result"].clone();
+    let route = Arc::new(Route::default());
+    route.replies.lock().unwrap().extend([
+        withdrawn.clone(),
+        withdrawn,
+        vector("filer-get-allowed")["reply"]["result"].clone(),
+        vector("filer-get-declined")["reply"]["result"].clone(),
+        vector("filer-get-expired")["reply"]["result"].clone(),
+    ]);
+    for _ in 0..5 {
+        let cards = ConsentCards::new(route.clone());
+        assert_eq!(
+            cards
+                .manifest_binding_card(CardRequest::Withdraw { card_id: "el_1" })
+                .unwrap(),
+            CardReply::Withdrawn
+        );
+    }
+    assert_eq!(
+        *route.calls.lock().unwrap(),
+        vec![("consent.withdraw".into(), json!({"elicitation_id":"el_1"})); 5]
+    );
+    *route.refusal.lock().unwrap() = Some("route_closed".into());
+    assert_eq!(
+        ConsentCards::new(route).manifest_binding_card(CardRequest::Withdraw { card_id: "el_1" }),
+        Err("route_closed".into())
+    );
+}
+
+#[test]
+fn unscoped_withdraw_rejects_mismatched_or_unsettled_records() {
+    for (field, value) in [
+        ("elicitation_id", json!("other")),
+        ("kind", json!("consent")),
+        ("state", json!("pending")),
+    ] {
+        let route = Arc::new(Route::default());
+        let mut record = vector("filer-get-expired")["reply"]["result"].clone();
+        record[field] = value;
+        route.replies.lock().unwrap().push_back(record);
+        assert_eq!(
+            ConsentCards::new(route)
+                .manifest_binding_card(CardRequest::Withdraw { card_id: "el_1" }),
+            Err("manifest_binding_card_reply_invalid".into())
+        );
+    }
+}
+
+#[test]
+fn get_and_await_decode_withdrawn_cards_after_a_lost_reply() {
+    let proposal = proposal();
+    for await_reply in [false, true] {
+        let mut record = vector("filer-get-expired")["reply"]["result"].clone();
+        record["state"] = json!("withdrawn");
+        let route = Arc::new(Route::default());
+        route.replies.lock().unwrap().push_back(record);
+        let request = if await_reply {
+            CardRequest::Await {
+                card_id: "el_1",
+                statement_b64url: &proposal.statement_b64url,
+                timeout_ms: 0,
+            }
+        } else {
+            CardRequest::Get {
+                card_id: "el_1",
+                statement_b64url: &proposal.statement_b64url,
+            }
+        };
+        assert_eq!(
+            ConsentCards::new(route)
+                .manifest_binding_card(request)
+                .unwrap(),
+            CardReply::State(CardState::Withdrawn)
+        );
+    }
+}
+
+#[test]
 fn inconsistent_or_unbound_answer_records_are_never_used() {
     let statement = proposal().statement_b64url;
     let allowed = vector("filer-get-allowed")["reply"]["result"].clone();

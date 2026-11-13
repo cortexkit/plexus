@@ -315,6 +315,26 @@ impl crate::github::manifest_binding::BindingCards for ConsentCards {
                     .map_err(|e| e.code().to_owned())?;
                 manifest_binding_answer(record, card_id, statement_b64url).map(CardReply::State)
             }
+            CardRequest::Withdraw { card_id } => {
+                let record = self
+                    .route
+                    .call_unscoped(
+                        CONSENT_WITHDRAW,
+                        json!({"elicitation_id":card_id}),
+                        CONTROL_RPC_TIMEOUT,
+                    )
+                    .map_err(|e| e.code().to_owned())?;
+                if record["elicitation_id"] != card_id
+                    || record["kind"] != "manifest_binding"
+                    || !matches!(
+                        record["state"].as_str(),
+                        Some("withdrawn" | "answered" | "expired")
+                    )
+                {
+                    return Err("manifest_binding_card_reply_invalid".into());
+                }
+                Ok(CardReply::Withdrawn)
+            }
         }
     }
 }
@@ -362,6 +382,12 @@ fn manifest_binding_answer(
                 && record.get("answered_choice_id").is_none() =>
         {
             Ok(CardState::Expired)
+        }
+        Some("withdrawn")
+            if record.get("manifest_binding_answer").is_none()
+                && record.get("answered_choice_id").is_none() =>
+        {
+            Ok(CardState::Withdrawn)
         }
         Some("answered") => {
             #[derive(serde::Deserialize)]

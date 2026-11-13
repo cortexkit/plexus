@@ -320,6 +320,9 @@ struct Cards {
     states: RefCell<BTreeMap<String, CardState>>,
     filed_ids: RefCell<BTreeSet<String>>,
     checked: RefCell<Vec<String>>,
+    actions: RefCell<Vec<String>>,
+    withdraw_error: Cell<bool>,
+    lose_withdraw_reply: Cell<bool>,
 }
 impl Cards {
     fn new() -> Self {
@@ -340,6 +343,9 @@ impl Cards {
             states: RefCell::new(BTreeMap::new()),
             filed_ids: RefCell::new(BTreeSet::new()),
             checked: RefCell::new(Vec::new()),
+            actions: RefCell::new(Vec::new()),
+            withdraw_error: Cell::new(false),
+            lose_withdraw_reply: Cell::new(false),
         }
     }
 }
@@ -353,6 +359,7 @@ impl BindingCards for Cards {
             CardRequest::File { handle, proposal } => {
                 assert_eq!(handle.app_id, 4617236);
                 let id = self.statements.borrow()[&proposal.statement_b64url].clone();
+                self.actions.borrow_mut().push(format!("file:{id}"));
                 self.attempts.set(self.attempts.get() + 1);
                 if self.conflict.get() {
                     return Ok(CardReply::Conflict);
@@ -374,6 +381,21 @@ impl BindingCards for Cards {
                         .copied()
                         .unwrap_or_else(|| self.state.get()),
                 )
+            }
+            CardRequest::Withdraw { card_id } => {
+                self.actions
+                    .borrow_mut()
+                    .push(format!("withdraw:{card_id}"));
+                if self.withdraw_error.get() {
+                    return Err("withdraw_unavailable".into());
+                }
+                self.states
+                    .borrow_mut()
+                    .insert(card_id.into(), CardState::Withdrawn);
+                if self.lose_withdraw_reply.replace(false) {
+                    return Err("lost_withdraw_reply".into());
+                }
+                CardReply::Withdrawn
             }
         })
     }
@@ -557,7 +579,7 @@ impl Fixture {
         .unwrap();
         result["proposal_id"] = json!(format!("{:026}", index + 1));
         result["manifest_version"] = json!(prior_version + 1);
-        result["manifest_sha256"] = json!(format!("{:064x}", prior_version + 1));
+        result["manifest_sha256"] = json!(format!("{:032x}{index:032x}", prior_version + 1));
         for field in [
             "proposal_id",
             "manifest_version",
@@ -587,7 +609,17 @@ impl Fixture {
     }
 
     fn seed_waiting(&self, handle: &GithubHandle, repository: &str, index: usize) -> BindingRecord {
-        let proposal = self.proposal_for(handle, repository, 28, index);
+        self.seed_waiting_on(handle, repository, 28, index)
+    }
+
+    fn seed_waiting_on(
+        &self,
+        handle: &GithubHandle,
+        repository: &str,
+        prior_version: i64,
+        index: usize,
+    ) -> BindingRecord {
+        let proposal = self.proposal_for(handle, repository, prior_version, index);
         let mut record = BindingRecord::observed(handle, repository);
         record.proposal_id = Some(proposal.proposal_id.clone());
         record.manifest_version = Some(proposal.manifest_version);
@@ -612,6 +644,180 @@ impl Fixture {
             .find(|r| r.app_handle_id == handle.app_handle_id && r.repository == repository)
             .unwrap()
     }
+}
+
+fn assert_withdrawn(record: &BindingRecord) {
+    assert_eq!(record.state, "observed");
+    assert_eq!(record.proposal_id, None);
+    assert_eq!(record.manifest_version, None);
+    assert_eq!(record.manifest_sha256, None);
+    assert_eq!(record.statement_b64url, None);
+    assert_eq!(record.expires_at_ms, None);
+    assert_eq!(record.card_id, None);
+    assert!(record.present);
+}
+
+fn notice_for(record: &BindingRecord) -> Value {
+    let mut notice = sample("watch.stored");
+    notice["version"] = json!(record.manifest_version);
+    notice["manifest_sha256"] = json!(record.manifest_sha256);
+    notice
+}
+
+#[test]
+fn notice_withdraws_superseded_cards_but_preserves_the_approved_and_declined_records() {
+    let mut f = Fixture::new();
+    let a = f.seed_waiting(&handle(), REPO, 0);
+    let b = f.seed_waiting(&handle(), "octo-owner/b", 1);
+    let mut c = f.seed_waiting(&handle(), "octo-owner/c", 2);
+    c.state = "card_conflict".into();
+    assert!(f.store.save_github_manifest_binding(&c, None).unwrap());
+    let d = f.seed_waiting(&handle(), "octo-owner/d", 3);
+    f.cards
+        .states
+        .borrow_mut()
+        .insert(d.card_id.clone().unwrap(), CardState::Declined);
+    f.pass().notice(notice_for(&a), NOW).unwrap();
+    assert_eq!(f.record_for(&handle(), REPO).state, "awaiting_active");
+    assert_eq!(f.record_for(&handle(), REPO).card_id, a.card_id);
+    assert_withdrawn(&f.record_for(&handle(), &b.repository));
+    assert_withdrawn(&f.record_for(&handle(), &c.repository));
+    assert_eq!(f.record_for(&handle(), &d.repository).state, "declined");
+    assert_eq!(f.record_for(&handle(), &d.repository).card_id, d.card_id);
+    assert_eq!(
+        *f.cards.actions.borrow(),
+        vec![
+            format!("withdraw:{}", b.card_id.unwrap()),
+            format!("withdraw:{}", c.card_id.unwrap()),
+        ]
+    );
+    assert_eq!(
+        f.store
+            .list_audit("reserved:plexus")
+            .unwrap()
+            .iter()
+            .filter(|a| a.reason_code == "github_manifest_card_withdrawn")
+            .count(),
+        2
+    );
+    f.pass().notice(notice_for(&a), NOW).unwrap();
+    assert_eq!(f.cards.actions.borrow().len(), 2);
+    assert!(!f.bound());
+}
+
+#[test]
+fn notice_only_withdraws_present_cards_at_or_before_the_stored_version() {
+    let mut f = Fixture::new();
+    let a = f.seed_waiting(&handle(), REPO, 0);
+    let older = f.seed_waiting_on(&handle(), "octo-owner/b", 27, 1);
+    let future = f.seed_waiting_on(&handle(), "octo-owner/c", 29, 2);
+    let absent = f.seed_waiting(&handle(), "octo-owner/d", 3);
+    f.store
+        .observe_github_manifest_installation(
+            &handle(),
+            &[
+                REPO.into(),
+                older.repository.clone(),
+                future.repository.clone(),
+            ],
+        )
+        .unwrap();
+    let absent = f.record_for(&handle(), &absent.repository);
+    f.pass().notice(notice_for(&a), NOW).unwrap();
+    assert_withdrawn(&f.record_for(&handle(), &older.repository));
+    assert_eq!(f.record_for(&handle(), &future.repository), future);
+    assert_eq!(f.record_for(&handle(), &absent.repository), absent);
+    assert_eq!(
+        *f.cards.actions.borrow(),
+        vec![format!("withdraw:{}", older.card_id.unwrap())]
+    );
+}
+
+#[test]
+fn reproposal_withdraws_the_old_card_before_filing_including_saved_card_conflicts() {
+    for conflict in [false, true] {
+        let mut f = Fixture::new();
+        let mut old = f.seed_waiting(&handle(), REPO, 0);
+        if conflict {
+            old.state = "card_conflict".into();
+            assert!(f.store.save_github_manifest_binding(&old, None).unwrap());
+        }
+        let proposal = f.proposal_for(&handle(), REPO, 29, 1);
+        f.discover();
+        let record = f.record();
+        assert_eq!(record.state, "pending");
+        assert_eq!(record.proposal_id, Some(proposal.proposal_id));
+        assert_eq!(record.manifest_version, Some(30));
+        assert_eq!(
+            *f.cards.actions.borrow(),
+            vec![
+                format!("withdraw:{}", old.card_id.unwrap()),
+                format!("file:{}", record.card_id.unwrap()),
+            ]
+        );
+        assert!(!f.bound());
+    }
+}
+
+#[test]
+fn withdrawal_failure_preserves_the_record_and_retries_without_filing_or_binding() {
+    for (from_notice, conflict) in [(false, false), (true, false), (true, true)] {
+        let mut f = Fixture::new();
+        let mut old = f.seed_waiting(&handle(), REPO, 0);
+        if conflict {
+            old.state = "card_conflict".into();
+            assert!(f.store.save_github_manifest_binding(&old, None).unwrap());
+            old.revision += 1;
+        }
+        let mut notice = notice_for(&old);
+        notice["manifest_sha256"] = json!("a".repeat(64));
+        f.proposal_for(&handle(), REPO, 29, 1);
+        f.cards.withdraw_error.set(true);
+        for _ in 0..2 {
+            if from_notice {
+                f.pass().notice(notice.clone(), NOW).unwrap();
+            } else {
+                f.discover();
+            }
+            assert_eq!(f.record(), old);
+            assert_eq!(f.cards.attempts.get(), 0);
+            assert!(!f.bound());
+        }
+        assert_eq!(f.progress.logged.len(), 1);
+        f.cards.withdraw_error.set(false);
+        f.discover();
+        assert_eq!(f.record().manifest_version, Some(30));
+        assert_eq!(f.cards.attempts.get(), 1);
+        assert_eq!(
+            f.cards
+                .actions
+                .borrow()
+                .iter()
+                .filter(|a| a.starts_with("withdraw:"))
+                .count(),
+            3
+        );
+    }
+}
+
+#[test]
+fn a_lost_withdraw_reply_recovers_the_reset_on_the_next_pass() {
+    let mut f = Fixture::new();
+    let old = f.seed_waiting(&handle(), REPO, 0);
+    let mut notice = notice_for(&old);
+    notice["manifest_sha256"] = json!("a".repeat(64));
+    f.cards.lose_withdraw_reply.set(true);
+    f.pass().notice(notice, NOW).unwrap();
+    assert_eq!(f.record(), old);
+    f.progress = Progress::default();
+    f.discover();
+    assert_withdrawn(&f.record());
+    assert_eq!(f.cards.actions.borrow().len(), 1);
+    assert_eq!(f.cards.attempts.get(), 0);
+    f.proposal_for(&handle(), REPO, 29, 1);
+    f.discover();
+    assert_eq!(f.record().manifest_version, Some(30));
+    assert_eq!(f.cards.attempts.get(), 1);
 }
 
 #[test]
@@ -910,6 +1116,7 @@ fn matching_notice_waits_for_every_computer_and_binds_without_grants() {
         )
     );
     let mut wrong = sample("watch.stored");
+    wrong["version"] = json!(28);
     wrong["manifest_sha256"] = json!("0".repeat(64));
     f.pass().notice(wrong, NOW).unwrap();
     assert_eq!(f.record().state, "pending");
