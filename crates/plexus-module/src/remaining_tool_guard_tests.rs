@@ -197,10 +197,13 @@ impl Fixture {
         )
         .await
         .unwrap();
-        assert_eq!(
-            responses.recv().await.unwrap().header.ty,
-            FrameType::Response
-        );
+        let ack = bounded::recv_within(
+            responses.recv(),
+            std::time::Duration::from_secs(5),
+            "reply guard fixture bind",
+        )
+        .await;
+        assert_eq!(ack.header.ty, FrameType::Response);
         assert_eq!(
             routes.binding(41, 1).unwrap().unwrap().reads_tool_result_v1,
             negotiated
@@ -226,7 +229,12 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let reply = responses.recv().await.unwrap();
+        let reply = bounded::recv_within(
+            responses.recv(),
+            std::time::Duration::from_secs(5),
+            "reply guard fixture response",
+        )
+        .await;
         assert_eq!(reply.header.ty, FrameType::Response);
         reply.body
     }
