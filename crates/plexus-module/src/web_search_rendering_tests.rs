@@ -112,10 +112,10 @@ fn maximal_web_results_keep_whole_entries_with_a_bounded_counted_note() {
         reply["structuredContent"]["results"],
         json!(&results[..shown])
     );
-    assert_eq!(
-        reply["result"], legacy["result"],
-        "the relay keeps the provider data"
-    );
+    // Core's web_search relay renders the legacy `result`, so it must carry
+    // the same shown subset as the text, or the head gets every result.
+    assert_eq!(reply["result"], reply["structuredContent"]);
+    assert_ne!(reply["result"], legacy["result"]);
     let text = reply["content"][0]["text"].as_str().unwrap();
     let mut expected = "20 web results:".to_string();
     for (index, result) in results.iter().take(shown).enumerate() {

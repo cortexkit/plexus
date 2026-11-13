@@ -5855,6 +5855,10 @@ fn search_content_result(tool: &str, mut legacy: Value, code_search_repo: Option
                     parsed["results_shown"] = json!(shown);
                     parsed["results_found"] = json!(found);
                     parsed["results_omitted"] = json!(found - shown);
+                    // Core's web_search relay renders the appended legacy
+                    // `result`, not this text, so it must carry the same
+                    // shown subset or the head still gets every result.
+                    legacy["result"] = parsed.clone();
                 }
             }
             text
