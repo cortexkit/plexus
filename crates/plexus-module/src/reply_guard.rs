@@ -10,8 +10,6 @@ use serde_json::{json, Value};
 #[derive(Clone, Copy, Debug)]
 pub(super) enum EffectiveFormat {
     Legacy,
-    // No caller selects this format until its route and catalog both opt in.
-    #[allow(dead_code)]
     ToolResultV1,
 }
 

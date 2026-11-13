@@ -3281,3 +3281,6 @@ async fn ask_first_search_refuses_without_card_or_vendor_contact() {
     assert_eq!(spy.calls(), 0);
     assert_eq!(f.requests(), sent);
 }
+
+#[path = "web_search_tool_result_v1_tests.rs"]
+mod tool_result_v1;

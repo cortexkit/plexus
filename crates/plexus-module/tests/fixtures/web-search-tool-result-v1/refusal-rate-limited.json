@@ -1,0 +1,1 @@
+{"content":[{"text":"web_search was refused (rate_limited): the web search rate limit is reached. Retry in 1 minute (retry_after_ms 60000).","type":"text"}],"errorCode":"rate_limited","isError":true,"structuredContent":{"code":"rate_limited","message":"web search rate limit reached; retry after retry_after_ms","retry_after_ms":60000}}

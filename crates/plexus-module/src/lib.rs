@@ -2588,6 +2588,25 @@ async fn handle_tool_request_with_budget(
     route_bindings: &Arc<RouteBindings>,
     budget: Arc<request_execution::RequestBudget>,
 ) -> Result<(), ModuleError> {
+    handle_tool_request_with_web_search_reader(
+        frame,
+        writer,
+        state,
+        route_bindings,
+        budget,
+        CORE_WEB_SEARCH_TOOL_RESULT_V1_READER_READY,
+    )
+    .await
+}
+
+async fn handle_tool_request_with_web_search_reader(
+    frame: Frame,
+    writer: &mpsc::Sender<Frame>,
+    state: &Arc<ModuleState>,
+    route_bindings: &Arc<RouteBindings>,
+    budget: Arc<request_execution::RequestBudget>,
+    core_web_search_reader_ready: bool,
+) -> Result<(), ModuleError> {
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
     let correlation = frame.header.corr;
@@ -2810,7 +2829,7 @@ async fn handle_tool_request_with_budget(
             reads_tool_result_v1,
         )
     } else {
-        with_call_tool_result_with_repo(
+        with_call_tool_result_for_route(
             tool,
             reply,
             object
@@ -2818,6 +2837,7 @@ async fn handle_tool_request_with_budget(
                 .and_then(|arguments| arguments.get("repo"))
                 .and_then(Value::as_str),
             reads_tool_result_v1,
+            core_web_search_reader_ready,
         )
     };
     send_tool_response(writer, frame.header.ver, channel, epoch, correlation, reply).await
@@ -5748,6 +5768,25 @@ fn diagnostic_label(value: &str) -> String {
     label
 }
 
+// Core already negotiates tool-result/v1 but still reads web search's legacy
+// result/error members. Enable only after Core deploys its structuredContent reader.
+const CORE_WEB_SEARCH_TOOL_RESULT_V1_READER_READY: bool = false;
+
+fn with_call_tool_result_with_repo(
+    tool: Option<&str>,
+    reply: Value,
+    code_search_repo: Option<&str>,
+    reads_tool_result_v1: bool,
+) -> Value {
+    with_call_tool_result_for_route(
+        tool,
+        reply,
+        code_search_repo,
+        reads_tool_result_v1,
+        CORE_WEB_SEARCH_TOOL_RESULT_V1_READER_READY,
+    )
+}
+
 /// Full envelopes remain JSON text for relays. Large events/catalog listings
 /// keep their full legacy result but summarize text and omit structuredContent.
 /// Other tools keep the MCP fields and legacy facade envelope they already serve.
@@ -5756,7 +5795,8 @@ fn diagnostic_label(value: &str) -> String {
 /// only `content[].text`, `structuredContent` and `isError`; relays that
 /// decode the reply themselves, such as prefrontal's web search relay and
 /// AFT's gh-shim relay, read `result`/`error`. Web search keeps these members
-/// for Prefrontal's relay; code search has no legacy-envelope consumer.
+/// for Prefrontal's relay until Core's reader is ready, then omits them only on
+/// negotiated routes; code search has no legacy-envelope consumer.
 /// A success adds `content`, `isError: false` and `structuredContent` (a copy
 /// of `result`, when it is a JSON object, as MCP requires). For web search the
 /// text is a readable listing, and code search renders its parsed matches.
@@ -5776,13 +5816,17 @@ fn diagnostic_label(value: &str) -> String {
 ///
 /// Management-surface replies (`{method, params}`) do not pass through here;
 /// the operator's admin client reads them as they are.
-fn with_call_tool_result_with_repo(
+fn with_call_tool_result_for_route(
     tool: Option<&str>,
     mut reply: Value,
     code_search_repo: Option<&str>,
-    _reads_tool_result_v1: bool,
+    reads_tool_result_v1: bool,
+    core_web_search_reader_ready: bool,
 ) -> Value {
-    if reply["error"]["code"] == "access_pending" {
+    let pure_web_search = tool == Some(manifest::WEB_SEARCH_TOOL)
+        && core_web_search_reader_ready
+        && reads_tool_result_v1;
+    if reply["error"]["code"] == "access_pending" && !pure_web_search {
         let text = reply["error"]["message"].as_str().unwrap_or_default();
         return json!({
             "content": text_content(text.to_string()),
@@ -5791,7 +5835,12 @@ fn with_call_tool_result_with_repo(
         });
     }
     if let Some(tool @ (manifest::WEB_SEARCH_TOOL | manifest::CODE_SEARCH_TOOL)) = tool {
-        return search_content_result(tool, reply, code_search_repo);
+        let format = if pure_web_search {
+            reply_guard::EffectiveFormat::ToolResultV1
+        } else {
+            reply_guard::EffectiveFormat::Legacy
+        };
+        return search_content_result(tool, reply, code_search_repo, format);
     }
     let listing = matches!(tool, Some(manifest::EVENTS_TOOL | manifest::CATALOG_TOOL))
         && ["events", "actions", "apps"]
@@ -5844,8 +5893,15 @@ fn json_fits(value: &Value, limit: usize) -> bool {
     serde_json::to_writer(BoundedSize(limit), value).is_ok()
 }
 
-fn search_content_result(tool: &str, mut legacy: Value, code_search_repo: Option<&str>) -> Value {
+fn search_content_result(
+    tool: &str,
+    mut legacy: Value,
+    code_search_repo: Option<&str>,
+    format: reply_guard::EffectiveFormat,
+) -> Value {
     use cortexkit_role_tool_provider::result::{validate, ContentPart, ToolResult};
+    let pure_web_search = tool == manifest::WEB_SEARCH_TOOL
+        && matches!(format, reply_guard::EffectiveFormat::ToolResultV1);
     let mut result = if let Some(error) = legacy.get("error") {
         let text = if tool == manifest::WEB_SEARCH_TOOL {
             web_search_refusal_text(error)
@@ -5859,7 +5915,13 @@ fn search_content_result(tool: &str, mut legacy: Value, code_search_repo: Option
         } else {
             error.get("code").and_then(Value::as_str).unwrap_or("error")
         };
-        ToolResult::new(vec![ContentPart::text(text)]).with_error(code)
+        let mut result = ToolResult::new(vec![ContentPart::text(text)]).with_error(code);
+        if pure_web_search {
+            if let Some(error) = error.as_object() {
+                result = result.with_structured_content(error.clone());
+            }
+        }
+        result
     } else {
         let mut parsed = legacy.get("result").cloned().unwrap_or(Value::Null);
         let text = if tool == manifest::WEB_SEARCH_TOOL {
@@ -5898,14 +5960,23 @@ fn search_content_result(tool: &str, mut legacy: Value, code_search_repo: Option
     };
     // Refuse an invalid or oversized result by name rather than sending content
     // that a tool-result/v1 consumer cannot accept, or silently truncating it.
-    if validate(&result).is_err() {
+    let mut body = serde_json::to_value(&result).expect("search ToolResult serializes");
+    let valid = if pure_web_search {
+        format.fits(&body)
+    } else {
+        validate(&result).is_ok()
+    };
+    if !valid {
         let message = "plexus could not produce a valid tool-result/v1 result";
         result = ToolResult::new(vec![ContentPart::text(message)]).with_error("invalid_answer");
         legacy = tool_error("invalid_answer", message);
+        if pure_web_search {
+            result = result.with_structured_content(legacy["error"].as_object().unwrap().clone());
+        }
+        body = serde_json::to_value(&result).expect("search ToolResult serializes");
     }
     validate(&result).expect("the bounded tool-result/v1 refusal is valid");
-    let mut body = serde_json::to_value(result).expect("search ToolResult serializes");
-    if tool == manifest::WEB_SEARCH_TOOL {
+    if tool == manifest::WEB_SEARCH_TOOL && !pure_web_search {
         for key in ["result", "error"] {
             if let Some(value) = legacy.get(key) {
                 body.as_object_mut()
