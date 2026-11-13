@@ -165,7 +165,7 @@ async fn pulls_open_graphql_errors_refuse_even_with_partial_data() {
     )
     .await;
     assert_eq!(reply["error"]["code"], "read_response_invalid");
-    assert_eq!(reply["isError"], true);
+    assert!(reply.get("isError").is_none());
     assert!(reply.get("structuredContent").is_none());
     assert!(!reply.to_string().contains("private vendor detail"));
     transport.set_response(MockResponse::VendorError {

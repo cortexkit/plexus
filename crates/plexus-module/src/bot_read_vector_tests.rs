@@ -58,7 +58,7 @@ fn mock(reply: &Value) -> MockResponse {
 }
 
 /// A budget refusal's delay depends on the clock, so it is checked for range
-/// and then replaced by the vector's value, in the error and in the text.
+/// and then replaced by the vector's value. Bulk replies also repeat it in text.
 fn normalize_clock(actual: &mut Value, expected: &Value) {
     if actual["error"]["code"] != "read_budget_exhausted" {
         return;
@@ -67,7 +67,9 @@ fn normalize_clock(actual: &mut Value, expected: &Value) {
     assert!(retry > 0 && retry <= 3_600_000, "{actual}");
     if expected.get("error").is_some() {
         actual["error"]["retry_after_ms"] = expected["error"]["retry_after_ms"].clone();
-        actual["content"] = expected["content"].clone();
+        if actual.get("content").is_some() {
+            actual["content"] = expected["content"].clone();
+        }
     }
 }
 

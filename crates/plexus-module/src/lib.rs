@@ -36,6 +36,7 @@ pub mod daemon_runtime;
 mod engram_catalog;
 mod github_bindings_list;
 mod github_bot_admin;
+mod github_read_tool;
 pub mod health;
 pub mod manifest;
 pub mod operator_confirmation;
@@ -2784,12 +2785,17 @@ async fn handle_tool_request_with_budget(
         .map_err(|error| ModuleError::Message(error.to_string()))?;
         return send(writer, response).await;
     }
-    send_tool_response(
-        writer,
-        frame.header.ver,
-        channel,
-        epoch,
-        correlation,
+    // GitHub programs read the facade directly. Do not duplicate it into MCP
+    // fields: every copy counts toward the legacy tool's model-visible limit.
+    // The bulk operation returned above deliberately keeps its old wrapper.
+    let reply = if tool == Some(manifest::GITHUB_READ_TOOL) {
+        let action = object
+            .get("arguments")
+            .and_then(|arguments| arguments.get("action"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        github_read_tool::guard(action, github_read_tool::shape_tail(action, reply))
+    } else {
         with_call_tool_result_with_repo(
             tool,
             reply,
@@ -2797,9 +2803,9 @@ async fn handle_tool_request_with_budget(
                 .get("arguments")
                 .and_then(|arguments| arguments.get("repo"))
                 .and_then(Value::as_str),
-        ),
-    )
-    .await
+        )
+    };
+    send_tool_response(writer, frame.header.ver, channel, epoch, correlation, reply).await
 }
 
 pub mod flow_audience;
@@ -3344,7 +3350,13 @@ fn facade_tool_reply_inner(
                     on_behalf_of_agent.as_deref(),
                 )));
             }
-            if let Some(bot_read) = BotReadForm::of(action, &principal_key, &args) {
+            let bot_read = BotReadForm::of(action, &principal_key, &args);
+            let (args, applied_max_bytes) = github_read_tool::bounded_args(
+                action,
+                args,
+                bot_read == Some(BotReadForm::JobLogRange),
+            );
+            if let Some(bot_read) = bot_read {
                 return Ok(blocking_section(|| {
                     let engine = &state.runtime.engine;
                     let scope = route_scope.as_ref();
@@ -3384,7 +3396,12 @@ fn facade_tool_reply_inner(
                     &args,
                     route_scope.as_ref(),
                 ) {
-                    Ok(result) => json!({"result": result}),
+                    Ok(mut result) => {
+                        if let Some(max_bytes) = applied_max_bytes {
+                            result["max_bytes"] = json!(max_bytes);
+                        }
+                        json!({"result": result})
+                    }
                     Err(plexus_core::github::reads::ReadError::UnsupportedAction) => {
                         json!({"error":{"code":"read_action_unsupported"}})
                     }

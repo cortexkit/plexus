@@ -68,8 +68,17 @@ fn pretty(value: &Value) -> String {
     format!("{}\n", serde_json::to_string_pretty(value).unwrap())
 }
 
+fn facade_only(bytes: &[u8]) -> Value {
+    let mut reply: Value = serde_json::from_slice(bytes).unwrap();
+    let fields = reply.as_object_mut().unwrap();
+    for key in ["content", "structuredContent", "isError"] {
+        fields.remove(key);
+    }
+    reply
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bulk_vectors_replay_byte_for_byte_and_match_the_tool() {
+async fn bulk_vectors_replay_byte_for_byte_and_match_tool_payloads() {
     let regenerate = std::env::var(BULK_REGENERATE).as_deref() == Ok("1");
     if regenerate {
         std::fs::create_dir_all(bulk_dir("requests")).unwrap();
@@ -94,12 +103,20 @@ async fn bulk_vectors_replay_byte_for_byte_and_match_the_tool() {
         let reply: Value = serde_json::from_slice(&body).unwrap();
         let tool = json!({"name": manifest::GITHUB_READ_TOOL, "arguments": request["params"]});
         let tool_body = send_bound(&runtime, "aft", scope, &tool).await;
-        assert_eq!(body, tool_body, "{name}: op and tool wire bytes differ");
+        assert_eq!(
+            facade_only(&body),
+            facade_only(&tool_body),
+            "{name}: op and tool payloads differ"
+        );
+        assert!(serde_json::from_slice::<Value>(&tool_body)
+            .unwrap()
+            .get("content")
+            .is_none());
         let old_reply = read_json(&vector_dir().join(format!("{name}.reply.json")));
         assert_eq!(
-            body,
+            tool_body,
             serde_json::to_vec(&old_reply).unwrap(),
-            "{name}: legacy tool bytes changed"
+            "{name}: lean tool bytes changed"
         );
         let sent: Vec<Value> = transport.requests().iter().map(|sent| {
             json!({"connection_id": sent.connection_id, "action": sent.action, "args": sent.args})
@@ -157,7 +174,7 @@ async fn bulk_vectors_replay_byte_for_byte_and_match_the_tool() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bulk_four_actions_keep_head_and_worker_identity_and_wire_bytes() {
+async fn bulk_four_actions_keep_head_and_worker_identity_and_payloads() {
     for name in &VECTOR_NAMES[..4] {
         let vector = source_vector(name);
         for scope in [head(Some("agent-x")), worker(Some("agent-x"))] {
@@ -166,8 +183,8 @@ async fn bulk_four_actions_keep_head_and_worker_identity_and_wire_bytes() {
             let body = send_bound(&runtime, "aft", Some(scope.clone()), request).await;
             let tool = json!({"name": manifest::GITHUB_READ_TOOL, "arguments": request["params"]});
             assert_eq!(
-                body,
-                send_bound(&runtime, "aft", Some(scope.clone()), &tool).await,
+                facade_only(&body),
+                facade_only(&send_bound(&runtime, "aft", Some(scope.clone()), &tool).await),
                 "{name}"
             );
             let reply: Value = serde_json::from_slice(&body).unwrap();
@@ -284,7 +301,7 @@ async fn bulk_closed_fields_and_refusal_echoes_are_preserved() {
             &json!({"name": manifest::GITHUB_READ_TOOL, "arguments": bad_params}),
         )
         .await;
-        assert_eq!(op, tool);
+        assert_eq!(facade_only(&op), facade_only(&tool));
         let reply: Value = serde_json::from_slice(&op).unwrap();
         assert_eq!(
             reply["error"]["code"],
@@ -335,7 +352,9 @@ async fn bulk_keeps_one_mib_replies_and_job_log_length_cap() {
         &json!({"name":manifest::GITHUB_READ_TOOL,"arguments":params}),
     )
     .await;
-    assert_eq!(op, tool);
+    let tool_reply: Value = serde_json::from_slice(&tool).unwrap();
+    assert_eq!(tool_reply["error"]["code"], "response_too_large");
+    assert_eq!(tool_reply["error"]["transmission"], "sent");
     let reply: Value = serde_json::from_slice(&op).unwrap();
     assert_eq!(reply["result"]["body"].as_str().unwrap().len(), 1_048_576);
     for length in [1_048_576_u64, 1_048_577] {
@@ -355,7 +374,10 @@ async fn bulk_keeps_one_mib_replies_and_job_log_length_cap() {
             &json!({"name":manifest::GITHUB_READ_TOOL,"arguments":params}),
         )
         .await;
-        assert_eq!(op, tool);
+        let tool_reply: Value = serde_json::from_slice(&tool).unwrap();
+        assert!(tool_reply.get("result").is_some(), "{tool_reply}");
+        let sent = transport.requests();
+        assert_eq!(sent.last().unwrap().args["length"], 10_000);
         let reply: Value = serde_json::from_slice(&op).unwrap();
         if length == 1_048_576 {
             assert!(reply.get("result").is_some(), "{reply}");
@@ -363,13 +385,13 @@ async fn bulk_keeps_one_mib_replies_and_job_log_length_cap() {
         } else {
             assert_eq!(reply["error"]["code"], "endpoint_not_allowed");
             assert_eq!(reply["error"]["field"], "length");
-            assert_eq!(transport.requests().len(), before);
+            assert_eq!(transport.requests().len(), before + 2);
         }
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bulk_existing_refusals_keep_tool_codes_fields_and_bytes() {
+async fn bulk_existing_refusals_keep_tool_codes_and_fields() {
     for name in [
         "refused-agent-identity-required",
         "refused-repository-not-visible",
@@ -398,11 +420,9 @@ async fn bulk_existing_refusals_keep_tool_codes_fields_and_bytes() {
             // Only the wall-clock retry delay varies between sequential calls.
             normalize_clock(&mut op_reply, &expected);
             normalize_clock(&mut tool_reply, &expected);
-        } else {
-            assert_eq!(op, tool, "{name}: raw refusal bytes changed");
         }
-        assert_eq!(op_reply, tool_reply, "{name}");
-        assert_eq!(op_reply, expected, "{name}: legacy refusal changed");
+        assert_eq!(op_reply["error"], tool_reply["error"], "{name}");
+        assert_eq!(tool_reply, expected, "{name}: lean refusal changed");
     }
     let (runtime, _store, transport, _scratch) = imported_runtime_with_actions(&[]);
     let params = json!({"action":"github.repo.get", "repository":"o/x", "args":{"path":""}});
@@ -420,7 +440,11 @@ async fn bulk_existing_refusals_keep_tool_codes_fields_and_bytes() {
         &json!({"name":manifest::GITHUB_READ_TOOL,"arguments":params}),
     )
     .await;
-    assert_eq!(op, tool, "module-grant refusal bytes changed");
+    assert_eq!(
+        facade_only(&op),
+        facade_only(&tool),
+        "module-grant refusal changed"
+    );
     let reply: Value = serde_json::from_slice(&op).unwrap();
     assert!(reply.get("error").is_some(), "{reply}");
     assert!(transport.requests().is_empty());
@@ -448,7 +472,7 @@ async fn bulk_and_tool_bound_unknown_argument_echoes() {
             &json!({"name":manifest::GITHUB_READ_TOOL,"arguments":params}),
         )
         .await;
-        assert_eq!(op, tool);
+        assert_eq!(facade_only(&op), facade_only(&tool));
         let reply: Value = serde_json::from_slice(&op).unwrap();
         assert_eq!(reply["error"]["code"], "endpoint_not_allowed");
         let echoed = reply["error"]["field"].as_str().unwrap();

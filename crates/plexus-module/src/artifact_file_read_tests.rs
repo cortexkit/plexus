@@ -57,14 +57,16 @@ async fn artifact_flow_visibility_uses_the_agents_bot_bindings() {
     assert!(requests
         .iter()
         .all(|request| request.connection_id == "conn-github-actions"));
-    assert_eq!(requests[1].args["max_bytes"], 65536);
+    assert_eq!(requests[1].args["max_bytes"], 60_000);
+    assert_eq!(reply["result"]["max_bytes"], 60_000);
+    assert_eq!(reply["result"]["length"], 17);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn artifact_arguments_are_bounded_before_dispatch() {
     let (runtime, _, transport, _scratch) = runtime();
     for invalid in [
-        json!({"run_id":42,"artifact":"shard-1","path":"log","max_bytes":262145}),
+        json!({"run_id":42,"artifact":"shard-1","path":"log","max_bytes":-1}),
         json!({"run_id":0,"artifact":"shard-1","path":"log"}),
         json!({"run_id":42,"artifact":"shard-1","path":"../bad"}),
         json!({"run_id":42,"artifact":"shard-1","path":"log","owner":"other"}),

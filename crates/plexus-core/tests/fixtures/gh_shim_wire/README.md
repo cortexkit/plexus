@@ -315,11 +315,13 @@ uses the same scoped route and daemon stamp as the tool; the acting agent is
 never accepted from the request body. The request is
 `{"method":"github.read.bulk","params":{"action":...,"repository":...,"args":...}}`.
 Only `github.repo.get`, `github.search.code`, `github.search.issues` and the
-byte-range form of `github.actions.job_log` are admitted. The tool's limits
-and ordinary legacy reply body (including `result`/`error`, `content`, `isError`
-and `structuredContent` when present) are unchanged. Both paths shorten unknown
-argument names longer than 256 bytes with the existing refusal-echo helper;
-that oversized-field refusal is the only changed tool reply. The legacy reply shape is
+byte-range form of `github.actions.job_log` are admitted. The operation keeps
+its original limits and wrapped legacy reply body (including `result`/`error`,
+`content`, `isError` and `structuredContent` when present). The tool intentionally
+differs: it sends only the facade envelope and bounds it to 65,536 canonical
+JSON bytes. Its bot ranges are clamped to 10,000 raw bytes; the operation keeps
+1,048,576. Both paths shorten unknown argument names longer than 256 bytes
+with the existing refusal-echo helper. The operation's legacy reply shape is
 retained for AFT's decoder, not an invitation to expose bulk data as a tool.
 
 `read-bulk-requests-contract/<name>.json` contains `name`, the daemon `scope`,
@@ -332,15 +334,17 @@ These vectors come from the existing bot-read harness in
 `crates/plexus-module/src/bot_read_vector_tests.rs`, not the HTTP fake used by
 `replies-contract/`. Its `github_read_bulk_tests.rs` child replays them through
 the real scoped frame handler, using the same mock GitHub projections as the
-existing `github-read-bot/` vectors. It compares op and tool wire bodies and
-the original tool replies byte for byte, verifies the governed requests and
-read-budget charges, and checks the rendered files byte for byte. Only the
+existing `github-read-bot/` vectors. It compares the operation's pinned wire
+body byte for byte, and compares its facade payload to the lean tool envelope
+for small replies. It checks the exact catalog actions, connection IDs and
+arguments sent to GitHub, verifies read-budget charges, and checks the rendered
+files byte for byte. Only the
 separate budget-refusal test normalizes the clock-dependent retry delay.
 
 Regenerate intentionally, then review the request and reply diff:
 
 ```sh
-PLEXUS_REGENERATE_GITHUB_READ_BULK_VECTORS=1 cargo test --locked -p plexus-module github_read_frame_tests::bot_read_vector_tests::bulk_tests::bulk_vectors_replay_byte_for_byte_and_match_the_tool -- --exact
+PLEXUS_REGENERATE_GITHUB_READ_BULK_VECTORS=1 cargo test --locked -p plexus-module github_read_frame_tests::bot_read_vector_tests::bulk_tests::bulk_vectors_replay_byte_for_byte_and_match_tool_payloads -- --exact
 ```
 
 The same test without the environment variable checks the pinned files.

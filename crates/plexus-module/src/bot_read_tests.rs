@@ -22,7 +22,7 @@ const BOT_ACTIONS: &[&str] = &[
     "github.actions.job_log",
 ];
 
-fn bot_runtime() -> (
+pub(super) fn bot_runtime() -> (
     Arc<ModuleState>,
     Arc<PlexusStore>,
     Arc<MockTransport>,
@@ -129,7 +129,7 @@ fn envelope(body: Value) -> MockResponse {
 fn not_sent(reply: &Value, code: &str) {
     assert_eq!(reply["error"]["code"], code, "{reply}");
     assert_eq!(reply["error"]["transmission"], "not_sent", "{reply}");
-    assert_eq!(reply["isError"], true, "{reply}");
+    assert!(reply.get("isError").is_none(), "{reply}");
     assert!(reply.get("structuredContent").is_none(), "{reply}");
 }
 
@@ -149,9 +149,7 @@ async fn repo_get_reads_through_the_head_agents_bot() {
     )
     .await;
     let expected = json!({"status": 200, "body": [{"number": 1}], "next_page": 2});
-    assert_eq!(reply["result"], expected, "{reply}");
-    assert_eq!(reply["structuredContent"], expected);
-    assert_eq!(reply["isError"], false);
+    assert_eq!(reply, json!({"result":expected}));
     let sent = transport.requests();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].connection_id, "github-handle-app-x");
@@ -517,7 +515,7 @@ async fn aft_job_log_reads_a_byte_range_with_the_agents_bot() {
     assert_eq!(sent[0].action, "github.actions.job.get");
     assert_eq!(
         sent[1].args,
-        json!({"owner":"o","repo":"x","job_id":42,"offset":0,"length":1_048_576})
+        json!({"owner":"o","repo":"x","job_id":42,"offset":0,"length":10_000})
     );
     // The log read is two HTTP requests: GitHub's redirect and the storage
     // download it points to. With the job check that is three units.
@@ -529,7 +527,6 @@ async fn aft_job_log_reads_a_byte_range_with_the_agents_bot() {
         3
     );
     for (args, field) in [
-        (json!({"job_id": 42, "length": 1_048_577}), "length"),
         (json!({"job_id": 42, "length": 0}), "length"),
         (json!({"job_id": 42, "offset": -1}), "offset"),
         (json!({"job_id": 0}), "job_id"),

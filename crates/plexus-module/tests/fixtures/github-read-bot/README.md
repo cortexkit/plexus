@@ -20,28 +20,30 @@ shim. Each vector is three files:
 
 `github_read_frame_tests::bot_read_vector_tests::every_bot_read_vector_replays_byte_for_byte`
 in `crates/plexus-module/src/bot_read_vector_tests.rs` replays every vector
-here through the real tool-call handler (`handle_tool_request`, which builds
-the reply with `with_call_tool_result_with_repo`) and compares the reply body
+here through the real tool-call handler (`handle_tool_request`) and compares the reply body
 byte for byte with `<name>.reply.json` after re-serializing that file
 compactly (keys sorted, which is how the handler serializes too). The test
 also fails if no vector covers one of the actions or refusal codes.
 
 One exception: `read_budget_exhausted` carries `retry_after_ms`, which depends
 on the clock at replay time. The replay checks it is between 1 and 3,600,000
-and then uses the vector's value for both `error.retry_after_ms` and the
-`content` text that repeats it (in whole seconds), before comparing bytes.
-Every other reply, `content` text included, is compared exactly.
+and then uses the vector's value for `error.retry_after_ms` before comparing
+bytes. Every other reply is compared exactly.
 
 Regenerate the reply files after an intended change with
 
-    PLEXUS_REGENERATE_BOT_READ_VECTORS=1 cargo test -p plexus-module --lib bot_read_vector_tests
+    PLEXUS_REGENERATE_BOT_READ_VECTORS=1 cargo test --locked -p plexus-module github_read_frame_tests::bot_read_vector_tests::every_bot_read_vector_replays_byte_for_byte -- --exact
 
 and review the diff: these replies are a contract AFT reads.
 
 ## Reply shapes
 
-Success is `{"result": R, "content": [{"type": "text", "text": <R pretty-printed
-under "result">}], "isError": false, "structuredContent": R}` where R is
+The tool sends a lean legacy envelope, not `tool-result/v1`: success is
+`{"result": R}`. It retains any other facade members, but adds no `content`,
+`structuredContent` or `isError` copies. Basal programs and AFT's fallback
+decoder read the top-level facade members. The non-tool `github.read.bulk`
+operation intentionally keeps its older wrapped bytes and larger limits.
+For tool successes, R is
 
 - `github.repo.get`: `{status, body, next_page}`; `body` is parsed JSON for
   `application/vnd.github+json` and a string for the raw, diff and patch media
@@ -66,12 +68,12 @@ under "result">}], "isError": false, "structuredContent": R}` where R is
   signed storage URL and the bot credential are redacted. So `body`'s byte
   length usually differs from `length`; check the range fields against the
   request and `total_bytes`, never against `body`. The
+  tool's requested `length` defaults to and is clamped to 10,000 raw bytes;
+  bulk retains its 1,048,576-byte limit. The
   `job-log-range-display-text` vector shows a range that begins with a colour
   code and ends inside a three-byte character.
 
-A refusal is `{"error": {"code", "message", "transmission", ...}, "content":
-[{"type": "text", "text": "<code>: <message>..."}], "isError": true}` with no
-`structuredContent`:
+A refusal is `{"error": {"code", "message", "transmission", ...}}`:
 
 | code | extra fields | transmission |
 | --- | --- | --- |

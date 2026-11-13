@@ -151,7 +151,9 @@ async fn job_log_flow_visibility_uses_the_agents_bot_bindings() {
     assert!(requests
         .iter()
         .all(|request| request.connection_id == CONNECTION));
-    assert_eq!(requests[1].args["max_bytes"], 65536);
+    assert_eq!(requests[1].args["max_bytes"], 60_000);
+    assert_eq!(allowed["result"]["max_bytes"], 60_000);
+    assert_eq!(allowed["result"]["length"], 17);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -203,7 +205,7 @@ async fn running_job_has_a_named_refusal_and_no_log_request() {
 async fn job_log_arguments_are_bounded_before_dispatch() {
     let (runtime, _, transport, _scratch) = actions_runtime();
     for args in [
-        json!({"job_id":42,"max_bytes":262145}),
+        json!({"job_id":42,"max_bytes":-1}),
         json!({"job_id":42,"max_bytes":0}),
         json!({"job_id":-1}),
         json!({"job_id":42,"owner":"other"}),

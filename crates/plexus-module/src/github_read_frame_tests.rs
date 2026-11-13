@@ -12,6 +12,8 @@ mod issue_flow_tests;
 mod job_log_tests;
 #[path = "review_threads_read_tests.rs"]
 mod review_threads_tests;
+#[path = "github_read_size_tests.rs"]
+mod size_tests;
 use super::*;
 use plexus_core::github::credential::HandleCredentialProvider;
 use plexus_core::storage::github_store::{GithubGovernanceSeams, GithubHandle, GithubImportRow};
@@ -180,17 +182,7 @@ async fn github_read_returns_the_governed_envelope_for_all_three_actions() {
             None,
         )
         .await;
-        assert_eq!(reply["result"], expected, "{action}: {reply}");
-        assert_eq!(reply["isError"], false);
-        assert_eq!(reply["content"][0]["type"], "text");
-        let text: Value =
-            serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(text, json!({"result":expected}));
-        if expected.is_object() {
-            assert_eq!(reply["structuredContent"], expected);
-        } else {
-            assert!(reply.get("structuredContent").is_none());
-        }
+        assert_eq!(reply, json!({"result":expected}), "{action}: {reply}");
         let requests = transport.requests();
         assert_eq!(
             requests.len(),
@@ -265,7 +257,10 @@ async fn github_read_refuses_write_and_unknown_actions_by_name_before_other_inpu
             "unsupported reads must be refused by action name: {reply}"
         );
         assert!(reply["error"]["message"].as_str().unwrap().contains(action));
-        assert_eq!(reply["isError"], true, "a refusal must set isError");
+        assert!(
+            reply.get("isError").is_none(),
+            "a tool refusal is a lean legacy envelope"
+        );
         assert!(!reply.to_string().contains("ckh_secret"));
     }
     assert!(transport.requests().is_empty());
@@ -535,7 +530,7 @@ async fn github_read_requires_flow_scoped_basal_and_dispatches_with_its_grant() 
     )
     .await;
     assert!(allowed.get("result").is_some(), "{allowed}");
-    assert_eq!(allowed["isError"], false);
+    assert!(allowed.get("isError").is_none());
     assert_eq!(transport.requests().len(), 1);
     let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
     let attributed: i64 = db.query_row(

@@ -1,0 +1,11 @@
+{
+  "result": {
+    "job_id": 42,
+    "length": 17,
+    "max_bytes": 60000,
+    "repository": "o/x",
+    "text": "test NAME FAILED\n",
+    "total_bytes": 17,
+    "truncated": false
+  }
+}
