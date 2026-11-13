@@ -1,5 +1,6 @@
 //! Federated admission is separate from first-party module authority.
 
+use plexus_core::storage::{CatalogAction, PlexusStore};
 use serde_json::{json, Map, Value};
 use subc_protocol::{
     scope::{FederatedPeerClass, ParentState, RemoteClaim, ScopeKind, ScopeStamp},
@@ -128,6 +129,32 @@ pub(crate) fn caller_not_allowed() -> Value {
         "message": "this frame is not served to federated callers",
         "transmission": "not_sent",
     }})
+}
+
+/// Build only public discovery fields, using the same severity rule as invoke.
+pub(crate) fn project_actions(
+    store: &PlexusStore,
+    connection_id: &str,
+    actions: Vec<CatalogAction>,
+) -> Result<Vec<Value>, cortexkit_store::StoreError> {
+    let connection = store.connection("direct", connection_id)?;
+    let app_key = connection
+        .as_ref()
+        .map_or("", |connection| connection.app_key.as_str());
+    actions
+        .into_iter()
+        .map(|action| {
+            let severity = plexus_core::governance::effective_severity(&action, app_key, store)?;
+            Ok(json!({
+                "name": action.name,
+                "title": action.title,
+                "risk": action.risk,
+                "severity": severity,
+                "schema": action.schema,
+                "status": action.status,
+            }))
+        })
+        .collect()
 }
 
 /// Fail closed before any local namespace or grant lookup until the dedicated

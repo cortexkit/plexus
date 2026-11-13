@@ -1515,10 +1515,9 @@ async fn handle_frame(
                     .and_then(|object| object.get("name"))
                     .and_then(Value::as_str)
                     .expect("served federated frames have a tool name");
-                if !tool_provider::is_metadata_op(name) {
-                    // Do not pass a federated call to a local handler while its
-                    // restricted metadata reply or federated consent path is
-                    // still absent.
+                if matches!(name, "invoke" | "web_search" | "code_search") {
+                    // Consent-gated tools must not reach local authorization
+                    // while their federated consent path is still absent.
                     let refusal = match tool_provider::mode_refusal(name, &binding.mode) {
                         Some(error) => json!({"error": error}),
                         None => federated::pending_handler(),
@@ -3787,11 +3786,40 @@ struct FacadeArguments<'a> {
     op: Option<&'a str>,
 }
 
+impl FacadeArguments<'_> {
+    fn federated_metadata(&self) -> bool {
+        // route.bind rejects this principal unless the daemon stamp identifies
+        // a paired computer. Request arguments cannot select this namespace.
+        self.principal_key == "reserved:callosum"
+    }
+
+    fn metadata_owner(&self) -> &str {
+        if self.federated_metadata() {
+            "direct"
+        } else {
+            self.principal_key
+        }
+    }
+}
+
 fn facade_connections_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
     let state = call.state;
-    let principal_key = call.principal_key;
+    let principal_key = call.metadata_owner();
     Ok({
         match state.store().list_connections(principal_key) {
+            Ok(connections) if call.federated_metadata() => {
+                let connections: Vec<_> = connections
+                    .into_iter()
+                    .map(|connection| {
+                        json!({
+                            "connection_id": connection.connection_id,
+                            "app_key": connection.app_key,
+                            "status": connection.status,
+                        })
+                    })
+                    .collect();
+                json!({"result": {"connections": connections}})
+            }
             Ok(connections) => json!({"result": {"connections": connections}}),
             Err(error) => crate::wire::store_failure(
                 "connections listed",
@@ -4069,12 +4097,16 @@ fn facade_connections_check(call: &FacadeArguments<'_>) -> Result<Value, ModuleE
 
 fn facade_catalog_apps(call: &FacadeArguments<'_>) -> Result<Value, ModuleError> {
     let state = call.state;
-    let principal_key = call.principal_key;
+    let principal_key = call.metadata_owner();
     Ok({
         match state.store().list_manifest_summaries(principal_key) {
             Ok(apps) => {
                 let mut values = Vec::with_capacity(apps.len());
                 for app in apps {
+                    if call.federated_metadata() {
+                        values.push(json!({"key": app.key, "name": app.name, "tier": app.tier}));
+                        continue;
+                    }
                     let takes_instance_url =
                         match state.store().manifest_takes_instance_url(&app.key) {
                             Ok(value) => value,
@@ -4105,7 +4137,7 @@ fn facade_catalog_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError>
     let op = call.op;
     let state = call.state;
     let arguments = call.arguments;
-    let principal_key = call.principal_key;
+    let principal_key = call.metadata_owner();
     Ok({
         let Some(connection_id) = arguments.get("connection").and_then(Value::as_str) else {
             return Ok(
@@ -4135,6 +4167,18 @@ fn facade_catalog_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError>
                 } else {
                     actions
                 };
+                if call.federated_metadata() {
+                    return Ok(
+                        match federated::project_actions(state.store(), connection_id, actions) {
+                            Ok(actions) => json!({"result": {"actions": actions}}),
+                            Err(error) => crate::wire::store_failure(
+                                "catalog read",
+                                "catalog could not be read",
+                                &error,
+                            ),
+                        },
+                    );
+                }
                 json!({"result": {"actions": actions}})
             }
             Err(error) => {

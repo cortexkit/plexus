@@ -146,6 +146,310 @@ fn reply(frame: Frame) -> Value {
     serde_json::from_slice(&frame.body).unwrap()
 }
 
+fn metadata_state() -> Arc<ModuleState> {
+    let state = state(true);
+    let store = state.store();
+    let mut manifest: Value = serde_json::from_str(
+        &subc_jsonc::jsonc_to_json(include_str!("../../../catalog/searxng_rest.jsonc")).unwrap(),
+    )
+    .unwrap();
+    manifest["tier"] = json!("S3");
+    store
+        .upsert_manifest(
+            plexus_core::storage::CATALOG_PRINCIPAL,
+            &plexus_core::ingest_value(manifest).unwrap(),
+        )
+        .unwrap();
+    for (principal, id, status) in [
+        ("direct", "shared", "active"),
+        ("reserved:callosum", "shared", "revoked"),
+        ("reserved:callosum", "callosum-only", "active"),
+        ("reserved:prefrontal-core", "shared", "pending"),
+    ] {
+        store
+            .insert_connection(
+                principal,
+                id,
+                "searxng_rest",
+                status,
+                &json!({"private_filter":"private-value"}),
+            )
+            .unwrap();
+        for (name, risk) in [
+            ("meta.read", "read"),
+            ("meta.write", "write"),
+            ("meta.destructive", "destructive"),
+        ] {
+            store
+                .upsert_catalog_action(&plexus_core::storage::CatalogActionInput {
+                    connection_id: id.into(),
+                    principal: principal.into(),
+                    name: name.into(),
+                    title: Some(format!("{principal} {name}")),
+                    schema: json!({"type":"object", "properties":{"query":{"type":"string"}}}),
+                    schema_hash: "private-schema-hash".into(),
+                    risk: risk.into(),
+                    // Deliberately stale: discovery must compute severity, not copy it.
+                    severity: "S1".into(),
+                    ask_first: true,
+                    status: "active".into(),
+                    quarantine_reason: Some("private-quarantine-reason".into()),
+                    reconciliation: Some(json!({"private":"reconciliation"})),
+                })
+                .unwrap();
+        }
+    }
+    state
+}
+
+async fn metadata_routes(state: &Arc<ModuleState>, negotiated: bool) -> Arc<RouteBindings> {
+    let routes = Arc::new(RouteBindings::new());
+    let mut body = bind_body(reserved("callosum"), Some(stamp()), CallMode::Classic);
+    if negotiated {
+        body["consumer_capabilities"] = json!(["tool-result/v1"]);
+    }
+    assert_eq!(
+        bind(state, &routes, body).await.header.ty,
+        FrameType::Response
+    );
+    routes
+}
+
+fn assert_item_keys(reply: &Value, member: &str, expected: &[&str], count: usize) {
+    let items = reply["result"][member].as_array().unwrap();
+    assert_eq!(items.len(), count, "{reply}");
+    let expected: std::collections::BTreeSet<_> = expected.iter().copied().collect();
+    for item in items {
+        let keys: std::collections::BTreeSet<_> = item
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, expected, "{item}");
+    }
+    assert_eq!(reply["isError"], false, "{reply}");
+    assert_eq!(reply["structuredContent"], reply["result"], "{reply}");
+    let mirrored: Value =
+        serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(mirrored, json!({"result":reply["result"]}), "{reply}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_connections_list_projects_exact_keys_from_direct() {
+    let state = metadata_state();
+    for negotiated in [false, true] {
+        let routes = metadata_routes(&state, negotiated).await;
+        let actual = reply(
+            call(
+                &state,
+                &routes,
+                json!({"name":"connections","arguments":{"op":"list"}}),
+            )
+            .await,
+        );
+        assert_item_keys(
+            &actual,
+            "connections",
+            &["connection_id", "app_key", "status"],
+            1,
+        );
+        assert_eq!(
+            actual["result"]["connections"],
+            json!([{
+                "connection_id":"shared", "app_key":"searxng_rest", "status":"active"
+            }])
+        );
+    }
+    assert!(state
+        .store()
+        .list_action_requests("direct")
+        .unwrap()
+        .is_empty());
+    assert!(state.store().list_audit("direct").unwrap().is_empty());
+    assert!(state
+        .store()
+        .list_audit("reserved:callosum")
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_catalog_apps_projects_exact_keys() {
+    let state = metadata_state();
+    for negotiated in [false, true] {
+        let routes = metadata_routes(&state, negotiated).await;
+        let actual = reply(
+            call(
+                &state,
+                &routes,
+                json!({"name":"catalog","arguments":{"op":"apps"}}),
+            )
+            .await,
+        );
+        assert_item_keys(&actual, "apps", &["key", "name", "tier"], 1);
+        assert_eq!(actual["result"]["apps"][0]["key"], "searxng_rest");
+        assert_eq!(actual["result"]["apps"][0]["tier"], "S3");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_catalog_list_projects_exact_keys_and_authorization_severity() {
+    let state = metadata_state();
+    for negotiated in [false, true] {
+        let routes = metadata_routes(&state, negotiated).await;
+        let actual = reply(
+            call(
+                &state,
+                &routes,
+                json!({"name":"catalog","arguments":{"op":"list","connection":"shared"}}),
+            )
+            .await,
+        );
+        assert_item_keys(
+            &actual,
+            "actions",
+            &["name", "title", "risk", "severity", "schema", "status"],
+            3,
+        );
+        for (name, severity) in [
+            ("meta.read", "S2"),
+            ("meta.write", "S3"),
+            ("meta.destructive", "S3"),
+        ] {
+            let action = actual["result"]["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["name"] == name)
+                .unwrap();
+            assert_eq!(action["severity"], severity, "{action}");
+            assert_eq!(action["title"], format!("direct {name}"));
+            assert_eq!(action["status"], "active");
+            assert_eq!(
+                action["schema"],
+                json!({"type":"object", "properties":{"query":{"type":"string"}}})
+            );
+        }
+        let hidden = reply(
+            call(
+                &state,
+                &routes,
+                json!({"name":"catalog","arguments":{"op":"list","connection":"callosum-only"}}),
+            )
+            .await,
+        );
+        assert_item_keys(
+            &hidden,
+            "actions",
+            &["name", "title", "risk", "severity", "schema", "status"],
+            0,
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_catalog_inspect_projects_exact_keys_and_authorization_severity() {
+    let state = metadata_state();
+    for negotiated in [false, true] {
+        let routes = metadata_routes(&state, negotiated).await;
+        let actual = reply(call(&state, &routes, json!({"name":"catalog","arguments":{"op":"inspect","connection":"shared","action":"meta.write"}})).await);
+        assert_item_keys(
+            &actual,
+            "actions",
+            &["name", "title", "risk", "severity", "schema", "status"],
+            1,
+        );
+        assert_eq!(actual["result"]["actions"][0]["title"], "direct meta.write");
+        assert_eq!(actual["result"]["actions"][0]["severity"], "S3");
+        let hidden = reply(call(&state, &routes, json!({"name":"catalog","arguments":{"op":"inspect","connection":"callosum-only","action":"meta.write"}})).await);
+        assert_item_keys(
+            &hidden,
+            "actions",
+            &["name", "title", "risk", "severity", "schema", "status"],
+            0,
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_local_replies_keep_complete_legacy_bytes_with_admission_on_or_off() {
+    for enabled in [false, true] {
+        let mut state = metadata_state();
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .runtime
+            .set_federated_callers_enabled_for_test(enabled);
+        for principal in [Principal::Direct, reserved("prefrontal-core")] {
+            let owner = principal::principal_key(&principal);
+            let routes = Arc::new(RouteBindings::new());
+            assert_eq!(
+                bind(
+                    &state,
+                    &routes,
+                    bind_body(principal, None, CallMode::Classic)
+                )
+                .await
+                .header
+                .ty,
+                FrameType::Response
+            );
+            let connections = state.store().list_connections(&owner).unwrap();
+            let apps: Vec<_> = state
+                .store()
+                .list_manifest_summaries(&owner)
+                .unwrap()
+                .into_iter()
+                .map(|app| {
+                    let takes_instance_url =
+                        state.store().manifest_takes_instance_url(&app.key).unwrap();
+                    let mut value = json!(app);
+                    value["takes_instance_url"] = json!(takes_instance_url);
+                    value
+                })
+                .collect();
+            let actions = state
+                .store()
+                .list_catalog_actions(&owner, "shared")
+                .unwrap();
+            assert_eq!(actions[0].severity, "S1");
+            for (name, arguments, result) in [
+                (
+                    "connections",
+                    json!({"op":"list"}),
+                    json!({"connections":connections}),
+                ),
+                ("catalog", json!({"op":"apps"}), json!({"apps":apps})),
+                (
+                    "catalog",
+                    json!({"op":"list","connection":"shared"}),
+                    json!({"actions":actions}),
+                ),
+                (
+                    "catalog",
+                    json!({"op":"inspect","connection":"shared","action":"meta.write"}),
+                    json!({"actions":actions.iter().filter(|action| action.name == "meta.write").collect::<Vec<_>>()}),
+                ),
+            ] {
+                let expected = with_call_tool_result_for_route(
+                    Some(name),
+                    json!({"result":result}),
+                    None,
+                    false,
+                    false,
+                );
+                let actual =
+                    call(&state, &routes, json!({"name":name,"arguments":arguments})).await;
+                assert_eq!(
+                    actual.body,
+                    serde_json::to_vec(&expected).unwrap(),
+                    "{owner} {name}"
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn fully_stamped_callosum_is_refused_with_hook_off_even_after_declaration() {
     assert_bind_denied(
@@ -292,7 +596,7 @@ fn served_frames() -> Vec<Value> {
         json!({"name":"connections", "arguments":{"op":"list"}}),
         json!({"name":"catalog", "arguments":{"op":"apps"}}),
         json!({"name":"catalog", "arguments":{"op":"list", "connection":"github-handle-app-x"}}),
-        json!({"name":"catalog", "arguments":{"op":"inspect", "connection":"github-handle-app-x"}}),
+        json!({"name":"catalog", "arguments":{"op":"inspect", "connection":"github-handle-app-x", "action":"github.issue.get"}}),
     ]
 }
 
@@ -444,7 +748,7 @@ async fn mixed_method_of_any_type_with_allowed_name_reaches_no_handler() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn served_tools_fail_closed_before_any_namespace_or_grant_read_or_dispatch() {
+async fn consent_tools_fail_closed_before_any_namespace_or_grant_read_or_dispatch() {
     let (mut state, _store, transport, scratch) =
         super::github_read_frame_tests::imported_runtime();
     Arc::get_mut(&mut state)
@@ -457,7 +761,12 @@ async fn served_tools_fail_closed_before_any_namespace_or_grant_read_or_dispatch
     db.execute_batch("DROP TABLE grants; DROP TABLE connections;")
         .unwrap();
     let routes = bind_accepted(&state, stamp(), CallMode::Classic).await;
-    for body in served_frames() {
+    for body in served_frames().into_iter().filter(|body| {
+        matches!(
+            body["name"].as_str(),
+            Some("invoke" | "web_search" | "code_search")
+        )
+    }) {
         let actual = reply(call(&state, &routes, body.clone()).await);
         assert_eq!(
             actual["error"]["code"], "consent_unavailable",
@@ -487,12 +796,19 @@ async fn federated_flow_skips_local_carrier_and_scope_checks_but_keeps_modes() {
         for body in served_frames() {
             let actual = reply(call(&state, &routes, body.clone()).await);
             let name = body["name"].as_str().unwrap();
-            let expected = if tool_provider::mode_refusal(name, &CallMode::Flow).is_some() {
-                "call_mode_unsupported"
+            if tool_provider::mode_refusal(name, &CallMode::Flow).is_some() {
+                assert_eq!(
+                    actual["error"]["code"], "call_mode_unsupported",
+                    "{body}: {actual}"
+                );
+            } else if matches!(name, "connections" | "catalog") {
+                assert!(actual.get("result").is_some(), "{body}: {actual}");
             } else {
-                "consent_unavailable"
-            };
-            assert_eq!(actual["error"]["code"], expected, "{body}: {actual}");
+                assert_eq!(
+                    actual["error"]["code"], "consent_unavailable",
+                    "{body}: {actual}"
+                );
+            }
         }
     }
     let routes = bind_accepted(&state, stamp(), CallMode::Codemode).await;

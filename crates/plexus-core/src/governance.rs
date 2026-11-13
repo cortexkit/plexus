@@ -5011,7 +5011,8 @@ fn catalog_denial(
     }
 }
 
-fn effective_severity(
+/// Compute the severity used for authorization and federated catalog discovery.
+pub fn effective_severity(
     action: &CatalogAction,
     app_key: &str,
     store: &PlexusStore,
