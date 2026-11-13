@@ -1455,6 +1455,7 @@ async fn open_live_route(stream: &mut TcpStream) -> (u16, u32) {
         stream,
         15,
         ClientControlRequest::RouteOpen {
+            busy_refusals: None,
             scope: None,
             role_versions: None,
             target: RouteTarget::ToolProvider {
@@ -1478,6 +1479,7 @@ async fn open_live_route(stream: &mut TcpStream) -> (u16, u32) {
         ClientControlResponse::RouteOpen {
             route_channel,
             route_epoch,
+            ..
         } => (route_channel, route_epoch),
         response => panic!("expected route open response, got {response:?}"),
     }
@@ -1491,6 +1493,7 @@ async fn open_management_route(stream: &mut TcpStream) -> (u16, u32) {
         stream,
         16,
         ClientControlRequest::RouteOpen {
+            busy_refusals: None,
             scope: None,
             role_versions: None,
             target: RouteTarget::ManagementSurface {
@@ -1515,6 +1518,7 @@ async fn open_management_route(stream: &mut TcpStream) -> (u16, u32) {
         ClientControlResponse::RouteOpen {
             route_channel,
             route_epoch,
+            ..
         } => (route_channel, route_epoch),
         response => panic!("expected route open response, got {response:?}"),
     };

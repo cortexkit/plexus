@@ -2071,6 +2071,68 @@ fn diagnostic_shadow_writes_fleet_attribution_to_real_stderr() {
     );
 }
 
+#[tokio::test]
+async fn protocol_move_refuses_federated_stamp_before_binding_a_first_party_principal() {
+    let (_scratch, _store, state) = two_connection_fixture("federated-bind-refusal");
+    let routes = Arc::new(RouteBindings::new());
+    let (writer, mut responses) = mpsc::channel(1);
+    let mut frame = bind(Some(Principal::Direct));
+    let mut request: ModuleControlRequest = serde_json::from_slice(&frame.body).unwrap();
+    let ModuleControlRequest::RouteBind { scope, .. } = &mut request else {
+        panic!("route bind");
+    };
+    *scope = Some(subc_protocol::scope::ScopeStamp::new(
+        Principal::Reserved {
+            module_id: "callosum".into(),
+        },
+        "fed-base:peer:pairing",
+        1,
+        subc_protocol::scope::ScopeKind::Federated,
+    ));
+    frame.body = serde_json::to_vec(&request).unwrap();
+    handle_control_request(frame, &writer, &state, &routes)
+        .await
+        .unwrap();
+    let response = recv_within(
+        responses.recv(),
+        std::time::Duration::from_secs(5),
+        "federated bind refusal",
+    )
+    .await;
+    assert_eq!(response.header.ty, FrameType::Error);
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["code"], "principal_denied");
+    assert!(routes.binding(4, 2).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn protocol_move_keeps_unstamped_callosum_refusal_unchanged() {
+    let (_scratch, _store, state) = two_connection_fixture("unstamped-callosum-refusal");
+    let routes = Arc::new(RouteBindings::new());
+    let (writer, mut responses) = mpsc::channel(1);
+    handle_control_request(
+        bind(Some(Principal::Reserved {
+            module_id: "callosum".into(),
+        })),
+        &writer,
+        &state,
+        &routes,
+    )
+    .await
+    .unwrap();
+    let response = recv_within(
+        responses.recv(),
+        std::time::Duration::from_secs(5),
+        "unstamped callosum refusal",
+    )
+    .await;
+    assert_eq!(response.header.ty, FrameType::Error);
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["code"], "principal_denied");
+    assert_eq!(body["message"], "plexus connector tools are first-party only; principal 'reserved:callosum' is not eligible");
+    assert!(routes.binding(4, 2).unwrap().is_none());
+}
+
 fn bind(principal: Option<Principal>) -> Frame {
     let request = ModuleControlRequest::RouteBind {
         scope: None,

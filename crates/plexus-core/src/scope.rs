@@ -107,6 +107,7 @@ impl CallScope {
                     ScopeKind::Head => "head",
                     ScopeKind::Worker => "worker",
                     ScopeKind::Ephemeral => "ephemeral",
+                    _ => "unknown",
                 }
                 .to_string(),
             ),
@@ -122,7 +123,7 @@ impl CallScope {
                 match state {
                     ParentState::Linked => "linked",
                     ParentState::Pending => "pending",
-                    ParentState::Ended => "ended",
+                    _ => "ended",
                 }
                 .to_string()
             }),
@@ -428,6 +429,22 @@ mod tests {
         assert_eq!(scope(Some("a"), false, true).acting_agent(), None);
         assert_eq!(scope(Some("a"), true, false).acting_agent(), None);
         assert_eq!(scope(None, true, true).acting_agent(), None);
+    }
+
+    #[test]
+    fn protocol_move_federated_kind_is_not_a_local_scope_kind() {
+        let stamp = ScopeStamp::new(
+            Principal::Reserved {
+                module_id: "callosum".into(),
+            },
+            "fed-base:peer:pairing",
+            1,
+            ScopeKind::Federated,
+        );
+        assert_eq!(
+            CallScope::from_stamp(&stamp).kind.as_deref(),
+            Some("unknown")
+        );
     }
 
     #[test]
