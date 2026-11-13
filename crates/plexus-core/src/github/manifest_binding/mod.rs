@@ -33,6 +33,9 @@ pub enum CardRequest<'a> {
         statement_b64url: &'a str,
         timeout_ms: u64,
     },
+    Withdraw {
+        card_id: &'a str,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +44,7 @@ pub enum CardState {
     Approved,
     Declined,
     Expired,
+    Withdrawn,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +54,7 @@ pub enum CardReply {
     Filed(String),
     Conflict,
     State(CardState),
+    Withdrawn,
 }
 
 pub trait BindingCards {
@@ -323,7 +328,10 @@ impl ApprovalPass<'_> {
                 }
                 // Do not create a vault proposal unless its statement can be
                 // put in front of the owner. No generic card can substitute.
-                if record.state == "card_conflict" || !available || !self.admitted() {
+                if (record.state == "card_conflict" && record.card_id.is_none())
+                    || !available
+                    || !self.admitted()
+                {
                     continue;
                 }
                 let slug = handle
@@ -347,6 +355,9 @@ impl ApprovalPass<'_> {
                             break;
                         }
                         if record.proposal_id.as_deref() != Some(&proposal.proposal_id) {
+                            if record.card_id.is_some() && !self.withdraw_card(&mut record)? {
+                                continue;
+                            }
                             record.proposal_id = Some(proposal.proposal_id.clone());
                             record.manifest_version = Some(proposal.manifest_version);
                             record.manifest_sha256 = Some(proposal.manifest_sha256.clone());
@@ -408,6 +419,45 @@ impl ApprovalPass<'_> {
         self.follow_ready(now)
     }
 
+    fn reset_withdrawn_card(&self, record: &mut BindingRecord) -> Result<(), String> {
+        record.proposal_id = None;
+        record.manifest_version = None;
+        record.manifest_sha256 = None;
+        record.statement_b64url = None;
+        record.expires_at_ms = None;
+        record.card_id = None;
+        record.state = "observed".into();
+        self.save(record, Some("github_manifest_card_withdrawn"))
+    }
+
+    fn withdraw_card(&mut self, record: &mut BindingRecord) -> Result<bool, String> {
+        let Some(id) = record.card_id.as_deref() else {
+            return Ok(false);
+        };
+        if !self.admitted() {
+            return Ok(false);
+        }
+        match self
+            .cards
+            .manifest_binding_card(CardRequest::Withdraw { card_id: id })
+        {
+            Ok(CardReply::Withdrawn) => {
+                self.reset_withdrawn_card(record)?;
+                Ok(true)
+            }
+            reply => {
+                let code = reply
+                    .err()
+                    .unwrap_or_else(|| "invalid_withdraw_reply".into());
+                self.log_once(
+                    format!("withdraw:{id}"),
+                    &format!("card withdrawal failed: {code}"),
+                );
+                Ok(false)
+            }
+        }
+    }
+
     fn card_settlement(&self, record: &mut BindingRecord) -> Result<bool, String> {
         let Some(id) = record.card_id.as_deref() else {
             return Ok(false);
@@ -442,6 +492,12 @@ impl ApprovalPass<'_> {
                 self.save(record, Some("github_manifest_expired"))?;
                 Ok(true)
             }
+            Ok(CardReply::State(CardState::Withdrawn)) => {
+                // Cingulate may have withdrawn the card before Plexus saved
+                // the reset, for example if the reply was lost or Plexus restarted.
+                self.reset_withdrawn_card(record)?;
+                Ok(true)
+            }
             Ok(CardReply::State(_)) => Ok(false),
             _ => Ok(true),
         }
@@ -465,9 +521,10 @@ impl ApprovalPass<'_> {
             .github_manifest_bindings()
             .map_err(|_| "store_error")?
         {
-            if record.present
-                && matches!(record.state.as_str(), "pending" | "card_conflict")
-                && record.manifest_version == notice.version
+            if !record.present || !matches!(record.state.as_str(), "pending" | "card_conflict") {
+                continue;
+            }
+            if record.manifest_version == notice.version
                 && record.manifest_sha256 == notice.manifest_sha256
             {
                 if self.card_settlement(&mut record)? {
@@ -475,6 +532,16 @@ impl ApprovalPass<'_> {
                 }
                 record.state = "awaiting_active".into();
                 self.save(&mut record, None)?;
+            } else if record.card_id.is_some()
+                && record
+                    .manifest_version
+                    .zip(notice.version)
+                    .is_some_and(|(proposed, stored)| proposed <= stored)
+            {
+                if self.card_settlement(&mut record)? {
+                    continue;
+                }
+                self.withdraw_card(&mut record)?;
             }
         }
         self.follow_ready(now)
