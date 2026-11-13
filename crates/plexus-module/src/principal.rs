@@ -23,9 +23,7 @@ pub fn trust_for_principal(principal: &Option<Principal>) -> PrincipalTrust {
         Some(Principal::Reserved { module_id }) if is_first_party_module_id(module_id) => {
             PrincipalTrust::FirstParty
         }
-        Some(Principal::Reserved { .. }) | Some(Principal::Unverified) | None => {
-            PrincipalTrust::Untrusted
-        }
+        _ => PrincipalTrust::Untrusted,
     }
 }
 

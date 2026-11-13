@@ -1682,6 +1682,24 @@ async fn handle_control_request(
             consumer_capabilities,
             ..
         } => {
+            // New scope kinds must not inherit local authority before Plexus
+            // implements their admission and authorization rules.
+            if scope.as_ref().is_some_and(|stamp| {
+                !matches!(
+                    stamp.kind,
+                    subc_protocol::scope::ScopeKind::Head
+                        | subc_protocol::scope::ScopeKind::Worker
+                        | subc_protocol::scope::ScopeKind::Ephemeral
+                )
+            }) {
+                return send_principal_denied(
+                    writer,
+                    frame.header.ver,
+                    frame.header.corr,
+                    &principal,
+                )
+                .await;
+            }
             let mode = call_mode.unwrap_or_else(|| derive_call_mode(scope.as_ref()));
             if matches!(mode, CallMode::Unknown(_)) {
                 let refusal = tool_provider::mode_refusal("route.bind", &mode)
