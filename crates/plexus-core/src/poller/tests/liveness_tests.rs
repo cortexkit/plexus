@@ -23,7 +23,28 @@ fn probe(store: &PlexusStore, source: &str) -> String {
 
 #[test]
 fn a_failed_probe_callback_cannot_be_caught_and_retried() {
-    let (store, engine, transport) = poll_engine(json!(true));
+    assert_failed_probe_callback_cannot_be_retried(Duration::ZERO);
+}
+
+#[test]
+fn a_failed_probe_callback_cannot_be_retried_after_a_slow_reply() {
+    assert_failed_probe_callback_cannot_be_retried(Duration::from_millis(600));
+}
+
+fn assert_failed_probe_callback_cannot_be_retried(reply_delay: Duration) {
+    let (store, credentials) = poll_store_with_shape(json!({
+        "item_kind": "issue",
+        "cursor_kind": "sync_token"
+    }));
+    let transport = MockTransport::default();
+    let engine = GovernanceEngine::new(
+        store.clone(),
+        Arc::new(credentials),
+        Arc::new(DelayedReplyTransport {
+            inner: Arc::new(transport.clone()),
+            reply_delay,
+        }),
+    );
     let id = probe(&store, "() => { try { invoke('read_action', {}); } catch (e) {} return invoke('read_action', {}); }");
     transport.set_response_sequence_for_method(
         "read_action",
