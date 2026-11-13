@@ -39,8 +39,7 @@ PLEXUS_REGENERATE_WEB_SEARCH_TOOL_RESULT_V1=1 cargo test --locked -p plexus-modu
 ```
 
 Without that environment variable set to `1`, the test compares response frame
-bodies and `SHA256SUMS` byte for byte. The repository's worker instructions are
-in `.cortexkit/WORKER.md`. In an AFT editing session, run the command with the
-shell tool's `runon: "linux,4c"` option (four Linux vCPUs), keeping the default
-build directory. Use that tool's `return_paths` option to copy the five JSON
-files and `SHA256SUMS` back into this directory after regeneration.
+bodies and `SHA256SUMS` byte for byte. Regenerate on Linux, as CI does. If you
+run the command on a remote build machine, copy the five JSON files and
+`SHA256SUMS` back into this directory afterwards; `.cortexkit/WORKER.md` names
+the build-machine settings this repository uses.
