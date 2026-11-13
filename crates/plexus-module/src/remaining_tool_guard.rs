@@ -84,9 +84,12 @@ pub(super) fn guard(tool: Option<&str>, facade: Value, rendered: Value) -> Value
         }
         // Never turn an unresolved dispatch into a completed one, even when
         // execution evidence itself cannot be represented in the byte budget.
-        return measured_error(
-            "The operation's output was too large to return and was discarded. Do not replay the operation.",
-            &transmission,
+        return render(
+            tool,
+            measured_error(
+                "The operation's output was too large to return and was discarded. Do not replay the operation.",
+                &transmission,
+            ),
         );
     }
     let event_read = tool == Some(manifest::EVENTS_GET_TOOL)
@@ -95,6 +98,10 @@ pub(super) fn guard(tool: Option<&str>, facade: Value, rendered: Value) -> Value
     if event_read {
         fallback = super::with_event_get_retryable(fallback);
     }
+    // Rendered like every other refusal of these tools (content, isError and
+    // the legacy error), so a runner reads it as a tool error, not a malformed
+    // reply.
+    let fallback = render(tool, fallback);
     assert!(format.fits(&fallback));
     fallback
 }
@@ -136,19 +143,25 @@ fn refusal(tool: Option<&str>, mut facade: Value) -> Value {
     if EffectiveFormat::Legacy.fits(&rendered) {
         return rendered;
     }
-    measured_error(
-        "The refusal was too large to return; the operation remains refused.",
-        if pending { "pending" } else { "refused" },
+    render_refusal(
+        tool,
+        &measured_error(
+            "The refusal was too large to return; the operation remains refused.",
+            if pending { "pending" } else { "refused" },
+        ),
+        pending,
     )
 }
 
 fn render_refusal(tool: Option<&str>, facade: &Value, pending: bool) -> Value {
+    let mut rendered = render(tool, facade.clone());
     if pending {
         // The ordinary renderer projects access_pending into structuredContent
-        // and loses transmission. Keep pending identity in the size disposition.
-        return facade.clone();
+        // and drops the legacy error, which carries transmission. Keep the
+        // pending identity beside the rendered fields.
+        rendered["error"] = facade["error"].clone();
     }
-    render(tool, facade.clone())
+    rendered
 }
 
 fn measured_error(message: &'static str, transmission: &str) -> Value {

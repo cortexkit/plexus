@@ -1,1 +1,1 @@
-{"error":{"code":"response_too_large","message":"The operation completed, but its output was too large to return and was discarded.","output_discarded":true,"transmission":"completed"}}
+{"content":[{"text":"response_too_large: The operation completed, but its output was too large to return and was discarded.","type":"text"}],"error":{"code":"response_too_large","message":"The operation completed, but its output was too large to return and was discarded.","output_discarded":true,"transmission":"completed"},"isError":true}
