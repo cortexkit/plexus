@@ -4173,12 +4173,9 @@ where
 
 /// Bounds a vendor callback independently of the sandbox's guest execution
 /// budget: synchronous vendor I/O cannot be interrupted by the sandbox clock.
-/// Tests use a short deadline to exercise abandoned-call recovery.
-const ACTION_CALLBACK_DEADLINE: Duration = if cfg!(test) {
-    Duration::from_millis(300)
-} else {
-    Duration::from_secs(5)
-};
+/// Unit tests use the same budget so ordinary scheduling delay is not mistaken
+/// for an abandoned vendor call.
+const ACTION_CALLBACK_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Inconclusive code for a probe whose earlier action call is still running.
 const PROBE_ACTION_IN_FLIGHT: &str = "probe_action_in_flight";

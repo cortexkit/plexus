@@ -2318,6 +2318,25 @@ fn ordered_poll_path_widens_only_on_a_row_that_arrived_late() {
     assert_eq!(late_rows(), json!(1));
 }
 
+/// Delay a result after the vendor has run: a callback can exceed a short
+/// test deadline even when its eventual result is definitive.
+struct DelayedReplyTransport<T> {
+    inner: Arc<T>,
+    reply_delay: Duration,
+}
+
+impl<T: crate::transport::Transport> crate::transport::Transport for DelayedReplyTransport<T> {
+    fn dispatch(
+        &self,
+        request: crate::transport::TransportRequest,
+        credential: &crate::credentials::ResolvedCredential,
+    ) -> crate::transport::TransportResponse {
+        let response = self.inner.dispatch(request, credential);
+        thread::sleep(self.reply_delay);
+        response
+    }
+}
+
 /// A transport whose calls block until the test opens the gate, so a probe
 /// action call outlives its callback deadline.
 struct GatedTransport {
@@ -2347,6 +2366,15 @@ impl crate::transport::Transport for GatedTransport {
 /// it ends, polling resumes normally.
 #[test]
 fn an_abandoned_probe_call_blocks_the_next_poll_until_it_ends() {
+    assert_abandoned_probe_call_recovers(Duration::ZERO);
+}
+
+#[test]
+fn an_abandoned_probe_call_recovers_with_a_slow_reply() {
+    assert_abandoned_probe_call_recovers(Duration::from_millis(600));
+}
+
+fn assert_abandoned_probe_call_recovers(reply_delay: Duration) {
     let (store, credentials) = poll_store_with_shape(json!({
         "item_kind": "issue",
         "cursor_kind": "sync_token"
@@ -2356,7 +2384,14 @@ fn an_abandoned_probe_call_blocks_the_next_poll_until_it_ends() {
         opened: std::sync::Condvar::new(),
         calls: AtomicU64::new(0),
     });
-    let engine = GovernanceEngine::new(store.clone(), Arc::new(credentials), transport.clone());
+    let engine = GovernanceEngine::new(
+        store.clone(),
+        Arc::new(credentials),
+        Arc::new(DelayedReplyTransport {
+            inner: transport.clone(),
+            reply_delay,
+        }),
+    );
     let id = store
         .register_probe(
             "direct",
@@ -2396,9 +2431,10 @@ fn an_abandoned_probe_call_blocks_the_next_poll_until_it_ends() {
     *transport.open.lock().unwrap() = true;
     transport.opened.notify_all();
     wait_until("the abandoned call ends", || !ProbeCallInFlight::held(&id));
-    assert!(matches!(
-        poller.poll_once("direct", &id),
-        PollCycle::Completed { .. }
-    ));
+    let recovered = poller.poll_once("direct", &id);
+    assert!(
+        matches!(recovered, PollCycle::Completed { .. }),
+        "{recovered:?}"
+    );
     assert_eq!(calls(), 2);
 }
