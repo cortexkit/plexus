@@ -31,38 +31,6 @@ fn delete(store: &PlexusStore, apply: bool) -> DeleteConnectionOutcome {
     store.delete_connection("direct", "conn", apply).unwrap()
 }
 
-fn snapshot(
-    store: &PlexusStore,
-    scratch: &Scratch,
-    descriptor: &StorageDescriptor,
-) -> StorageDescriptor {
-    let path = scratch.join("snapshot.db");
-    // Capture committed WAL pages too. Opening the older database beside the
-    // journal models a restore without reusing the live database's sidecars.
-    store
-        .inner
-        .with_conn(|conn| conn.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()]))
-        .unwrap();
-    let conn = Connection::open(&path).unwrap();
-    let state: String = conn
-        .query_row(
-            "SELECT state FROM federated_card_records WHERE id='pending'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        state, "pending",
-        "the snapshot must contain the pending card"
-    );
-    StorageDescriptor {
-        backend: StorageBackend::Sqlite {
-            path: path.to_string_lossy().into_owned(),
-        },
-        ..descriptor.clone()
-    }
-}
-
 #[test]
 fn connection_delete_journals_each_row_and_rowless_pending_key_before_reuse() {
     let (scratch, descriptor) = fixture("federated-connection-delete");
@@ -124,7 +92,13 @@ fn connection_delete_journals_each_row_and_rowless_pending_key_before_reuse() {
             )
         })
         .unwrap();
-    let older = snapshot(&store, &scratch, &descriptor);
+    let older = snapshot(
+        &store,
+        &scratch,
+        &descriptor,
+        &[&read_id, &write_id],
+        &["pending"],
+    );
 
     assert!(matches!(
         delete(&store, true),
@@ -207,7 +181,7 @@ fn connection_delete_rowless_card_ref_is_processed_after_pending_snapshot_restor
         let store = PlexusStore::open(&descriptor).unwrap();
         insert_connection(&store, "direct", "conn");
         insert_card(&store, &key(), "pending", Some("el_pending"), "pending");
-        older = snapshot(&store, &scratch, &descriptor);
+        older = snapshot(&store, &scratch, &descriptor, &[], &["pending"]);
     }
     {
         let store = PlexusStore::open(&descriptor).unwrap();

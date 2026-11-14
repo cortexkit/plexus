@@ -109,16 +109,63 @@ fn entries(scratch: &Scratch) -> Vec<Deletion> {
     entries
 }
 
+fn snapshot(
+    store: &PlexusStore,
+    scratch: &Scratch,
+    descriptor: &StorageDescriptor,
+    row_ids: &[&str],
+    pending_card_ids: &[&str],
+) -> StorageDescriptor {
+    let path = scratch.join("snapshot.db");
+    // Capture committed WAL pages too. Opening the older database beside the
+    // journal models a restore without reusing the live database's sidecars.
+    store
+        .inner
+        .with_conn(|conn| conn.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()]))
+        .unwrap();
+    let conn = Connection::open(&path).unwrap();
+    for id in row_ids {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM federated_rows WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "the snapshot must contain row {id}");
+    }
+    for id in pending_card_ids {
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM federated_card_records WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            state, "pending",
+            "the snapshot must contain pending card {id}"
+        );
+    }
+    StorageDescriptor {
+        backend: StorageBackend::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+        },
+        ..descriptor.clone()
+    }
+}
+
 #[test]
 fn torn_boot_acknowledged_revoke_reboot_and_older_restore_keep_row_deleted() {
     let (scratch, descriptor) = fixture("federated-torn-restore");
     let id;
+    let older;
     {
         let store = PlexusStore::open(&descriptor).unwrap();
         id = insert_row(&store, &key());
         insert_card(&store, &key(), "pending", Some("el_pending"), "pending");
+        older = snapshot(&store, &scratch, &descriptor, &[&id], &["pending"]);
     }
-    let older = std::fs::read(scratch.join("store.db")).unwrap();
     std::fs::write(
         scratch.join(federated_journal::NAME),
         b"{\"row_id\":\"plxf_torn",
@@ -137,8 +184,7 @@ fn torn_boot_acknowledged_revoke_reboot_and_older_restore_keep_row_deleted() {
         assert!(!exists(&store, &id));
         assert_eq!(processed(&store), ["el_mint", "el_pending", "el_reaffirm"]);
     }
-    std::fs::write(scratch.join("store.db"), older).unwrap();
-    let store = PlexusStore::open(&descriptor).expect("restore replays durable deletes");
+    let store = PlexusStore::open(&older).expect("restore replays durable deletes");
     assert!(!exists(&store, &id));
     assert_eq!(processed(&store), ["el_mint", "el_pending", "el_reaffirm"]);
     let entries = entries(&scratch);
@@ -370,11 +416,13 @@ fn malformed_complete_journal_refuses_boot_before_creating_or_changing_database(
     assert!(!scratch.join("store.db").exists());
     std::fs::write(&path, b"").unwrap();
     let id;
+    let older;
     {
         let store = PlexusStore::open(&descriptor).unwrap();
         id = insert_row(&store, &key());
+        older = snapshot(&store, &scratch, &descriptor, &[&id], &[]);
     }
-    let before = std::fs::read(scratch.join("store.db")).unwrap();
+    let before = std::fs::read(scratch.join("snapshot.db")).unwrap();
     std::fs::write(
         &path,
         format!(
@@ -382,8 +430,25 @@ fn malformed_complete_journal_refuses_boot_before_creating_or_changing_database(
         ),
     )
     .unwrap();
-    assert!(PlexusStore::open(&descriptor).is_err());
-    assert_eq!(std::fs::read(scratch.join("store.db")).unwrap(), before);
+    assert!(PlexusStore::open(&older).is_err());
+    assert_eq!(std::fs::read(scratch.join("snapshot.db")).unwrap(), before);
+    let conn = Connection::open(scratch.join("snapshot.db")).unwrap();
+    let row_survived: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM federated_rows WHERE id=?1)",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(row_survived);
+    let processed: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM federated_processed_cards",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(processed, 0);
 }
 
 #[test]
