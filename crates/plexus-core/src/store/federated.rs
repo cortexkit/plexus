@@ -7,6 +7,9 @@ pub(crate) mod cards;
 #[path = "federated_commit.rs"]
 pub(crate) mod commit;
 
+#[path = "federated_list.rs"]
+mod list;
+
 #[path = "federated_search.rs"]
 mod search;
 

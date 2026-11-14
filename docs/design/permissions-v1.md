@@ -30,13 +30,21 @@ gave an agent:
 
 An agent's grants on one bot connection fold into capability rows. The rows are
 the same for every bot and never depend on when grants were minted. Plexus's
-`scope` vocabulary is exactly these three tokens:
+`scope` vocabulary includes these three GitHub bot tokens:
 
 | `scope` | Grants in the row | `subject_label` |
 |---|---|---|
 | `github_bot_speak` | every selector except `create_issue` and `create_pull_request`: comment, edit comment, review, react, edit, close, reopen, assignees, labels, and the reads they depend on | `Speak as <bot login> on <bound repos>` |
 | `github_bot_open_issues` | `create_issue` | `Open issues as <bot login>` |
 | `github_bot_open_pull_requests` | `create_pull_request` | `Open pull requests as <bot login>` |
+
+Federated permissions add `read` and `write` to the vocabulary. Their
+subject is a connection in the operator's `direct` namespace, or `web_search`
+or `code_search` (both `read`). They are separate from local agent and module
+grants, appear only in an unfiltered list, and carry a `federated` holder with
+no local `agent_id`. A denial carries `effect: "deny"`; an allow, like every
+local row, omits `effect`. The listed `card_ref` and `granted_at_ms` are from
+the card that minted the row, even after another card reaffirms it.
 
 A selector plexus does not know lands in the speak row. A row exists only while
 at least one of its grants is live. A grant whose selectors span rows (`*`, or a

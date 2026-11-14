@@ -90,12 +90,16 @@ pub(super) fn run(
             Ok(agent_id) => agent_id,
             Err(refusal) => return refusal,
         };
-        return match core_permissions::list(state.store(), agent_id, now) {
-            Ok(rows) => {
-                let grants: Vec<Value> = rows.iter().map(|row| row.to_wire()).collect();
+        return match state.runtime.engine.list_permissions(agent_id, now) {
+            Ok(grants) => {
                 json!({"result": {"grants": grants}})
             }
-            Err(error) => {
+            Err(core_permissions::ListError::LivenessUnavailable) => json!({"error": {
+                "code": "federated_liveness_unavailable",
+                "message": "federated pairing liveness could not be confirmed",
+                "retryable": true,
+            }}),
+            Err(core_permissions::ListError::Store(error)) => {
                 crate::wire::store_failure("permissions listed", "grants could not be read", &error)
             }
         };

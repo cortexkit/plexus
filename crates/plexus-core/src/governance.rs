@@ -1763,6 +1763,20 @@ where
         &self.store
     }
 
+    /// List operator permissions using this engine's daemon scope reader.
+    pub fn list_permissions(
+        &self,
+        agent_id: Option<&str>,
+        now: i64,
+    ) -> Result<Vec<Value>, crate::permissions::ListError> {
+        crate::permissions::list_with_scope_reader(
+            &self.store,
+            self.scope_reader.as_deref(),
+            agent_id,
+            now,
+        )
+    }
+
     /// Construct the only kind of request a poller may submit. The catalog is
     /// read at construction time, before authorization gates run, so a timer
     /// cannot manufacture a request for an action that is no longer an active

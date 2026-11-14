@@ -396,6 +396,39 @@ pub fn list(
     Ok(listed)
 }
 
+/// A list is unavailable as a whole when any pairing's liveness is unknown.
+/// Store failures remain distinct so the route keeps its existing envelope.
+#[derive(Debug)]
+pub enum ListError {
+    Store(StoreError),
+    LivenessUnavailable,
+}
+
+impl From<StoreError> for ListError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+/// Operator listing, including federated rows after a fresh base-scope check.
+/// The local-only `list` remains the lookup for local revocation: revoking a
+/// grant must not depend on any pairing's availability.
+pub fn list_with_scope_reader(
+    store: &PlexusStore,
+    reader: Option<&dyn crate::scope::ScopeReader>,
+    agent_id: Option<&str>,
+    now: i64,
+) -> Result<Vec<Value>, ListError> {
+    let mut listed: Vec<_> = list(store, agent_id, now)?
+        .iter()
+        .map(ListedRow::to_wire)
+        .collect();
+    if agent_id.is_none() {
+        listed.extend(store.list_federated_permissions(reader, now)?);
+    }
+    Ok(listed)
+}
+
 /// What `permissions.revoke` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RevokeOutcome {

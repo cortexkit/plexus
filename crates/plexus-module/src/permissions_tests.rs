@@ -1245,3 +1245,152 @@ async fn plexus_module_search_list_vector_matches_handler() {
         }
     }
 }
+
+struct FederatedListReader {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl plexus_core::scope::ScopeReader for FederatedListReader {
+    fn describe(
+        &self,
+        owner: &str,
+        scope_ref: &str,
+    ) -> Result<plexus_core::scope::ScopeDescription, plexus_core::scope::ScopeReadError> {
+        use plexus_core::scope::{ScopeDescription, ScopeReadError, ScopeStatus};
+        assert_eq!(owner, "reserved:callosum");
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if scope_ref.ends_with(":unknown") {
+            Err(ScopeReadError("offline".into()))
+        } else {
+            Ok(ScopeDescription {
+                status: ScopeStatus::Ended,
+                owner_synced: true,
+                owner_configured: true,
+                live: None,
+                parent: None,
+                expires_at_ms: None,
+            })
+        }
+    }
+}
+
+fn federated_list_state(
+    store: Arc<PlexusStore>,
+    reader: Arc<FederatedListReader>,
+) -> Arc<ModuleState> {
+    let mut runtime = ModuleRuntime::with_stub_credentials_and_mock_transport(
+        store,
+        Arc::new(StubCredentialSource::default()),
+        Arc::new(MockTransport::default()),
+    );
+    runtime.engine = runtime.engine.with_scope_reader(reader);
+    Arc::new(ModuleState {
+        health: Arc::new(health::HealthState::new()),
+        runtime,
+    })
+}
+
+fn seed_federated_list_row(scratch: &Scratch, id: &str, pairing: &str) {
+    sql(scratch).execute("INSERT INTO federated_rows
+        (id,peer_fingerprint,pairing_id,peer_class,selector,claim_kind,canonical_claim_identity,
+         owner_principal,subject,scope,claim_json,peer_name,effect,granted_at_ms,card_ref,card_refs_json)
+        VALUES (?1,?2,?3,'computer','claimless','','','','web_search','read',NULL,'Juniper','allow',1000000,?4,?5)",
+        rusqlite::params![id, "a".repeat(32), pairing, format!("el_{id}"), json!([format!("el_{id}")]).to_string()]).unwrap();
+}
+
+#[tokio::test]
+async fn federated_list_ended_cleanup_and_unavailable_envelope_match_for_both_operators() {
+    let mut replies = Vec::new();
+    for principal in [reserved("cingulate"), Principal::Direct] {
+        let f = fixture();
+        let reader = Arc::new(FederatedListReader {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let state = federated_list_state(f.store.clone(), reader.clone());
+        seed_federated_list_row(&f.scratch, "plxf_ended", "ended");
+        seed_federated_list_row(&f.scratch, "plxf_unknown", "unknown");
+        sql(&f.scratch)
+            .execute(
+                "INSERT INTO federated_processed_cards VALUES ('el_keep')",
+                [],
+            )
+            .unwrap();
+        let reply = route_call(
+            &state,
+            principal,
+            CallMode::Classic,
+            json!({"method":"permissions.list","params":{}}),
+        )
+        .await;
+        assert_eq!(
+            reply,
+            json!({"error":{"code":"federated_liveness_unavailable","message":"federated pairing liveness could not be confirmed","retryable":true}})
+        );
+        assert_eq!(reader.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let ids: Vec<String> = sql(&f.scratch)
+            .prepare("SELECT id FROM federated_rows ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids, ["plxf_unknown"]);
+        let processed: i64 = sql(&f.scratch)
+            .query_row(
+                "SELECT count(*) FROM federated_processed_cards",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(processed, 2);
+        let journal =
+            std::fs::read_to_string(f.scratch.path().with_file_name("federated-deletions.jsonl"))
+                .unwrap();
+        assert!(journal.contains("plxf_ended") && journal.contains("el_plxf_ended"));
+        replies.push(reply);
+    }
+    assert_eq!(replies[0], replies[1]);
+}
+
+#[tokio::test]
+async fn federated_list_filter_skips_describe_and_failed_delete_is_store_failure() {
+    let f = fixture();
+    let reader = Arc::new(FederatedListReader {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let state = federated_list_state(f.store.clone(), reader.clone());
+    let local = list(&state, json!({})).await;
+    assert_eq!(reader.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(local
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row.get("effect").is_none()));
+    seed_federated_list_row(&f.scratch, "plxf_filtered", "ended");
+    let filtered = list(&state, json!({"agent_id":ALL_AGENT})).await;
+    assert!(filtered
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["holder"]["kind"] == "agent"));
+    assert_eq!(reader.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let journal = f.scratch.path().with_file_name("federated-deletions.jsonl");
+    std::fs::remove_file(&journal).unwrap();
+    std::fs::create_dir(&journal).unwrap();
+    let reply = route_call(
+        &state,
+        reserved("cingulate"),
+        CallMode::Classic,
+        json!({"method":"permissions.list","params":{}}),
+    )
+    .await;
+    assert_eq!(
+        reply,
+        json!({"error":{"code":"store_failure","message":"grants could not be read"}})
+    );
+    assert_eq!(reader.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let remaining: i64 = sql(&f.scratch)
+        .query_row("SELECT count(*) FROM federated_rows", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(remaining, 1);
+}
