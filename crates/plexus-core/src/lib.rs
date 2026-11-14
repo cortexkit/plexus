@@ -192,6 +192,7 @@ mod error_signals;
 pub mod event_envelope;
 pub mod event_key;
 pub mod federated;
+mod federated_journal;
 pub mod fingerprint;
 pub mod github;
 pub mod github_identity;
