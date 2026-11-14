@@ -3018,12 +3018,7 @@ fn facade_tool_reply_with_budget(
             .binding(frame.header.channel, frame.header.epoch)?
             .is_some_and(|binding| binding.federated_caller.is_some())
     {
-        if let Some(error) = reply.get_mut("error").and_then(Value::as_object_mut) {
-            error.insert("transmission".into(), json!("not_sent"));
-            if error.get("code").and_then(Value::as_str) == Some("access_pending") {
-                error.insert("message".into(), json!("Waiting for the user to answer this request. Send the same call again to collect the answer."));
-            }
-        }
+        reply = federated_invoke_reply(reply);
     }
     if let Some(error) = reply.get("error") {
         if tool_provider::is_metadata_op(name)
@@ -3033,6 +3028,21 @@ fn facade_tool_reply_with_budget(
         }
     }
     Ok(reply)
+}
+
+fn federated_invoke_reply(mut reply: Value) -> Value {
+    if let Some(error) = reply.get_mut("error").and_then(Value::as_object_mut) {
+        // Invoke's top-level errors refuse the call before contacting the vendor;
+        // dispatched outcomes use result.transmission. Preserve any transmission
+        // an error producer already supplied rather than asserting a safe retry.
+        error
+            .entry("transmission")
+            .or_insert_with(|| json!("not_sent"));
+        if error.get("code").and_then(Value::as_str) == Some("access_pending") {
+            error.insert("message".into(), json!("Waiting for the user to answer this request. Send the same call again to collect the answer."));
+        }
+    }
+    reply
 }
 
 fn log_tool_provider_refusal(

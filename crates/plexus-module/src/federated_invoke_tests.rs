@@ -26,6 +26,129 @@ fn standing_liveness_refusals_are_not_sent_with_explicit_retryability() {
     }
 }
 
+#[test]
+fn federated_invoke_wrapper_preserves_an_existing_error_transmission() {
+    for transmission in ["sent", "outcome_unknown", "not_sent"] {
+        let local = json!({"error":{"code":"dispatch_failed", "message":"fake vendor failure", "transmission":transmission}});
+        assert_eq!(federated_invoke_reply(local.clone()), local);
+    }
+    let denial = denial_response(&plexus_core::Denial::FederatedConsentDenied);
+    let mut expected = denial.clone();
+    expected["error"]["transmission"] = json!("not_sent");
+    assert_eq!(federated_invoke_reply(denial), expected);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standing_federated_invoke_keeps_local_dispatch_failure_transmission() {
+    for risk in ["read", "write"] {
+        for (failure, expected) in [
+            (plexus_core::MockResponse::OutcomeUnknown, "outcome_unknown"),
+            (
+                plexus_core::MockResponse::VendorError {
+                    code: "fake_vendor_failure".into(),
+                    message: String::new(),
+                },
+                "failed",
+            ),
+        ] {
+            let (mut state, store, transport, scratch) =
+                super::super::github_read_frame_tests::imported_runtime();
+            let runtime = &mut Arc::get_mut(&mut state).unwrap().runtime;
+            runtime.set_federated_callers_enabled_for_test(true);
+            runtime.engine = runtime
+                .engine
+                .clone()
+                .with_scope_reader(crate::consent_test_support::live_reader(
+                    CallScope::from_stamp(&stamp()),
+                ))
+                .with_freshness_check(Arc::new(|_| Ok(())));
+            let mut manifest: Value = serde_json::from_str(
+                &subc_jsonc::jsonc_to_json(include_str!("../../../catalog/searxng_rest.jsonc"))
+                    .unwrap(),
+            )
+            .unwrap();
+            manifest["tier"] = json!("S1");
+            manifest["actions_baseline"][0]["name"] = json!("meta.test");
+            store
+                .upsert_manifest(
+                    plexus_core::storage::CATALOG_PRINCIPAL,
+                    &plexus_core::ingest_value(manifest).unwrap(),
+                )
+                .unwrap();
+            store
+                .insert_connection(
+                    "direct",
+                    "plain",
+                    "searxng_rest",
+                    "active",
+                    &json!({"write_enabling":["resource"]}),
+                )
+                .unwrap();
+            store
+                .upsert_catalog_action(&plexus_core::storage::CatalogActionInput {
+                    principal: "direct".into(),
+                    connection_id: "plain".into(),
+                    name: "meta.test".into(),
+                    title: None,
+                    schema: json!({"type":"object","properties":{"resource":{"type":"string"}}}),
+                    schema_hash: "schema".into(),
+                    risk: risk.into(),
+                    severity: "S1".into(),
+                    ask_first: risk == "write",
+                    status: "active".into(),
+                    quarantine_reason: None,
+                    reconciliation: None,
+                })
+                .unwrap();
+            store
+                .set_policy("direct", "plain", "*", "allow", None)
+                .unwrap();
+            let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+            db.execute_batch("UPDATE connections SET ceiling_risk='write',ceiling_selectors='[\"meta.test\"]' WHERE connection_id='plain'").unwrap();
+            db.execute("INSERT INTO federated_rows (id,peer_fingerprint,pairing_id,peer_class,selector,claim_kind,canonical_claim_identity,owner_principal,subject,scope,peer_name,effect,granted_at_ms,card_ref,card_refs_json)
+                VALUES ('plxf_dispatch',?1,'pairing','computer','claimless','','','direct','plain',?2,'Peer','allow',1,'el_seed','[\"el_seed\"]')", rusqlite::params!["a".repeat(32),risk]).unwrap();
+            transport.set_response(failure);
+            let body = json!({"name":"invoke","arguments":{"op":"call","connection":"plain","action":"meta.test","args":{"resource":"target"}}});
+            let federated_routes = bind_accepted(&state, stamp(), CallMode::Classic).await;
+            let federated = reply(call(&state, &federated_routes, body.clone()).await);
+            assert_eq!(transport.requests().len(), 1, "{federated}");
+            store
+                .insert_grant(&plexus_core::storage::GrantInput {
+                    grant_id: "local-dispatch".into(),
+                    principal: "direct".into(),
+                    connection_id: "plain".into(),
+                    grantee_principal: "direct".into(),
+                    risk_ceiling: "write".into(),
+                    action_selectors: vec!["meta.test".into()],
+                    authority_kind: "invoke".into(),
+                    expires_at: None,
+                })
+                .unwrap();
+            let local_routes = Arc::new(RouteBindings::new());
+            local_routes
+                .insert_mode(17, 3, Principal::Direct, None, CallMode::Classic)
+                .unwrap();
+            let local = reply(call(&state, &local_routes, body).await);
+            assert_eq!(transport.requests().len(), 2, "{local}");
+            assert!(federated.get("error").is_none(), "{federated}");
+            assert!(local.get("error").is_none(), "{local}");
+            assert_eq!(federated["result"]["transmission"], expected);
+            assert_ne!(federated["result"]["transmission"], "not_sent");
+            assert_eq!(
+                serde_json::to_vec(&federated["result"]["transmission"]).unwrap(),
+                serde_json::to_vec(&local["result"]["transmission"]).unwrap()
+            );
+            assert!(store.list_action_requests("direct").unwrap().is_empty());
+            let cards: i64 = db
+                .query_row("SELECT count(*) FROM federated_card_records", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(cards, 0);
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn synthetic_bind_held_reply_declaration_controls_federated_card_filing() {
     for (declared, claim) in [
