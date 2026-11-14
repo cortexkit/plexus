@@ -8,6 +8,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+#[path = "governance_federated_ask_first_tests.rs"]
+mod ask_first;
+
 #[derive(Default)]
 struct Requester {
     cards: Mutex<Vec<Value>>,
