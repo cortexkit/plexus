@@ -155,8 +155,9 @@ pub struct AuthorizationRequest {
     federated_caller: Option<crate::federated::FederatedCaller>,
     federated_row_id: Option<String>,
     federated_card_ref: Option<String>,
-    federated_held_reply: bool,
-    federated_deadline: Option<std::time::Instant>,
+    pub(crate) federated_held_reply: bool,
+    pub(crate) federated_deadline: Option<std::time::Instant>,
+    pub(crate) federated_search_use: Option<crate::web_search::federated::SearchUse>,
     federated_answer: Option<(
         crate::federated::card::Record,
         crate::storage::federated_store::commit::Answer,
@@ -309,6 +310,7 @@ impl AuthorizationRequest {
             federated_card_ref: None,
             federated_held_reply: false,
             federated_deadline: None,
+            federated_search_use: None,
             federated_answer: None,
         }
     }
@@ -983,6 +985,7 @@ pub struct Reservation {
     pub federated_caller: Option<crate::federated::FederatedCaller>,
     pub federated_row_id: Option<String>,
     pub federated_card_ref: Option<String>,
+    pub(crate) federated_search_use: bool,
 }
 
 impl AuditRecord {
@@ -2923,6 +2926,7 @@ where
             federated_caller: None,
             federated_row_id: None,
             federated_card_ref: None,
+            federated_search_use: false,
         }))
     }
 
@@ -3619,6 +3623,7 @@ where
                 &reservation_record(reservation),
                 &reservation.request_id,
                 &*self.now_ms,
+                reservation.federated_search_use,
             ) {
                 Ok(claimed) => claimed,
                 Err(error) => {

@@ -315,7 +315,7 @@ impl WebSearchService {
         {
             return Ok(hit);
         }
-        let deadline_at_ms =
+        let mut deadline_at_ms =
             (self.clock)().saturating_add(WEB_SEARCH_CHAIN_DEADLINE.as_millis() as i64);
         let mut deadline_stopped = false;
         // Owned, so the walk can update the audit record while it holds the name.
@@ -450,12 +450,29 @@ impl WebSearchService {
                 if audit.federated.is_some() {
                     self.standing_checks(engine.store(), &connection, &action, now_ms)?;
                 }
-                if let Some(request) = &federated_request {
-                    engine.apply_federated_search(request).map_err(|denial| {
-                        federated_consent_refusal =
-                            Some(WebSearchRefusal::Governance(Box::new(denial)));
-                        SkipReason::Unavailable
-                    })?;
+                if let (Some(request), Some(authority)) =
+                    (&federated_request, audit.federated.as_mut())
+                {
+                    engine
+                        .apply_federated_search(request, authority)
+                        .map_err(|denial| {
+                            federated_consent_refusal =
+                                Some(WebSearchRefusal::Governance(Box::new(denial)));
+                            SkipReason::Unavailable
+                        })?;
+                    if authority.answer.is_some() {
+                        // Human approval time is not provider-attempt time.
+                        deadline_at_ms = (self.clock)()
+                            .saturating_add(WEB_SEARCH_CHAIN_DEADLINE.as_millis() as i64);
+                        engine
+                            .preflight_federated_search(request.clone())
+                            .map_err(|denial| {
+                                federated_gate_refusal =
+                                    Some(WebSearchRefusal::Governance(Box::new(denial)));
+                                SkipReason::Unavailable
+                            })?;
+                        self.standing_checks(engine.store(), &connection, &action, now_ms)?;
+                    }
                     // Unlike the local cache-first path, a federated cache lookup
                     // follows every backing-connection gate and the search row.
                     let limits = engine
@@ -468,6 +485,13 @@ impl WebSearchService {
                         .map_err(|retry| {
                             retry_after = Some(retry_after.map_or(retry, |old| old.min(retry)));
                             SkipReason::RateLimited
+                        })?;
+                    engine
+                        .consume_federated_search(authority)
+                        .map_err(|denial| {
+                            federated_consent_refusal =
+                                Some(WebSearchRefusal::Governance(Box::new(denial)));
+                            SkipReason::Unavailable
                         })?;
                     if let Some(entry) = self.cache.get_served(&cache_key, now_ms) {
                         if entry.served.provider == *name
@@ -558,7 +582,12 @@ impl WebSearchService {
                 audit.chain.as_mut().unwrap().attempted = Some(identity);
                 // Local searches check connector-home ownership only here;
                 // federated searches already checked it before rate and cache.
-                let reservation = engine.authorize(federated_request.unwrap_or(request)).map_err(|denial| {
+                let request = if let Some(authority) = &audit.federated {
+                    authority.bind(federated_request.unwrap_or(request))
+                } else {
+                    request
+                };
+                let reservation = engine.authorize(request).map_err(|denial| {
                     if audit.federated.is_some() { federated_gate_refusal = Some(WebSearchRefusal::Governance(Box::new(denial.clone()))); }
                     eprintln!(warn web_search: "web_search chain authorization refused on {} ({})", connection.connection_id, denial.reason_code());
                     SkipReason::for_refusal(&self.refusal_for_denial(caller, &denial))

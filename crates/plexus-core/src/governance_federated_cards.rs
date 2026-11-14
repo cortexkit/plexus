@@ -44,8 +44,6 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
             return Err(unavailable());
         }
         let scope = request.scope.as_ref().ok_or_else(unavailable)?;
-        let deadline = request.federated_deadline.ok_or_else(unavailable)?;
-        let client = self.consent_cards.as_ref().ok_or_else(unavailable)?;
         let prepared = PreparedCard::invoke(
             &self.store,
             &Context {
@@ -63,6 +61,27 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
                 .is_some(),
         )
         .map_err(|_| unavailable())?;
+        self.collect_federated_card(
+            request,
+            prepared,
+            &self.service_label(&connection.app_key),
+            action_label(action, &action.name),
+        )
+    }
+
+    pub(super) fn collect_federated_card(
+        &self,
+        request: &AuthorizationRequest,
+        prepared: PreparedCard,
+        service: &str,
+        action: &str,
+    ) -> Result<(Record, Answer), Denial> {
+        let unavailable = || Denial::ConsentUnavailable {
+            action: action.into(),
+        };
+        let scope = request.scope.as_ref().ok_or_else(unavailable)?;
+        let deadline = request.federated_deadline.ok_or_else(unavailable)?;
+        let client = self.consent_cards.as_ref().ok_or_else(unavailable)?;
         let mut record = self
             .store
             .ensure_federated_card(&prepared.record)
@@ -109,8 +128,8 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
             (Some("pending"), _) => {
                 return Err(Denial::AccessPending {
                     elicitation_id: id.into(),
-                    service: self.service_label(&connection.app_key),
-                    action: action_label(action, &action.name).into(),
+                    service: service.into(),
+                    action: action.into(),
                 })
             }
             (Some("answered"), Some("allow_once")) => Answer::AllowOnce,

@@ -7,12 +7,13 @@ where
     C: CredentialSource + ?Sized,
     T: Transport + ?Sized,
 {
-    /// Apply standing search authority after the backing connection's gates.
+    /// Resolve standing authority or collect a search card after the backing gates.
     /// The daemon liveness query does not hold the store's write lock. Re-read
     /// the row afterwards so a revocation committed during that query wins.
     pub(crate) fn apply_federated_search(
         &self,
         request: &AuthorizationRequest,
+        authority: &mut crate::web_search::federated::SearchAuthorization,
     ) -> Result<(), Denial> {
         let caller = request
             .federated_caller
@@ -34,13 +35,47 @@ where
         let unavailable = || Denial::ConsentUnavailable {
             action: binding.action.clone(),
         };
+        if authority.used.is_some() || authority.answer.is_some() {
+            return Ok(());
+        }
         if self
             .store
             .matching_federated_row(&call, self.now_ms())
             .map_err(|_| Denial::StoreFailure)?
             .is_none()
         {
-            return Err(unavailable());
+            if !request.federated_held_reply || matches!(caller.claim.claim_kind, "flow" | "run") {
+                return Err(unavailable());
+            }
+            let scope = request.scope.as_ref().ok_or_else(unavailable)?;
+            let search = match binding.action.as_str() {
+                "web_search" => crate::federated::card::Search::Web,
+                "code_search" => crate::federated::card::Search::Code,
+                _ => return Err(unavailable()),
+            };
+            let prepared = crate::federated::card::PreparedCard::search(
+                &crate::federated::card::Context {
+                    caller,
+                    filed_scope: scope,
+                    expires_in_ms: APPROVAL_TTL_MS,
+                    per_call_only: false,
+                },
+                search,
+                &authority.arguments,
+            )
+            .map_err(|_| unavailable())?;
+            authority.answer = Some(self.collect_federated_card(
+                request,
+                prepared,
+                if binding.action == "web_search" {
+                    "Web search"
+                } else {
+                    "Code search"
+                },
+                &binding.action,
+            )?);
+            self.federated_live(caller)?;
+            return Ok(());
         }
         self.federated_live(caller)?;
         match self
@@ -52,6 +87,61 @@ where
             Some(_) => Err(Denial::FederatedConsentDenied),
             None => Err(unavailable()),
         }
+    }
+
+    /// Settle a collected answer only after the search gates pass and the backend
+    /// and caller rate buckets are charged together.
+    /// Cache hits and all fallback attempts then share this in-memory use.
+    pub(crate) fn consume_federated_search(
+        &self,
+        authority: &mut crate::web_search::federated::SearchAuthorization,
+    ) -> Result<(), Denial> {
+        use crate::storage::federated_store::commit::{CommitInput, CommitOutcome};
+        let Some((mut record, answer)) = authority.answer.take() else {
+            if let Some(used) = &authority.used {
+                self.federated_live(&authority.caller)?;
+                self.store
+                    .validate_federated_search_use(&authority.caller, used, self.now_ms())
+                    .map_err(|_| Denial::StoreFailure)??;
+            }
+            return Ok(());
+        };
+        if answer.standing_effect().is_some() {
+            match self
+                .store
+                .commit_federated_standing_answer(
+                    self.scope_reader.as_deref(),
+                    &CommitInput {
+                        caller: &authority.caller,
+                        record: &record,
+                        answer,
+                        standing_choices_offered: record.standing_choices_offered,
+                        now_ms: self.now_ms(),
+                    },
+                )
+                .map_err(|failure| failure.denial)?
+            {
+                CommitOutcome::Committed {
+                    effect: Effect::Deny,
+                    ..
+                } => return Err(Denial::FederatedConsentDenied),
+                CommitOutcome::Committed { .. } => {
+                    record.state = crate::federated::card::State::Committed
+                }
+                _ => {
+                    return Err(Denial::ConsentUnavailable {
+                        action: authority.binding.action.clone(),
+                    })
+                }
+            }
+        }
+        self.federated_live(&authority.caller)?;
+        authority.used = Some(
+            self.store
+                .consume_federated_search(&authority.caller, &record, answer, self.now_ms())
+                .map_err(|_| Denial::StoreFailure)??,
+        );
+        Ok(())
     }
 
     /// Standing rows and call-bound cards replace local grants only after all
@@ -105,7 +195,13 @@ where
                     .map_or_else(|| request.action.clone(), |binding| binding.action.clone()),
             };
             let mut card_use = request.federated_answer.take();
-            if card_use.is_none() {
+            if let Some(used) = &request.federated_search_use {
+                if request.federated_search.as_ref() != Some(&used.binding) {
+                    return Err(unavailable());
+                }
+                self.federated_live(&caller)?;
+                request.federated_card_ref = Some(used.card_ref.clone());
+            } else if card_use.is_none() {
                 // Rows decide new arrivals before even a pending-card lookup.
                 let row = self
                     .store
@@ -210,7 +306,13 @@ where
                 now,
                 ask_first: policy_effect == "ask_first",
             };
-            let (row, reservation_id) = if let Some((record, answer)) = &card_use {
+            let (row, reservation_id) = if let Some(used) = &request.federated_search_use {
+                let (row, id) = self
+                    .store
+                    .reserve_federated_search_use(&call, &input, used)
+                    .map_err(|_| Denial::StoreFailure)??;
+                (row, Some(id))
+            } else if let Some((record, answer)) = &card_use {
                 let (row, id) = self
                     .store
                     .reserve_federated_card(&call, &input, record, *answer)
@@ -273,6 +375,7 @@ where
                 federated_caller: request.federated_caller.clone(),
                 federated_row_id: request.federated_row_id.clone(),
                 federated_card_ref: request.federated_card_ref.clone(),
+                federated_search_use: request.federated_search_use.is_some(),
             })
         })();
         if let Err(denial) = &result {

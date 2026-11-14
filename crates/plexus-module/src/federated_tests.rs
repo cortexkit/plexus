@@ -776,13 +776,13 @@ async fn search_rows_replace_the_placeholder_only_after_backing_gates_pass() {
             super::github_read_frame_tests::imported_runtime();
         let runtime = &mut Arc::get_mut(&mut state).unwrap().runtime;
         runtime.set_federated_callers_enabled_for_test(true);
-        runtime.engine =
-            runtime
-                .engine
-                .clone()
-                .with_scope_reader(crate::consent_test_support::live_reader(
-                    CallScope::from_stamp(&stamp()),
-                ));
+        runtime.engine = runtime
+            .engine
+            .clone()
+            .with_consent_cards(crate::consent_test_support::pending_cards())
+            .with_scope_reader(crate::consent_test_support::live_reader(
+                CallScope::from_stamp(&stamp()),
+            ));
         let (app, action, source) = if tool == "web_search" {
             (
                 "exa_rest",
@@ -884,7 +884,7 @@ async fn search_rows_replace_the_placeholder_only_after_backing_gates_pass() {
         expected["error"]["transmission"] = json!("not_sent");
         assert_eq!(denied["error"], expected["error"]);
         store.delete_federated_row("plxf_search").unwrap();
-        let revoked = unpack(tool, reply(call(&state, &routes, body).await));
+        let revoked = unpack(tool, reply(call(&state, &routes, body.clone()).await));
         assert_eq!(revoked["error"]["code"], "consent_unavailable");
         assert_eq!(
             transport.requests().len(),
@@ -899,6 +899,50 @@ async fn search_rows_replace_the_placeholder_only_after_backing_gates_pass() {
                 0
             );
         }
+        for claim in [
+            Some(json!({"kind":"run","agent_id":"run"})),
+            Some(
+                json!({"kind":"flow","flow_id":"f","flow_version":1,"flow_code_hash":"h","flow_install_id":"i"}),
+            ),
+            None,
+        ] {
+            let mut scope = stamp();
+            scope.attributes.federated.as_mut().unwrap().remote_claim =
+                claim.clone().map(|v| serde_json::from_value(v).unwrap());
+            let mut binding = bind_body(reserved("callosum"), Some(scope), CallMode::Classic);
+            binding["consumer_capabilities"] = json!(["held-reply/v1"]);
+            let held_routes = Arc::new(RouteBindings::new());
+            assert_eq!(
+                bind(&state, &held_routes, binding).await.header.ty,
+                FrameType::Response
+            );
+            let actual = unpack(tool, reply(call(&state, &held_routes, body.clone()).await));
+            let waits = claim.is_none();
+            assert_eq!(
+                actual["error"]["code"],
+                if waits {
+                    "access_pending"
+                } else {
+                    "consent_unavailable"
+                },
+                "{actual}"
+            );
+            assert_eq!(actual["error"]["transmission"], "not_sent");
+            if waits {
+                assert_eq!(actual["error"]["message"], "Waiting for the user to answer this request. Send the same call again to collect the answer.");
+                assert!(actual["error"]["elicitation_id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("el_"));
+            }
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM federated_card_records", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                i64::from(waits)
+            );
+        }
+        assert_eq!(transport.requests().len(), 1);
     }
 }
 

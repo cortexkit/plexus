@@ -349,9 +349,25 @@ impl WebSearchService {
         scope: Option<&CallScope>,
         relay_origin: Option<&RelayOrigin>,
     ) -> Result<WebSearchResponse, WebSearchRefusal> {
-        let authority =
+        self.search_federated_held(engine, caller, arguments, scope, relay_origin, None)
+    }
+
+    /// Search with the admitted route's `held-reply/v1` declaration and reply
+    /// deadline. The optional `wait` pair comes from the binding, not arguments.
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_federated_held<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+        &self,
+        engine: &GovernanceEngine<C, T>,
+        caller: &crate::federated::FederatedCaller,
+        arguments: &Map<String, Value>,
+        scope: Option<&CallScope>,
+        relay_origin: Option<&RelayOrigin>,
+        wait: Option<(bool, std::time::Instant)>,
+    ) -> Result<WebSearchResponse, WebSearchRefusal> {
+        let mut authority =
             federated::SearchAuthorization::new(caller, facade::SearchTool::Web, arguments)
                 .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?;
+        authority.wait = wait;
         self.search_with_authority(
             engine,
             "reserved:callosum",
@@ -505,10 +521,23 @@ impl WebSearchService {
         }
         facade::standing_checks(store, facade::SearchTool::Web, &connection, &action, now_ms)
             .map_err(|denial| self.refusal_from(denial))?;
-        if let Some(request) = &federated_request {
+        if let (Some(request), Some(authority)) = (&federated_request, audit.federated.as_mut()) {
             engine
-                .apply_federated_search(request)
+                .apply_federated_search(request, authority)
                 .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?;
+            if authority.answer.is_some() {
+                engine
+                    .preflight_federated_search(request.clone())
+                    .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?;
+                facade::standing_checks(
+                    store,
+                    facade::SearchTool::Web,
+                    &connection,
+                    &action,
+                    now_ms,
+                )
+                .map_err(|denial| self.refusal_from(denial))?;
+            }
         }
         // Charge the rate buckets only once the caller is known to hold a grant
         // on a usable connection. The backend bucket is shared by every caller,
@@ -516,6 +545,12 @@ impl WebSearchService {
         self.limiter
             .try_acquire(backend.name(), &caller_key, limits, now_ms)
             .map_err(|retry_after_ms| WebSearchRefusal::RateLimited { retry_after_ms })?;
+
+        if let Some(authority) = audit.federated.as_mut() {
+            engine
+                .consume_federated_search(authority)
+                .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?;
+        }
 
         // Search is authorized by the carrier's module grant. The stamped agent
         // supplies attribution and a rate-limit key, not a second grant layer.
@@ -550,7 +585,11 @@ impl WebSearchService {
             request = request.with_relay_origin(relay_origin.clone());
         }
         let reservation = engine
-            .authorize(federated_request.unwrap_or(request))
+            .authorize(if let Some(authority) = &audit.federated {
+                authority.bind(federated_request.unwrap_or(request))
+            } else {
+                request
+            })
             .map_err(|denial| {
                 if audit.federated.is_some() {
                     return WebSearchRefusal::Governance(Box::new(denial));

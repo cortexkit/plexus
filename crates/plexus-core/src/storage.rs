@@ -7371,11 +7371,16 @@ impl PlexusStore {
     /// `now_ms` is the governance engine's clock. It is read inside the
     /// transaction, the moment the claim is judged, so the claim and the
     /// engine's own expiry checks use one clock.
+    ///
+    /// `consumed_search_use` is carried only from a search whose answer was
+    /// consumed before its cache lookup. Such a dispatch pins the reservation,
+    /// not the now-terminal card; fallback attempts share that call's use.
     pub(crate) fn claim_reservation(
         &self,
         reservation: &ReservationRecord,
         attempt_request_id: &str,
         now_ms: &dyn Fn() -> i64,
+        consumed_search_use: bool,
     ) -> Result<bool, StoreError> {
         self.inner.with_conn_fenced(|conn| {
             let claim_now = now_ms();
@@ -7410,12 +7415,13 @@ impl PlexusStore {
                                     THEN 0 ELSE -1 END
                             WHEN card_ref IS NOT NULL THEN
                                 CASE WHEN grant_id IS NULL AND agent_grant_id IS NULL
-                                  AND EXISTS (SELECT 1 FROM federated_card_records c
+                                  THEN CASE WHEN ?6 THEN 0
+                                  WHEN EXISTS (SELECT 1 FROM federated_card_records c
                                     WHERE c.card_ref=reservations.card_ref AND c.state='consumed'
                                       AND c.owner_principal=?1 AND c.subject=?2 AND c.action=?3
                                       AND c.args_digest=reservations.approved_args_hash
                                       AND c.schema_hash=reservations.schema_hash)
-                                  THEN 0 ELSE -1 END
+                                  THEN 0 ELSE -1 END ELSE -1 END
                             ELSE COALESCE((SELECT generation FROM grants
                              WHERE principal = ?1 AND (expires_at IS NULL OR expires_at > ?5) AND grant_id = (
                                  SELECT grant_id FROM reservations
@@ -7435,6 +7441,7 @@ impl PlexusStore {
                         reservation.action.as_str(),
                         reservation.reservation_id.as_str(),
                         claim_now,
+                        consumed_search_use,
                     ),
                     |row| {
                         Ok((

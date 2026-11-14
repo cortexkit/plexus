@@ -7,6 +7,9 @@ pub(crate) mod cards;
 #[path = "federated_commit.rs"]
 pub(crate) mod commit;
 
+#[path = "federated_search.rs"]
+mod search;
+
 /// The exact unique key shared by a standing row and its pending card records.
 #[derive(Debug, Clone)]
 pub(crate) struct FederatedRowKey {

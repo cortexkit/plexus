@@ -2926,6 +2926,13 @@ async fn handle_tool_request_with_reply_guard(
     } else {
         None
     };
+    let federated_search_pending = matches!(
+        tool,
+        Some(manifest::WEB_SEARCH_TOOL | manifest::CODE_SEARCH_TOOL)
+    ) && reply["error"]["code"] == "access_pending"
+        && route_bindings
+            .binding(channel, epoch)?
+            .is_some_and(|binding| binding.federated_caller.is_some());
     let mut reply = if tool == Some(manifest::GITHUB_READ_TOOL) {
         let action = object
             .get("arguments")
@@ -2936,6 +2943,22 @@ async fn handle_tool_request_with_reply_guard(
             action,
             github_read_tool::shape_tail(action, reply),
             reads_tool_result_v1,
+        )
+    } else if federated_search_pending {
+        // Search pending replies keep the search error envelope, rather than
+        // invoke's legacy pending-card wrapper, which drops refusal members.
+        search_content_result(
+            tool.expect("a pending federated search has a tool"),
+            reply,
+            None,
+            if tool == Some(manifest::WEB_SEARCH_TOOL)
+                && reads_tool_result_v1
+                && core_web_search_reader_ready
+            {
+                reply_guard::EffectiveFormat::ToolResultV1
+            } else {
+                reply_guard::EffectiveFormat::Legacy
+            },
         )
     } else {
         with_call_tool_result_for_route(
@@ -3090,6 +3113,9 @@ fn facade_tool_reply_inner(
     let held_deadline = budget.deadline;
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
+    let federated_held_reply = route_bindings
+        .binding(channel, epoch)?
+        .is_some_and(|binding| binding.held_reply_v1);
     let bulk_read = object.get("method").and_then(Value::as_str)
         == Some(plexus_core::github::reads::bot::BULK_METHOD);
     if bulk_read {
@@ -3765,12 +3791,13 @@ fn facade_tool_reply_inner(
             // undeclared identity-token fields were already refused at ingress.
             blocking_section(|| {
                 let outcome = if let Some(caller) = &federated_caller {
-                    state.runtime.web_search.search_federated(
+                    state.runtime.web_search.search_federated_held(
                         &state.runtime.engine,
                         caller,
                         arguments,
                         route_scope.as_ref(),
                         relay_origin.as_ref(),
+                        Some((federated_held_reply, held_deadline)),
                     )
                 } else {
                     state.runtime.web_search.search_scoped(
@@ -3789,12 +3816,13 @@ fn facade_tool_reply_inner(
         }
         (manifest::CODE_SEARCH_TOOL, _) => blocking_section(|| {
             let outcome = if let Some(caller) = &federated_caller {
-                state.runtime.code_search.search_federated(
+                state.runtime.code_search.search_federated_held(
                     &state.runtime.engine,
                     caller,
                     arguments,
                     route_scope.as_ref(),
                     relay_origin.as_ref(),
+                    Some((federated_held_reply, held_deadline)),
                 )
             } else {
                 state.runtime.code_search.search_scoped(

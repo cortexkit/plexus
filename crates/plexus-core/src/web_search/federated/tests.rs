@@ -12,6 +12,9 @@ use std::time::Duration;
 use subc_protocol::scope::{FederatedAttributes, FederatedPeerClass};
 
 const NOW: i64 = 1_790_000_000_000;
+
+#[path = "card_tests.rs"]
+mod cards;
 type Engine = GovernanceEngine<StubCredentialSource, MockTransport>;
 
 #[derive(Clone, Copy, Debug)]

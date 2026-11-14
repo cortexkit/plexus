@@ -199,12 +199,28 @@ impl CodeSearchService {
         scope: Option<&CallScope>,
         relay_origin: Option<&RelayOrigin>,
     ) -> Result<CodeSearchResponse, CodeSearchRefusal> {
-        let authority = crate::web_search::federated::SearchAuthorization::new(
+        self.search_federated_held(engine, caller, arguments, scope, relay_origin, None)
+    }
+
+    /// Search with the admitted route's `held-reply/v1` declaration and reply
+    /// deadline. The optional `wait` pair comes from the binding, not arguments.
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_federated_held<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+        &self,
+        engine: &GovernanceEngine<C, T>,
+        caller: &crate::federated::FederatedCaller,
+        arguments: &Map<String, Value>,
+        scope: Option<&CallScope>,
+        relay_origin: Option<&RelayOrigin>,
+        wait: Option<(bool, std::time::Instant)>,
+    ) -> Result<CodeSearchResponse, CodeSearchRefusal> {
+        let mut authority = crate::web_search::federated::SearchAuthorization::new(
             caller,
             SearchTool::Code,
             arguments,
         )
         .map_err(CodeSearchRefusal::governance)?;
+        authority.wait = wait;
         self.search_with_authority(
             engine,
             "reserved:callosum",
@@ -223,7 +239,7 @@ impl CodeSearchService {
         arguments: &Map<String, Value>,
         scope: Option<&CallScope>,
         relay_origin: Option<&RelayOrigin>,
-        authority: Option<crate::web_search::federated::SearchAuthorization>,
+        mut authority: Option<crate::web_search::federated::SearchAuthorization>,
     ) -> Result<CodeSearchResponse, CodeSearchRefusal> {
         let mut audit = facade::SearchAudit::new(
             SearchTool::Code,
@@ -285,10 +301,23 @@ impl CodeSearchService {
             }
             facade::standing_checks(engine.store(), SearchTool::Code, &connection, &action, now)
                 .map_err(refusal_from)?;
-            if let Some(request) = &federated_request {
+            if let (Some(request), Some(authority)) = (&federated_request, authority.as_mut()) {
                 engine
-                    .apply_federated_search(request)
+                    .apply_federated_search(request, authority)
                     .map_err(CodeSearchRefusal::governance)?;
+                if authority.answer.is_some() {
+                    engine
+                        .preflight_federated_search(request.clone())
+                        .map_err(CodeSearchRefusal::governance)?;
+                    facade::standing_checks(
+                        engine.store(),
+                        SearchTool::Code,
+                        &connection,
+                        &action,
+                        now,
+                    )
+                    .map_err(refusal_from)?;
+                }
             }
             // Limits are stored by backend in web_search_limits. Charge the caller's
             // module bucket and the global grep.app bucket, irrespective of agent identity.
@@ -317,6 +346,11 @@ impl CodeSearchService {
                     retry_after_ms: Some(retry_after_ms),
                     ..CodeSearchRefusal::new(RefusalCode::RateLimited)
                 })?;
+            if let Some(authority) = authority.as_mut() {
+                engine
+                    .consume_federated_search(authority)
+                    .map_err(CodeSearchRefusal::governance)?;
+            }
             let mut request = AuthorizationRequest::new(
                 caller,
                 &connection.connection_id,
@@ -336,7 +370,11 @@ impl CodeSearchService {
                 request = request.with_relay_origin(origin.clone());
             }
             let reservation = engine
-                .authorize(federated_request.unwrap_or(request))
+                .authorize(if let Some(authority) = &authority {
+                    authority.bind(federated_request.unwrap_or(request))
+                } else {
+                    request
+                })
                 .map_err(|denial| {
                     if authority.is_some() {
                         return CodeSearchRefusal::governance(denial);

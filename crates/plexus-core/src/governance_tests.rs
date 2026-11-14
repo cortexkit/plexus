@@ -432,6 +432,7 @@ fn missing_connection_or_action_invalidates_claim_without_store_error() {
                 &reservation_record(&reservation),
                 "attempt",
                 &crate::storage::now_ms,
+                false,
             )
             .unwrap());
         assert_eq!(
@@ -493,6 +494,7 @@ fn claim_pins_policy_identity_not_only_generation() {
             &reservation_record(&reservation),
             "attempt",
             &crate::storage::now_ms,
+            false,
         )
         .unwrap());
     assert!(engine.transport().requests().is_empty());
@@ -531,7 +533,7 @@ fn claim_rechecks_module_and_agent_expiry() {
         assert!(
             !engine
                 .store()
-                .claim_reservation(&record, "attempt", &crate::storage::now_ms)
+                .claim_reservation(&record, "attempt", &crate::storage::now_ms, false)
                 .unwrap(),
             "agent={agent}"
         );
@@ -2083,6 +2085,7 @@ fn reservation_argument_mismatch_aborts_before_dispatch() {
         federated_caller: None,
         federated_row_id: None,
         federated_card_ref: None,
+        federated_search_use: false,
     };
 
     let outcome = engine.revalidate_and_dispatch(&reservation);
@@ -2474,6 +2477,7 @@ fn reservation_audit_rows_record_the_app_handle_only_for_facade_calls() {
         federated_caller: None,
         federated_row_id: None,
         federated_card_ref: None,
+        federated_search_use: false,
     };
     let expected = |app_handle_id: Option<&str>| AuditRecord {
         principal: "owner".to_string(),

@@ -2856,6 +2856,7 @@ mod facade_seam_tests {
             federated_caller: None,
             federated_row_id: None,
             federated_card_ref: None,
+            federated_search_use: false,
         };
         assert!(!seams.pre_transmit(&reservation));
         reservation.risk = Risk::Read;

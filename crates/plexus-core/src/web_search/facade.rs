@@ -270,8 +270,8 @@ pub(crate) fn policy_effect(
 /// The checks governance applies to a resolved connection before it would
 /// dispatch, in governance's order: the connection must be able to serve,
 /// the catalog action must be active, and policy must allow the action
-/// outright. A search can never carry a per-call approval, so `ask_first`
-/// refuses like `block` does, under its own name.
+/// outright. Federated consent replaces the search grant, not its policy:
+/// `ask_first` still refuses like `block` does, under its own name.
 pub(crate) fn standing_checks(
     store: &PlexusStore,
     tool: SearchTool,
