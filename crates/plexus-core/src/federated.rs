@@ -3,6 +3,8 @@
 use serde_json::json;
 use subc_protocol::scope::RemoteClaim;
 
+pub mod matcher;
+
 /// A claim's key and display data, normalized together so omitted names cannot
 /// reappear in stored claims or labels. The kind is separate from the canonical JSON text:
 /// an agent and a run may carry the same id but are different callers.

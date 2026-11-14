@@ -1037,6 +1037,35 @@ async fn revoke_replies_have_the_vector_shape() {
     assert_eq!(reply, json!({"error": refused["error"]}));
 }
 
+/// Pin every federated vector, including the copied checksum files, to its line
+/// in permissions-federated-v1/SHA256SUMS. That file is Cingulate's authoritative
+/// checksum list, not a manifest Plexus may regenerate.
+#[test]
+fn copied_federated_vectors_match_their_checksums() {
+    use sha2::{Digest, Sha256};
+    let directory =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/permissions-federated-v1");
+    let sums = std::fs::read_to_string(directory.join("SHA256SUMS")).unwrap();
+    let mut checked = BTreeSet::new();
+    for line in sums.lines() {
+        let (sum, name) = line.split_once("  ").unwrap();
+        assert!(checked.insert(name), "duplicate checksum line for {name}");
+        let bytes = std::fs::read(directory.join(name)).unwrap();
+        assert_eq!(
+            hex_lower(&Sha256::digest(&bytes)),
+            sum,
+            "{name} differs from cingulate's"
+        );
+    }
+    assert_eq!(checked.len(), 21, "7 federated cases of 3 files each");
+    let files: BTreeSet<_> = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name != "SHA256SUMS" && name != "SOURCE.md")
+        .collect();
+    assert_eq!(files, checked.into_iter().map(str::to_owned).collect());
+}
+
 /// The copied vectors in `crates/plexus-module/tests/fixtures/permissions-v1/`
 /// are byte for byte the files cingulate's checksum list (`SHA256SUMS`)
 /// names. Only the provider cases and the README are copied; the list also
