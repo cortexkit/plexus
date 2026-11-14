@@ -3,6 +3,7 @@
 use serde_json::json;
 use subc_protocol::scope::RemoteClaim;
 
+pub mod card;
 pub mod matcher;
 
 /// The paired computer and its remote claim, copied from the daemon's bind

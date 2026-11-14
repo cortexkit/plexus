@@ -1,6 +1,11 @@
 use super::*;
 use crate::federated_journal::{self, Deletion};
 
+// Record helpers remain dormant until the authorization path files cards.
+#[allow(dead_code)]
+#[path = "federated_cards.rs"]
+pub(crate) mod cards;
+
 /// The exact unique key shared by a standing row and its pending card records.
 #[derive(Debug, Clone)]
 pub(crate) struct FederatedRowKey {

@@ -4291,14 +4291,7 @@ where
     /// The service's catalog name for a card: the app manifest's `name`,
     /// else its key.
     fn service_label(&self, app_key: &str) -> String {
-        self.store
-            .cached_manifest(app_key)
-            .ok()
-            .and_then(|manifest| {
-                let name = manifest.name.trim();
-                (!name.is_empty()).then(|| name.to_owned())
-            })
-            .unwrap_or_else(|| app_key.to_string())
+        crate::consent_card::service_label(&self.store, app_key)
     }
 
     fn withdraw_consent_card(&self, request: &ActionRequestRecord) {
@@ -4968,7 +4961,7 @@ struct PreparedCredential {
     vault_credential: Option<ResolvedCredential>,
 }
 
-fn action_label<'a>(action: &'a CatalogAction, fallback: &'a str) -> &'a str {
+pub(crate) fn action_label<'a>(action: &'a CatalogAction, fallback: &'a str) -> &'a str {
     action
         .title
         .as_deref()

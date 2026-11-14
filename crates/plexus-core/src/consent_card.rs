@@ -28,7 +28,7 @@ const AWAIT_MAX_MS: u64 = 120_000;
 const AWAIT_ROUTE_DEADLINE: Duration = Duration::from_secs(30);
 const AWAIT_REPLY_RESERVE: Duration = Duration::from_secs(1);
 
-/// The option ids on every card Plexus files. Get and await identify the
+/// The option ids on local approval cards. Get and await identify the
 /// chosen option by `answered_choice_id`, never by label.
 pub const OPTION_APPROVE: &str = "approve";
 pub(crate) const OPTION_DENY: &str = "deny";
@@ -130,7 +130,6 @@ pub struct ParkedApproval<'a> {
 /// secret is rendered, and the body as a whole never names a secret-looking
 /// key (`contains_secret_input` holds false for it).
 pub fn consent_request_body(parked: &ParkedApproval<'_>) -> Value {
-    let material_damage = parked.risk != "read";
     let consequence = match parked.risk {
         "read" => format!(
             "It reads data from {} and changes nothing.",
@@ -142,21 +141,37 @@ pub fn consent_request_body(parked: &ParkedApproval<'_>) -> Value {
         ),
         _ => format!("It changes data in {}.", parked.service_label),
     };
-    let body = json!({
-        "kind": "consent",
-        "title": format!("{} on {}", parked.action_label, parked.service_label),
-        "prompt": format!(
+    request_body(
+        parked,
+        &format!(
             "Allow {} to run once on {} with the arguments shown? {consequence}",
             parked.action_label, parked.service_label
         ),
-        "options": [
+        json!([
             {"id": OPTION_APPROVE, "label": "Approve", "effect": "grant"},
             {"id": OPTION_DENY, "label": "Deny", "effect": "decline"},
-        ],
-        "default": OPTION_DENY,
+        ]),
+        OPTION_DENY,
+    )
+}
+
+/// Requester members shared by local and federated cards. Their prompt and
+/// choices differ, but expiry, call previews and presentation rules do not.
+pub(crate) fn request_body(
+    parked: &ParkedApproval<'_>,
+    prompt: &str,
+    options: Value,
+    default: &str,
+) -> Value {
+    json!({
+        "kind": "consent",
+        "title": format!("{} on {}", parked.action_label, parked.service_label),
+        "prompt": prompt,
+        "options": options,
+        "default": default,
         "urgency": "normal",
         "on_expiry": "deny",
-        "material_damage": material_damage,
+        "material_damage": parked.risk != "read",
         "late_execution": "notify_only",
         "target": {"kind": "service", "label": parked.service_label},
         "expires_in_ms": parked.expires_in_ms.clamp(1, MAX_EXPIRES_IN_MS),
@@ -168,8 +183,20 @@ pub fn consent_request_body(parked: &ParkedApproval<'_>) -> Value {
             {"label": "Action", "value": parked.action_label},
             {"label": "Risk", "value": parked.risk},
         ],
-    });
-    body
+    })
+}
+
+/// The app display name shared by local and federated cards: the manifest's
+/// nonblank, trimmed name, falling back to the app key.
+pub(crate) fn service_label(store: &PlexusStore, app_key: &str) -> String {
+    store
+        .cached_manifest(app_key)
+        .ok()
+        .and_then(|manifest| {
+            let name = manifest.name.trim();
+            (!name.is_empty()).then(|| name.to_owned())
+        })
+        .unwrap_or_else(|| app_key.to_string())
 }
 
 /// A bounded, readable rendering of an action's arguments, one `name: value`
