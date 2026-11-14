@@ -157,6 +157,59 @@ VALUES ('direct','tavily','apikey:tavily','00000000000000000000000000000001',2,'
     assert_eq!(scalar::<i64>(&new, "SELECT appended_at_ms FROM web_search_auto_connections WHERE provider='brave' AND revoked_at_ms IS NULL"), 3000);
 }
 
+/// Paired computers' permissions and the card refs already acted on are
+/// authority. If a cutover dropped the processed refs, an old answer could mint
+/// a revoked permission again on the new store.
+#[test]
+fn federated_permissions_and_processed_cards_survive_store_cutover() {
+    let f = Fixture::new();
+    let source = open_sqlite(&descriptor(&f.from).unwrap()).unwrap();
+    source.migrate("plexus", MIGRATIONS).unwrap();
+    source.with_conn_fenced(|conn| conn.execute_batch(r#"
+INSERT INTO federated_rows (id, peer_fingerprint, pairing_id, peer_class, selector, claim_kind, canonical_claim_identity, owner_principal, subject, scope, claim_json, peer_name, effect, granted_at_ms, card_ref, card_refs_json)
+VALUES ('plxf_1','fp','pair','computer','agent','agent','{"agent_id":"a"}','direct','invoke:conn-x','read',NULL,'Laptop','allow',1000,'el_1','["el_1","el_2"]');
+INSERT INTO federated_card_records (id, peer_fingerprint, pairing_id, peer_class, claim_kind, canonical_claim_identity, owner_principal, subject, action, args_digest, selector, scope, filed_scope_json, schema_hash, state, card_ref)
+VALUES ('rec_1','fp','pair','computer','agent','{"agent_id":"a"}','direct','invoke:conn-x','read_thing','digest','agent','read','{}',NULL,'pending','el_3');
+INSERT INTO federated_processed_cards (card_ref) VALUES ('el_1'), ('el_2'), ('el_9');
+"#)).unwrap();
+    drop(source);
+    let report = f.import();
+    for (table, count) in [
+        ("federated_rows", 1),
+        ("federated_card_records", 1),
+        ("federated_processed_cards", 3),
+    ] {
+        let row = report.iter().find(|row| row.table == table).unwrap();
+        assert_eq!(
+            (row.read, row.carried, row.scrubbed),
+            (count, count, 0),
+            "{table}"
+        );
+    }
+    let new = f.destination();
+    assert_eq!(
+        scalar::<String>(
+            &new,
+            "SELECT card_refs_json FROM federated_rows WHERE id='plxf_1'"
+        ),
+        r#"["el_1","el_2"]"#
+    );
+    assert_eq!(
+        scalar::<String>(
+            &new,
+            "SELECT state FROM federated_card_records WHERE id='rec_1'"
+        ),
+        "pending"
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT count(*) FROM federated_processed_cards WHERE card_ref='el_9'"
+        ),
+        1
+    );
+}
+
 #[test]
 fn outbox_failures_follow_only_retained_publication_markers_on_import() {
     assert_eq!(
@@ -488,7 +541,10 @@ fn production_v23_round_trip_dispositions_and_routing() {
             | "gmail_accounts"
             | "sent_text"
             | "sent_text_settings"
-            | "web_search_auto_connections" => (0, 0, 0),
+            | "web_search_auto_connections"
+            | "federated_rows"
+            | "federated_card_records"
+            | "federated_processed_cards" => (0, 0, 0),
             _ => (1, 1, 0),
         };
         assert_eq!(

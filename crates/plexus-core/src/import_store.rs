@@ -93,6 +93,13 @@ const TABLES: &[&str] = &[
     "gmail_accounts",
     "sent_text",
     "sent_text_settings",
+    // Paired computers' standing permissions and denials, and their open cards.
+    // The person's answers are authority and must survive the move.
+    "federated_rows",
+    "federated_card_records",
+    // Card refs already acted on. Without them an old answer could mint a
+    // permission again on the new store after its row was revoked.
+    "federated_processed_cards",
 ];
 
 /// Tables of the current schema that `import_store` deliberately does not
@@ -440,6 +447,8 @@ fn identity(table: &str, row: &Record) -> String {
         "github_actions_quota" => vec!["reservation_id"],
         "event_outbox_counters" => vec!["name"],
         "elicitation_answers_cursor" => vec![],
+        "federated_rows" | "federated_card_records" => vec!["id"],
+        "federated_processed_cards" => vec!["card_ref"],
         _ => vec!["subscription_id"],
     };
     format!(

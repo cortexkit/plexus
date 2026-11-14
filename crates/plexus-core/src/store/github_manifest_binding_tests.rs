@@ -15,6 +15,8 @@ fn migration_60_forward_rollback_and_reforward_preserves_proposals() {
     let inner = cortexkit_store::open_sqlite(&descriptor).unwrap();
     let boundary = MIGRATIONS.iter().position(|m| m.version == 60).unwrap();
     let older = &MIGRATIONS[..boundary];
+    // Stop at 60 so later migrations don't change the forward step count.
+    let through_60 = &MIGRATIONS[..=boundary];
     inner.migrate("plexus", older).unwrap();
     let old_write = |id: &str| {
         inner.with_conn_fenced(|conn| {
@@ -23,7 +25,7 @@ fn migration_60_forward_rollback_and_reforward_preserves_proposals() {
     }).unwrap()
     };
     old_write("before");
-    assert_eq!(inner.migrate("plexus", MIGRATIONS).unwrap().applied, 1);
+    assert_eq!(inner.migrate("plexus", through_60).unwrap().applied, 1);
     inner.with_conn_fenced(|conn| {
         conn.execute("INSERT INTO github_manifest_binding(app_handle_id,repository,agent_id,proposal_id,manifest_version,manifest_sha256,statement_b64url,expires_at_ms,state,card_id,present,revision) VALUES ('before','org/repo','before','proposal',29,'hash','statement',12345,'pending','card',1,7)",[])?;
         Ok(())
@@ -33,7 +35,7 @@ fn migration_60_forward_rollback_and_reforward_preserves_proposals() {
     assert!(rollback.store_ahead());
     assert_eq!(rollback.applied, 0);
     old_write("during-rollback");
-    assert_eq!(inner.migrate("plexus", MIGRATIONS).unwrap().applied, 0);
+    assert_eq!(inner.migrate("plexus", through_60).unwrap().applied, 0);
     let actual = inner.with_read(|conn|conn.query_row("SELECT app_handle_id,repository,agent_id,proposal_id,manifest_version,manifest_sha256,statement_b64url,expires_at_ms,state,card_id,present,revision FROM github_manifest_binding",[],row)).unwrap();
     assert_eq!(actual, expected);
     assert_eq!(
