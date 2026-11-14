@@ -2415,12 +2415,18 @@ async fn vault_route_fixture() {
             // the role, so it refuses those; plexus leaves ownership unchanged
             // when Entorhinal does not answer.
             json!({"error": {"code": "unsupported", "message": "this test fixture serves only role.read"}})
-        } else if !roles && request["method"] == "auth.watch_scoped" {
-            // Plexus opens the vault's change feed in the background as soon as
-            // it starts, to connect stored search keys. Whether that request
+        } else if !roles
+            && matches!(
+                request["method"].as_str(),
+                Some("auth.watch_scoped" | "manifest.watch")
+            )
+        {
+            // Plexus opens two vault feeds in the background as soon as it
+            // starts: stored search keys (`auth.watch_scoped`) and one-tap
+            // manifest versions (`manifest.watch`). Whether either request
             // lands before a test ends depends on timing. This fixture models
-            // only scoped reads, so it answers the feed the way a vault without
-            // it does, which leaves the automatic connector dormant.
+            // only scoped reads, so it answers both the way a vault without
+            // them does, which leaves both features dormant.
             json!({"error": {"code": "unknown_method", "message": "this test fixture serves only credential.get_scoped"}})
         } else {
             assert_eq!(
