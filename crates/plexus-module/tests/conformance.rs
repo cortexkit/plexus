@@ -1191,6 +1191,11 @@ async fn start_live_daemon_with(
                         "PLEXUS_CATALOG_DIR": catalog,
                         "PLEXUS_CKCRED_MODULE_ID": "test-vault"
                     },
+                    // Wire debug lines log each route bind and each tool frame
+                    // plexus starts to handle. A failing test dumps the fleet
+                    // log, so a request that times out shows whether it reached
+                    // plexus's handler or stalled before it.
+                    "log": {"tags": {"wire": "debug"}},
                     "reserved": true
                 },
                 "entorhinal": {
@@ -1639,6 +1644,8 @@ async fn send_tool_request(
     name: &str,
     arguments: Value,
 ) -> Frame {
+    // Named in the deadline panic so a timeout says which step went unanswered.
+    let op = arguments["op"].as_str().unwrap_or_default().to_string();
     let frame = Frame::build_with_version(
         PROTOCOL_VERSION,
         FrameType::Request,
@@ -1655,7 +1662,11 @@ async fn send_tool_request(
         .expect("write tool request");
     timeout(Duration::from_secs(5), read_frame(stream))
         .await
-        .expect("tool response deadline")
+        .unwrap_or_else(|_| {
+            panic!(
+                "tool response deadline: no answer within 5s to {name} op {op} (correlation {correlation}, route channel {channel} epoch {epoch})"
+            )
+        })
         .expect("read tool response")
         .expect("daemon connection remains open")
 }
