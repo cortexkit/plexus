@@ -1,5 +1,4 @@
-//! Compatibility probe for the published daemon, without enabling federated
-//! callers in the shipped Plexus manifest or admission path.
+//! Compatibility probe for the published daemon using test-only module peers.
 
 #[path = "support/daemon_client.rs"]
 mod daemon_client;
@@ -59,13 +58,7 @@ async fn register(
     nonce: &str,
 ) -> TcpStream {
     let mut stream = daemon_client::connect_client(connection).await;
-    let mut manifest = plexus_module::manifest::build(module_id);
-    manifest
-        .capabilities
-        .as_mut()
-        .unwrap()
-        .provides
-        .push("scope-federated/v1".into());
+    let manifest = plexus_module::manifest::build(module_id);
     let hello = json!({
         "manifest": manifest,
         "protocol_ver": PROTOCOL_VERSION,

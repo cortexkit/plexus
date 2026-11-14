@@ -7,9 +7,8 @@ use subc_protocol::{
     Principal,
 };
 
-/// Admission stays dormant until federated consent checks and the restricted
-/// connection/catalog metadata replies are implemented.
-pub const FEDERATED_CALLERS_ENABLED: bool = false;
+/// Federated admission ships together with the scope-federated/v1 declaration.
+pub const FEDERATED_CALLERS_ENABLED: bool = true;
 
 /// The module runtime owns one switch; only Rust test code may override it.
 pub(crate) struct Admission {

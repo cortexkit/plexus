@@ -462,9 +462,9 @@ async fn fully_stamped_callosum_is_refused_with_hook_off_even_after_declaration(
 }
 
 #[test]
-fn dormant_manifest_does_not_declare_federated_scopes() {
+fn manifest_declares_federated_scopes_together_with_admission() {
     let manifest = manifest::build(DEFAULT_MODULE_ID);
-    assert!(!manifest
+    assert!(manifest
         .capabilities
         .unwrap()
         .provides

@@ -45,6 +45,588 @@ use tokio::time::{sleep, timeout};
 
 const MODULE_ID: &str = "plexus";
 
+async fn federated_control(stream: &mut TcpStream, correlation: u64, body: Value) -> Value {
+    let frame = Frame::build(
+        FrameType::Request,
+        plexus_module::wire::control_flags(),
+        0,
+        0,
+        correlation,
+        serde_json::to_vec(&body).unwrap(),
+    )
+    .unwrap();
+    write_frame(stream, &frame).await.unwrap();
+    let response = timeout(Duration::from_secs(10), read_frame(stream))
+        .await
+        .expect("federated control deadline")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.header.corr, correlation);
+    assert_eq!(
+        response.header.ty,
+        FrameType::Response,
+        "{:?}",
+        response.body
+    );
+    serde_json::from_slice(&response.body).unwrap()
+}
+
+async fn register_federated_fixture(
+    connection: &subc_transport::ConnectionInfo,
+    directory: &Path,
+    id: &str,
+) -> (TcpStream, String) {
+    use subc_protocol::manifest::{ManagementOperation, ManagementOperationKind};
+    let nonce = timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(nonce) = fs::read_to_string(directory.join(format!("{id}.nonce"))) {
+                if !nonce.is_empty() {
+                    break nonce;
+                }
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("supervised stand-in nonce");
+    let mut module = manifest::build(id);
+    module
+        .provides
+        .retain(|role| matches!(role, ProviderRole::ManagementSurface { .. }));
+    for role in &mut module.provides {
+        if let ProviderRole::ManagementSurface { operations, .. } = role {
+            *operations = ["consent.request", "consent.get", "consent.await"]
+                .into_iter()
+                .map(|name| ManagementOperation {
+                    name: name.into(),
+                    kind: if name == "consent.request" {
+                        ManagementOperationKind::Mutate
+                    } else {
+                        ManagementOperationKind::Query
+                    },
+                    description: None,
+                })
+                .collect();
+        }
+    }
+    let mut stream = connect_client(connection).await;
+    let frame = Frame::build(
+        FrameType::Hello,
+        plexus_module::wire::control_flags(),
+        0,
+        0,
+        1,
+        serde_json::to_vec(&json!({
+            "manifest":module,"protocol_ver":PROTOCOL_VERSION,
+            "control_ops":["route.bind"],"launch_nonce":nonce
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    write_frame(&mut stream, &frame).await.unwrap();
+    let ack = timeout(Duration::from_secs(10), read_frame(&mut stream))
+        .await
+        .expect("stand-in hello deadline")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ack.header.ty, FrameType::HelloAck, "{:?}", ack.body);
+    (stream, nonce)
+}
+
+#[derive(Default)]
+struct FederatedRequester {
+    cards: Vec<Value>,
+    binds: std::collections::HashMap<(u16, u32), Value>,
+    choice: String,
+    awaits: usize,
+}
+
+/// A requester peer, not a consent bypass: every call arrives over a real
+/// carried route and must present Plexus's principal and the original claim.
+struct CingulateStandIn {
+    task: JoinHandle<()>,
+    state: Arc<std::sync::Mutex<FederatedRequester>>,
+}
+
+impl CingulateStandIn {
+    fn spawn(mut stream: TcpStream) -> Self {
+        let state = Arc::new(std::sync::Mutex::new(FederatedRequester::default()));
+        let shared = state.clone();
+        let task = tokio::spawn(async move {
+            while let Some(frame) = timeout(Duration::from_secs(120), read_frame(&mut stream))
+                .await
+                .expect("requester fixture lifetime")
+                .unwrap()
+            {
+                if frame.header.ty != FrameType::Request {
+                    continue;
+                }
+                let request: Value = serde_json::from_slice(&frame.body).unwrap();
+                let body = {
+                    let mut state = shared.lock().unwrap();
+                    if frame.header.channel == 0 {
+                        assert_eq!(request["op"], "route.bind");
+                        assert_eq!(
+                            request["principal"],
+                            json!({"kind":"reserved","module_id":"plexus"})
+                        );
+                        assert_eq!(request["scope"]["kind"], "federated");
+                        assert_eq!(
+                            request["scope"]["owner"],
+                            json!({"kind":"reserved","module_id":"callosum"})
+                        );
+                        assert_eq!(request["scope"]["parent_state"], "linked");
+                        let route = (
+                            request["route_channel"].as_u64().unwrap() as u16,
+                            request["epoch"].as_u64().unwrap() as u32,
+                        );
+                        state.binds.insert(route, request);
+                        json!({"op":"route.bind"})
+                    } else {
+                        let bind = state
+                            .binds
+                            .get(&(frame.header.channel, frame.header.epoch))
+                            .expect("requester call has a stamped bind")
+                            .clone();
+                        let params = &request["params"];
+                        let result = match request["method"].as_str().unwrap() {
+                            "consent.request" => {
+                                assert_eq!(params["kind"], "consent");
+                                let mut card = params.clone();
+                                card["elicitation_id"] =
+                                    json!(format!("el_conformance_{}", state.cards.len()));
+                                card["state"] = json!("pending");
+                                // Keep the verified subject beside the body, never derive it from params.
+                                card["test_stamp"] = bind["scope"].clone();
+                                let result = json!({"elicitation_id":card["elicitation_id"]});
+                                state.cards.push(card);
+                                result
+                            }
+                            method @ ("consent.get" | "consent.await") => {
+                                let choice = state.choice.clone();
+                                if method == "consent.await" {
+                                    state.awaits += 1;
+                                }
+                                let card = state
+                                    .cards
+                                    .iter_mut()
+                                    .find(|card| card["elicitation_id"] == params["elicitation_id"])
+                                    .expect("only the raising subject can collect a known card");
+                                assert_eq!(card["test_stamp"], bind["scope"]);
+                                if method == "consent.await" {
+                                    assert!(
+                                        card["options"]
+                                            .as_array()
+                                            .unwrap()
+                                            .iter()
+                                            .any(|option| option["id"] == choice),
+                                        "choice must have been offered"
+                                    );
+                                    card["state"] = json!("answered");
+                                    card["answered_choice_id"] = json!(choice);
+                                }
+                                let mut result = card.clone();
+                                result.as_object_mut().unwrap().remove("test_stamp");
+                                result
+                            }
+                            method => panic!("unexpected requester operation: {method}"),
+                        };
+                        json!({"result":result})
+                    }
+                };
+                let response = Frame::build(
+                    FrameType::Response,
+                    frame.header.flags,
+                    frame.header.channel,
+                    frame.header.epoch,
+                    frame.header.corr,
+                    serde_json::to_vec(&body).unwrap(),
+                )
+                .unwrap();
+                write_frame(&mut stream, &response).await.unwrap();
+            }
+        });
+        Self { task, state }
+    }
+
+    fn choose(&self, choice: &str) {
+        self.state.lock().unwrap().choice = choice.into();
+    }
+
+    fn card_count(&self) -> usize {
+        assert!(!self.task.is_finished(), "Cingulate stand-in stopped");
+        self.state.lock().unwrap().cards.len()
+    }
+}
+
+impl Drop for CingulateStandIn {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn open_federated_route(
+    connection: &subc_transport::ConnectionInfo,
+    nonce: &str,
+    scope_ref: &str,
+) -> (TcpStream, (u16, u32)) {
+    let mut stream = connect_client(connection).await;
+    let opened = federated_control(&mut stream, 1, json!({
+        "op":"route.open","target":{"kind":"tool_provider","module_id":MODULE_ID},
+        "identity":{"harness":"federated-conformance","session":"remote"},
+        "consumer_identity":{"module_id":"callosum","launch_nonce":nonce},
+        "consumer_capabilities":["tool-result/v1","held-reply/v1"],
+        "scope":{"owner":{"kind":"reserved","module_id":"callosum"},"ref":scope_ref,"scope_epoch":1}
+    })).await;
+    let ClientControlResponse::RouteOpen {
+        route_channel,
+        route_epoch,
+        ..
+    } = serde_json::from_value(opened).unwrap()
+    else {
+        panic!("federated route.open response")
+    };
+    let route = (route_channel, route_epoch);
+    (stream, route)
+}
+
+fn federated_body(frame: Frame) -> Value {
+    assert_eq!(frame.header.ty, FrameType::Response, "{:?}", frame.body);
+    serde_json::from_slice(&frame.body).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_daemon_federated_consent_denial_worker_run_and_unpair() {
+    let vendor = StubRestServer::start(
+        vec![StubRestRoute::new(
+            "GET",
+            "/v1/items/{item_id}",
+            200,
+            json!({"served":true}),
+        )],
+        None,
+    )
+    .unwrap();
+    let catalog = Scratch::directory("federated-conformance-catalog");
+    fs::write(catalog.join("federated_rest.jsonc"), serde_json::to_vec(&json!({
+        "schema_version":1,"key":"federated_rest","name":"Federated REST",
+        "description":"Conformance vendor","reuse_path":"openapi_shim",
+        "reuse_rationale":"Tests real dispatch under federated consent","tier":"S1",
+        "transport":{"kind":"rest_api","url":vendor.endpoint()},"auth":{"mode":"api_key"},
+        "credential_bindings":[{"ref_role":"api_key","placement":"header","key":"Authorization","prefix":"Bearer ","required":true}],
+        "resource_filters":{"required":[],"optional":[],"write_enabling":[]},
+        "actions_baseline":[{"name":"get_item","risk":"read","http":{
+            "method":"GET","path":"/v1/items/{item_id}","args_schema":{
+                "type":"object","properties":{"item_id":{"type":"string"}},"required":["item_id"]
+            }
+        }}],
+        "defaults":{"ask_first_risk":["write"],"rate_limit":{"calls_per_min":30}},"availability":"ga"
+    })).unwrap()).unwrap();
+    let (mut daemon, connection) = start_live_daemon_with_federation(
+        catalog.path().to_path_buf(),
+        NonceHandoff::DescriptorAndEnvironment,
+        true,
+    )
+    .await;
+    let (mut owner, nonce) =
+        register_federated_fixture(&connection, &daemon.directory, "callosum").await;
+    let (cingulate, _) =
+        register_federated_fixture(&connection, &daemon.directory, "cingulate").await;
+    let requester = CingulateStandIn::spawn(cingulate);
+    let mut direct = connect_client(&connection).await;
+    let listed = wait_for_module_catalog(&mut direct).await;
+    let ClientControlResponse::CatalogList { modules, .. } = listed else {
+        panic!("catalog")
+    };
+    assert!(modules
+        .iter()
+        .find(|module| module.module_id == MODULE_ID)
+        .unwrap()
+        .capabilities
+        .as_ref()
+        .unwrap()
+        .provides
+        .iter()
+        .any(|cap| cap == "scope-federated/v1"));
+    let local = open_live_route(&mut direct).await;
+    wait_for_connector_home_held(&mut direct, local).await;
+    let admin = open_management_route(&mut direct).await;
+    let issued = federated_body(send_management_request(&mut direct, admin, 40,
+        "plexus.admin.issue_ticket", json!({"app_key":"federated_rest",
+            "credential_id":"test:federated-rest","risk_ceiling":"read","action_selectors":["get_item"]})).await);
+    assert!(issued["error"].is_null(), "{issued}");
+    let connection_id = issued["result"]["connection_id"].as_str().unwrap();
+    let connected = federated_body(
+        send_tool_request(
+            &mut direct,
+            local,
+            41,
+            "connections",
+            json!({"op":"connect","ticket_id":issued["result"]["ticket_id"]}),
+        )
+        .await,
+    );
+    assert!(connected["error"].is_null(), "{connected}");
+    // No local invoke grant is created, including for Callosum itself.
+    let grants = federated_body(
+        send_management_request(
+            &mut direct,
+            admin,
+            42,
+            "plexus.admin.list_grants",
+            json!({}),
+        )
+        .await,
+    );
+    assert_eq!(grants["result"]["grants"], json!([]), "{grants}");
+
+    let base = format!("fed-base:{}:conformance-pair", "a".repeat(32));
+    let claims = [
+        ("fed-claim:agent", json!({"kind":"agent","agent_id":"Sage"})),
+        (
+            "fed-claim:denied",
+            json!({"kind":"agent","agent_id":"Refused"}),
+        ),
+        ("fed-claim:run", json!({"kind":"run","agent_id":"Sage"})),
+        (
+            "fed-claim:worker",
+            json!({"kind":"worker","owner_module_id":"prefrontal-core","worker_ref":"b".repeat(64),"on_behalf_of":"Sage"}),
+        ),
+    ];
+    let attributes = json!({"peer_class":"computer","peer_fingerprint":"a".repeat(32),
+        "pairing_id":"conformance-pair","peer_name":"Juniper"});
+    let carriers =
+        json!([{"principal":{"kind":"reserved","module_id":"plexus"},"targets":["cingulate"]}]);
+    let mut scopes = vec![json!({"ref":base,"scope_epoch":1,"kind":"federated",
+        "attributes":{"federated":attributes},"carriers":carriers})];
+    for (scope_ref, claim) in &claims {
+        let mut claimed = attributes.clone();
+        claimed["remote_claim"] = claim.clone();
+        scopes.push(json!({"ref":scope_ref,"scope_epoch":1,"kind":"federated",
+            "parent":{"owner":{"kind":"reserved","module_id":"callosum"},"ref":base,"scope_epoch":1},
+            "attributes":{"federated":claimed},"carriers":carriers}));
+    }
+    let synced = federated_control(
+        &mut owner,
+        2,
+        json!({"op":"scope.sync","generation":1,"scopes":[]}),
+    )
+    .await;
+    assert_eq!(synced["generation"], 1);
+    let applied = federated_control(
+        &mut owner,
+        3,
+        json!({"op":"scope.apply","generation":2,"end":[],"upsert":scopes}),
+    )
+    .await;
+    assert_eq!(applied["results"].as_array().unwrap().len(), 5, "{applied}");
+    for result in applied["results"].as_array().unwrap() {
+        assert_eq!(result["outcome"], "created", "{applied}");
+    }
+    let (mut agent, route) = open_federated_route(&connection, &nonce, claims[0].0).await;
+    let metadata = federated_body(
+        send_tool_request(&mut agent, route, 10, "connections", json!({"op":"list"})).await,
+    );
+    assert_eq!(
+        metadata["result"]["connections"][0]["connection_id"], connection_id,
+        "{metadata}"
+    );
+    let invoke =
+        json!({"op":"call","connection":connection_id,"action":"get_item","args":{"item_id":"42"}});
+    requester.choose("allow_always");
+    let allowed =
+        federated_body(send_tool_request(&mut agent, route, 11, "invoke", invoke.clone()).await);
+    assert_eq!(allowed["result"]["response"]["served"], true, "{allowed}");
+    assert_eq!(allowed["result"]["transmission"], "completed", "{allowed}");
+    assert_eq!(requester.card_count(), 1);
+    {
+        let state = requester.state.lock().unwrap();
+        let card = &state.cards[0];
+        assert_eq!(card["prompt"], "read from Federated REST (get_item)");
+        assert_eq!(card["test_stamp"]["ref"], claims[0].0);
+        assert_eq!(
+            card["test_stamp"]["attributes"]["federated"]["remote_claim"],
+            claims[0].1
+        );
+        assert_eq!(
+            card["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|option| option["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["allow_once", "allow_always", "deny_once", "deny_always"]
+        );
+        assert_eq!(state.awaits, 1, "first call held for its requester answer");
+    }
+    let again =
+        federated_body(send_tool_request(&mut agent, route, 12, "invoke", invoke.clone()).await);
+    assert_eq!(again["result"]["response"]["served"], true, "{again}");
+    assert_eq!(
+        requester.card_count(),
+        1,
+        "standing allow files no new card"
+    );
+
+    let (mut denied, denied_route) = open_federated_route(&connection, &nonce, claims[1].0).await;
+    requester.choose("deny_always");
+    for correlation in [20, 21] {
+        let body = federated_body(
+            send_tool_request(
+                &mut denied,
+                denied_route,
+                correlation,
+                "invoke",
+                invoke.clone(),
+            )
+            .await,
+        );
+        assert_eq!(body["error"]["code"], "consent_denied", "{body}");
+        assert_eq!(body["error"]["transmission"], "not_sent");
+        assert_eq!(
+            requester.card_count(),
+            2,
+            "standing denial files no new card"
+        );
+    }
+    let rows = federated_body(
+        send_management_request(&mut direct, admin, 43, "permissions.list", json!({})).await,
+    );
+    let rows = rows["result"]["grants"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row["holder"]["kind"] == "federated"));
+    assert_eq!(rows.iter().filter(|row| row["effect"] == "deny").count(), 1);
+    let row_ids: Vec<_> = rows
+        .iter()
+        .map(|row| row["id"].as_str().unwrap().to_string())
+        .collect();
+
+    let (mut run, run_route) = open_federated_route(&connection, &nonce, claims[2].0).await;
+    let body =
+        federated_body(send_tool_request(&mut run, run_route, 30, "invoke", invoke.clone()).await);
+    assert_eq!(
+        body["error"]["code"], "consent_unavailable",
+        "run must not inherit the agent's row: {body}"
+    );
+    assert_eq!(body["error"]["transmission"], "not_sent");
+    assert_eq!(requester.card_count(), 2, "runs cannot file cards");
+
+    let (mut worker, worker_route) = open_federated_route(&connection, &nonce, claims[3].0).await;
+    requester.choose("allow_once");
+    let body = federated_body(
+        send_tool_request(&mut worker, worker_route, 40, "invoke", invoke.clone()).await,
+    );
+    assert_eq!(body["result"]["response"]["served"], true, "{body}");
+    assert_eq!(requester.card_count(), 3);
+    requester.choose("deny_once");
+    let body = federated_body(
+        send_tool_request(&mut worker, worker_route, 41, "invoke", invoke.clone()).await,
+    );
+    assert_eq!(
+        body["error"]["code"], "consent_denied",
+        "worker answer must not be reused: {body}"
+    );
+    assert_eq!(requester.card_count(), 4);
+    {
+        let state = requester.state.lock().unwrap();
+        for card in &state.cards[2..] {
+            assert_eq!(
+                card["test_stamp"]["attributes"]["federated"]["remote_claim"],
+                claims[3].1
+            );
+            assert_eq!(
+                card["options"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|option| option["id"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["allow_once", "deny_once"]
+            );
+        }
+    }
+    let after_worker = federated_body(
+        send_management_request(&mut direct, admin, 44, "permissions.list", json!({})).await,
+    );
+    assert_eq!(
+        after_worker["result"]["grants"],
+        json!(rows),
+        "worker minted no row"
+    );
+    for (i, name) in ["github", "github_read", "github_react"].iter().enumerate() {
+        let body = federated_body(
+            send_tool_request(&mut agent, route, 50 + i as u64, name, json!({})).await,
+        );
+        assert_eq!(
+            body["error"]["code"], "caller_not_allowed",
+            "{name}: {body}"
+        );
+        assert_eq!(body["error"]["transmission"], "not_sent");
+    }
+    let bulk = federated_body(
+        send_management_request(&mut agent, route, 53, "github.read.bulk", json!({})).await,
+    );
+    assert_eq!(bulk["error"]["code"], "caller_not_allowed", "{bulk}");
+    assert_eq!(bulk["error"]["transmission"], "not_sent");
+    assert_eq!(requester.card_count(), 4);
+
+    let ended: Vec<_> = std::iter::once(base.as_str())
+        .chain(claims.iter().map(|(scope_ref, _)| *scope_ref))
+        .map(|scope_ref| json!({"ref":scope_ref,"scope_epoch":1}))
+        .collect();
+    let ended = federated_control(
+        &mut owner,
+        4,
+        json!({"op":"scope.apply","generation":3,"end":ended,"upsert":[]}),
+    )
+    .await;
+    assert_eq!(ended["generation"], 3, "{ended}");
+    let description = federated_control(
+        &mut owner,
+        5,
+        json!({"op":"scope.describe",
+        "owner":{"kind":"reserved","module_id":"callosum"},"ref":base}),
+    )
+    .await;
+    assert_eq!(description["status"], "ended", "{description}");
+    assert_eq!(description["owner_synced"], true);
+    let unpaired = federated_body(
+        send_management_request(&mut direct, admin, 45, "permissions.list", json!({})).await,
+    );
+    assert_eq!(unpaired["result"]["grants"], json!([]), "{unpaired}");
+    let mut pending = vec![daemon.directory.path().to_path_buf()];
+    let mut journal = None;
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            } else if entry.file_name() == "federated-deletions.jsonl" {
+                assert!(
+                    journal.is_none(),
+                    "one federated journal in the isolated daemon tree"
+                );
+                journal = Some(fs::read_to_string(entry.path()).unwrap());
+            }
+        }
+    }
+    let entries: Vec<Value> = journal
+        .expect("federated deletion journal")
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(entries.len(), 2);
+    for id in row_ids {
+        assert!(
+            entries.iter().any(|entry| entry["row_id"] == id),
+            "unpair journals {id}: {entries:?}"
+        );
+    }
+    assert_eq!(requester.card_count(), 4);
+    drop(requester);
+    daemon.stop();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_daemon_proves_hello_empty_connections_health_and_deny() {
     let (mut daemon, connection) = start_live_daemon().await;
@@ -1122,6 +1704,14 @@ async fn start_live_daemon_with(
     catalog: PathBuf,
     nonce_handoff: NonceHandoff,
 ) -> (LiveDaemonGuard, subc_transport::ConnectionInfo) {
+    start_live_daemon_with_federation(catalog, nonce_handoff, false).await
+}
+
+async fn start_live_daemon_with_federation(
+    catalog: PathBuf,
+    nonce_handoff: NonceHandoff,
+    federation: bool,
+) -> (LiveDaemonGuard, subc_transport::ConnectionInfo) {
     let serialized = LIVE_DAEMON.lock().await;
     // A wall-clock nonce alone is not unique enough. These tests run in
     // parallel, and two that start within the same clock tick derive the SAME
@@ -1172,47 +1762,58 @@ async fn start_live_daemon_with(
     let plexus_program = PathBuf::from("/bin/sh");
     let plexus_args = json!([launcher]);
     let daemon_config_path = directory.join("subc.jsonc");
+    let mut config = json!({
+        "version": 1,
+        "storage": {"backend": "sqlite", "data_home": home},
+        "modules": {
+            MODULE_ID: {
+                "program": plexus_program,
+                "args": plexus_args,
+                // XDG_DATA_HOME as well as HOME: the module resolves its
+                // store from the data home, and an inherited
+                // XDG_DATA_HOME would otherwise point it at the
+                // operator's live store.
+                "env": {
+                    "HOME": home,
+                    "XDG_DATA_HOME": home.join(".local/share"),
+                    "PLEXUS_CATALOG_DIR": catalog,
+                    "PLEXUS_CKCRED_MODULE_ID": "test-vault"
+                },
+                // Wire debug lines log each route bind and each tool frame
+                // plexus starts to handle. A failing test dumps the fleet
+                // log, so a request that times out shows whether it reached
+                // plexus's handler or stalled before it.
+                "log": {"tags": {"wire": "debug"}},
+                "reserved": true
+            },
+            "entorhinal": {
+                "program": "/bin/sh",
+                "args": [entorhinal_launcher],
+                "env": {"TEST_VAULT_CONNECTION": connection_file_path, "TEST_ROLE_SERVICE": "1"},
+                "reserved": true
+            },
+            "test-vault": {
+                "program": "/bin/sh",
+                "args": [vault_launcher],
+                "env": {"TEST_VAULT_CONNECTION": connection_file_path},
+                "reserved": true
+            }
+        }
+    });
+    if federation {
+        for id in ["callosum", "cingulate"] {
+            // The test registers these stand-ins with the supervisor's nonce,
+            // so their reserved principals are attested by the real daemon.
+            config["modules"][id] = json!({
+                "program":"/bin/sh",
+                "args":["-c", "dd status=none <&3 > \"$1\"; exec sleep 120", "federated-fixture", directory.join(format!("{id}.nonce"))],
+                "reserved":true
+            });
+        }
+    }
     fs::write(
         &daemon_config_path,
-        serde_json::to_vec(&json!({
-            "version": 1,
-            "storage": {"backend": "sqlite", "data_home": home},
-            "modules": {
-                MODULE_ID: {
-                    "program": plexus_program,
-                    "args": plexus_args,
-                    // XDG_DATA_HOME as well as HOME: the module resolves its
-                    // store from the data home, and an inherited
-                    // XDG_DATA_HOME would otherwise point it at the
-                    // operator's live store.
-                    "env": {
-                        "HOME": home,
-                        "XDG_DATA_HOME": home.join(".local/share"),
-                        "PLEXUS_CATALOG_DIR": catalog,
-                        "PLEXUS_CKCRED_MODULE_ID": "test-vault"
-                    },
-                    // Wire debug lines log each route bind and each tool frame
-                    // plexus starts to handle. A failing test dumps the fleet
-                    // log, so a request that times out shows whether it reached
-                    // plexus's handler or stalled before it.
-                    "log": {"tags": {"wire": "debug"}},
-                    "reserved": true
-                },
-                "entorhinal": {
-                    "program": "/bin/sh",
-                    "args": [entorhinal_launcher],
-                    "env": {"TEST_VAULT_CONNECTION": connection_file_path, "TEST_ROLE_SERVICE": "1"},
-                    "reserved": true
-                },
-                "test-vault": {
-                    "program": "/bin/sh",
-                    "args": [vault_launcher],
-                    "env": {"TEST_VAULT_CONNECTION": connection_file_path},
-                    "reserved": true
-                }
-            }
-        }))
-        .expect("serialize daemon config"),
+        serde_json::to_vec(&config).expect("serialize daemon config"),
     )
     .expect("write daemon config");
 
