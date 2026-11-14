@@ -1389,6 +1389,9 @@ pub mod github_manifest_binding;
 #[path = "store/permissions.rs"]
 pub mod permissions_store;
 
+#[path = "store/federated.rs"]
+pub(crate) mod federated_store;
+
 #[cfg(test)]
 #[path = "store/connection_delete_tests.rs"]
 mod connection_delete_tests;
@@ -3195,6 +3198,9 @@ impl PlexusStore {
 
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, StoreError> {
         let grant_journal = grant_journal_path(descriptor);
+        let federated_journal = grant_journal
+            .as_ref()
+            .map(|path| path.with_file_name(crate::federated_journal::NAME));
         // Parse before opening SQLite: malformed restore evidence must cause no writes.
         let revocations = grant_journal
             .as_deref()
@@ -3202,8 +3208,17 @@ impl PlexusStore {
             .transpose()
             .map_err(StoreError::Backend)?
             .unwrap_or_default();
+        let deletions = federated_journal
+            .as_deref()
+            .map(|path| crate::federated_journal::scan(path, |_| Ok(())))
+            .transpose()
+            .map_err(StoreError::Backend)?
+            .unwrap_or_default();
         let store = open_sqlite(descriptor)?;
         if let Some(path) = &grant_journal {
+            crate::grant_journal::ensure(path).map_err(|e| StoreError::Backend(e.to_string()))?;
+        }
+        if let Some(path) = &federated_journal {
             crate::grant_journal::ensure(path).map_err(|e| StoreError::Backend(e.to_string()))?;
         }
         let outcome = store.migrate("plexus", MIGRATIONS)?;
@@ -3234,6 +3249,20 @@ impl PlexusStore {
                     grant_journal.as_deref().expect("journal was scanned"),
                     |entry| {
                         crate::grant_journal::apply(conn, &entry)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    },
+                )
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+                Ok(())
+            })?;
+        }
+        if deletions != 0 {
+            store.with_conn_fenced(|conn| {
+                crate::federated_journal::scan(
+                    federated_journal.as_deref().expect("journal was scanned"),
+                    |entry| {
+                        crate::federated_journal::apply(conn, &entry)
                             .map(|_| ())
                             .map_err(|e| e.to_string())
                     },

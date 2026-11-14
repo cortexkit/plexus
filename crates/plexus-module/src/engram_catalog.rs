@@ -33,6 +33,14 @@ const CATALOG_BYTES: &[u8] = br#"{
       "capture": "after_databases"
     },
     {
+      "entry_id": "plexus/federated-deletions",
+      "class": "portable",
+      "mechanism": "filetree",
+      "path": "federated-deletions.jsonl",
+      "writer_interaction": "none",
+      "capture": "after_databases"
+    },
+    {
       "entry_id": "plexus/logs",
       "class": "excluded",
       "reason": "Diagnostics can name repositories and queries.",
@@ -178,6 +186,7 @@ mod tests {
                 "plexus/store",
                 "plexus/catalog",
                 "plexus/grant-revocations",
+                "plexus/federated-deletions",
                 "plexus/logs",
                 "plexus/store-leases",
             ]
@@ -211,6 +220,22 @@ mod tests {
         // lands mid-backup is in the journal whenever it is in the store. A
         // store restored with an older journal could otherwise bring the revoked grant back.
         assert_eq!(revocations["capture"], "after_databases");
+
+        let deletions = entries
+            .iter()
+            .find(|entry| entry["entry_id"] == "plexus/federated-deletions")
+            .unwrap();
+        assert_eq!(
+            deletions,
+            &serde_json::json!({
+                "entry_id": "plexus/federated-deletions",
+                "class": "portable",
+                "mechanism": "filetree",
+                "path": "federated-deletions.jsonl",
+                "writer_interaction": "none",
+                "capture": "after_databases"
+            })
+        );
 
         let leases = entries
             .iter()
