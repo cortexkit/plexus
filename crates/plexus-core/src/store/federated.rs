@@ -6,6 +6,11 @@ use crate::federated_journal::{self, Deletion};
 #[path = "federated_cards.rs"]
 pub(crate) mod cards;
 
+// Standing commits are wired into requester collection by the authorization path.
+#[allow(dead_code)]
+#[path = "federated_commit.rs"]
+pub(crate) mod commit;
+
 /// The exact unique key shared by a standing row and its pending card records.
 #[derive(Debug, Clone)]
 pub(crate) struct FederatedRowKey {
