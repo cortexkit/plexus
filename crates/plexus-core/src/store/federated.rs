@@ -47,6 +47,42 @@ impl FederatedRowKey {
 }
 
 impl PlexusStore {
+    /// The caller holds `with_conn_fenced` for the entire connection deletion.
+    /// Include pending-card keys without a standing row so an answer restored
+    /// from an older database cannot recreate authority for a deleted connection.
+    /// Terminal records are removed too, but only pending records add their
+    /// Cingulate card refs to the federated deletion journal and the insert-only
+    /// `federated_processed_cards` table, preventing reuse of their answers.
+    pub(super) fn delete_federated_connection_on_conn(
+        &self,
+        conn: &Connection,
+        principal: &str,
+        connection_id: &str,
+        deleted_at_ms: i64,
+    ) -> rusqlite::Result<()> {
+        let keys: Vec<FederatedRowKey> = conn
+            .prepare(
+                "SELECT peer_fingerprint,pairing_id,peer_class,selector,claim_kind,
+                    canonical_claim_identity,owner_principal,subject,scope
+                 FROM federated_rows WHERE owner_principal=?1 AND subject=?2
+                 UNION
+                 SELECT peer_fingerprint,pairing_id,peer_class,selector,claim_kind,
+                    canonical_claim_identity,owner_principal,subject,scope
+                 FROM federated_card_records
+                 WHERE owner_principal=?1 AND subject=?2 AND state='pending'",
+            )?
+            .query_map((principal, connection_id), FederatedRowKey::from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        for key in keys {
+            self.delete_federated_key_on_conn(conn, &key, None, deleted_at_ms)?;
+        }
+        conn.execute(
+            "DELETE FROM federated_card_records WHERE owner_principal=?1 AND subject=?2",
+            (principal, connection_id),
+        )?;
+        Ok(())
+    }
+
     /// Durably delete only this stored row without describing its pairing's
     /// base scope. Revocation must work even when that scope cannot be read.
     /// A missing id is a no-op; ids are never resolved through local grants.

@@ -3832,6 +3832,7 @@ impl PlexusStore {
                 return Ok(DeleteConnectionOutcome::HasLiveGrants { count: live_grants });
             }
             if apply {
+                self.delete_federated_connection_on_conn(conn, principal, connection_id, now)?;
                 event_outbox::count_dropped(
                     conn,
                     "principal = ?1 AND connection_id = ?2",

@@ -1,6 +1,9 @@
 use super::*;
 use crate::test_scratch::Scratch;
 
+#[path = "federated_connection_delete_tests.rs"]
+mod connection_tests;
+
 fn fixture(label: &str) -> (Scratch, StorageDescriptor) {
     let scratch = Scratch::directory(label);
     let descriptor = StorageDescriptor {
