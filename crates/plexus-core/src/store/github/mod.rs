@@ -1708,7 +1708,7 @@ impl PlexusStore {
     /// Whether this connection was created by a GitHub handle import, so its
     /// credential comes from the handle credential provider rather than a
     /// stored credential binding.
-    pub(crate) fn is_github_handle_connection(
+    pub fn is_github_handle_connection(
         &self,
         principal: &str,
         connection_id: &str,

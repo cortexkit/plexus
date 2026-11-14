@@ -5,6 +5,129 @@ fn invoke_body(connection: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bot_metadata_is_hidden_only_from_federated_callers() {
+    let (mut state, store, transport, scratch) =
+        super::super::github_read_frame_tests::imported_runtime();
+    Arc::get_mut(&mut state)
+        .unwrap()
+        .runtime
+        .set_federated_callers_enabled_for_test(true);
+    for connection in ["ordinary-looking", "github-handle-not-a-bot"] {
+        store
+            .insert_connection("direct", connection, "github_rest", "active", &json!({}))
+            .unwrap();
+    }
+    let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+    db.execute_batch(
+        "UPDATE github_app_handle SET connection_id='ordinary-looking' WHERE app_handle_id='app-x'",
+    )
+    .unwrap();
+    store
+        .upsert_catalog_action(&plexus_core::storage::CatalogActionInput {
+            principal: "direct".into(),
+            connection_id: "ordinary-looking".into(),
+            name: "meta.read".into(),
+            title: Some("Private bot action".into()),
+            schema: json!({"type":"object","properties":{}}),
+            schema_hash: "schema".into(),
+            risk: "read".into(),
+            severity: "S1".into(),
+            ask_first: false,
+            status: "active".into(),
+            quarantine_reason: None,
+            reconciliation: None,
+        })
+        .unwrap();
+    let local = Arc::new(RouteBindings::new());
+    local
+        .insert_mode(17, 3, Principal::Direct, None, CallMode::Classic)
+        .unwrap();
+    for (name, arguments, result) in [
+        (
+            "connections",
+            json!({"op":"list"}),
+            json!({"connections":store.list_connections("direct").unwrap()}),
+        ),
+        (
+            "catalog",
+            json!({"op":"list","connection":"ordinary-looking"}),
+            json!({"actions":store.list_catalog_actions("direct", "ordinary-looking").unwrap()}),
+        ),
+        (
+            "catalog",
+            json!({"op":"inspect","connection":"ordinary-looking","action":"meta.read"}),
+            json!({"actions":store.list_catalog_actions("direct", "ordinary-looking").unwrap()}),
+        ),
+    ] {
+        let actual = call(&state, &local, json!({"name":name,"arguments":arguments})).await;
+        let expected = with_call_tool_result_for_route(
+            Some(name),
+            json!({"result":result}),
+            None,
+            false,
+            false,
+        );
+        assert_eq!(actual.body, serde_json::to_vec(&expected).unwrap());
+    }
+    for negotiated in [false, true] {
+        let routes = metadata_routes(&state, negotiated).await;
+        let listed = reply(
+            call(
+                &state,
+                &routes,
+                json!({"name":"connections","arguments":{"op":"list"}}),
+            )
+            .await,
+        );
+        let ids: Vec<_> = listed["result"]["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["connection_id"].as_str().unwrap())
+            .collect();
+        let mut catalog_pairs = Vec::new();
+        for arguments in [
+            json!({"op":"list"}),
+            json!({"op":"inspect","action":"meta.read"}),
+            json!({"op":"inspect"}),
+        ] {
+            let mut hidden_args = arguments.clone();
+            hidden_args["connection"] = json!("ordinary-looking");
+            let mut unknown_args = arguments;
+            unknown_args["connection"] = json!("never-existed");
+            let hidden = call(
+                &state,
+                &routes,
+                json!({"name":"catalog","arguments":hidden_args}),
+            )
+            .await;
+            let unknown = call(
+                &state,
+                &routes,
+                json!({"name":"catalog","arguments":unknown_args}),
+            )
+            .await;
+            catalog_pairs.push((hidden.body, unknown.body));
+        }
+        assert!(!ids.contains(&"ordinary-looking"), "{listed}");
+        assert!(ids.contains(&"github-handle-not-a-bot"), "{listed}");
+        assert_item_keys(
+            &listed,
+            "connections",
+            &["connection_id", "app_key", "status"],
+            2,
+        );
+        for (hidden, unknown) in catalog_pairs {
+            assert_eq!(
+                hidden, unknown,
+                "bot catalog metadata must match an unknown connection byte for byte"
+            );
+        }
+    }
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bot_handle_connection_is_local_only_even_without_a_handle_name_prefix() {
     let (mut state, store, transport, scratch) =
         super::super::github_read_frame_tests::imported_runtime();
@@ -55,7 +178,7 @@ async fn bot_handle_connection_is_local_only_even_without_a_handle_name_prefix()
         .as_array()
         .unwrap()
         .iter()
-        .any(|item| item["connection_id"] == "ordinary-looking"));
+        .all(|item| item["connection_id"] != "ordinary-looking"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

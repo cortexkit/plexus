@@ -3837,17 +3837,28 @@ fn facade_connections_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleEr
     Ok({
         match state.store().list_connections(principal_key) {
             Ok(connections) if call.federated_metadata() => {
-                let connections: Vec<_> = connections
-                    .into_iter()
-                    .map(|connection| {
-                        json!({
+                let mut visible = Vec::with_capacity(connections.len());
+                for connection in connections {
+                    match state
+                        .store()
+                        .is_github_handle_connection(principal_key, &connection.connection_id)
+                    {
+                        Ok(true) => continue,
+                        Ok(false) => visible.push(json!({
                             "connection_id": connection.connection_id,
                             "app_key": connection.app_key,
                             "status": connection.status,
-                        })
-                    })
-                    .collect();
-                json!({"result": {"connections": connections}})
+                        })),
+                        Err(error) => {
+                            return Ok(crate::wire::store_failure(
+                                "connections listed",
+                                "connections could not be listed",
+                                &error,
+                            ))
+                        }
+                    }
+                }
+                json!({"result": {"connections": visible}})
             }
             Ok(connections) => json!({"result": {"connections": connections}}),
             Err(error) => crate::wire::store_failure(
@@ -4173,10 +4184,33 @@ fn facade_catalog_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError>
                 json!({"error": {"code": "invalid_request", "message": "catalog list/inspect requires connection; use op=apps to discover connectable vendors"}}),
             );
         };
-        match state
-            .store()
-            .list_catalog_actions(principal_key, connection_id)
-        {
+        let hidden = if call.federated_metadata() {
+            match state
+                .store()
+                .is_github_handle_connection(principal_key, connection_id)
+            {
+                Ok(hidden) => hidden,
+                Err(error) => {
+                    return Ok(crate::wire::store_failure(
+                        "catalog read",
+                        "catalog could not be read",
+                        &error,
+                    ))
+                }
+            }
+        } else {
+            false
+        };
+        // A bot connection is undiscoverable to remote callers, including by
+        // direct catalog queries. Keep the unknown-id response and validation.
+        let actions = if hidden {
+            Ok(Vec::new())
+        } else {
+            state
+                .store()
+                .list_catalog_actions(principal_key, connection_id)
+        };
+        match actions {
             Ok(actions) => {
                 let actions = if op == Some("inspect") {
                     let Some(action) = arguments
@@ -4197,6 +4231,9 @@ fn facade_catalog_list(call: &FacadeArguments<'_>) -> Result<Value, ModuleError>
                     actions
                 };
                 if call.federated_metadata() {
+                    if hidden {
+                        return Ok(json!({"result": {"actions": []}}));
+                    }
                     return Ok(
                         match federated::project_actions(state.store(), connection_id, actions) {
                             Ok(actions) => json!({"result": {"actions": actions}}),
