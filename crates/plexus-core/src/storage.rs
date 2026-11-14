@@ -1294,6 +1294,12 @@ CREATE UNIQUE INDEX github_manifest_proposal_id ON github_manifest_binding(propo
     WHERE proposal_id IS NOT NULL;
 "#,
     },
+    // Federated authority is separate from local grants. Existing writers name
+    // their columns, leaving the new audit and reservation fields NULL.
+    Migration {
+        version: 61,
+        statements: include_str!("federated_schema.sql"),
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
@@ -1386,6 +1392,10 @@ pub mod permissions_store;
 #[cfg(test)]
 #[path = "store/connection_delete_tests.rs"]
 mod connection_delete_tests;
+
+#[cfg(test)]
+#[path = "store/federated_tests.rs"]
+mod federated_tests;
 
 /// A principal-scoped connection projection. Credential bindings are deliberately
 /// absent from this projection.
