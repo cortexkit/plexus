@@ -166,6 +166,7 @@ struct RouteBinding {
     /// one. It chooses a bot, charges its read budget and limits reads to its
     /// repositories; it grants no write and no authority to act as the agent.
     on_behalf_of_agent: Option<String>,
+    federated_caller: Option<plexus_core::federated::FederatedCaller>,
 }
 
 // Held approval calls live for up to 110 seconds and share this budget with
@@ -218,9 +219,10 @@ impl RouteBindings {
         scope: Option<CallScope>,
         mode: CallMode,
     ) -> Result<(), ModuleError> {
-        self.insert_bound((channel, epoch), principal, scope, mode, None, false)
+        self.insert_bound((channel, epoch), principal, scope, mode, None, false, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_bound(
         &self,
         (channel, epoch): (u16, u32),
@@ -229,6 +231,7 @@ impl RouteBindings {
         mode: CallMode,
         on_behalf_of_agent: Option<String>,
         reads_tool_result_v1: bool,
+        federated_caller: Option<plexus_core::federated::FederatedCaller>,
     ) -> Result<(), ModuleError> {
         let mut routes = self
             .inner
@@ -266,6 +269,7 @@ impl RouteBindings {
                 mode,
                 on_behalf_of_agent,
                 reads_tool_result_v1,
+                federated_caller,
             },
         );
         Ok(())
@@ -1515,7 +1519,7 @@ async fn handle_frame(
                     .and_then(|object| object.get("name"))
                     .and_then(Value::as_str)
                     .expect("served federated frames have a tool name");
-                if matches!(name, "invoke" | "web_search" | "code_search") {
+                if matches!(name, "web_search" | "code_search") {
                     // Consent-gated tools must not reach local authorization
                     // while their federated consent path is still absent.
                     let refusal = match tool_provider::mode_refusal(name, &binding.mode) {
@@ -1800,6 +1804,12 @@ async fn handle_control_request(
             let on_behalf_of_agent = scope
                 .as_ref()
                 .and_then(|stamp| stamp.attributes.on_behalf_of_agent.clone());
+            let federated_caller = scope
+                .as_ref()
+                .and_then(|stamp| stamp.attributes.federated.clone())
+                .map(plexus_core::federated::FederatedCaller::from_attributes)
+                .transpose()
+                .map_err(|error| ModuleError::Message(error.to_string()))?;
             let scope = scope.as_ref().map(CallScope::from_stamp);
             // One line per scoped bind is per-call routing detail, like the
             // unscoped ACCEPTED line above, so it logs at debug: core now opens
@@ -1825,6 +1835,7 @@ async fn handle_control_request(
                 cortexkit_role_tool_provider::consumer_reads_tool_result_v1(
                     consumer_capabilities.as_deref(),
                 ),
+                federated_caller,
             ) {
                 Ok(()) => {}
                 Err(ModuleError::RouteCapacity) => {
@@ -2986,6 +2997,16 @@ fn facade_tool_reply_with_budget(
         reply
     };
     let name = object.get("name").and_then(Value::as_str).unwrap_or("");
+    let mut reply = reply;
+    if name == manifest::INVOKE_TOOL
+        && route_bindings
+            .binding(frame.header.channel, frame.header.epoch)?
+            .is_some_and(|binding| binding.federated_caller.is_some())
+    {
+        if let Some(error) = reply.get_mut("error").and_then(Value::as_object_mut) {
+            error.insert("transmission".into(), json!("not_sent"));
+        }
+    }
     if let Some(error) = reply.get("error") {
         if tool_provider::is_metadata_op(name)
             || (object.contains_key("preset") && error["field"] == "preset")
@@ -3176,6 +3197,7 @@ fn facade_tool_reply_inner(
         scope: route_scope,
         mode,
         on_behalf_of_agent,
+        federated_caller,
         ..
     }) = route_bindings.binding(channel, epoch)?
     else {
@@ -3261,13 +3283,17 @@ fn facade_tool_reply_inner(
             Err(error) => json!({"error": error}),
         });
     }
-    let audience = match state
-        .runtime
-        .flow_audiences
-        .for_route(&principal_key, route_scope.as_ref())
-    {
-        Ok(audience) => audience,
-        Err(refusal) => return Ok(refusal),
+    let audience = if federated_route {
+        None
+    } else {
+        match state
+            .runtime
+            .flow_audiences
+            .for_route(&principal_key, route_scope.as_ref())
+        {
+            Ok(audience) => audience,
+            Err(refusal) => return Ok(refusal),
+        }
     };
     if let Some(audience) = &audience {
         if let Err(refusal) = flow_audience::check_call(state, audience, name, arguments) {
@@ -3665,6 +3691,9 @@ fn facade_tool_reply_inner(
             // required on top of this module's grant.
             if let Some(scope) = route_scope.clone() {
                 request = request.with_scope(scope);
+            }
+            if let Some(caller) = federated_caller.clone() {
+                request = request.with_federated_caller(caller);
             }
             if let Some(schema_hash) = arguments.get("schema_hash").and_then(Value::as_str) {
                 request = request.with_schema_hash(schema_hash);

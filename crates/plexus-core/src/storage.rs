@@ -8664,6 +8664,27 @@ impl PlexusStore {
         })
     }
 
+    pub(crate) fn append_audit_federated(
+        &self,
+        record: &AuditRecord,
+        scope: Option<&CallScope>,
+        relay_origin: Option<&RelayOrigin>,
+        caller: &crate::federated::FederatedCaller,
+    ) -> Result<(), StoreError> {
+        self.inner.with_conn_fenced(|conn| {
+            append_audit_on_conn_with(
+                conn,
+                record,
+                &AuditContext {
+                    scope,
+                    relay_origin,
+                    federated_caller: Some(caller),
+                    ..AuditContext::default()
+                },
+            )
+        })
+    }
+
     /// The one audit INSERT. `query_text` and `result_count` are `Some` only for
     /// rows the `web_search` tool writes; every other writer goes through
     /// [`Self::append_audit`], which leaves both NULL. `scope` is the daemon
@@ -9787,6 +9808,7 @@ struct AuditContext<'a> {
     scope: Option<&'a CallScope>,
     relay_origin: Option<&'a RelayOrigin>,
     on_behalf_of_agent: Option<&'a str>,
+    federated_caller: Option<&'a crate::federated::FederatedCaller>,
 }
 
 fn append_audit_on_conn(
@@ -9806,6 +9828,7 @@ fn append_audit_on_conn(
             scope,
             relay_origin,
             on_behalf_of_agent: None,
+            federated_caller: None,
         },
     )
 }
@@ -9821,6 +9844,7 @@ fn append_audit_on_conn_with(
         scope,
         relay_origin,
         on_behalf_of_agent,
+        federated_caller,
     } = *context;
     let now = now_ms();
     let scope_epoch = scope.map(|scope| epoch_to_sql(scope.scope_epoch));
@@ -9834,19 +9858,23 @@ fn append_audit_on_conn_with(
             reconciliation_of, app_handle_id, query_text, result_count,
             scope_owner, scope_ref, scope_epoch, scope_kind, scope_parent,
             scope_parent_state, scope_delegates, scope_owner_authorized,
-            origin_carrier, origin_call_key, scope_flow_id, scope_on_behalf_of_agent
+            origin_carrier, origin_call_key, scope_flow_id, scope_on_behalf_of_agent,
+            peer_fingerprint, pairing_id, peer_class, claim_kind, canonical_claim_identity
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
             ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34,
-            ?35, ?36, ?37, ?38, ?39, ?40
+            ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45
         )",
         rusqlite::params![
             now,
             record.principal,
             record.actor,
             record.acting_principal,
-            record.agent_id,
+            record
+                .agent_id
+                .as_ref()
+                .filter(|_| federated_caller.is_none()),
             record.agent_handle,
             record.connection_id,
             record.app_key,
@@ -9882,6 +9910,16 @@ fn append_audit_on_conn_with(
             relay_origin.map(|origin| origin.call_key.as_str()),
             scope.and_then(|scope| scope.flow_id.as_deref()),
             on_behalf_of_agent,
+            federated_caller.map(|caller| caller.attributes.peer_fingerprint.as_str()),
+            federated_caller.map(|caller| caller.attributes.pairing_id.as_str()),
+            federated_caller.map(|caller| match caller.attributes.peer_class {
+                subc_protocol::scope::FederatedPeerClass::Computer => "computer",
+                subc_protocol::scope::FederatedPeerClass::Phone => "phone",
+                subc_protocol::scope::FederatedPeerClass::Sim => "sim",
+                _ => "unknown",
+            }),
+            federated_caller.map(|caller| caller.claim.claim_kind),
+            federated_caller.map(|caller| caller.claim.canonical_claim_identity.as_str()),
         ],
     )?;
     // A settled send of a claimed approval also settles the approval

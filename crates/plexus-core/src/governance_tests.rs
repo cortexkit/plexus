@@ -1964,7 +1964,7 @@ fn hash_test_engine_at(path: &str) -> GovernanceEngine<StubCredentialSource, Moc
 /// Install a reviewed system manifest for `app_key` at `tier`. Severity
 /// reads the app's tier from it, and an app without one is gated at the
 /// strongest tier, so every fixture app needs one.
-fn install_system_manifest(store: &PlexusStore, app_key: &str, tier: &str) {
+pub(super) fn install_system_manifest(store: &PlexusStore, app_key: &str, tier: &str) {
     let manifest = crate::ingest_value(serde_json::json!({
             "schema_version": 1,
             "key": app_key,

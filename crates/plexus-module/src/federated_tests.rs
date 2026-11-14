@@ -1,4 +1,6 @@
 use super::*;
+#[path = "federated_invoke_tests.rs"]
+mod invoke_kept_gates;
 use subc_protocol::{
     manifest::ProviderRole,
     scope::{
@@ -748,7 +750,7 @@ async fn mixed_method_of_any_type_with_allowed_name_reaches_no_handler() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn consent_tools_fail_closed_before_any_namespace_or_grant_read_or_dispatch() {
+async fn search_tools_fail_closed_before_any_namespace_or_grant_read_or_dispatch() {
     let (mut state, _store, transport, scratch) =
         super::github_read_frame_tests::imported_runtime();
     Arc::get_mut(&mut state)
@@ -761,12 +763,10 @@ async fn consent_tools_fail_closed_before_any_namespace_or_grant_read_or_dispatc
     db.execute_batch("DROP TABLE grants; DROP TABLE connections;")
         .unwrap();
     let routes = bind_accepted(&state, stamp(), CallMode::Classic).await;
-    for body in served_frames().into_iter().filter(|body| {
-        matches!(
-            body["name"].as_str(),
-            Some("invoke" | "web_search" | "code_search")
-        )
-    }) {
+    for body in served_frames()
+        .into_iter()
+        .filter(|body| matches!(body["name"].as_str(), Some("web_search" | "code_search")))
+    {
         let actual = reply(call(&state, &routes, body.clone()).await);
         assert_eq!(
             actual["error"]["code"], "consent_unavailable",
@@ -803,6 +803,12 @@ async fn federated_flow_skips_local_carrier_and_scope_checks_but_keeps_modes() {
                 );
             } else if matches!(name, "connections" | "catalog") {
                 assert!(actual.get("result").is_some(), "{body}: {actual}");
+            } else if name == "invoke" {
+                assert_eq!(
+                    actual["error"]["code"], "github_read_required",
+                    "{body}: {actual}"
+                );
+                assert_eq!(actual["error"]["transmission"], "not_sent");
             } else {
                 assert_eq!(
                     actual["error"]["code"], "consent_unavailable",
@@ -814,8 +820,11 @@ async fn federated_flow_skips_local_carrier_and_scope_checks_but_keeps_modes() {
     let routes = bind_accepted(&state, stamp(), CallMode::Codemode).await;
     let body = served_frames().remove(0);
     let actual = reply(call(&state, &routes, body).await);
-    let expected = tool_provider::mode_refusal("invoke", &CallMode::Codemode).unwrap();
-    assert_eq!(actual["error"], serde_json::to_value(expected).unwrap());
+    let mut expected =
+        serde_json::to_value(tool_provider::mode_refusal("invoke", &CallMode::Codemode).unwrap())
+            .unwrap();
+    expected["transmission"] = json!("not_sent");
+    assert_eq!(actual["error"], expected);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

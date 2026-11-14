@@ -152,6 +152,7 @@ pub struct AuthorizationRequest {
     resolved_repository: Option<String>,
     resolved_github_search_repositories: Option<Vec<String>>,
     diagnostic_tool: String,
+    federated_caller: Option<crate::federated::FederatedCaller>,
 }
 
 /// Authority claimed by an interactive call an agent or operator made.
@@ -293,6 +294,7 @@ impl AuthorizationRequest {
             resolved_repository: None,
             resolved_github_search_repositories: None,
             diagnostic_tool: "invoke".into(),
+            federated_caller: None,
         }
     }
 
@@ -403,13 +405,22 @@ impl AuthorizationRequest {
 
     /// The agent an ordinary invoke must also hold a grant for, if any.
     fn acting_agent(&self) -> Option<&str> {
-        if self.origin != RequestOrigin::Ordinary
+        if self.federated_caller.is_some()
+            || self.origin != RequestOrigin::Ordinary
             || self.authority_kind != AUTHORITY_INVOKE
             || !self.scope_grants_agent
         {
             return None;
         }
         self.scope.as_ref().and_then(CallScope::acting_agent)
+    }
+
+    /// Attach facts from an admitted federated bind, never from tool arguments.
+    pub fn with_federated_caller(mut self, caller: crate::federated::FederatedCaller) -> Self {
+        self.federated_caller = Some(caller);
+        self.attributed_agent_id = None;
+        self.bound_agent_handle = None;
+        self
     }
 
     pub fn origin(&self) -> RequestOrigin {
@@ -673,7 +684,7 @@ pub enum Denial {
 }
 
 pub struct AuthorityEvaluation {
-    pub grant: GrantRecord,
+    pub grant: Option<GrantRecord>,
     pub agent_grant_pin: Option<PinnedGrant>,
     pub policy: Option<crate::storage::PolicyRecord>,
     pub policy_inputs: Option<PolicyInputs>,
@@ -1861,80 +1872,85 @@ where
                 GrantDenial::Missing,
             ));
         }
-        let rows = if request.origin == RequestOrigin::Facade {
-            self.seams
-                .as_ref()
-                .ok_or(Denial::StoreFailure)?
-                .grant_rows(connection, request)?
-        } else if agent.is_some() {
-            self.store
-                .scoped_invoke_grant_rows(connection, &request.principal, agent)
-                .map_err(|_| Denial::StoreFailure)?
+        let (grant, agent_grant_pin) = if request.federated_caller.is_some() {
+            (None, None)
         } else {
-            Vec::new()
-        };
-        let module = if request.origin == RequestOrigin::Facade || agent.is_some() {
-            scoped_grant(
-                &rows,
-                connection,
-                &request.principal,
-                None,
-                &request.authority_kind,
-                &request.action,
-                now,
-                Some(&action.risk),
-            )
-        } else {
-            self.store
-                .matching_grant(
-                    &connection.principal,
-                    &request.connection_id,
+            let rows = if request.origin == RequestOrigin::Facade {
+                self.seams
+                    .as_ref()
+                    .ok_or(Denial::StoreFailure)?
+                    .grant_rows(connection, request)?
+            } else if agent.is_some() {
+                self.store
+                    .scoped_invoke_grant_rows(connection, &request.principal, agent)
+                    .map_err(|_| Denial::StoreFailure)?
+            } else {
+                Vec::new()
+            };
+            let module = if request.origin == RequestOrigin::Facade || agent.is_some() {
+                scoped_grant(
+                    &rows,
+                    connection,
                     &request.principal,
-                    &request.action,
+                    None,
                     &request.authority_kind,
+                    &request.action,
                     now,
                     Some(&action.risk),
                 )
-                .map_err(|_| Denial::StoreFailure)?
-        };
-        if let Some(reason) =
-            scoped_grant_refusal(module.as_ref(), &request.action, &action.risk, now)
-        {
-            return Err(grant_denial(
-                request,
-                crate::grant_refusal::Layer::Module,
-                reason,
-            ));
-        }
-        let grant = module.ok_or(Denial::StoreFailure)?;
-        let mut agent_grant_pin = None;
-        if let Some(agent) = agent {
-            let row = scoped_grant(
-                &rows,
-                connection,
-                &request.principal,
-                Some(agent),
-                &request.authority_kind,
-                &request.action,
-                now,
-                Some(&action.risk),
-            );
+            } else {
+                self.store
+                    .matching_grant(
+                        &connection.principal,
+                        &request.connection_id,
+                        &request.principal,
+                        &request.action,
+                        &request.authority_kind,
+                        now,
+                        Some(&action.risk),
+                    )
+                    .map_err(|_| Denial::StoreFailure)?
+            };
             if let Some(reason) =
-                scoped_grant_refusal(row.as_ref(), &request.action, &action.risk, now)
+                scoped_grant_refusal(module.as_ref(), &request.action, &action.risk, now)
             {
                 return Err(grant_denial(
                     request,
-                    crate::grant_refusal::Layer::Agent,
+                    crate::grant_refusal::Layer::Module,
                     reason,
                 ));
             }
-            if acting_agent.is_some() {
-                agent_grant_pin = row.map(|row| PinnedGrant {
-                    grant_id: row.grant_id,
-                    generation: row.generation,
-                });
+            let grant = module.ok_or(Denial::StoreFailure)?;
+            let mut agent_grant_pin = None;
+            if let Some(agent) = agent {
+                let row = scoped_grant(
+                    &rows,
+                    connection,
+                    &request.principal,
+                    Some(agent),
+                    &request.authority_kind,
+                    &request.action,
+                    now,
+                    Some(&action.risk),
+                );
+                if let Some(reason) =
+                    scoped_grant_refusal(row.as_ref(), &request.action, &action.risk, now)
+                {
+                    return Err(grant_denial(
+                        request,
+                        crate::grant_refusal::Layer::Agent,
+                        reason,
+                    ));
+                }
+                if acting_agent.is_some() {
+                    agent_grant_pin = row.map(|row| PinnedGrant {
+                        grant_id: row.grant_id,
+                        generation: row.generation,
+                    });
+                }
             }
-        }
+            (Some(grant), agent_grant_pin)
+        };
         let policy = self
             .store
             .matching_policy(
@@ -1989,7 +2005,7 @@ where
             self.audit_denial(&request, &args_hash, None, None, None, &denial);
             return Err(denial);
         }
-        if request.authority_kind == AUTHORITY_INVOKE {
+        if request.authority_kind == AUTHORITY_INVOKE && request.federated_caller.is_none() {
             if let Some(seams) = &self.seams {
                 let original_args = request.args.clone();
                 if let Err(reason) = seams
@@ -2009,7 +2025,9 @@ where
             }
         }
         let args_snapshot_hash = args_hash.clone();
-        let connection = match if request.authority_kind == AUTHORITY_INVOKE {
+        let connection = match if request.federated_caller.is_some() {
+            self.store.connection("direct", &request.connection_id)
+        } else if request.authority_kind == AUTHORITY_INVOKE {
             self.store
                 .connection_for_invoke(&request.principal, &request.connection_id)
         } else {
@@ -2018,10 +2036,11 @@ where
         } {
             Ok(Some(connection)) => connection,
             Ok(None) => {
-                let denial = if request
-                    .scope
-                    .as_ref()
-                    .is_some_and(|scope| scope.flow_id.is_some())
+                let denial = if request.federated_caller.is_none()
+                    && request
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.flow_id.is_some())
                     && self
                         .store
                         .connection_id_exists(&request.connection_id)
@@ -2042,6 +2061,18 @@ where
         };
         if let Some(reason) = connection_denial(&connection) {
             let denial = Denial::Connection(reason);
+            self.audit_denial(&request, &args_hash, Some(&connection), None, None, &denial);
+            return Err(denial);
+        }
+        // Bot credentials belong to this computer's local agents. A remote
+        // caller cannot use a bot by invoking its backing connection directly.
+        if request.federated_caller.is_some()
+            && self
+                .store
+                .is_github_handle_connection(&connection.principal, &connection.connection_id)
+                .map_err(|_| Denial::StoreFailure)?
+        {
+            let denial = Denial::BotActionRequiresFacade;
             self.audit_denial(&request, &args_hash, Some(&connection), None, None, &denial);
             return Err(denial);
         }
@@ -2156,7 +2187,9 @@ where
         // The allowlist only narrows policy and cannot override a block. A NULL
         // agent key selects the module-only list, separate from each agent's own
         // list, so module-only calls cannot use an agent's recipient authority.
-        let unlisted = if let Some(recipients) = recipients.as_ref() {
+        let unlisted = if request.federated_caller.is_some() {
+            recipients.is_some()
+        } else if let Some(recipients) = recipients.as_ref() {
             let listed = self
                 .store
                 .list_recipients(
@@ -2189,13 +2222,66 @@ where
                 &args_hash,
                 Some(&connection),
                 Some(&action),
-                Some(&grant),
+                grant.as_ref(),
                 &denial,
             );
             return Err(denial);
         }
         let severity = effective_severity(&action, &connection.app_key, &self.store)
             .map_err(|_| Denial::StoreFailure)?;
+        if request.federated_caller.is_some() {
+            let denial = if matches!(severity, Severity::S3 | Severity::S4)
+                || !matches!(action.risk.as_str(), "read" | "write")
+            {
+                Denial::NeedsDecisionPlane(Box::new(DecisionPlaneEnvelope {
+                    request_id: request.request_id.clone(),
+                    connection_id: request.connection_id.clone(),
+                    action: request.action.clone(),
+                    args_hash: args_snapshot_hash.clone(),
+                    schema_hash: action.schema_hash.clone(),
+                    severity,
+                    expires_at_ms: now.saturating_add(APPROVAL_TTL_MS),
+                }))
+            } else if let Some(reason) = resource_denial_with_repositories(
+                &connection,
+                &action,
+                &request.args,
+                request.resolved_github_search_repositories(),
+            ) {
+                Denial::ResourceFilter(reason)
+            } else {
+                match self
+                    .store
+                    .connection_ceiling(&connection.principal, &request.connection_id)
+                    .map_err(|_| Denial::StoreFailure)?
+                {
+                    Ok(ceiling)
+                        if !Risk::parse(&action.risk).is_some_and(|risk| risk <= ceiling.risk) =>
+                    {
+                        Denial::Grant(GrantDenial::RiskCeiling)
+                    }
+                    Ok(ceiling) if !ceiling.action_selectors.contains(&action.name) => {
+                        Denial::Grant(GrantDenial::ActionSelector)
+                    }
+                    Err(_) => Denial::Grant(GrantDenial::RiskCeiling),
+                    Ok(_) => Denial::ConsentUnavailable {
+                        action: request.action.clone(),
+                    },
+                }
+            };
+            self.audit_denial(
+                &request,
+                &args_hash,
+                Some(&connection),
+                Some(&action),
+                None,
+                &denial,
+            );
+            return Err(denial);
+        }
+        // Local authorization always supplied a module grant; federated calls
+        // have already stopped before local approvals or reservations are read.
+        let grant = grant.ok_or(Denial::StoreFailure)?;
         if matches!(severity, Severity::S3 | Severity::S4) && self.decision_plane.is_none() {
             let denial = self
                 .evaluate_decision_plane(
@@ -4645,12 +4731,22 @@ where
             response_class: grant.map(|value| value.authority_kind.clone()),
             reconciliation_of: None,
         };
-        if let Err(error) = self.store.append_audit_relayed(
-            &record,
-            request.scope.as_ref(),
-            request.relay_origin.as_ref(),
-            request.on_behalf_of_agent.as_deref(),
-        ) {
+        let result = if let Some(caller) = request.federated_caller.as_ref() {
+            self.store.append_audit_federated(
+                &record,
+                request.scope.as_ref(),
+                request.relay_origin.as_ref(),
+                caller,
+            )
+        } else {
+            self.store.append_audit_relayed(
+                &record,
+                request.scope.as_ref(),
+                request.relay_origin.as_ref(),
+                request.on_behalf_of_agent.as_deref(),
+            )
+        };
+        if let Err(error) = result {
             eprintln!(error governance: "audit append failed: authorization decision={decision:?} reason={reason:?} principal={:?} actor={:?} acting_principal={:?} request_id={:?} action={:?}: {error}", connection.map(|value| value.principal.as_str()).unwrap_or(&request.principal), request.actor, request.principal, request.request_id, request.action);
         }
     }
@@ -5243,3 +5339,7 @@ fn new_request_id() -> String {
 #[cfg(test)]
 #[path = "governance_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "governance_federated_tests.rs"]
+mod federated_invoke_tests;

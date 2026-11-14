@@ -92,6 +92,7 @@ pub(super) async fn send_bound(
                 .as_ref()
                 .and_then(|stamp| stamp.attributes.on_behalf_of_agent.clone()),
             false,
+            None,
         )
         .unwrap();
     handle_tool_request(frame, &writer, runtime, &routes)

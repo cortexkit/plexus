@@ -5,10 +5,28 @@ use subc_protocol::scope::RemoteClaim;
 
 pub mod matcher;
 
+/// The paired computer and its remote claim, copied from the daemon's bind
+/// stamp. These facts identify a caller for consent and audit; remote agent ids
+/// never select this computer's agent grants, policies, recipient lists or bots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FederatedCaller {
+    pub attributes: subc_protocol::scope::FederatedAttributes,
+    pub claim: CanonicalClaim,
+}
+
+impl FederatedCaller {
+    pub fn from_attributes(
+        attributes: subc_protocol::scope::FederatedAttributes,
+    ) -> Result<Self, UnsupportedClaim> {
+        let claim = canonicalize_claim(attributes.remote_claim.as_ref())?;
+        Ok(Self { attributes, claim })
+    }
+}
+
 /// A claim's key and display data, normalized together so omitted names cannot
 /// reappear in stored claims or labels. The kind is separate from the canonical JSON text:
 /// an agent and a run may carry the same id but are different callers.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalClaim {
     pub claim_kind: &'static str,
     pub canonical_claim_identity: String,
