@@ -47,6 +47,55 @@ impl FederatedRowKey {
 }
 
 impl PlexusStore {
+    pub(crate) fn matching_federated_row(
+        &self,
+        call: &crate::federated::matcher::Call<'_>,
+        now: i64,
+    ) -> Result<Option<FederatedStandingRow>, StoreError> {
+        self.inner
+            .with_conn_fenced(|conn| matching_row_on_conn(conn, call, now))
+    }
+
+    /// Re-read standing authority under the writer fence after the caller's
+    /// liveness check. A revoke that committed during describe must win.
+    pub(crate) fn reserve_federated_invoke(
+        &self,
+        call: &crate::federated::matcher::Call<'_>,
+        input: &FederatedReservationInput<'_>,
+    ) -> Result<(Option<FederatedStandingRow>, Option<String>), StoreError> {
+        let snapshot = serde_json::to_string(input.snapshot)
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        self.inner.with_conn_fenced(|conn| {
+            let row = matching_row_on_conn(conn, call, input.now)?;
+            let Some(standing) = row.as_ref().filter(|row| {
+                row.effect == crate::federated::matcher::Effect::Allow && !input.ask_first
+            }) else {
+                return Ok((row, None));
+            };
+            let id = super::new_id("res");
+            conn.execute(
+                "INSERT INTO reservations
+                 (reservation_id, principal, connection_id, action, snapshot_generations,
+                  approved_args_hash, schema_hash, expires_at, status, created_at_ms,
+                  federated_row_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'reserved', ?9, ?10)",
+                rusqlite::params![
+                    id,
+                    call.owner_principal,
+                    call.subject,
+                    input.action,
+                    snapshot,
+                    input.args_hash,
+                    input.schema_hash,
+                    input.expires_at,
+                    input.now,
+                    standing.id
+                ],
+            )?;
+            Ok((row, Some(id)))
+        })
+    }
+
     /// The caller holds `with_conn_fenced` for the entire connection deletion.
     /// Include pending-card keys without a standing row so an answer restored
     /// from an older database cannot recreate authority for a deleted connection.
@@ -183,6 +232,84 @@ impl PlexusStore {
         }
         federated_journal::apply(conn, &entry).map(|removed| removed != 0)
     }
+}
+
+pub(crate) struct FederatedReservationInput<'a> {
+    pub action: &'a str,
+    pub snapshot: &'a super::SnapshotGenerations,
+    pub args_hash: &'a str,
+    pub schema_hash: &'a str,
+    pub expires_at: i64,
+    pub now: i64,
+    pub ask_first: bool,
+}
+
+pub(crate) struct FederatedStandingRow {
+    pub id: String,
+    pub effect: crate::federated::matcher::Effect,
+}
+
+fn matching_row_on_conn(
+    conn: &rusqlite::Connection,
+    call: &crate::federated::matcher::Call<'_>,
+    now: i64,
+) -> rusqlite::Result<Option<FederatedStandingRow>> {
+    use crate::federated::matcher::{match_rows, Effect, Row};
+    let mut query = conn.prepare(
+        "SELECT id, selector, claim_json, effect FROM federated_rows
+         WHERE peer_fingerprint=?1 AND pairing_id=?2 AND peer_class=?3
+           AND owner_principal=?4 AND subject=?5 AND scope=?6 ORDER BY id",
+    )?;
+    let stored = query
+        .query_map(
+            (
+                call.peer_fingerprint,
+                call.pairing_id,
+                call.peer_class,
+                call.owner_principal,
+                call.subject,
+                call.scope,
+            ),
+            |row| {
+                let claim: Option<String> = row.get(2)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    claim
+                        .map(|json| {
+                            super::parse_json_column::<subc_protocol::scope::RemoteClaim>(&json)
+                        })
+                        .transpose()?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows: Vec<_> = stored
+        .iter()
+        .map(|(_, selector, claim, effect)| Row {
+            peer_fingerprint: call.peer_fingerprint,
+            pairing_id: call.pairing_id,
+            peer_class: call.peer_class,
+            selector: Some(selector),
+            claim: claim.as_ref(),
+            owner_principal: call.owner_principal,
+            subject: call.subject,
+            scope: call.scope,
+            effect: if effect == "deny" {
+                Effect::Deny
+            } else {
+                Effect::Allow
+            },
+            expires_at_ms: None,
+        })
+        .collect();
+    Ok(
+        match_rows(&rows, call, now).map(|index| FederatedStandingRow {
+            id: stored[index].0.clone(),
+            effect: rows[index].effect,
+        }),
+    )
 }
 
 #[cfg(test)]

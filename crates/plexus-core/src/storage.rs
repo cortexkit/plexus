@@ -7403,11 +7403,16 @@ impl PlexusStore {
                             -- authorized. A revoked grant yields NULL, which
                             -- coalesces to -1 and can never equal a stored
                             -- generation, so revocation always aborts.
-                            COALESCE((SELECT generation FROM grants
+                            CASE WHEN federated_row_id IS NOT NULL THEN
+                                CASE WHEN EXISTS (SELECT 1 FROM federated_rows
+                                    WHERE id = reservations.federated_row_id AND effect = 'allow')
+                                    AND grant_id IS NULL AND agent_grant_id IS NULL
+                                    THEN 0 ELSE -1 END
+                            ELSE COALESCE((SELECT generation FROM grants
                              WHERE principal = ?1 AND (expires_at IS NULL OR expires_at > ?5) AND grant_id = (
                                  SELECT grant_id FROM reservations
                                  WHERE principal = ?1 AND reservation_id = ?4
-                         )), -1),
+                         )), -1) END,
                             approval_request_id,
                             -- The agent grant of a call made as an agent, pinned
                             -- the same way. NULL when the call named no agent
@@ -8670,6 +8675,8 @@ impl PlexusStore {
         scope: Option<&CallScope>,
         relay_origin: Option<&RelayOrigin>,
         caller: &crate::federated::FederatedCaller,
+        row_id: Option<&str>,
+        card_ref: Option<&str>,
     ) -> Result<(), StoreError> {
         self.inner.with_conn_fenced(|conn| {
             append_audit_on_conn_with(
@@ -8679,6 +8686,8 @@ impl PlexusStore {
                     scope,
                     relay_origin,
                     federated_caller: Some(caller),
+                    federated_row_id: row_id,
+                    card_ref,
                     ..AuditContext::default()
                 },
             )
@@ -9809,6 +9818,8 @@ struct AuditContext<'a> {
     relay_origin: Option<&'a RelayOrigin>,
     on_behalf_of_agent: Option<&'a str>,
     federated_caller: Option<&'a crate::federated::FederatedCaller>,
+    federated_row_id: Option<&'a str>,
+    card_ref: Option<&'a str>,
 }
 
 fn append_audit_on_conn(
@@ -9827,8 +9838,7 @@ fn append_audit_on_conn(
             result_count,
             scope,
             relay_origin,
-            on_behalf_of_agent: None,
-            federated_caller: None,
+            ..AuditContext::default()
         },
     )
 }
@@ -9845,6 +9855,8 @@ fn append_audit_on_conn_with(
         relay_origin,
         on_behalf_of_agent,
         federated_caller,
+        federated_row_id,
+        card_ref,
     } = *context;
     let now = now_ms();
     let scope_epoch = scope.map(|scope| epoch_to_sql(scope.scope_epoch));
@@ -9859,12 +9871,13 @@ fn append_audit_on_conn_with(
             scope_owner, scope_ref, scope_epoch, scope_kind, scope_parent,
             scope_parent_state, scope_delegates, scope_owner_authorized,
             origin_carrier, origin_call_key, scope_flow_id, scope_on_behalf_of_agent,
-            peer_fingerprint, pairing_id, peer_class, claim_kind, canonical_claim_identity
+            peer_fingerprint, pairing_id, peer_class, claim_kind, canonical_claim_identity,
+            federated_row_id, card_ref
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
             ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34,
-            ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45
+            ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47
         )",
         rusqlite::params![
             now,
@@ -9920,6 +9933,8 @@ fn append_audit_on_conn_with(
             }),
             federated_caller.map(|caller| caller.claim.claim_kind),
             federated_caller.map(|caller| caller.claim.canonical_claim_identity.as_str()),
+            federated_row_id,
+            card_ref,
         ],
     )?;
     // A settled send of a claimed approval also settles the approval

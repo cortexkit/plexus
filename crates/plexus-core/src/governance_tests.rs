@@ -2080,6 +2080,8 @@ fn reservation_argument_mismatch_aborts_before_dispatch() {
         on_behalf_of_agent: None,
         agent_grant: None,
         approval_scope: None,
+        federated_caller: None,
+        federated_row_id: None,
     };
 
     let outcome = engine.revalidate_and_dispatch(&reservation);
@@ -2468,6 +2470,8 @@ fn reservation_audit_rows_record_the_app_handle_only_for_facade_calls() {
         on_behalf_of_agent: None,
         agent_grant: None,
         approval_scope: None,
+        federated_caller: None,
+        federated_row_id: None,
     };
     let expected = |app_handle_id: Option<&str>| AuditRecord {
         principal: "owner".to_string(),

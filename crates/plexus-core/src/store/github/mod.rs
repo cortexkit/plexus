@@ -2853,6 +2853,8 @@ mod facade_seam_tests {
             on_behalf_of_agent: None,
             agent_grant: None,
             approval_scope: None,
+            federated_caller: None,
+            federated_row_id: None,
         };
         assert!(!seams.pre_transmit(&reservation));
         reservation.risk = Risk::Read;

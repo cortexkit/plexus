@@ -1543,6 +1543,9 @@ fn verify_denial_audit(
         | Denial::ActionRequestCreated { .. }
         | Denial::AccessPending { .. }
         | Denial::ConsentRefused { .. }
+        | Denial::FederatedConsentDenied
+        | Denial::FederatedPairingEnded
+        | Denial::FederatedLivenessUnavailable
         | Denial::ConsentUnavailable { .. } => "policy",
         Denial::Severity(_) | Denial::NeedsDecisionPlane(_) => "severity",
         Denial::ResourceFilter(_) => "resource_filter",

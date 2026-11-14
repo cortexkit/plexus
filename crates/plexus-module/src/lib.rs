@@ -5485,6 +5485,15 @@ fn map_contains_secret_input(value: &serde_json::Map<String, Value>) -> bool {
 const CONSENT_PENDING_TEXT: &str = "Waiting for the user to approve <service> <action>. The request has gone to them. End your turn now; you will be resumed with the answer, and then you should run this same call again.";
 
 fn denial_response(denial: &plexus_core::Denial) -> Value {
+    if matches!(
+        denial,
+        plexus_core::Denial::FederatedPairingEnded
+            | plexus_core::Denial::FederatedLivenessUnavailable
+    ) {
+        return json!({"error": {"code": denial.reason_code(), "message": denial.reason_code(),
+            "retryable": matches!(denial, plexus_core::Denial::FederatedLivenessUnavailable),
+            "transmission": "not_sent"}});
+    }
     if let plexus_core::Denial::AccessPending {
         elicitation_id,
         service,

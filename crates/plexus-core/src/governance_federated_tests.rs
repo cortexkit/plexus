@@ -9,6 +9,9 @@ use subc_protocol::scope::{FederatedAttributes, FederatedPeerClass};
 
 type Engine = GovernanceEngine<StubCredentialSource, MockTransport>;
 
+#[path = "governance_federated_standing_tests.rs"]
+mod standing;
+
 fn fixture() -> (Engine, rusqlite::Connection) {
     let path = crate::test_scratch::store_path();
     let store = Arc::new(
@@ -91,9 +94,7 @@ fn assert_no_consent_or_dispatch(engine: &Engine, db: &rusqlite::Connection) {
     assert_eq!(missing_identity, 0);
 }
 
-#[test]
-fn kept_gates_refuse_before_consent_without_local_grants() {
-    let cases = [
+const GATE_CASES: &[(&str, &str)] = &[
         ("UPDATE connections SET status='disabled'", "connection_disabled"),
         ("UPDATE connections SET status='revoked'", "connection_revoked"),
         ("UPDATE connections SET status='pending'", "connection_pending"),
@@ -107,7 +108,10 @@ fn kept_gates_refuse_before_consent_without_local_grants() {
         ("UPDATE connections SET ceiling_risk=NULL", "grant_risk_ceiling"),
         ("UPDATE connections SET ceiling_risk='not-a-risk'", "grant_risk_ceiling"),
     ];
-    for (sql, expected) in cases {
+
+#[test]
+fn kept_gates_refuse_before_consent_without_local_grants() {
+    for &(sql, expected) in GATE_CASES {
         let (engine, db) = fixture();
         db.execute_batch(sql).unwrap();
         let denial = engine.authorize(request(None)).unwrap_err();

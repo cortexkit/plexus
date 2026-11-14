@@ -153,6 +153,7 @@ pub struct AuthorizationRequest {
     resolved_github_search_repositories: Option<Vec<String>>,
     diagnostic_tool: String,
     federated_caller: Option<crate::federated::FederatedCaller>,
+    federated_row_id: Option<String>,
 }
 
 /// Authority claimed by an interactive call an agent or operator made.
@@ -295,6 +296,7 @@ impl AuthorizationRequest {
             resolved_github_search_repositories: None,
             diagnostic_tool: "invoke".into(),
             federated_caller: None,
+            federated_row_id: None,
         }
     }
 
@@ -648,6 +650,9 @@ pub enum Denial {
     ConsentUnavailable {
         action: String,
     },
+    FederatedConsentDenied,
+    FederatedPairingEnded,
+    FederatedLivenessUnavailable,
     AccessPending {
         elicitation_id: String,
         service: String,
@@ -744,6 +749,9 @@ impl Denial {
             Self::OwnershipProofMissing => "ownership_proof_missing",
             Self::CredentialMaterialForbidden => "credential_material_forbidden",
             Self::ConsentUnavailable { .. } => "consent_unavailable",
+            Self::FederatedConsentDenied => "consent_denied",
+            Self::FederatedPairingEnded => "federated_pairing_ended",
+            Self::FederatedLivenessUnavailable => "federated_liveness_unavailable",
             Self::AccessPending { .. } => "access_pending",
             Self::ConsentRefused { code, .. } => code,
             Self::RecipientArgumentInvalid { .. } => "recipient_argument_invalid",
@@ -834,6 +842,7 @@ impl Denial {
     pub(crate) fn clears_by_waiting(&self) -> bool {
         match self {
             Self::StoreFailure
+            | Self::FederatedLivenessUnavailable
             | Self::Resolver(ResolverDenial::StoreFailure)
             | Self::ConnectorHomeNotHeld { .. }
             | Self::Credential(CredentialDenial::Transient(_))
@@ -943,6 +952,8 @@ pub struct Reservation {
     /// When this reservation runs a stored approval raised under a scope, that
     /// scope. It is re-checked with the daemon just before the claim.
     pub approval_scope: Option<ApprovalScope>,
+    pub federated_caller: Option<crate::federated::FederatedCaller>,
+    pub federated_row_id: Option<String>,
 }
 
 impl AuditRecord {
@@ -1233,6 +1244,9 @@ pub fn pipeline_denial(denial: &Denial, gate: &str) -> String {
         Denial::ConsentUnavailable { .. } => "consent_unavailable",
         Denial::AccessPending { .. } => "access_pending",
         Denial::ConsentRefused { code, .. } => code,
+        Denial::FederatedConsentDenied => "consent_denied",
+        Denial::FederatedPairingEnded => "federated_pairing_ended",
+        Denial::FederatedLivenessUnavailable => "federated_liveness_unavailable",
         Denial::RecipientArgumentInvalid { .. } => "recipient_argument_invalid",
         Denial::ApprovalPreviewTooLong { .. } => "approval_preview_too_long",
         Denial::Connection(reason) => match reason {
@@ -2233,22 +2247,24 @@ where
             let denial = if matches!(severity, Severity::S3 | Severity::S4)
                 || !matches!(action.risk.as_str(), "read" | "write")
             {
-                Denial::NeedsDecisionPlane(Box::new(DecisionPlaneEnvelope {
-                    request_id: request.request_id.clone(),
-                    connection_id: request.connection_id.clone(),
-                    action: request.action.clone(),
-                    args_hash: args_snapshot_hash.clone(),
-                    schema_hash: action.schema_hash.clone(),
-                    severity,
-                    expires_at_ms: now.saturating_add(APPROVAL_TTL_MS),
-                }))
+                Some(Denial::NeedsDecisionPlane(Box::new(
+                    DecisionPlaneEnvelope {
+                        request_id: request.request_id.clone(),
+                        connection_id: request.connection_id.clone(),
+                        action: request.action.clone(),
+                        args_hash: args_snapshot_hash.clone(),
+                        schema_hash: action.schema_hash.clone(),
+                        severity,
+                        expires_at_ms: now.saturating_add(APPROVAL_TTL_MS),
+                    },
+                )))
             } else if let Some(reason) = resource_denial_with_repositories(
                 &connection,
                 &action,
                 &request.args,
                 request.resolved_github_search_repositories(),
             ) {
-                Denial::ResourceFilter(reason)
+                Some(Denial::ResourceFilter(reason))
             } else {
                 match self
                     .store
@@ -2258,29 +2274,38 @@ where
                     Ok(ceiling)
                         if !Risk::parse(&action.risk).is_some_and(|risk| risk <= ceiling.risk) =>
                     {
-                        Denial::Grant(GrantDenial::RiskCeiling)
+                        Some(Denial::Grant(GrantDenial::RiskCeiling))
                     }
                     Ok(ceiling) if !ceiling.action_selectors.contains(&action.name) => {
-                        Denial::Grant(GrantDenial::ActionSelector)
+                        Some(Denial::Grant(GrantDenial::ActionSelector))
                     }
-                    Err(_) => Denial::Grant(GrantDenial::RiskCeiling),
-                    Ok(_) => Denial::ConsentUnavailable {
-                        action: request.action.clone(),
-                    },
+                    Err(_) => Some(Denial::Grant(GrantDenial::RiskCeiling)),
+                    Ok(_) => None,
                 }
             };
-            self.audit_denial(
-                &request,
-                &args_hash,
-                Some(&connection),
-                Some(&action),
-                None,
-                &denial,
+            if let Some(denial) = denial {
+                self.audit_denial(
+                    &request,
+                    &args_hash,
+                    Some(&connection),
+                    Some(&action),
+                    None,
+                    &denial,
+                );
+                return Err(denial);
+            }
+            return self.authorize_federated_invoke(
+                request,
+                connection,
+                action,
+                policy,
+                policy_effect,
+                severity,
+                args_hash,
             );
-            return Err(denial);
         }
-        // Local authorization always supplied a module grant; federated calls
-        // have already stopped before local approvals or reservations are read.
+        // Federated calls have their own consent and reservation path and never
+        // read local approvals. Local authorization always supplies a grant.
         let grant = grant.ok_or(Denial::StoreFailure)?;
         if matches!(severity, Severity::S3 | Severity::S4) && self.decision_plane.is_none() {
             let denial = self
@@ -2837,6 +2862,8 @@ where
             on_behalf_of_agent: request.on_behalf_of_agent,
             agent_grant: agent_grant_pin,
             approval_scope,
+            federated_caller: None,
+            federated_row_id: None,
         })
     }
 
@@ -4293,6 +4320,11 @@ where
         if let Some(denial) = self.connector_home_denial() {
             return Err(denial);
         }
+        if request.federated_caller.is_some() {
+            return self
+                .authorize(request)
+                .map(|reservation| self.dispatch_checked(&reservation));
+        }
         if let (Some(cards), Some(scope)) = (&self.consent_cards, request.scope.as_ref()) {
             if let Some(key) = request.call_key.as_deref() {
                 if let Some(held) = self
@@ -4737,6 +4769,8 @@ where
                 request.scope.as_ref(),
                 request.relay_origin.as_ref(),
                 caller,
+                request.federated_row_id.as_deref(),
+                None,
             )
         } else {
             self.store.append_audit_relayed(
@@ -4787,7 +4821,8 @@ where
         reason: &str,
         credential_fingerprint: &str,
     ) {
-        if let Err(error) = self.store.append_audit_relayed(
+        if let Err(error) = self.append_reservation_audit(
+            reservation,
             &AuditRecord {
                 risk: Some(risk_str(reservation.risk).to_string()),
                 severity: Some(reservation.severity.as_str().to_string()),
@@ -4802,9 +4837,6 @@ where
                 attempt_no: Some(1),
                 ..AuditRecord::for_reservation(reservation, "deny", reason, "dispatch")
             },
-            reservation.scope.as_ref(),
-            reservation.relay_origin.as_ref(),
-            reservation.on_behalf_of_agent.as_deref(),
         ) {
             eprintln!(error governance: "audit append failed: dispatch denial reason={reason:?} principal={:?} actor={:?} request_id={:?}: {error}", reservation.principal, reservation.actor, reservation.request_id);
         }
@@ -4859,7 +4891,8 @@ where
             }
             TransmissionState::OutcomeUnknown => "unknown",
         };
-        if let Err(error) = self.store.append_audit_relayed(
+        if let Err(error) = self.append_reservation_audit(
+            reservation,
             &AuditRecord {
                 risk: Some(risk_str(reservation.risk).to_string()),
                 severity: Some(reservation.severity.as_str().to_string()),
@@ -4877,9 +4910,6 @@ where
                 response_class: response.error_code.clone(),
                 ..AuditRecord::for_reservation(reservation, "allow", "dispatched", "dispatch")
             },
-            reservation.scope.as_ref(),
-            reservation.relay_origin.as_ref(),
-            reservation.on_behalf_of_agent.as_deref(),
         ) {
             eprintln!(error governance: "audit append failed: dispatch result outcome={outcome:?} principal={:?} actor={:?} request_id={:?}: {error}", reservation.principal, reservation.actor, reservation.request_id);
         }
@@ -5286,6 +5316,9 @@ fn gate_for_denial(denial: &Denial) -> &'static str {
         | Denial::ActionRequestCreated { .. }
         | Denial::AccessPending { .. }
         | Denial::ConsentRefused { .. }
+        | Denial::FederatedConsentDenied
+        | Denial::FederatedPairingEnded
+        | Denial::FederatedLivenessUnavailable
         | Denial::ConsentUnavailable { .. } => "policy",
         Denial::Severity(_) | Denial::NeedsDecisionPlane(_) => "severity",
         Denial::ResourceFilter(_) => "resource_filter",
@@ -5343,3 +5376,6 @@ mod tests;
 #[cfg(test)]
 #[path = "governance_federated_tests.rs"]
 mod federated_invoke_tests;
+
+#[path = "governance_federated.rs"]
+mod federated_invoke;

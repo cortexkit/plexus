@@ -4,6 +4,28 @@ fn invoke_body(connection: &str) -> Value {
     json!({"name":"invoke", "arguments":{"op":"call", "connection":connection, "action":"meta.read", "args":{}}})
 }
 
+#[test]
+fn standing_liveness_refusals_are_not_sent_with_explicit_retryability() {
+    for (denial, code, retryable) in [
+        (
+            plexus_core::Denial::FederatedPairingEnded,
+            "federated_pairing_ended",
+            false,
+        ),
+        (
+            plexus_core::Denial::FederatedLivenessUnavailable,
+            "federated_liveness_unavailable",
+            true,
+        ),
+    ] {
+        assert_eq!(
+            denial_response(&denial),
+            json!({"error": {"code":code, "message":code,
+            "retryable":retryable, "transmission":"not_sent"}})
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bot_metadata_is_hidden_only_from_federated_callers() {
     let (mut state, store, transport, scratch) =
