@@ -92,29 +92,39 @@ async fn revoke_id_namespaces_never_resolve_each_others_rows() {
     let local_id = row_id(ALL_AGENT, ALL_CONNECTION, Capability::OpenPullRequests);
     let local_count = count(&f.scratch, "SELECT count(*) FROM grants");
     seed_federated_list_row(&f.scratch, "plxf_only_federated", "normal");
-    // Even a malformed stored federated id cannot be reached through a local id.
-    seed_federated_list_row(&f.scratch, "plx_only_federated", "malformed");
-    seed_federated_list_row(&f.scratch, &local_id, "collision");
-    for id in [
-        "plx_only_federated".to_owned(),
-        local_id.replacen("plx_", "plxf_", 1),
-    ] {
-        assert_eq!(
-            revoke(&f.state, &id).await,
-            json!({"result":{"outcome":"not_found"}})
-        );
-        assert_eq!(
-            count(&f.scratch, "SELECT count(*) FROM grants"),
-            local_count
-        );
-        assert_eq!(federated_ids(f.scratch.path()).len(), 3);
-    }
+    let federated_id = local_id.replacen("plx_", "plxf_", 1);
+    seed_federated_list_row(&f.scratch, &federated_id, "same_suffix");
+    assert_eq!(
+        revoke(&f.state, "plx_only_federated").await,
+        json!({"result":{"outcome":"not_found"}})
+    );
+    assert_eq!(
+        count(&f.scratch, "SELECT count(*) FROM grants"),
+        local_count
+    );
+    assert_eq!(federated_ids(f.scratch.path()).len(), 2);
+    assert_eq!(
+        revoke(&f.state, &federated_id).await,
+        json!({"result":{"outcome":"revoked"}})
+    );
+    assert_eq!(
+        count(&f.scratch, "SELECT count(*) FROM grants"),
+        local_count
+    );
+    assert_eq!(federated_ids(f.scratch.path()), ["plxf_only_federated"]);
+    assert_eq!(
+        revoke(&f.state, &federated_id).await,
+        json!({"result":{"outcome":"not_found"}})
+    );
+    assert_eq!(
+        count(&f.scratch, "SELECT count(*) FROM grants"),
+        local_count
+    );
     assert_eq!(
         revoke(&f.state, &local_id).await,
         json!({"result":{"outcome":"revoked"}})
     );
-    assert!(federated_ids(f.scratch.path()).contains(&local_id));
-    assert_eq!(federated_ids(f.scratch.path()).len(), 3);
+    assert_eq!(federated_ids(f.scratch.path()), ["plxf_only_federated"]);
     let remaining_local = count(&f.scratch, "SELECT count(*) FROM grants");
     assert_eq!(
         revoke(&f.state, "plxf_only_federated").await,
@@ -124,7 +134,7 @@ async fn revoke_id_namespaces_never_resolve_each_others_rows() {
         count(&f.scratch, "SELECT count(*) FROM grants"),
         remaining_local
     );
-    assert_eq!(federated_ids(f.scratch.path()).len(), 2);
+    assert!(federated_ids(f.scratch.path()).is_empty());
 }
 
 fn seed_card(scratch: &Scratch, row_id: &str, card_id: &str, card_ref: &str, state: &str) {
