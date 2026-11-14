@@ -434,20 +434,28 @@ pub fn list_with_scope_reader(
 pub enum RevokeOutcome {
     /// At least one live grant of the row was revoked; these are the ones.
     Revoked(Vec<HeldGrant>),
-    /// The row has no live grants: an unknown id, a row already revoked, or
-    /// one whose grants all expired.
+    /// The federated row was deleted and outstanding consent requests for
+    /// its caller identity, subject and scope were retired.
+    FederatedRevoked,
+    /// No stored federated row or live local grants remain for this id.
     NotFound,
 }
 
-/// Revoke every live grant of the row `id`, and nothing else.
+/// Revoke only the row `id`, without querying the daemon for pairing liveness.
+/// Operator revocation must work even when a paired computer is unavailable.
 ///
-/// Each grant goes through [`PlexusStore::revoke_grant`], the path the admin
+/// Federated ids are looked up directly and use the journaled row deletion,
+/// which also retires outstanding consent requests that could mint a new row
+/// under the same key. Local ids resolve only among local rows, so neither id
+/// namespace can revoke the other's rows.
+///
+/// Each local grant goes through [`PlexusStore::revoke_grant`], the path the admin
 /// `revoke-grant` takes: the revocation is appended to the journal and
 /// fsynced, then one fenced transaction snapshots the row into
 /// `grant_revocations` and deletes it. A database restored from before the
 /// revoke replays the journal on open, so the grant stays revoked.
 ///
-/// Grants are revoked one at a time. A crash or store error part way leaves
+/// Local grants are revoked one at a time. A crash or store error part way leaves
 /// every grant before it fully revoked and every grant after it untouched;
 /// the row is still listed under the same id, because the id depends only on
 /// the holder and capability (plus the connection for agent rows), so a retry finds the rest
@@ -460,6 +468,16 @@ pub fn revoke(
     id: &str,
     now: i64,
 ) -> Result<RevokeOutcome, StoreError> {
+    if id.starts_with("plxf_") {
+        return Ok(if store.delete_federated_row(id)? {
+            RevokeOutcome::FederatedRevoked
+        } else {
+            RevokeOutcome::NotFound
+        });
+    }
+    if !id.starts_with("plx_") {
+        return Ok(RevokeOutcome::NotFound);
+    }
     let Some(row) = list(store, None, now)?
         .into_iter()
         .find(|row| row.id() == id)

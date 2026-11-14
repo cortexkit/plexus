@@ -491,14 +491,18 @@ fn revoke_during_held_describe_commits_without_waiting_and_never_admits() {
     let (deleted_tx, deleted_rx) = std::sync::mpsc::channel();
     let revoke = std::thread::spawn(move || {
         deleted_tx
-            .send(store.delete_federated_row(&id).unwrap())
+            .send(crate::permissions::revoke(&store, "direct", &id, 1).unwrap())
             .unwrap();
     });
     let deleted = deleted_rx.recv_timeout(Duration::from_secs(5));
     release_tx.send(()).unwrap();
     revoke.join().unwrap();
     let result = authorize.join().unwrap();
-    assert!(deleted.unwrap(), "describe must not hold the writer fence");
+    assert_eq!(
+        deleted.unwrap(),
+        crate::permissions::RevokeOutcome::FederatedRevoked,
+        "describe must not hold the writer fence"
+    );
     assert_eq!(result.unwrap_err().reason_code(), "consent_unavailable");
     assert_eq!(count(&db, "federated_rows"), 0);
     assert_eq!(count(&db, "reservations"), 0);

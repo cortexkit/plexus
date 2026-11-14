@@ -275,7 +275,18 @@ fn manifest_advertises_permissions_v1() {
         .provides
         .iter()
         .filter_map(|role| match role {
-            ProviderRole::ManagementSurface { operations, .. } => Some(operations),
+            ProviderRole::ManagementSurface {
+                concurrency,
+                operations,
+                ..
+            } => {
+                assert_eq!(
+                    concurrency,
+                    &Concurrency::Serial,
+                    "permissions list and revoke must stay serialized"
+                );
+                Some(operations)
+            }
             _ => None,
         })
         .flatten()

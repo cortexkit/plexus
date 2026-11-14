@@ -5,6 +5,9 @@
 //! files the permissions/v1 contract publishes; the provider ones are copied
 //! into `crates/plexus-module/tests/fixtures/permissions-v1/`.
 use super::*;
+
+#[path = "permissions_federated_revoke_tests.rs"]
+mod federated_revoke_tests;
 use plexus_core::permissions::{row_id, Capability};
 use plexus_core::storage::github_store::{
     GithubHandle, GithubImportRow, GithubImportedGrant, GithubImportedPolicy,

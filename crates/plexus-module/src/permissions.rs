@@ -1,5 +1,5 @@
 //! `permissions.list` and `permissions.revoke`, the `permissions/v1` provider
-//! operations cingulate calls to show and end an agent's GitHub bot grants.
+//! operations cingulate calls to show and revoke standing permissions.
 //!
 //! They arrive as `{method, params}` route requests, like `grants.would_ask`,
 //! and are never facade tools. The rows and the revoke are in
@@ -112,6 +112,10 @@ pub(super) fn run(
     match core_permissions::revoke(state.store(), caller, id, now) {
         Ok(RevokeOutcome::Revoked(grants)) => {
             eprintln!(info governance: "permissions.revoke by {caller}: row {id} revoked {} grant(s)", grants.len());
+            json!({"result": {"outcome": "revoked"}})
+        }
+        Ok(RevokeOutcome::FederatedRevoked) => {
+            plexus_core::diag!(info governance: "permissions.revoke by {caller}: federated row {id} revoked");
             json!({"result": {"outcome": "revoked"}})
         }
         Ok(RevokeOutcome::NotFound) => json!({"result": {"outcome": "not_found"}}),

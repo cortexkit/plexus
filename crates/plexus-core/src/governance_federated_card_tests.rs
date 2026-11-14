@@ -127,6 +127,37 @@ fn sent(engine: &Engine, req: AuthorizationRequest) {
 }
 
 #[test]
+fn permissions_revoke_denial_asks_again_and_never_grants() {
+    let (engine, db, requester, reader) = setup();
+    let id = seed(&db, None, "read", "deny");
+    assert_eq!(
+        run(&engine, req(None)).unwrap_err().reason_code(),
+        "consent_denied"
+    );
+    assert!(requester.cards.lock().unwrap().is_empty());
+    let describes = reader.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        crate::permissions::revoke(engine.store(), "direct", &id, 1).unwrap(),
+        crate::permissions::RevokeOutcome::FederatedRevoked
+    );
+    assert_eq!(reader.calls.load(Ordering::SeqCst), describes);
+    pending(&engine, req(None));
+    assert_eq!(requester.cards.lock().unwrap().len(), 1);
+    assert_eq!(
+        reader.calls.load(Ordering::SeqCst),
+        describes,
+        "filing needs no describe"
+    );
+    assert_eq!(count(&db, "federated_rows"), 0);
+    assert_eq!(count(&db, "reservations"), 0);
+    assert!(engine.transport().requests().is_empty());
+    assert_eq!(
+        crate::permissions::revoke(engine.store(), "direct", &id, 1).unwrap(),
+        crate::permissions::RevokeOutcome::NotFound
+    );
+}
+
+#[test]
 fn four_choices_on_first_read_call_without_any_local_grant() {
     for claim in [None, Some(json!({"kind":"agent","agent_id":"remote"}))] {
         for choice in ["allow_once", "allow_always", "deny_once", "deny_always"] {
