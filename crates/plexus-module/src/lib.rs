@@ -1527,28 +1527,6 @@ async fn handle_frame(
                     .await?;
                     return Ok(true);
                 }
-                let name = object
-                    .and_then(|object| object.get("name"))
-                    .and_then(Value::as_str)
-                    .expect("served federated frames have a tool name");
-                if matches!(name, "web_search" | "code_search") {
-                    // Consent-gated tools must not reach local authorization
-                    // while their federated consent path is still absent.
-                    let refusal = match tool_provider::mode_refusal(name, &binding.mode) {
-                        Some(error) => json!({"error": error}),
-                        None => federated::pending_handler(),
-                    };
-                    send_tool_response(
-                        writer,
-                        frame.header.ver,
-                        frame.header.channel,
-                        frame.header.epoch,
-                        frame.header.corr,
-                        refusal,
-                    )
-                    .await?;
-                    return Ok(true);
-                }
             }
             let principal_permit = binding.admission.try_acquire_owned();
             let permit = route_bindings.in_flight.clone().try_acquire_owned();
@@ -2937,7 +2915,18 @@ async fn handle_tool_request_with_reply_guard(
         .is_some_and(|binding| binding.reads_tool_result_v1);
     let guarded_facade =
         (remaining_guard_enabled && remaining_tool_guard::covers(tool)).then(|| reply.clone());
-    let reply = if tool == Some(manifest::GITHUB_READ_TOOL) {
+    // Local code-search errors keep their legacy bytes. Federated callers also
+    // need the structured consent and liveness members, not only rendered text.
+    let federated_code_error = if tool == Some(manifest::CODE_SEARCH_TOOL)
+        && route_bindings
+            .binding(channel, epoch)?
+            .is_some_and(|binding| binding.federated_caller.is_some())
+    {
+        reply.get("error").cloned()
+    } else {
+        None
+    };
+    let mut reply = if tool == Some(manifest::GITHUB_READ_TOOL) {
         let action = object
             .get("arguments")
             .and_then(|arguments| arguments.get("action"))
@@ -2960,6 +2949,9 @@ async fn handle_tool_request_with_reply_guard(
             core_web_search_reader_ready,
         )
     };
+    if let Some(error) = federated_code_error {
+        reply["structuredContent"] = error;
+    }
     let reply = match guarded_facade {
         Some(facade) => remaining_tool_guard::guard(tool, facade, reply),
         None => reply,
@@ -3772,26 +3764,48 @@ fn facade_tool_reply_inner(
             // Pass every web-search argument to core's closed-schema validator;
             // undeclared identity-token fields were already refused at ingress.
             blocking_section(|| {
-                match state.runtime.web_search.search_scoped(
-                    &state.runtime.engine,
-                    &principal_key,
-                    arguments,
-                    route_scope.as_ref(),
-                    relay_origin.as_ref(),
-                ) {
+                let outcome = if let Some(caller) = &federated_caller {
+                    state.runtime.web_search.search_federated(
+                        &state.runtime.engine,
+                        caller,
+                        arguments,
+                        route_scope.as_ref(),
+                        relay_origin.as_ref(),
+                    )
+                } else {
+                    state.runtime.web_search.search_scoped(
+                        &state.runtime.engine,
+                        &principal_key,
+                        arguments,
+                        route_scope.as_ref(),
+                        relay_origin.as_ref(),
+                    )
+                };
+                match outcome {
                     Ok(response) => json!({"result": response}),
                     Err(refusal) => refusal.to_wire(),
                 }
             })
         }
         (manifest::CODE_SEARCH_TOOL, _) => blocking_section(|| {
-            match state.runtime.code_search.search_scoped(
-                &state.runtime.engine,
-                &principal_key,
-                arguments,
-                route_scope.as_ref(),
-                relay_origin.as_ref(),
-            ) {
+            let outcome = if let Some(caller) = &federated_caller {
+                state.runtime.code_search.search_federated(
+                    &state.runtime.engine,
+                    caller,
+                    arguments,
+                    route_scope.as_ref(),
+                    relay_origin.as_ref(),
+                )
+            } else {
+                state.runtime.code_search.search_scoped(
+                    &state.runtime.engine,
+                    &principal_key,
+                    arguments,
+                    route_scope.as_ref(),
+                    relay_origin.as_ref(),
+                )
+            };
+            match outcome {
                 Ok(response) => json!({"result": response}),
                 Err(refusal) => refusal.to_wire(),
             }

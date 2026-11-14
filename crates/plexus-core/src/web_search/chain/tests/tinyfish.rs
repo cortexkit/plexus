@@ -355,6 +355,7 @@ fn capability_skip_before_dispatch_has_no_allowance_or_cooldown() {
     // backend's 2000-character guard at the chain entry to prove its no-send
     // invariant even if the tool's envelope is widened later.
     let mut audit = CallAudit {
+        federated: None,
         search: facade::SearchAudit::new(facade::SearchTool::Web, "direct", None, None, None),
         chain: None,
     };

@@ -286,20 +286,33 @@ impl WebSearchService {
             .scope
             .as_ref()
             .is_some_and(|scope| scope.flow_id.is_some());
-        let caller_key = CallerKey {
-            principal: audit.search.caller.clone(),
-            agent_id: audit.search.agent_id.clone(),
+        let caller_key = if let Some(authority) = &audit.federated {
+            authority
+                .caller_key()
+                .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?
+        } else {
+            CallerKey {
+                principal: audit.search.caller.clone(),
+                agent_id: audit.search.agent_id.clone(),
+            }
         };
         let cache_key = CacheKey::new(cache::CHAIN_CACHE_BACKEND, query);
-        if let Some(hit) = self.chain_cache_hit(
-            engine.store(),
-            order,
-            &cache_key,
-            &caller_key,
-            is_flow,
-            now_ms,
-            audit,
-        ) {
+        if let Some(hit) = audit
+            .federated
+            .is_none()
+            .then(|| {
+                self.chain_cache_hit(
+                    engine.store(),
+                    order,
+                    &cache_key,
+                    &caller_key,
+                    is_flow,
+                    now_ms,
+                    audit,
+                )
+            })
+            .flatten()
+        {
             return Ok(hit);
         }
         let deadline_at_ms =
@@ -311,6 +324,8 @@ impl WebSearchService {
         let mut first_grant_refusal = None;
         let mut retry_after = None::<u64>;
         let mut request_rejected = false;
+        let mut federated_gate_refusal = None;
+        let mut federated_consent_refusal = None;
 
         for (position, name) in order.iter().enumerate() {
             let Some(provider) = providers::provider_named(name) else {
@@ -339,14 +354,27 @@ impl WebSearchService {
                 Some(provider.name),
                 provider.action,
             );
-            let resolved = self.backing_connection_for(
-                engine.store(),
-                caller,
-                now_ms,
-                is_flow,
-                identity,
-                target,
-            );
+            let resolved = if audit.federated.is_some() {
+                facade::resolve_federated_connection(
+                    engine.store(),
+                    now_ms,
+                    facade::SearchTarget {
+                        tool: facade::SearchTool::Web,
+                        app_key: identity.app_key,
+                        action: identity.action,
+                    },
+                )
+                .map_err(|denial| self.refusal_from(denial))
+            } else {
+                self.backing_connection_for(
+                    engine.store(),
+                    caller,
+                    now_ms,
+                    is_flow,
+                    identity,
+                    target,
+                )
+            };
             let not_granted = matches!(
                 &resolved,
                 Err(WebSearchRefusal::NotGranted | WebSearchRefusal::Grant(_))
@@ -386,10 +414,81 @@ impl WebSearchService {
                 if deadline_stopped {
                     return Err(SkipReason::Deadline);
                 }
-                self.chain_checks(engine.store(), &connection, &action, now_ms)?;
+                if audit.federated.is_none() {
+                    self.chain_checks(engine.store(), &connection, &action, now_ms)?;
+                }
                 let (Some(backend), Some(prepared)) = (backend, prepared) else {
                     return Err(SkipReason::Unavailable);
                 };
+                let federated_request = audit.federated.as_ref().map(|authority| {
+                    let mut request = authority.bind(
+                        AuthorizationRequest::new(
+                            caller,
+                            &connection.connection_id,
+                            provider.action,
+                            prepared.vendor_args.clone(),
+                        )
+                        .without_per_call_approval(),
+                    );
+                    if let Some(scope) = &audit.search.scope {
+                        request = request.with_scope_attribution_only(scope.clone());
+                    }
+                    if let Some(origin) = &audit.search.relay_origin {
+                        request = request.with_relay_origin(origin.clone());
+                    }
+                    request
+                });
+                if let Some(request) = &federated_request {
+                    engine
+                        .preflight_federated_search(request.clone())
+                        .map_err(|denial| {
+                            federated_gate_refusal =
+                                Some(WebSearchRefusal::Governance(Box::new(denial)));
+                            SkipReason::Unavailable
+                        })?;
+                }
+                if audit.federated.is_some() {
+                    self.standing_checks(engine.store(), &connection, &action, now_ms)?;
+                }
+                if let Some(request) = &federated_request {
+                    engine.apply_federated_search(request).map_err(|denial| {
+                        federated_consent_refusal =
+                            Some(WebSearchRefusal::Governance(Box::new(denial)));
+                        SkipReason::Unavailable
+                    })?;
+                    // Unlike the local cache-first path, a federated cache lookup
+                    // follows every backing-connection gate and the search row.
+                    let limits = engine
+                        .store()
+                        .web_search_limits(name)
+                        .map_err(|_| SkipReason::Unavailable)?
+                        .unwrap_or_else(default_limits);
+                    self.limiter
+                        .try_acquire(name, &caller_key, limits, now_ms)
+                        .map_err(|retry| {
+                            retry_after = Some(retry_after.map_or(retry, |old| old.min(retry)));
+                            SkipReason::RateLimited
+                        })?;
+                    if let Some(entry) = self.cache.get_served(&cache_key, now_ms) {
+                        if entry.served.provider == *name
+                            && instance_digest(name, backend.as_ref(), &connection)
+                                .is_ok_and(|instance| instance == entry.served.instance_digest)
+                        {
+                            audit.search.resolved(&connection, &action);
+                            return Ok((
+                                WebSearchResponse {
+                                    results: entry.results,
+                                    backend: name.clone(),
+                                    cached: true,
+                                },
+                                instance_digest(name, backend.as_ref(), &connection),
+                            ));
+                        }
+                    }
+                }
+                if audit.federated.is_some() {
+                    self.chain_checks(engine.store(), &connection, &action, now_ms)?;
+                }
 
                 // Check after policy/approval and cooldown, immediately before
                 // allowance admission. This budgets attempt starts, not time
@@ -429,12 +528,14 @@ impl WebSearchService {
                     .web_search_limits(name)
                     .map_err(|_| SkipReason::Unavailable)?
                     .unwrap_or_else(default_limits);
-                self.limiter
-                    .try_acquire(name, &caller_key, limits, now_ms)
-                    .map_err(|retry| {
-                        retry_after = Some(retry_after.map_or(retry, |old| old.min(retry)));
-                        SkipReason::RateLimited
-                    })?;
+                if audit.federated.is_none() {
+                    self.limiter
+                        .try_acquire(name, &caller_key, limits, now_ms)
+                        .map_err(|retry| {
+                            retry_after = Some(retry_after.map_or(retry, |old| old.min(retry)));
+                            SkipReason::RateLimited
+                        })?;
+                }
 
                 let mut request = AuthorizationRequest::new(
                     caller,
@@ -455,9 +556,10 @@ impl WebSearchService {
                 audit.search.resolved(&connection, &action);
                 audit.search.new_attempt();
                 audit.chain.as_mut().unwrap().attempted = Some(identity);
-                // Connector-home ownership is mediated only by authorize, not
-                // preflight, so its denial is this provider's unavailable reason.
-                let reservation = engine.authorize(request).map_err(|denial| {
+                // Local searches check connector-home ownership only here;
+                // federated searches already checked it before rate and cache.
+                let reservation = engine.authorize(federated_request.unwrap_or(request)).map_err(|denial| {
+                    if audit.federated.is_some() { federated_gate_refusal = Some(WebSearchRefusal::Governance(Box::new(denial.clone()))); }
                     eprintln!(warn web_search: "web_search chain authorization refused on {} ({})", connection.connection_id, denial.reason_code());
                     SkipReason::for_refusal(&self.refusal_for_denial(caller, &denial))
                 })?;
@@ -506,6 +608,9 @@ impl WebSearchService {
                     instance_digest(name, backend.as_ref(), &connection),
                 ))
             })();
+            if let Some(refusal) = federated_consent_refusal.take() {
+                return Err(refusal);
+            }
             if request_rejected {
                 return Err(WebSearchRefusal::RequestRejected {
                     backend: name.clone(),
@@ -547,6 +652,9 @@ impl WebSearchService {
             return Err(WebSearchRefusal::RateLimited {
                 retry_after_ms: retry_after.unwrap(),
             });
+        }
+        if let Some(refusal) = federated_gate_refusal {
+            return Err(refusal);
         }
         Err(WebSearchRefusal::WebSearchUnavailable {
             providers: skipped.clone(),

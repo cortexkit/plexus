@@ -23,6 +23,9 @@
 //!
 //! Every call writes one `web_search` audit row. A dispatched call also leaves
 //! the engine's own authorization and dispatch rows.
+//! Federated calls use direct-owned candidates and search-subject consent instead
+//! of module grants. They run all dispatch gates before row, rate and cache checks;
+//! the compatibility and cache-first ordering above remains local-only.
 
 pub mod backend;
 pub mod cache;
@@ -30,6 +33,7 @@ pub mod capability;
 mod chain;
 mod code_lookup;
 pub(crate) mod facade;
+pub(crate) mod federated;
 pub mod limiter;
 pub mod providers;
 pub mod query;
@@ -62,6 +66,7 @@ pub use query::{Recency, WebSearchQuery};
 /// Every way a `web_search` call is refused. Each has a stable wire code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebSearchRefusal {
+    Governance(Box<Denial>),
     /// No live connection of the backend's app carries an invoke grant for
     /// the search action to this caller.
     NotGranted,
@@ -106,6 +111,7 @@ pub enum WebSearchRefusal {
 impl WebSearchRefusal {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Governance(denial) => denial.reason_code(),
             Self::NotGranted => "web_search_not_granted",
             Self::Grant(refusal) => refusal.code(),
             Self::PolicyBlocked => "policy_blocked",
@@ -124,6 +130,7 @@ impl WebSearchRefusal {
 
     fn message(&self) -> &'static str {
         match self {
+            Self::Governance(_) => "governance denied the connector operation",
             Self::NotGranted | Self::Grant(_) => "no web search backend is granted to this caller",
             Self::PolicyBlocked => {
                 "a policy blocks web search on the granted backend; an operator must change that policy"
@@ -147,6 +154,9 @@ impl WebSearchRefusal {
 
     /// The refusal as the tool's error body.
     pub fn to_wire(&self) -> Value {
+        if let Self::Governance(denial) = self {
+            return federated::denial_wire(denial);
+        }
         let mut error = json!({"code": self.code(), "message": self.message()});
         match self {
             Self::Grant(refusal) => error["detail"] = json!(refusal.detail()),
@@ -160,7 +170,8 @@ impl WebSearchRefusal {
             | Self::RequestRejected { backend } => error["backend"] = json!(backend),
             Self::InvalidQuery { field } => error["field"] = json!(field),
             Self::WebSearchUnavailable { providers } => error["detail"] = json!(providers),
-            Self::NotGranted
+            Self::Governance(_)
+            | Self::NotGranted
             | Self::PolicyBlocked
             | Self::BackendAmbiguous
             | Self::CodeLookup
@@ -230,6 +241,7 @@ pub struct WebSearchService {
 /// What the one `web_search` audit row of a call records: the fields every
 /// search row has, plus the provider walk of an ordered search.
 struct CallAudit {
+    federated: Option<federated::SearchAuthorization>,
     search: facade::SearchAudit,
     chain: Option<chain::ChainAudit>,
 }
@@ -326,8 +338,43 @@ impl WebSearchService {
         scope: Option<&CallScope>,
         relay_origin: Option<&RelayOrigin>,
     ) -> Result<WebSearchResponse, WebSearchRefusal> {
+        self.search_with_authority(engine, caller, arguments, scope, relay_origin, None)
+    }
+
+    pub fn search_federated<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+        &self,
+        engine: &GovernanceEngine<C, T>,
+        caller: &crate::federated::FederatedCaller,
+        arguments: &Map<String, Value>,
+        scope: Option<&CallScope>,
+        relay_origin: Option<&RelayOrigin>,
+    ) -> Result<WebSearchResponse, WebSearchRefusal> {
+        let authority =
+            federated::SearchAuthorization::new(caller, facade::SearchTool::Web, arguments)
+                .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?;
+        self.search_with_authority(
+            engine,
+            "reserved:callosum",
+            arguments,
+            scope,
+            relay_origin,
+            Some(authority),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn search_with_authority<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+        &self,
+        engine: &GovernanceEngine<C, T>,
+        caller: &str,
+        arguments: &Map<String, Value>,
+        scope: Option<&CallScope>,
+        relay_origin: Option<&RelayOrigin>,
+        federated: Option<federated::SearchAuthorization>,
+    ) -> Result<WebSearchResponse, WebSearchRefusal> {
         let now_ms = (self.clock)();
         let mut audit = CallAudit {
+            federated,
             search: facade::SearchAudit::new(
                 facade::SearchTool::Web,
                 caller,
@@ -376,7 +423,11 @@ impl WebSearchService {
         audit.search.record_filters(query.audited_filters());
 
         let agent = resolve_call_agent(audit.search.scope.as_ref());
-        audit.search.agent_id = agent.attributed.clone();
+        audit.search.agent_id = if audit.federated.is_some() {
+            None
+        } else {
+            agent.attributed.clone()
+        };
 
         // Refuse before charging quota or reading old cached source-search results.
         if code_lookup::classify(&query).is_some() {
@@ -398,9 +449,15 @@ impl WebSearchService {
                 return Err(self.unavailable());
             }
         };
-        let caller_key = CallerKey {
-            principal: caller.clone(),
-            agent_id: agent.attributed.clone(),
+        let caller_key = if let Some(authority) = &audit.federated {
+            authority
+                .caller_key()
+                .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?
+        } else {
+            CallerKey {
+                principal: caller.clone(),
+                agent_id: agent.attributed.clone(),
+            }
         };
 
         let is_flow = audit
@@ -408,10 +465,51 @@ impl WebSearchService {
             .scope
             .as_ref()
             .is_some_and(|scope| scope.flow_id.is_some());
-        let (connection, action) = self.backing_connection(store, &caller, now_ms, is_flow)?;
+        let (connection, action) = if audit.federated.is_some() {
+            facade::resolve_federated_connection(
+                store,
+                now_ms,
+                facade::SearchTarget {
+                    tool: facade::SearchTool::Web,
+                    app_key: backend.app_key(),
+                    action: backend.action(),
+                },
+            )
+            .map_err(|denial| self.refusal_from(denial))?
+        } else {
+            self.backing_connection(store, &caller, now_ms, is_flow)?
+        };
         audit.search.resolved(&connection, &action);
+        let federated_request = audit.federated.as_ref().map(|authority| {
+            let mut request = authority.bind(
+                AuthorizationRequest::new(
+                    &caller,
+                    &connection.connection_id,
+                    backend.action(),
+                    backend.vendor_args(&query, now_ms),
+                )
+                .without_per_call_approval(),
+            );
+            if let Some(scope) = &audit.search.scope {
+                request = request.with_scope_attribution_only(scope.clone());
+            }
+            if let Some(origin) = &audit.search.relay_origin {
+                request = request.with_relay_origin(origin.clone());
+            }
+            request
+        });
+        if let Some(request) = &federated_request {
+            engine
+                .preflight_federated_search(request.clone())
+                .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?;
+        }
         facade::standing_checks(store, facade::SearchTool::Web, &connection, &action, now_ms)
             .map_err(|denial| self.refusal_from(denial))?;
+        if let Some(request) = &federated_request {
+            engine
+                .apply_federated_search(request)
+                .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?;
+        }
         // Charge the rate buckets only once the caller is known to hold a grant
         // on a usable connection. The backend bucket is shared by every caller,
         // so charging earlier would let an ungranted caller drain it for all.
@@ -451,14 +549,19 @@ impl WebSearchService {
         if let Some(relay_origin) = &audit.search.relay_origin {
             request = request.with_relay_origin(relay_origin.clone());
         }
-        let reservation = engine.authorize(request).map_err(|denial| {
-            eprintln!(warn web_search:
-                "web_search authorization refused on {} ({})",
-                connection.connection_id,
-                denial.reason_code()
-            );
-            self.refusal_for_denial(&caller, &denial)
-        })?;
+        let reservation = engine
+            .authorize(federated_request.unwrap_or(request))
+            .map_err(|denial| {
+                if audit.federated.is_some() {
+                    return WebSearchRefusal::Governance(Box::new(denial));
+                }
+                eprintln!(warn web_search:
+                    "web_search authorization refused on {} ({})",
+                    connection.connection_id,
+                    denial.reason_code()
+                );
+                self.refusal_for_denial(&caller, &denial)
+            })?;
         audit.search.request_id = Some(reservation.request_id.clone());
         let dispatched = engine.revalidate_and_dispatch(&reservation);
         let fetched_at_ms = crate::storage::now_ms();

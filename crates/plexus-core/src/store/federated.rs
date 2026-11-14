@@ -87,8 +87,8 @@ impl PlexusStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'reserved', ?9, ?10)",
                 rusqlite::params![
                     id,
-                    call.owner_principal,
-                    call.subject,
+                    input.principal,
+                    input.connection_id,
                     input.action,
                     snapshot,
                     input.args_hash,
@@ -241,6 +241,8 @@ impl PlexusStore {
 }
 
 pub(crate) struct FederatedReservationInput<'a> {
+    pub principal: &'a str,
+    pub connection_id: &'a str,
     pub action: &'a str,
     pub snapshot: &'a super::SnapshotGenerations,
     pub args_hash: &'a str,

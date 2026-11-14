@@ -750,40 +750,156 @@ async fn mixed_method_of_any_type_with_allowed_name_reaches_no_handler() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn search_tools_fail_closed_before_any_namespace_or_grant_read_or_dispatch() {
-    let (mut state, _store, transport, scratch) =
-        super::github_read_frame_tests::imported_runtime();
-    Arc::get_mut(&mut state)
-        .unwrap()
-        .runtime
-        .set_federated_callers_enabled_for_test(true);
-    // Any accidental connection or local grant lookup now fails independently
-    // of its authority decision, even if it selects Callosum's namespace.
-    let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
-    db.execute_batch("DROP TABLE grants; DROP TABLE connections;")
-        .unwrap();
-    let routes = bind_accepted(&state, stamp(), CallMode::Classic).await;
-    for body in served_frames()
-        .into_iter()
-        .filter(|body| matches!(body["name"].as_str(), Some("web_search" | "code_search")))
-    {
-        let actual = reply(call(&state, &routes, body.clone()).await);
-        assert_eq!(
-            actual["error"]["code"], "consent_unavailable",
-            "{body}: {actual}"
-        );
-        assert_eq!(
-            actual["error"]["transmission"], "not_sent",
-            "{body}: {actual}"
-        );
+async fn search_rows_replace_the_placeholder_only_after_backing_gates_pass() {
+    fn unpack(tool: &str, value: Value) -> Value {
+        let result: cortexkit_role_tool_provider::result::ToolResult =
+            serde_json::from_value(value.clone()).unwrap();
+        cortexkit_role_tool_provider::result::validate(&result).unwrap();
+        if tool == "code_search" {
+            assert!(value.get("error").is_none());
+            if value["isError"] == true {
+                assert_eq!(value["errorCode"], value["structuredContent"]["code"]);
+                json!({"error":value["structuredContent"]})
+            } else {
+                json!({"result":value["structuredContent"]})
+            }
+        } else {
+            value
+        }
     }
-    assert!(transport.requests().is_empty());
-    assert!(state
-        .store()
-        .list_audit("reserved:callosum")
-        .unwrap()
-        .is_empty());
-    assert!(state.store().list_audit("direct").unwrap().is_empty());
+    for (tool, ordered) in [
+        ("web_search", false),
+        ("web_search", true),
+        ("code_search", false),
+    ] {
+        let (mut state, store, transport, scratch) =
+            super::github_read_frame_tests::imported_runtime();
+        let runtime = &mut Arc::get_mut(&mut state).unwrap().runtime;
+        runtime.set_federated_callers_enabled_for_test(true);
+        runtime.engine =
+            runtime
+                .engine
+                .clone()
+                .with_scope_reader(crate::consent_test_support::live_reader(
+                    CallScope::from_stamp(&stamp()),
+                ));
+        let (app, action, source) = if tool == "web_search" {
+            (
+                "exa_rest",
+                "search",
+                include_str!("../../../catalog/exa_rest.jsonc"),
+            )
+        } else {
+            (
+                "grep_app",
+                "searchGitHub",
+                include_str!("../../../catalog/grep_app.jsonc"),
+            )
+        };
+        let mut manifest: Value =
+            serde_json::from_str(&subc_jsonc::jsonc_to_json(source).unwrap()).unwrap();
+        manifest["auth"] = json!({"mode":"none"});
+        manifest["credential_bindings"] = json!([]);
+        store
+            .upsert_manifest(
+                plexus_core::storage::CATALOG_PRINCIPAL,
+                &plexus_core::ingest_value(manifest).unwrap(),
+            )
+            .unwrap();
+        store
+            .insert_connection("direct", "backing", app, "active", &json!({}))
+            .unwrap();
+        store
+            .upsert_catalog_action(&plexus_core::storage::CatalogActionInput {
+                principal: "direct".into(),
+                connection_id: "backing".into(),
+                name: action.into(),
+                title: None,
+                schema: json!({"type":"object"}),
+                schema_hash: "schema".into(),
+                risk: "read".into(),
+                severity: "S1".into(),
+                ask_first: false,
+                status: "active".into(),
+                quarantine_reason: None,
+                reconciliation: None,
+            })
+            .unwrap();
+        if ordered {
+            store.set_web_search_order(&["exa".into()]).unwrap();
+        }
+        let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+        db.execute("DELETE FROM grants", []).unwrap();
+        db.execute("UPDATE connections SET ceiling_risk='read',ceiling_selectors=?1 WHERE connection_id='backing'",[json!([action]).to_string()]).unwrap();
+        transport.set_response(plexus_core::MockResponse::Success(
+            if tool == "web_search" {
+                json!({"results":[]})
+            } else {
+                json!({"content":[]})
+            },
+        ));
+        let routes = bind_accepted(&state, stamp(), CallMode::Classic).await;
+        let body = json!({"name":tool,"arguments":{"query":"rust async book"}});
+        let missing = unpack(tool, reply(call(&state, &routes, body.clone()).await));
+        assert_eq!(
+            missing["error"],
+            denial_response(&plexus_core::Denial::ConsentUnavailable {
+                action: tool.into()
+            })["error"]
+        );
+        db.execute("INSERT INTO federated_rows (id,peer_fingerprint,pairing_id,peer_class,selector,claim_kind,canonical_claim_identity,owner_principal,subject,scope,peer_name,effect,granted_at_ms,card_ref,card_refs_json) VALUES ('plxf_search',?1,'pairing','computer','claimless','','','',?2,'read','Peer','allow',1,'el_seed','[\"el_seed\"]')",rusqlite::params!["a".repeat(32),tool]).unwrap();
+        let served = unpack(tool, reply(call(&state, &routes, body.clone()).await));
+        assert!(served.get("result").is_some(), "{served}");
+        assert_eq!(transport.requests().len(), 1);
+        if tool == "web_search" {
+            let cached = reply(call(&state, &routes, body.clone()).await);
+            assert_eq!(cached["result"]["cached"], true, "{cached}");
+            assert_eq!(transport.requests().len(), 1);
+        }
+        for (policy, denial) in [
+            (
+                "block",
+                plexus_core::Denial::Policy(plexus_core::governance::PolicyDenial::Blocked),
+            ),
+            (
+                "ask_first",
+                plexus_core::Denial::Policy(plexus_core::governance::PolicyDenial::AskFirst),
+            ),
+        ] {
+            store
+                .set_policy("direct", "backing", action, policy, None)
+                .unwrap();
+            let refused = unpack(tool, reply(call(&state, &routes, body.clone()).await));
+            let mut expected = denial_response(&denial);
+            expected["error"]["transmission"] = json!("not_sent");
+            assert_eq!(refused["error"], expected["error"]);
+        }
+        store
+            .set_policy("direct", "backing", action, "allow", None)
+            .unwrap();
+        db.execute("UPDATE federated_rows SET effect='deny'", [])
+            .unwrap();
+        let denied = unpack(tool, reply(call(&state, &routes, body.clone()).await));
+        let mut expected = denial_response(&plexus_core::Denial::FederatedConsentDenied);
+        expected["error"]["transmission"] = json!("not_sent");
+        assert_eq!(denied["error"], expected["error"]);
+        store.delete_federated_row("plxf_search").unwrap();
+        let revoked = unpack(tool, reply(call(&state, &routes, body).await));
+        assert_eq!(revoked["error"]["code"], "consent_unavailable");
+        assert_eq!(
+            transport.requests().len(),
+            1,
+            "refusals cannot serve cache or dispatch"
+        );
+        for table in ["action_requests", "federated_card_records"] {
+            assert_eq!(
+                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -811,7 +927,16 @@ async fn federated_flow_skips_local_carrier_and_scope_checks_but_keeps_modes() {
                 assert_eq!(actual["error"]["transmission"], "not_sent");
             } else {
                 assert_eq!(
-                    actual["error"]["code"], "consent_unavailable",
+                    if name == "code_search" {
+                        &actual["errorCode"]
+                    } else {
+                        &actual["error"]["code"]
+                    },
+                    if name == "web_search" {
+                        "web_search_not_granted"
+                    } else {
+                        "code_search_not_granted"
+                    },
                     "{body}: {actual}"
                 );
             }

@@ -31,6 +31,7 @@ const TARGET: SearchTarget = SearchTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefusalCode {
+    Governance(&'static str),
     NotGranted,
     /// A flow's typed grant refusal at the named layer.
     GrantAbsent(Layer),
@@ -47,6 +48,7 @@ enum RefusalCode {
 impl RefusalCode {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Governance(code) => code,
             Self::NotGranted => "code_search_not_granted",
             Self::GrantAbsent(Layer::Module) => "module_grant_absent",
             Self::GrantAbsent(Layer::Agent) => "agent_grant_absent",
@@ -76,6 +78,7 @@ impl std::fmt::Display for RefusalCode {
 
 #[derive(Debug)]
 pub struct CodeSearchRefusal {
+    governance: Option<Box<crate::governance::Denial>>,
     code: RefusalCode,
     field: Option<String>,
     retry_after_ms: Option<u64>,
@@ -86,6 +89,7 @@ pub struct CodeSearchRefusal {
 impl CodeSearchRefusal {
     fn new(code: RefusalCode) -> Self {
         Self {
+            governance: None,
             code,
             field: None,
             retry_after_ms: None,
@@ -105,7 +109,11 @@ impl CodeSearchRefusal {
         }
     }
     pub fn to_wire(&self) -> Value {
+        if let Some(denial) = &self.governance {
+            return crate::web_search::federated::denial_wire(denial);
+        }
         let message = match self.code {
+            RefusalCode::Governance(_) => "governance denied the connector operation",
             RefusalCode::NotGranted | RefusalCode::GrantAbsent(_) => {
                 "no code search backend is granted to this caller"
             }
@@ -144,6 +152,13 @@ impl CodeSearchRefusal {
         }
         json!({"error":error})
     }
+
+    fn governance(denial: crate::governance::Denial) -> Self {
+        Self {
+            governance: Some(Box::new(denial.clone())),
+            ..Self::new(RefusalCode::Governance(denial.reason_code()))
+        }
+    }
 }
 
 pub struct CodeSearchService {
@@ -173,10 +188,51 @@ impl CodeSearchService {
         scope: Option<&CallScope>,
         relay_origin: Option<&RelayOrigin>,
     ) -> Result<CodeSearchResponse, CodeSearchRefusal> {
+        self.search_with_authority(engine, caller, arguments, scope, relay_origin, None)
+    }
+
+    pub fn search_federated<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+        &self,
+        engine: &GovernanceEngine<C, T>,
+        caller: &crate::federated::FederatedCaller,
+        arguments: &Map<String, Value>,
+        scope: Option<&CallScope>,
+        relay_origin: Option<&RelayOrigin>,
+    ) -> Result<CodeSearchResponse, CodeSearchRefusal> {
+        let authority = crate::web_search::federated::SearchAuthorization::new(
+            caller,
+            SearchTool::Code,
+            arguments,
+        )
+        .map_err(CodeSearchRefusal::governance)?;
+        self.search_with_authority(
+            engine,
+            "reserved:callosum",
+            arguments,
+            scope,
+            relay_origin,
+            Some(authority),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn search_with_authority<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+        &self,
+        engine: &GovernanceEngine<C, T>,
+        caller: &str,
+        arguments: &Map<String, Value>,
+        scope: Option<&CallScope>,
+        relay_origin: Option<&RelayOrigin>,
+        authority: Option<crate::web_search::federated::SearchAuthorization>,
+    ) -> Result<CodeSearchResponse, CodeSearchRefusal> {
         let mut audit = facade::SearchAudit::new(
             SearchTool::Code,
             caller,
-            scope.and_then(|s| s.agent_id.clone()),
+            if authority.is_some() {
+                None
+            } else {
+                scope.and_then(|s| s.agent_id.clone())
+            },
             scope,
             relay_origin,
         );
@@ -190,18 +246,50 @@ impl CodeSearchService {
             // Find the granted connection first: the rate buckets are shared
             // (the global grep.app bucket serves every caller), so a caller
             // with no grant must be refused before it can spend from them.
-            let (connection, action) = facade::resolve_connection(
-                engine.store(),
-                caller,
-                now,
-                is_flow,
-                TARGET,
-                grant_target(caller),
-            )
+            let (connection, action) = if authority.is_some() {
+                facade::resolve_federated_connection(engine.store(), now, TARGET)
+            } else {
+                facade::resolve_connection(
+                    engine.store(),
+                    caller,
+                    now,
+                    is_flow,
+                    TARGET,
+                    grant_target(caller),
+                )
+            }
             .map_err(refusal_from)?;
             audit.resolved(&connection, &action);
+            let federated_request = authority.as_ref().map(|authority| {
+                let mut request = authority.bind(
+                    AuthorizationRequest::new(
+                        caller,
+                        &connection.connection_id,
+                        ACTION,
+                        query.vendor_args(),
+                    )
+                    .without_per_call_approval(),
+                );
+                if let Some(scope) = scope {
+                    request = request.with_scope_attribution_only(scope.clone());
+                }
+                if let Some(origin) = relay_origin {
+                    request = request.with_relay_origin(origin.clone());
+                }
+                request
+            });
+            if let Some(request) = &federated_request {
+                engine
+                    .preflight_federated_search(request.clone())
+                    .map_err(CodeSearchRefusal::governance)?;
+            }
             facade::standing_checks(engine.store(), SearchTool::Code, &connection, &action, now)
                 .map_err(refusal_from)?;
+            if let Some(request) = &federated_request {
+                engine
+                    .apply_federated_search(request)
+                    .map_err(CodeSearchRefusal::governance)?;
+            }
             // Limits are stored by backend in web_search_limits. Charge the caller's
             // module bucket and the global grep.app bucket, irrespective of agent identity.
             let limits = engine
@@ -212,9 +300,15 @@ impl CodeSearchService {
             self.limiter
                 .try_acquire(
                     BACKEND,
-                    &CallerKey {
-                        principal: caller.to_string(),
-                        agent_id: None,
+                    &if let Some(authority) = &authority {
+                        authority
+                            .caller_key()
+                            .map_err(CodeSearchRefusal::governance)?
+                    } else {
+                        CallerKey {
+                            principal: caller.to_string(),
+                            agent_id: None,
+                        }
                     },
                     limits,
                     now,
@@ -241,9 +335,14 @@ impl CodeSearchService {
             if let Some(origin) = relay_origin {
                 request = request.with_relay_origin(origin.clone());
             }
-            let reservation = engine.authorize(request).map_err(|denial| {
-                refusal_from(facade::denial_for(&denial, grant_target(caller)))
-            })?;
+            let reservation = engine
+                .authorize(federated_request.unwrap_or(request))
+                .map_err(|denial| {
+                    if authority.is_some() {
+                        return CodeSearchRefusal::governance(denial);
+                    }
+                    refusal_from(facade::denial_for(&denial, grant_target(caller)))
+                })?;
             audit.request_id = Some(reservation.request_id.clone());
             let dispatched = engine.revalidate_and_dispatch(&reservation);
             audit.transmission = Some(dispatched.transmission);

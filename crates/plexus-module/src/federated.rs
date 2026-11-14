@@ -156,13 +156,3 @@ pub(crate) fn project_actions(
         })
         .collect()
 }
-
-/// Fail closed before any local namespace or grant lookup until the dedicated
-/// federated handlers are available. Role metadata carries no authority.
-pub(crate) fn pending_handler() -> Value {
-    json!({"error": {
-        "code": "consent_unavailable",
-        "message": "federated handling is not available for this tool",
-        "transmission": "not_sent",
-    }})
-}

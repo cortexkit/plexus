@@ -7,6 +7,53 @@ where
     C: CredentialSource + ?Sized,
     T: Transport + ?Sized,
 {
+    /// Apply standing search authority after the backing connection's gates.
+    /// The daemon liveness query does not hold the store's write lock. Re-read
+    /// the row afterwards so a revocation committed during that query wins.
+    pub(crate) fn apply_federated_search(
+        &self,
+        request: &AuthorizationRequest,
+    ) -> Result<(), Denial> {
+        let caller = request
+            .federated_caller
+            .as_ref()
+            .ok_or(Denial::StoreFailure)?;
+        let binding = request
+            .federated_search
+            .as_ref()
+            .ok_or(Denial::StoreFailure)?;
+        let call = Call {
+            peer_fingerprint: &caller.attributes.peer_fingerprint,
+            pairing_id: &caller.attributes.pairing_id,
+            peer_class: "computer",
+            claim: caller.attributes.remote_claim.as_ref(),
+            owner_principal: &binding.owner_principal,
+            subject: &binding.subject,
+            scope: "read",
+        };
+        let unavailable = || Denial::ConsentUnavailable {
+            action: binding.action.clone(),
+        };
+        if self
+            .store
+            .matching_federated_row(&call, self.now_ms())
+            .map_err(|_| Denial::StoreFailure)?
+            .is_none()
+        {
+            return Err(unavailable());
+        }
+        self.federated_live(caller)?;
+        match self
+            .store
+            .matching_federated_row(&call, self.now_ms())
+            .map_err(|_| Denial::StoreFailure)?
+        {
+            Some(row) if row.effect == Effect::Allow => Ok(()),
+            Some(_) => Err(Denial::FederatedConsentDenied),
+            None => Err(unavailable()),
+        }
+    }
+
     /// Standing rows and call-bound cards replace local grants only after all
     /// non-grant invoke gates have passed.
     #[allow(clippy::too_many_arguments)]
@@ -32,13 +79,30 @@ where
                 pairing_id: &caller.attributes.pairing_id,
                 peer_class: "computer",
                 claim: caller.attributes.remote_claim.as_ref(),
-                owner_principal: &connection.principal,
-                subject: &connection.connection_id,
+                owner_principal: request
+                    .federated_search
+                    .as_ref()
+                    .map_or(connection.principal.as_str(), |binding| {
+                        binding.owner_principal.as_str()
+                    }),
+                subject: request
+                    .federated_search
+                    .as_ref()
+                    .map_or(connection.connection_id.as_str(), |binding| {
+                        binding.subject.as_str()
+                    }),
                 // Catalog risk, never the tool execution mode, selects scope.
-                scope: &action.risk,
+                scope: if request.federated_search.is_some() {
+                    "read"
+                } else {
+                    &action.risk
+                },
             };
             let unavailable = || Denial::ConsentUnavailable {
-                action: request.action.clone(),
+                action: request
+                    .federated_search
+                    .as_ref()
+                    .map_or_else(|| request.action.clone(), |binding| binding.action.clone()),
             };
             let mut card_use = request.federated_answer.take();
             if card_use.is_none() {
@@ -60,6 +124,9 @@ where
                     }
                 }
                 if request.federated_row_id.is_none() || policy_effect == "ask_first" {
+                    if request.federated_search.is_some() {
+                        return Err(unavailable());
+                    }
                     let answer = self.collect_federated_invoke(&request, &connection, &action)?;
                     request.federated_answer = Some(answer);
                     // A held answer must pass fresh catalog, policy and connection
@@ -133,6 +200,8 @@ where
             };
             let expires_at_ms = now.saturating_add(RESERVATION_TTL_MS);
             let input = FederatedReservationInput {
+                principal: &connection.principal,
+                connection_id: &connection.connection_id,
                 action: &action.name,
                 snapshot: &snapshot,
                 args_hash: &args_hash,

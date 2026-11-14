@@ -247,7 +247,7 @@ impl crate::storage::PlexusStore {
             let id = crate::storage::new_id("res");
             let snapshot = serde_json::to_string(input.snapshot).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             tx.execute("INSERT INTO reservations (reservation_id,principal,connection_id,action,snapshot_generations,approved_args_hash,schema_hash,expires_at,status,created_at_ms,federated_row_id,card_ref)
-                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'reserved',?9,?10,?11)", params![id,call.owner_principal,call.subject,input.action,snapshot,input.args_hash,input.schema_hash,input.expires_at,input.now,row.as_ref().map(|r| &r.id),card_ref])?;
+                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'reserved',?9,?10,?11)", params![id,input.principal,input.connection_id,input.action,snapshot,input.args_hash,input.schema_hash,input.expires_at,input.now,row.as_ref().map(|r| &r.id),card_ref])?;
             Ok(Ok((row, id)))
         })
     }

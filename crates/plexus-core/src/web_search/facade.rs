@@ -104,6 +104,41 @@ pub(crate) fn resolve_connection(
     target: SearchTarget,
     grant_target: GrantTarget,
 ) -> Result<(ConnectionRecord, CatalogAction), SearchDenial> {
+    resolve_connection_inner(store, caller, now_ms, is_flow, target, grant_target, false)
+}
+
+pub(crate) fn resolve_federated_connection(
+    store: &PlexusStore,
+    now_ms: i64,
+    target: SearchTarget,
+) -> Result<(ConnectionRecord, CatalogAction), SearchDenial> {
+    resolve_connection_inner(
+        store,
+        "direct",
+        now_ms,
+        false,
+        target,
+        GrantTarget::new(
+            crate::grant_refusal::Layer::Module,
+            "direct",
+            target.tool.name(),
+            Some(target.app_key),
+            target.action,
+        ),
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_connection_inner(
+    store: &PlexusStore,
+    caller: &str,
+    now_ms: i64,
+    is_flow: bool,
+    target: SearchTarget,
+    grant_target: GrantTarget,
+    federated: bool,
+) -> Result<(ConnectionRecord, CatalogAction), SearchDenial> {
     let tool = target.tool;
     let store_failure = |error: cortexkit_store::StoreError| {
         search_log!(
@@ -120,9 +155,12 @@ pub(crate) fn resolve_connection(
         .web_search_candidate_connection_ids(caller, target.app_key, now_ms)
         .map_err(store_failure)?
     {
-        let Some(connection) = store
-            .connection_for_invoke(caller, &connection_id)
-            .map_err(store_failure)?
+        let Some(connection) = (if federated {
+            store.connection("direct", &connection_id)
+        } else {
+            store.connection_for_invoke(caller, &connection_id)
+        })
+        .map_err(store_failure)?
         else {
             continue;
         };
@@ -143,6 +181,10 @@ pub(crate) fn resolve_connection(
         else {
             continue;
         };
+        if federated {
+            eligible.push((connection, action));
+            continue;
+        }
         let rows = store
             .scoped_invoke_grant_rows(&connection, caller, None)
             .map_err(store_failure)?;

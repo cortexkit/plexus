@@ -161,6 +161,7 @@ pub struct AuthorizationRequest {
         crate::federated::card::Record,
         crate::storage::federated_store::commit::Answer,
     )>,
+    federated_search: Option<crate::federated::card::CallBinding>,
 }
 
 /// Authority claimed by an interactive call an agent or operator made.
@@ -303,6 +304,7 @@ impl AuthorizationRequest {
             resolved_github_search_repositories: None,
             diagnostic_tool: "invoke".into(),
             federated_caller: None,
+            federated_search: None,
             federated_row_id: None,
             federated_card_ref: None,
             federated_held_reply: false,
@@ -440,6 +442,14 @@ impl AuthorizationRequest {
     /// This is not a tool argument or an authority grant.
     pub fn with_federated_held_reply(mut self, declared: bool) -> Self {
         self.federated_held_reply = declared;
+        self
+    }
+
+    pub(crate) fn with_federated_search(
+        mut self,
+        binding: crate::federated::card::CallBinding,
+    ) -> Self {
+        self.federated_search = Some(binding);
         self
     }
 
@@ -2028,7 +2038,28 @@ where
         })
     }
 
-    pub fn authorize(&self, mut request: AuthorizationRequest) -> Result<Reservation, Denial> {
+    pub fn authorize(&self, request: AuthorizationRequest) -> Result<Reservation, Denial> {
+        self.authorize_inner(request, false)?
+            .ok_or(Denial::StoreFailure)
+    }
+
+    /// Run the dispatch gates without reserving, reading consent or credentials.
+    /// Search must pass these even when a shared cache can answer the call.
+    pub(crate) fn preflight_federated_search(
+        &self,
+        request: AuthorizationRequest,
+    ) -> Result<(), Denial> {
+        if request.federated_caller.is_none() || request.federated_search.is_none() {
+            return Err(Denial::StoreFailure);
+        }
+        self.authorize_inner(request, true).map(|_| ())
+    }
+
+    fn authorize_inner(
+        &self,
+        mut request: AuthorizationRequest,
+        preflight: bool,
+    ) -> Result<Option<Reservation>, Denial> {
         if let Some(denial) = self.connector_home_denial() {
             return Err(denial);
         }
@@ -2313,15 +2344,23 @@ where
                 );
                 return Err(denial);
             }
-            return self.authorize_federated_invoke(
-                request,
-                connection,
-                action,
-                policy,
-                policy_effect,
-                severity,
-                args_hash,
-            );
+            if request.federated_search.is_some() && policy_effect != "allow" {
+                return Err(Denial::Policy(PolicyDenial::AskFirst));
+            }
+            if preflight {
+                return Ok(None);
+            }
+            return self
+                .authorize_federated_invoke(
+                    request,
+                    connection,
+                    action,
+                    policy,
+                    policy_effect,
+                    severity,
+                    args_hash,
+                )
+                .map(Some);
         }
         // Federated calls have their own consent and reservation path and never
         // read local approvals. Local authorization always supplies a grant.
@@ -2848,7 +2887,7 @@ where
         } else {
             None
         };
-        Ok(Reservation {
+        Ok(Some(Reservation {
             reservation_id: stored.reservation_id,
             principal: connection.principal,
             acting_principal: request.principal,
@@ -2884,7 +2923,7 @@ where
             federated_caller: None,
             federated_row_id: None,
             federated_card_ref: None,
-        })
+        }))
     }
 
     fn report_unsent_plane_allow(

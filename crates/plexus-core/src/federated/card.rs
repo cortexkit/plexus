@@ -36,6 +36,18 @@ pub struct CallerIdentity {
     pub canonical_claim_identity: String,
 }
 
+impl From<&FederatedCaller> for CallerIdentity {
+    fn from(caller: &FederatedCaller) -> Self {
+        Self {
+            peer_fingerprint: caller.attributes.peer_fingerprint.clone(),
+            pairing_id: caller.attributes.pairing_id.clone(),
+            peer_class: "computer".into(),
+            claim_kind: caller.claim.claim_kind.into(),
+            canonical_claim_identity: caller.claim.canonical_claim_identity.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallBinding {
     pub caller: CallerIdentity,
@@ -199,13 +211,7 @@ impl PreparedCard {
         }
         let claim = &context.caller.claim;
         let binding = CallBinding {
-            caller: CallerIdentity {
-                peer_fingerprint: context.caller.attributes.peer_fingerprint.clone(),
-                pairing_id: context.caller.attributes.pairing_id.clone(),
-                peer_class: "computer".into(),
-                claim_kind: claim.claim_kind.into(),
-                canonical_claim_identity: claim.canonical_claim_identity.clone(),
-            },
+            caller: CallerIdentity::from(context.caller),
             owner_principal: input.owner_principal.into(),
             subject: input.subject.into(),
             action: input.action.into(),
