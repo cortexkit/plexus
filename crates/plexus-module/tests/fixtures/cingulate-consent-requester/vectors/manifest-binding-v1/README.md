@@ -13,11 +13,19 @@ The authority is `docs/wire-contract-v1.md` section 17 at that tag (SHA-256
 `63aee2042c1565c47c4f3764f869b248a48a5db8a444cf0c34e2724909e731aa`).
 Keys and signatures are TEST ONLY. No build or test reads the claustrum checkout.
 
-All other JSON samples are produced by Cingulate's real request, get, answer and
-await handlers, with a fixed clock and temporary store. `phone-refuse-mismatch.json`
+All other JSON samples are produced by Cingulate's real request, get, answer,
+withdraw and await handlers, with a fixed clock and temporary store. `phone-refuse-mismatch.json`
 is the sole exception: it mutates `repo` on a real served card and explicitly
 labels it as a sample the phone MUST refuse, not a card Cingulate serves.
 Decline records a local decision only; expired answers are refused.
+
+Only the filing owner may withdraw: ownership is the daemon-stamped principal and
+bind session, not a process identity. An unscoped `reserved:plexus` filing has an
+empty bind session, so a restarted unscoped Plexus process may withdraw it. For a
+non-federated scoped filing, the principal and scope owner, scope reference and
+scope epoch must match; a new epoch does not own the earlier card. Valid federated
+stamps instead use their federated session identity. The refused-withdraw sample
+uses `reserved:cerebellum` before the filer withdraws the pending card.
 
 Regenerate with `cargo run -p cingulate-vectors --example generate_manifest_binding_vectors --locked`.
 Add `-- --check` to verify without writing. `SHA256SUMS` covers every corpus file
