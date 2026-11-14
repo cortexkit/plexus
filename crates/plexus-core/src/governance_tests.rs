@@ -2082,6 +2082,7 @@ fn reservation_argument_mismatch_aborts_before_dispatch() {
         approval_scope: None,
         federated_caller: None,
         federated_row_id: None,
+        federated_card_ref: None,
     };
 
     let outcome = engine.revalidate_and_dispatch(&reservation);
@@ -2472,6 +2473,7 @@ fn reservation_audit_rows_record_the_app_handle_only_for_facade_calls() {
         approval_scope: None,
         federated_caller: None,
         federated_row_id: None,
+        federated_card_ref: None,
     };
     let expected = |app_handle_id: Option<&str>| AuditRecord {
         principal: "owner".to_string(),

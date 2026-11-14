@@ -16,8 +16,8 @@ pub(crate) fn insert_on_conn(tx: &Transaction<'_>, record: &Record) -> rusqlite:
         "INSERT INTO federated_card_records
          (id,peer_fingerprint,pairing_id,peer_class,claim_kind,canonical_claim_identity,
           owner_principal,subject,action,args_digest,selector,scope,filed_scope_json,
-          schema_hash,state,card_ref)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'pending',NULL)",
+           schema_hash,state,card_ref,standing_choices_offered)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'pending',NULL,?15)",
         params![
             record.id,
             caller.peer_fingerprint,
@@ -32,7 +32,8 @@ pub(crate) fn insert_on_conn(tx: &Transaction<'_>, record: &Record) -> rusqlite:
             record.selector,
             record.scope.as_str(),
             filed_scope,
-            record.schema_hash
+            record.schema_hash,
+            record.standing_choices_offered
         ],
     )?;
     Ok(())
@@ -60,7 +61,7 @@ pub(crate) fn attach_card_ref_on_conn(
 
 const COLUMNS: &str = "id,peer_fingerprint,pairing_id,peer_class,claim_kind,
     canonical_claim_identity,owner_principal,subject,action,args_digest,selector,
-    scope,filed_scope_json,schema_hash,state,card_ref";
+    scope,filed_scope_json,schema_hash,state,card_ref,standing_choices_offered";
 
 /// Read by correlation id within the caller's fenced transaction, including
 /// terminal records. Read-only: allows no state or card-ref transitions.
@@ -131,6 +132,7 @@ fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
         schema_hash: row.get(13)?,
         state: enum_column(row, 14)?,
         card_ref: row.get(15)?,
+        standing_choices_offered: row.get(16)?,
     })
 }
 
@@ -145,6 +147,110 @@ fn enum_column<T: serde::de::DeserializeOwned>(
             Box::new(error),
         )
     })
+}
+
+impl crate::storage::PlexusStore {
+    pub(crate) fn ensure_federated_card(
+        &self,
+        record: &Record,
+    ) -> Result<Record, cortexkit_store::StoreError> {
+        self.inner.with_conn_fenced(|tx| {
+            if let Some(pending) = pending_on_conn(
+                tx,
+                &record.binding,
+                record.scope,
+                record.schema_hash.as_deref(),
+            )? {
+                return Ok(pending);
+            }
+            insert_on_conn(tx, record)?;
+            Ok(record.clone())
+        })
+    }
+
+    pub(crate) fn attach_federated_card(
+        &self,
+        id: &str,
+        card_ref: &str,
+    ) -> Result<(), cortexkit_store::StoreError> {
+        self.inner
+            .with_conn_fenced(|tx| attach_card_ref_on_conn(tx, id, card_ref))
+    }
+
+    /// Settle the answer and reserve its one call under the same writer fence.
+    /// Liveness is checked by the collector before this transaction. Re-read
+    /// rows, the record and `federated_processed_cards` here so a revoke or
+    /// answer commit performed during describe cannot authorize reuse.
+    pub(crate) fn reserve_federated_card(
+        &self,
+        call: &crate::federated::matcher::Call<'_>,
+        input: &super::FederatedReservationInput<'_>,
+        expected: &Record,
+        answer: super::commit::Answer,
+    ) -> Result<
+        Result<(Option<super::FederatedStandingRow>, String), crate::governance::Denial>,
+        cortexkit_store::StoreError,
+    > {
+        use super::commit::Answer;
+        use crate::governance::Denial;
+        self.inner.with_conn_fenced(|tx| {
+            let unavailable = || Denial::ConsentUnavailable { action: input.action.into() };
+            let row = super::matching_row_on_conn(tx, call, input.now)?;
+            if row.as_ref().is_some_and(|row| row.effect == crate::federated::matcher::Effect::Deny) {
+                return Ok(Err(Denial::FederatedConsentDenied));
+            }
+            let Some(record) = read_on_conn(tx, &expected.id)? else { return Ok(Err(unavailable())) };
+            if record != *expected || record.card_ref.is_none() {
+                return Ok(Err(unavailable()));
+            }
+            let claim = crate::federated::canonicalize_claim(call.claim)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let identity = &record.binding.caller;
+            if identity.peer_fingerprint != call.peer_fingerprint
+                || identity.pairing_id != call.pairing_id
+                || identity.peer_class != call.peer_class
+                || identity.claim_kind != claim.claim_kind
+                || identity.canonical_claim_identity != claim.canonical_claim_identity
+                || record.binding.owner_principal != call.owner_principal
+                || record.binding.subject != call.subject
+                || record.binding.action != input.action
+                || record.binding.args_digest != input.args_hash
+                || record.schema_hash.as_deref() != Some(input.schema_hash)
+                || record.scope.as_str() != call.scope
+            {
+                return Ok(Err(unavailable()));
+            }
+            let card_ref = record.card_ref.as_deref().expect("checked above");
+            let processed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM federated_processed_cards WHERE card_ref=?1)", [card_ref], |row| row.get(0))?;
+            if answer == Answer::AllowAlways {
+                let reserved: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM reservations WHERE card_ref=?1)", [card_ref], |row| row.get(0))?;
+                if record.state != State::Committed || !processed || row.is_none() || reserved {
+                    return Ok(Err(unavailable()));
+                }
+            } else if record.state != State::Pending || processed {
+                if processed {
+                    tx.execute("UPDATE federated_card_records SET state='retired' WHERE id=?1", [&record.id])?;
+                }
+                return Ok(Err(unavailable()));
+            }
+            let (state, refusal) = match answer {
+                Answer::AllowOnce => (State::Consumed, None),
+                Answer::AllowAlways => (State::Committed, None),
+                Answer::Expired => (State::Expired, Some("consent_expired")),
+                Answer::Withdrawn => (State::Withdrawn, Some("consent_withdrawn")),
+                _ => (State::Declined, Some("consent_denied")),
+            };
+            tx.execute("UPDATE federated_card_records SET state=?2 WHERE id=?1", (&record.id, state.as_str()))?;
+            if let Some(code) = refusal {
+                return Ok(Err(Denial::ConsentRefused { code, elicitation_id: card_ref.into() }));
+            }
+            let id = crate::storage::new_id("res");
+            let snapshot = serde_json::to_string(input.snapshot).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            tx.execute("INSERT INTO reservations (reservation_id,principal,connection_id,action,snapshot_generations,approved_args_hash,schema_hash,expires_at,status,created_at_ms,federated_row_id,card_ref)
+                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'reserved',?9,?10,?11)", params![id,call.owner_principal,call.subject,input.action,snapshot,input.args_hash,input.schema_hash,input.expires_at,input.now,row.as_ref().map(|r| &r.id),card_ref])?;
+            Ok(Ok((row, id)))
+        })
+    }
 }
 
 #[cfg(test)]

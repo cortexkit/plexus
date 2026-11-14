@@ -7408,6 +7408,14 @@ impl PlexusStore {
                                     WHERE id = reservations.federated_row_id AND effect = 'allow')
                                     AND grant_id IS NULL AND agent_grant_id IS NULL
                                     THEN 0 ELSE -1 END
+                            WHEN card_ref IS NOT NULL THEN
+                                CASE WHEN grant_id IS NULL AND agent_grant_id IS NULL
+                                  AND EXISTS (SELECT 1 FROM federated_card_records c
+                                    WHERE c.card_ref=reservations.card_ref AND c.state='consumed'
+                                      AND c.owner_principal=?1 AND c.subject=?2 AND c.action=?3
+                                      AND c.args_digest=reservations.approved_args_hash
+                                      AND c.schema_hash=reservations.schema_hash)
+                                  THEN 0 ELSE -1 END
                             ELSE COALESCE((SELECT generation FROM grants
                              WHERE principal = ?1 AND (expires_at IS NULL OR expires_at > ?5) AND grant_id = (
                                  SELECT grant_id FROM reservations

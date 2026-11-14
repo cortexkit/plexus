@@ -90,6 +90,8 @@ pub struct Record {
     pub schema_hash: Option<String>,
     pub state: State,
     pub card_ref: Option<String>,
+    /// Persist the original choice set; later row changes cannot widen it.
+    pub standing_choices_offered: bool,
 }
 
 /// Context from the admitted route, not from tool arguments. A standing allow
@@ -225,6 +227,8 @@ impl PreparedCard {
             schema_hash: input.schema_hash.map(str::to_owned),
             state: State::Pending,
             card_ref: None,
+            standing_choices_offered: !context.per_call_only
+                && matches!(claim.claim_kind, "" | "agent" | "flow"),
         };
         let standing = !context.per_call_only && matches!(claim.claim_kind, "" | "agent" | "flow");
         let options = if standing {

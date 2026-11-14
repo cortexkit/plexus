@@ -18,8 +18,10 @@ pub(crate) enum Answer {
     DenyOnce,
     DenyAlways,
     Expired,
+    #[allow(dead_code)] // Timed-out requests are currently reported as expired.
     TimedOut,
     Withdrawn,
+    #[allow(dead_code)] // Kept distinct for callers that can report dismissal explicitly.
     Dismissed,
 }
 
@@ -118,6 +120,7 @@ impl PlexusStore {
             canonical_claim_identity: claim.canonical_claim_identity.clone(),
         };
         if !input.standing_choices_offered
+            || !input.record.standing_choices_offered
             || attributes.peer_class != subc_protocol::scope::FederatedPeerClass::Computer
             || !matches!(claim.claim_kind, "" | "agent" | "flow")
             || input.record.binding.caller != identity

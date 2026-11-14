@@ -27,6 +27,111 @@ fn standing_liveness_refusals_are_not_sent_with_explicit_retryability() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn synthetic_bind_held_reply_declaration_controls_federated_card_filing() {
+    for (declared, claim) in [
+        (false, None),
+        (true, None),
+        (true, Some(json!({"kind":"run","agent_id":"r"}))),
+        (
+            true,
+            Some(
+                json!({"kind":"flow","flow_id":"f","flow_version":1,"flow_code_hash":"hash","flow_install_id":"i"}),
+            ),
+        ),
+    ] {
+        let (mut state, store, transport, scratch) =
+            super::super::github_read_frame_tests::imported_runtime();
+        let runtime = &mut Arc::get_mut(&mut state).unwrap().runtime;
+        runtime.set_federated_callers_enabled_for_test(true);
+        runtime.engine = runtime
+            .engine
+            .clone()
+            .with_consent_cards(crate::consent_test_support::pending_cards());
+        let mut manifest: Value = serde_json::from_str(
+            &subc_jsonc::jsonc_to_json(include_str!("../../../catalog/searxng_rest.jsonc"))
+                .unwrap(),
+        )
+        .unwrap();
+        manifest["tier"] = json!("S1");
+        manifest["actions_baseline"][0]["name"] = json!("meta.read");
+        store
+            .upsert_manifest(
+                plexus_core::storage::CATALOG_PRINCIPAL,
+                &plexus_core::ingest_value(manifest).unwrap(),
+            )
+            .unwrap();
+        store
+            .insert_connection("direct", "plain", "searxng_rest", "active", &json!({}))
+            .unwrap();
+        store
+            .upsert_catalog_action(&plexus_core::storage::CatalogActionInput {
+                principal: "direct".into(),
+                connection_id: "plain".into(),
+                name: "meta.read".into(),
+                title: None,
+                schema: json!({"type":"object","properties":{}}),
+                schema_hash: "schema".into(),
+                risk: "read".into(),
+                severity: "S1".into(),
+                ask_first: false,
+                status: "active".into(),
+                quarantine_reason: None,
+                reconciliation: None,
+            })
+            .unwrap();
+        let db = rusqlite::Connection::open(scratch.as_ref() as &Path).unwrap();
+        db.execute_batch("UPDATE connections SET ceiling_risk='read',ceiling_selectors='[\"meta.read\"]' WHERE connection_id='plain'; DROP TABLE grants;").unwrap();
+        let mut scope = stamp();
+        scope.attributes.federated.as_mut().unwrap().remote_claim =
+            claim.clone().map(|v| serde_json::from_value(v).unwrap());
+        let mut body = bind_body(reserved("callosum"), Some(scope), CallMode::Classic);
+        if declared {
+            body["consumer_capabilities"] = json!(["held-reply/v1", "tool-result/v1"]);
+        }
+        let routes = Arc::new(RouteBindings::new());
+        assert_eq!(
+            bind(&state, &routes, body).await.header.ty,
+            FrameType::Response
+        );
+        assert_eq!(
+            routes.binding(17, 3).unwrap().unwrap().held_reply_v1,
+            declared
+        );
+        let actual = reply(call(&state, &routes, invoke_body("plain")).await);
+        let waits = declared && claim.is_none();
+        let error = if waits {
+            &actual["structuredContent"]
+        } else {
+            &actual["error"]
+        };
+        assert_eq!(
+            error["code"],
+            if waits {
+                "access_pending"
+            } else {
+                "consent_unavailable"
+            },
+            "{actual}"
+        );
+        if !waits {
+            assert_eq!(error["transmission"], "not_sent");
+        }
+        if waits {
+            assert_eq!(error["message"], "Waiting for the user to answer this request. Send the same call again to collect the answer.");
+            assert!(!error["message"].as_str().unwrap().contains("resum"));
+        }
+        let cards: i64 = db
+            .query_row("SELECT count(*) FROM federated_card_records", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(cards, i64::from(waits));
+        assert!(store.list_action_requests("direct").unwrap().is_empty());
+        assert!(transport.requests().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bot_metadata_is_hidden_only_from_federated_callers() {
     let (mut state, store, transport, scratch) =
         super::super::github_read_frame_tests::imported_runtime();

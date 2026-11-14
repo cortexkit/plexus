@@ -20,6 +20,7 @@ CREATE TABLE federated_rows (
 );
 
 CREATE TABLE federated_card_records (
+    standing_choices_offered INTEGER NOT NULL CHECK (standing_choices_offered IN (0,1)),
     id TEXT PRIMARY KEY NOT NULL,
     peer_fingerprint TEXT NOT NULL,
     pairing_id TEXT NOT NULL,

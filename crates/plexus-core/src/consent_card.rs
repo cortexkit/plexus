@@ -506,6 +506,24 @@ impl ConsentCards {
         )
     }
 
+    pub(crate) fn file_federated(
+        &self,
+        scope: &CallScope,
+        body: Value,
+    ) -> Result<String, ElicitationCallError> {
+        if contains_secret_input(&body) {
+            return Err(ElicitationCallError::Transport);
+        }
+        let reply = self
+            .route
+            .call_scoped(scope, CONSENT_REQUEST, body, CONTROL_RPC_TIMEOUT)?;
+        reply["elicitation_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .ok_or(ElicitationCallError::Transport)
+    }
+
     /// Reserve time to tell Cingulate the tool call is no longer waiting, so
     /// later settlements notify the agent. A timed-out await returning pending
     /// is never an approval.

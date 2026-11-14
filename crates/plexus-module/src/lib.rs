@@ -160,6 +160,7 @@ struct RouteBinding {
     mode: CallMode,
     /// Bind-scoped format support, not authority or a per-call option.
     reads_tool_result_v1: bool,
+    held_reply_v1: bool,
     /// A worker scope's `on_behalf_of_agent` from the bind stamp: the agent
     /// whose bot serves the worker's GitHub bot reads. Kept beside the scope,
     /// not in it, so nothing that reads the scope's agent can mistake it for
@@ -219,7 +220,16 @@ impl RouteBindings {
         scope: Option<CallScope>,
         mode: CallMode,
     ) -> Result<(), ModuleError> {
-        self.insert_bound((channel, epoch), principal, scope, mode, None, false, None)
+        self.insert_bound(
+            (channel, epoch),
+            principal,
+            scope,
+            mode,
+            None,
+            false,
+            false,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -231,6 +241,7 @@ impl RouteBindings {
         mode: CallMode,
         on_behalf_of_agent: Option<String>,
         reads_tool_result_v1: bool,
+        held_reply_v1: bool,
         federated_caller: Option<plexus_core::federated::FederatedCaller>,
     ) -> Result<(), ModuleError> {
         let mut routes = self
@@ -269,6 +280,7 @@ impl RouteBindings {
                 mode,
                 on_behalf_of_agent,
                 reads_tool_result_v1,
+                held_reply_v1,
                 federated_caller,
             },
         );
@@ -1835,6 +1847,9 @@ async fn handle_control_request(
                 cortexkit_role_tool_provider::consumer_reads_tool_result_v1(
                     consumer_capabilities.as_deref(),
                 ),
+                consumer_capabilities
+                    .as_deref()
+                    .is_some_and(|caps| caps.iter().any(|cap| cap == "held-reply/v1")),
                 federated_caller,
             ) {
                 Ok(()) => {}
@@ -3005,6 +3020,9 @@ fn facade_tool_reply_with_budget(
     {
         if let Some(error) = reply.get_mut("error").and_then(Value::as_object_mut) {
             error.insert("transmission".into(), json!("not_sent"));
+            if error.get("code").and_then(Value::as_str) == Some("access_pending") {
+                error.insert("message".into(), json!("Waiting for the user to answer this request. Send the same call again to collect the answer."));
+            }
         }
     }
     if let Some(error) = reply.get("error") {
@@ -3693,7 +3711,13 @@ fn facade_tool_reply_inner(
                 request = request.with_scope(scope);
             }
             if let Some(caller) = federated_caller.clone() {
-                request = request.with_federated_caller(caller);
+                request = request
+                    .with_federated_caller(caller)
+                    .with_federated_held_reply(
+                        route_bindings
+                            .binding(channel, epoch)?
+                            .is_some_and(|binding| binding.held_reply_v1),
+                    );
             }
             if let Some(schema_hash) = arguments.get("schema_hash").and_then(Value::as_str) {
                 request = request.with_schema_hash(schema_hash);

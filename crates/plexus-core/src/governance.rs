@@ -154,6 +154,13 @@ pub struct AuthorizationRequest {
     diagnostic_tool: String,
     federated_caller: Option<crate::federated::FederatedCaller>,
     federated_row_id: Option<String>,
+    federated_card_ref: Option<String>,
+    federated_held_reply: bool,
+    federated_deadline: Option<std::time::Instant>,
+    federated_answer: Option<(
+        crate::federated::card::Record,
+        crate::storage::federated_store::commit::Answer,
+    )>,
 }
 
 /// Authority claimed by an interactive call an agent or operator made.
@@ -297,6 +304,10 @@ impl AuthorizationRequest {
             diagnostic_tool: "invoke".into(),
             federated_caller: None,
             federated_row_id: None,
+            federated_card_ref: None,
+            federated_held_reply: false,
+            federated_deadline: None,
+            federated_answer: None,
         }
     }
 
@@ -422,6 +433,13 @@ impl AuthorizationRequest {
         self.federated_caller = Some(caller);
         self.attributed_agent_id = None;
         self.bound_agent_handle = None;
+        self
+    }
+
+    /// Record whether the federated route declared that it can hold a reply.
+    /// This is not a tool argument or an authority grant.
+    pub fn with_federated_held_reply(mut self, declared: bool) -> Self {
+        self.federated_held_reply = declared;
         self
     }
 
@@ -954,6 +972,7 @@ pub struct Reservation {
     pub approval_scope: Option<ApprovalScope>,
     pub federated_caller: Option<crate::federated::FederatedCaller>,
     pub federated_row_id: Option<String>,
+    pub federated_card_ref: Option<String>,
 }
 
 impl AuditRecord {
@@ -2864,6 +2883,7 @@ where
             approval_scope,
             federated_caller: None,
             federated_row_id: None,
+            federated_card_ref: None,
         })
     }
 
@@ -4314,6 +4334,7 @@ where
             return Err(denial);
         }
         if request.federated_caller.is_some() {
+            request.federated_deadline = Some(deadline);
             return self
                 .authorize(request)
                 .map(|reservation| self.dispatch_checked(&reservation));
@@ -4763,7 +4784,7 @@ where
                 request.relay_origin.as_ref(),
                 caller,
                 request.federated_row_id.as_deref(),
-                None,
+                request.federated_card_ref.as_deref(),
             )
         } else {
             self.store.append_audit_relayed(
@@ -5372,3 +5393,6 @@ mod federated_invoke_tests;
 
 #[path = "governance_federated.rs"]
 mod federated_invoke;
+
+#[path = "governance_federated_cards.rs"]
+mod federated_cards;

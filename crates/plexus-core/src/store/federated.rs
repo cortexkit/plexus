@@ -1,13 +1,9 @@
 use super::*;
 use crate::federated_journal::{self, Deletion};
 
-// Record helpers remain dormant until the authorization path files cards.
-#[allow(dead_code)]
 #[path = "federated_cards.rs"]
 pub(crate) mod cards;
 
-// Standing commits are wired into requester collection by the authorization path.
-#[allow(dead_code)]
 #[path = "federated_commit.rs"]
 pub(crate) mod commit;
 
@@ -259,7 +255,7 @@ pub(crate) struct FederatedStandingRow {
     pub effect: crate::federated::matcher::Effect,
 }
 
-fn matching_row_on_conn(
+pub(crate) fn matching_row_on_conn(
     conn: &rusqlite::Connection,
     call: &crate::federated::matcher::Call<'_>,
     now: i64,

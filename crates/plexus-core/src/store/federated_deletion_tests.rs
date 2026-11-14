@@ -55,8 +55,8 @@ fn insert_card(
     store.inner.with_conn_fenced(|conn| conn.execute(
         "INSERT INTO federated_card_records (id,peer_fingerprint,pairing_id,peer_class,selector,claim_kind,
              canonical_claim_identity,owner_principal,subject,scope,action,args_digest,filed_scope_json,
-             schema_hash,state,card_ref)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'read','args','{}','schema',?11,?12)",
+             schema_hash,state,card_ref,standing_choices_offered)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'read','args','{}','schema',?11,?12,1)",
         rusqlite::params![id,key.peer_fingerprint,key.pairing_id,key.peer_class,key.selector,key.claim_kind,
             key.canonical_claim_identity,key.owner_principal,key.subject,key.scope,state,card_ref],
     )).unwrap();

@@ -3,7 +3,7 @@ use crate::scope::{ScopeDescription, ScopeReadError, ScopeStatus};
 use std::sync::Mutex;
 use std::time::Duration;
 
-fn fixture() -> (Engine, rusqlite::Connection) {
+pub(super) fn fixture() -> (Engine, rusqlite::Connection) {
     let (engine, db) = super::fixture();
     let manifest = engine
         .store()
@@ -53,7 +53,12 @@ fn reader(status: ScopeStatus, owner_synced: bool, owner_configured: bool) -> Ar
     })
 }
 
-fn seed(db: &rusqlite::Connection, claim: Option<Value>, scope: &str, effect: &str) -> String {
+pub(super) fn seed(
+    db: &rusqlite::Connection,
+    claim: Option<Value>,
+    scope: &str,
+    effect: &str,
+) -> String {
     let claim = claim.map(|claim| serde_json::from_value(claim).unwrap());
     let canonical = crate::federated::canonicalize_claim(claim.as_ref()).unwrap();
     let id = crate::federated::new_row_id();
@@ -67,7 +72,7 @@ fn seed(db: &rusqlite::Connection, claim: Option<Value>, scope: &str, effect: &s
     id
 }
 
-fn count(db: &rusqlite::Connection, table: &str) -> i64 {
+pub(super) fn count(db: &rusqlite::Connection, table: &str) -> i64 {
     db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
         row.get(0)
     })

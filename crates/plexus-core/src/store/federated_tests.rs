@@ -206,9 +206,9 @@ fn cards_store_binding_scope_schema_and_state_without_owning_processed_refs() {
     conn.execute_batch(
         "INSERT INTO federated_card_records (id,peer_fingerprint,pairing_id,peer_class,claim_kind,
             canonical_claim_identity,owner_principal,subject,action,args_digest,selector,scope,
-            filed_scope_json,schema_hash,state,card_ref)
+            filed_scope_json,schema_hash,state,card_ref,standing_choices_offered)
          VALUES ('record','fp','pair','computer','','','direct','conn','read','digest',
-             'claimless','read','{\"scope_ref\":\"ref\"}','schema','pending','el_card');
+             'claimless','read','{\"scope_ref\":\"ref\"}','schema','pending','el_card',1);
          INSERT INTO federated_processed_cards (card_ref) VALUES ('el_card');",
     )
     .unwrap();
@@ -247,4 +247,26 @@ fn cards_store_binding_scope_schema_and_state_without_owning_processed_refs() {
         )
         .unwrap();
     assert_eq!(count, 1, "processed refs have an independent lifetime");
+}
+
+#[test]
+fn fresh_migration_61_requires_boolean_standing_choice_metadata() {
+    let conn = Connection::open_in_memory().unwrap();
+    PlexusStore::apply_migrations(&conn).unwrap();
+    let column: (String, bool) = conn.query_row(
+        "SELECT type, \"notnull\" FROM pragma_table_info('federated_card_records') WHERE name='standing_choices_offered'",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(column, ("INTEGER".into(), true));
+    for (suffix, value, valid) in [
+        ("missing", None, false),
+        ("bad", Some(2), false),
+        ("false", Some(0), true),
+        ("true", Some(1), true),
+    ] {
+        let result = conn.execute("INSERT INTO federated_card_records
+            (id,peer_fingerprint,pairing_id,peer_class,claim_kind,canonical_claim_identity,owner_principal,subject,action,args_digest,selector,scope,filed_scope_json,state,standing_choices_offered)
+            VALUES (?1,'fp','pair','computer','','','direct','connection','read','digest','claimless','read','{}','pending',?2)", rusqlite::params![suffix,value]);
+        assert_eq!(result.is_ok(), valid, "{suffix}: {result:?}");
+    }
 }

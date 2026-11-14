@@ -168,8 +168,8 @@ fn federated_permissions_and_processed_cards_survive_store_cutover() {
     source.with_conn_fenced(|conn| conn.execute_batch(r#"
 INSERT INTO federated_rows (id, peer_fingerprint, pairing_id, peer_class, selector, claim_kind, canonical_claim_identity, owner_principal, subject, scope, claim_json, peer_name, effect, granted_at_ms, card_ref, card_refs_json)
 VALUES ('plxf_1','fp','pair','computer','agent','agent','{"agent_id":"a"}','direct','invoke:conn-x','read',NULL,'Laptop','allow',1000,'el_1','["el_1","el_2"]');
-INSERT INTO federated_card_records (id, peer_fingerprint, pairing_id, peer_class, claim_kind, canonical_claim_identity, owner_principal, subject, action, args_digest, selector, scope, filed_scope_json, schema_hash, state, card_ref)
-VALUES ('rec_1','fp','pair','computer','agent','{"agent_id":"a"}','direct','invoke:conn-x','read_thing','digest','agent','read','{}',NULL,'pending','el_3');
+INSERT INTO federated_card_records (id, peer_fingerprint, pairing_id, peer_class, claim_kind, canonical_claim_identity, owner_principal, subject, action, args_digest, selector, scope, filed_scope_json, schema_hash, state, card_ref, standing_choices_offered)
+VALUES ('rec_1','fp','pair','computer','agent','{"agent_id":"a"}','direct','invoke:conn-x','read_thing','digest','agent','read','{}',NULL,'pending','el_3',0);
 INSERT INTO federated_processed_cards (card_ref) VALUES ('el_1'), ('el_2'), ('el_9');
 "#)).unwrap();
     drop(source);
@@ -187,6 +187,13 @@ INSERT INTO federated_processed_cards (card_ref) VALUES ('el_1'), ('el_2'), ('el
         );
     }
     let new = f.destination();
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT standing_choices_offered FROM federated_card_records WHERE id='rec_1'"
+        ),
+        0
+    );
     assert_eq!(
         scalar::<String>(
             &new,

@@ -29,6 +29,7 @@ fn record(id: &str) -> Record {
         filed_scope: json!({"owner":"reserved:callosum","ref":"filed","scope_epoch":3}),
         schema_hash: Some("schema-v1".into()),
         state: State::Pending,
+        standing_choices_offered: true,
         card_ref: None,
     }
 }

@@ -7,9 +7,8 @@ where
     C: CredentialSource + ?Sized,
     T: Transport + ?Sized,
 {
-    /// Standing authority replaces local grants only after every non-grant
-    /// invoke gate has passed. Cards are deliberately unavailable until the
-    /// federated card path can bind and consume its own answers.
+    /// Standing rows and call-bound cards replace local grants only after all
+    /// non-grant invoke gates have passed.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn authorize_federated_invoke(
         &self,
@@ -21,10 +20,12 @@ where
         severity: Severity,
         args_hash: String,
     ) -> Result<Reservation, Denial> {
+        request.federated_row_id = None;
+        request.federated_card_ref = None;
         let result = (|| {
             let caller = request
                 .federated_caller
-                .as_ref()
+                .clone()
                 .ok_or(Denial::StoreFailure)?;
             let call = Call {
                 peer_fingerprint: &caller.attributes.peer_fingerprint,
@@ -39,54 +40,87 @@ where
             let unavailable = || Denial::ConsentUnavailable {
                 action: request.action.clone(),
             };
-            if self
-                .store
-                .matching_federated_row(&call, self.now_ms())
-                .map_err(|_| Denial::StoreFailure)?
-                .is_none()
-            {
-                return Err(unavailable());
-            }
-
-            // No store writer fence is held across this blocking daemon call.
-            // Selection and reservation below re-read authority under the fence.
-            let base = format!("fed-base:{}:{}", call.peer_fingerprint, call.pairing_id);
-            let description = self
-                .scope_reader
-                .as_ref()
-                .ok_or(Denial::FederatedLivenessUnavailable)?
-                .describe("reserved:callosum", &base)
-                .map_err(|_| Denial::FederatedLivenessUnavailable)?;
-            match description.status {
-                crate::scope::ScopeStatus::Live => {}
-                crate::scope::ScopeStatus::Ended => return Err(Denial::FederatedPairingEnded),
-                crate::scope::ScopeStatus::NotLive
-                    if description.owner_synced && description.owner_configured =>
-                {
-                    return Err(Denial::FederatedPairingEnded);
+            let mut card_use = request.federated_answer.take();
+            if card_use.is_none() {
+                // Rows decide new arrivals before even a pending-card lookup.
+                let row = self
+                    .store
+                    .matching_federated_row(&call, self.now_ms())
+                    .map_err(|_| Denial::StoreFailure)?;
+                if row.is_some() {
+                    self.federated_live(&caller)?;
+                    let row = self
+                        .store
+                        .matching_federated_row(&call, self.now_ms())
+                        .map_err(|_| Denial::StoreFailure)?
+                        .ok_or_else(unavailable)?;
+                    request.federated_row_id = Some(row.id);
+                    if row.effect == Effect::Deny {
+                        return Err(Denial::FederatedConsentDenied);
+                    }
                 }
-                _ => return Err(Denial::FederatedLivenessUnavailable),
+                if request.federated_row_id.is_none() || policy_effect == "ask_first" {
+                    let answer = self.collect_federated_invoke(&request, &connection, &action)?;
+                    request.federated_answer = Some(answer);
+                    // A held answer must pass fresh catalog, policy and connection
+                    // gates before it can create a standing row or authorize execution.
+                    return self.authorize(request.clone());
+                }
+            } else if let Some((record, _)) = &card_use {
+                if record.binding.args_digest != args_hash
+                    || record.binding.action != action.name
+                    || record.schema_hash.as_deref() != Some(&action.schema_hash)
+                    || record.scope.as_str() != action.risk
+                {
+                    return self.authorize(request.clone());
+                }
             }
-
-            // A denial or a call still needing consent must not reach credential
-            // preparation. Re-read under the fence: a revoked row cannot refuse
-            // the call or authorize credential preparation.
-            let row = self
-                .store
-                .matching_federated_row(&call, self.now_ms())
-                .map_err(|_| Denial::StoreFailure)?
-                .ok_or_else(unavailable)?;
-            request.federated_row_id = Some(row.id);
-            if row.effect == Effect::Deny {
-                return Err(Denial::FederatedConsentDenied);
+            if let Some((record, answer)) = card_use.as_mut() {
+                use crate::storage::federated_store::commit::{CommitInput, CommitOutcome};
+                if answer.standing_effect().is_some() {
+                    match self
+                        .store
+                        .commit_federated_standing_answer(
+                            self.scope_reader.as_deref(),
+                            &CommitInput {
+                                caller: &caller,
+                                record,
+                                answer: *answer,
+                                standing_choices_offered: record.standing_choices_offered,
+                                now_ms: self.now_ms(),
+                            },
+                        )
+                        .map_err(|failure| {
+                            debug_assert_eq!(failure.transmission, TransmissionState::NotSent);
+                            failure.denial
+                        })? {
+                        CommitOutcome::Committed {
+                            effect: Effect::Deny,
+                            ..
+                        } => return Err(Denial::FederatedConsentDenied),
+                        CommitOutcome::Committed { .. } => {
+                            record.state = crate::federated::card::State::Committed
+                        }
+                        CommitOutcome::Reask => return self.authorize(request.clone()),
+                        CommitOutcome::PerCall(_) => return Err(unavailable()),
+                    }
+                }
+                self.federated_live(&caller)?;
+                request.federated_card_ref = record.card_ref.clone();
             }
-            if policy_effect == "ask_first" {
-                return Err(unavailable());
-            }
-
-            let (credential_fingerprint, credential) =
-                self.resolve_credential(&request, &connection)?;
-            drop(credential);
+            let credential_fingerprint = if card_use.as_ref().is_none_or(|(_, answer)| {
+                matches!(
+                    answer,
+                    crate::storage::federated_store::commit::Answer::AllowOnce
+                        | crate::storage::federated_store::commit::Answer::AllowAlways
+                )
+            }) {
+                let (fingerprint, credential) = self.resolve_credential(&request, &connection)?;
+                drop(credential);
+                fingerprint
+            } else {
+                String::new()
+            };
             let now = self.now_ms();
             let snapshot = SnapshotGenerations {
                 connection: connection.generation,
@@ -98,24 +132,28 @@ where
                 policy_id: policy.as_ref().map(|row| row.policy_id.clone()),
             };
             let expires_at_ms = now.saturating_add(RESERVATION_TTL_MS);
-            let (row, reservation_id) = self
-                .store
-                .reserve_federated_invoke(
-                    &call,
-                    &FederatedReservationInput {
-                        action: &action.name,
-                        snapshot: &snapshot,
-                        args_hash: &args_hash,
-                        schema_hash: &action.schema_hash,
-                        expires_at: expires_at_ms,
-                        now,
-                        ask_first: policy_effect == "ask_first",
-                    },
-                )
-                .map_err(|_| Denial::StoreFailure)?;
-            let row = row.ok_or_else(unavailable)?;
-            request.federated_row_id = Some(row.id.clone());
-            if row.effect == Effect::Deny {
+            let input = FederatedReservationInput {
+                action: &action.name,
+                snapshot: &snapshot,
+                args_hash: &args_hash,
+                schema_hash: &action.schema_hash,
+                expires_at: expires_at_ms,
+                now,
+                ask_first: policy_effect == "ask_first",
+            };
+            let (row, reservation_id) = if let Some((record, answer)) = &card_use {
+                let (row, id) = self
+                    .store
+                    .reserve_federated_card(&call, &input, record, *answer)
+                    .map_err(|_| Denial::StoreFailure)??;
+                (row, Some(id))
+            } else {
+                self.store
+                    .reserve_federated_invoke(&call, &input)
+                    .map_err(|_| Denial::StoreFailure)?
+            };
+            request.federated_row_id = row.as_ref().map(|row| row.id.clone());
+            if row.as_ref().is_some_and(|row| row.effect == Effect::Deny) {
                 return Err(Denial::FederatedConsentDenied);
             }
             let reservation_id = reservation_id.ok_or_else(unavailable)?;
@@ -164,7 +202,8 @@ where
                 agent_grant: None,
                 approval_scope: None,
                 federated_caller: request.federated_caller.clone(),
-                federated_row_id: Some(row.id),
+                federated_row_id: request.federated_row_id.clone(),
+                federated_card_ref: request.federated_card_ref.clone(),
             })
         })();
         if let Err(denial) = &result {
@@ -192,7 +231,7 @@ where
                 reservation.relay_origin.as_ref(),
                 caller,
                 reservation.federated_row_id.as_deref(),
-                None,
+                reservation.federated_card_ref.as_deref(),
             )
         } else {
             self.store.append_audit_relayed(

@@ -12,6 +12,9 @@ type Engine = GovernanceEngine<StubCredentialSource, MockTransport>;
 #[path = "governance_federated_standing_tests.rs"]
 mod standing;
 
+#[path = "governance_federated_card_tests.rs"]
+mod cards;
+
 fn fixture() -> (Engine, rusqlite::Connection) {
     let path = crate::test_scratch::store_path();
     let store = Arc::new(
