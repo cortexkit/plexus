@@ -156,13 +156,24 @@ pub(super) fn spawn(
                 // Approval rechecks use this connection after readiness. Do not
                 // hold a writer clone during slow initialization: a stop must
                 // be able to close and drain the daemon connection immediately.
-                state.runtime.search_declarations = Some(Arc::new(
-                    crate::search_declarations::SearchDeclarations::new(
-                        writer.clone(),
-                        PROTOCOL_VERSION,
-                        Arc::clone(&control_replies),
-                    ),
-                ));
+                // Only a daemon that lists the op in HELLO_ACK can take a
+                // changed declaration; an older one keeps HELLO's, which
+                // declares every route plexus has a catalog row for.
+                if hello_ack.subc_ops.iter().any(|op| {
+                    op == subc_protocol::session::MODULE_TO_SUBC_OP_CATALOG_UPDATE_ROLE_DECLARATIONS
+                }) {
+                    state.runtime.search_declarations = Some(Arc::new(
+                        crate::search_declarations::SearchDeclarations::new(
+                            writer.clone(),
+                            PROTOCOL_VERSION,
+                            Arc::clone(&control_replies),
+                        ),
+                    ));
+                } else {
+                    eprintln!(info web_search:
+                        "the daemon does not take catalog.update_role_declarations; routing keeps the routes plexus declared at HELLO"
+                    );
+                }
                 state.runtime.engine = state.runtime.engine.clone().with_scope_reader(Arc::new(
                     DaemonScopeReader::new(writer, PROTOCOL_VERSION, control_replies),
                 ));
