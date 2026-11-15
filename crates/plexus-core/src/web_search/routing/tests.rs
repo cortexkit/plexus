@@ -167,3 +167,41 @@ fn select_replies_name_a_route_or_say_why_not() {
         SelectOutcome::Unavailable(_)
     ));
 }
+
+#[test]
+fn a_discovery_names_what_the_catalog_held() {
+    let entry = |module: &str| {
+        json!({"module_id": module, "nonce_verified": true,
+            "capabilities": {"provides": ["routing/v1"]}})
+    };
+    let found = Discovery::of(Some(&json!([entry("striatum")])), 7);
+    assert_eq!(
+        found,
+        Discovery {
+            outcome: DiscoveryOutcome::Found,
+            provider: Some("striatum".into()),
+            at_ms: 7
+        }
+    );
+    for (catalog, outcome) in [
+        (Some(json!([])), DiscoveryOutcome::None),
+        (
+            Some(json!([entry("striatum"), entry("other")])),
+            DiscoveryOutcome::Several,
+        ),
+        (None, DiscoveryOutcome::Unreachable),
+    ] {
+        let discovery = Discovery::of(catalog.as_ref(), 9);
+        assert_eq!((discovery.outcome, discovery.provider), (outcome, None));
+    }
+    assert_eq!(
+        [
+            DiscoveryOutcome::Found,
+            DiscoveryOutcome::None,
+            DiscoveryOutcome::Several,
+            DiscoveryOutcome::Unreachable
+        ]
+        .map(DiscoveryOutcome::name),
+        ["found", "none", "several", "unreachable"]
+    );
+}

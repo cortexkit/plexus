@@ -75,9 +75,13 @@ fn declaration_follows_live_connections_and_marks_added_routes() {
     store
         .insert_connection("direct", "searx", "searxng_rest", "active", &json!({}))
         .unwrap();
+    assert_eq!(declarations.status(), DeclarationStatus::at_hello());
     // Narrowing from HELLO's full table only removes routes.
     declarations.reconcile(&store, &principals, &search);
     assert_eq!(search.routes_added_at_for_test(), None);
+    let narrowed = declarations.status();
+    assert_eq!(narrowed.routes, [RouteRef::new("exa", "search")]);
+    assert!(narrowed.updated_at_ms.is_some(), "{narrowed:?}");
     // Unchanged: nothing is sent.
     declarations.reconcile(&store, &principals, &search);
     now.store(NOW + 5, Ordering::SeqCst);

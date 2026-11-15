@@ -5,7 +5,8 @@
 > `web-search-routing.md`. The stored order and `set-web-search-order` are
 > retired (the command is refused as `web_search_order_retired`), and there is
 > no compatibility mode. Connections, grants, allowances and limits below still
-> apply.
+> apply. Health's `webSearch` section no longer reports an order or
+> `order_position`; see the new document for what it reports.
 
 ## Status and safety boundary
 

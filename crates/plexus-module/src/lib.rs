@@ -5333,6 +5333,12 @@ fn connector_home_health(state: &ModuleState) -> ModuleControlResponse {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .as_ref(),
                 &state.runtime.web_search,
+                state
+                    .runtime
+                    .search_declarations
+                    .as_ref()
+                    .map(|declarations| declarations.status())
+                    .as_ref(),
             );
         }
     }

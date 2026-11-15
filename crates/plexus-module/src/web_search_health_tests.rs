@@ -41,6 +41,25 @@ fn column(health: &Value, name: &str) -> Vec<Value> {
         .collect()
 }
 
+/// The rows of one provider, in row order.
+fn rows_of(health: &Value, provider: &str) -> Vec<Value> {
+    health["providers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("webSearch has provider rows: {health}"))
+        .iter()
+        .filter(|row| row["provider"] == provider)
+        .cloned()
+        .collect()
+}
+
+/// One column of one provider's rows.
+fn provider_column(health: &Value, provider: &str, name: &str) -> Vec<Value> {
+    rows_of(health, provider)
+        .iter()
+        .map(|row| row[name].clone())
+        .collect()
+}
+
 fn order(fixture: &Fixture, names: &[&str]) {
     fixture
         .store
@@ -112,35 +131,61 @@ fn add_owned_connection(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn health_lists_each_ordered_provider_with_its_position_presence_and_connections() {
+async fn health_lists_every_routed_provider_with_its_route_presence_and_connections() {
     let fixture = Fixture::new("health-rows");
     add_owned_connection(&fixture, "other", "conn-exa-other", "exa_rest", json!({}));
-    order(&fixture, &["exa", "tavily"]);
+    // Connected, but with no routing catalog row, so never searched.
+    add_owned_connection(&fixture, "direct", "conn-jina", "jina_rest", json!({}));
+    // A stored order changes nothing and is not reported.
+    order(&fixture, &["tavily", "exa"]);
     let health = web_search_health(&state_of(fixture.runtime()));
 
-    assert_eq!(health["order"], json!(["exa", "tavily"]), "{health}");
+    assert!(health.get("order").is_none(), "{health}");
+    assert_eq!(
+        column(&health, "provider"),
+        ["exa", "exa", "tavily", "brave", "deepseek", "kimi", "ollama", "jina"]
+            .map(|name| json!(name)),
+        "every routed provider in table order, then connected unrouted ones: {health}"
+    );
     assert_eq!(
         column(&health, "connection_id"),
-        [json!(CONNECTION), json!("conn-exa-other"), Value::Null],
+        [
+            json!(CONNECTION),
+            json!("conn-exa-other"),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            json!("conn-jina")
+        ],
         "a provider with several connections gets one row per connection, across principals: {health}"
     );
     assert_eq!(
-        column(&health, "principal"),
-        [json!("direct"), json!("other"), Value::Null]
+        provider_column(&health, "exa", "principal"),
+        [json!("direct"), json!("other")]
     );
     assert_eq!(
-        column(&health, "provider"),
-        [json!("exa"), json!("exa"), json!("tavily")]
+        column(&health, "route")[..3],
+        [
+            json!({"provider": "exa", "model": "search"}),
+            json!({"provider": "exa", "model": "search"}),
+            json!({"provider": "tavily", "model": "search"}),
+        ]
     );
     assert_eq!(
-        column(&health, "order_position"),
-        [json!(1), json!(1), json!(2)],
-        "order_position is the provider's place in the order, counting from 1"
+        provider_column(&health, "kimi", "route"),
+        [json!({"provider": "kimi-for-coding", "model": "search"})]
     );
+    assert_eq!(provider_column(&health, "jina", "route"), [Value::Null]);
     assert_eq!(
         column(&health, "connection_present"),
-        [json!(true), json!(true), json!(false)],
+        [true, true, false, false, false, false, false, true].map(|present| json!(present)),
         "connection_present says whether the provider has a live connection"
+    );
+    assert!(
+        column(&health, "order_position").iter().all(Value::is_null),
+        "rows no longer carry an order position: {health}"
     );
 }
 
@@ -148,7 +193,6 @@ async fn health_lists_each_ordered_provider_with_its_position_presence_and_conne
 async fn health_reports_each_owners_allowance_use_against_the_providers_limit() {
     let fixture = Fixture::new("health-allowance");
     add_owned_connection(&fixture, "other", "conn-exa-other", "exa_rest", json!({}));
-    order(&fixture, &["exa", "tavily"]);
     fixture.store.set_web_search_allowance("exa", 5).unwrap();
     let reply = fixture
         .search(Principal::Direct, json!({"query": "allowance"}))
@@ -157,12 +201,12 @@ async fn health_reports_each_owners_allowance_use_against_the_providers_limit() 
     let health = web_search_health(&state_of(fixture.runtime()));
 
     assert_eq!(
-        column(&health, "allowance_limit"),
+        column(&health, "allowance_limit")[..3],
         [json!(5), json!(5), Value::Null],
         "allowance_limit is the provider's monthly allowance, or null when none is set: {health}"
     );
     assert_eq!(
-        column(&health, "allowance_used"),
+        column(&health, "allowance_used")[..3],
         [json!(1), json!(0), Value::Null],
         "allowance_used is this month's count for the connection's owner: {health}"
     );
@@ -172,7 +216,6 @@ async fn health_reports_each_owners_allowance_use_against_the_providers_limit() 
 async fn health_reports_live_cooldowns_per_connection_and_zero_after_a_restart() {
     let fixture = Fixture::new("health-cooldown");
     add_owned_connection(&fixture, "other", "conn-exa-other", "exa_rest", json!({}));
-    order(&fixture, &["exa"]);
     fixture.transport.set_response(MockResponse::VendorError {
         code: "http_503".to_string(),
         message: "outage".to_string(),
@@ -183,7 +226,7 @@ async fn health_reports_live_cooldowns_per_connection_and_zero_after_a_restart()
     assert_eq!(code(&reply), "web_search_unavailable", "{reply}");
     let health = web_search_health(&state_of(fixture.runtime()));
     assert_eq!(
-        column(&health, "cooldown_remaining_ms"),
+        provider_column(&health, "exa", "cooldown_remaining_ms"),
         [json!(60_000), json!(0)],
         "cooldown_remaining_ms counts down the failed connection's cooldown only: {health}"
     );
@@ -196,16 +239,15 @@ async fn health_reports_live_cooldowns_per_connection_and_zero_after_a_restart()
     ));
     let health = web_search_health(&state_of(restarted));
     assert_eq!(
-        column(&health, "cooldown_remaining_ms"),
+        provider_column(&health, "exa", "cooldown_remaining_ms"),
         [json!(0), json!(0)],
         "cooldowns are held in memory, so a restarted module reports 0: {health}"
     );
 }
 
-/// Health with Exa ordered and its only connection moved to `status`.
-fn health_with_only_connection(label: &str, status: &str) -> Value {
+/// Exa's health rows with its only connection moved to `status`.
+fn health_with_only_connection(label: &str, status: &str) -> Vec<Value> {
     let fixture = Fixture::new(label);
-    order(&fixture, &["exa"]);
     let updated = Connection::open(fixture.path.as_ref() as &Path)
         .unwrap()
         .execute(
@@ -214,21 +256,21 @@ fn health_with_only_connection(label: &str, status: &str) -> Value {
         )
         .unwrap();
     assert_eq!(updated, 1);
-    web_search_health(&state_of(fixture.runtime()))
+    rows_of(&web_search_health(&state_of(fixture.runtime())), "exa")
 }
 
 /// The single row of a provider with no connection that can serve a search.
-fn absent_exa_row() -> Value {
-    json!({"order": ["exa"], "providers": [{
+fn absent_exa_row() -> Vec<Value> {
+    vec![json!({
         "provider": "exa",
-        "order_position": 1,
+        "route": {"provider": "exa", "model": "search"},
         "connection_id": null,
         "principal": null,
         "connection_present": false,
         "cooldown_remaining_ms": 0,
         "allowance_used": null,
         "allowance_limit": null,
-    }]})
+    })]
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -250,14 +292,82 @@ async fn a_provider_whose_only_connection_is_disabled_has_no_connection_present(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn with_no_order_health_lists_no_providers() {
-    let fixture = Fixture::new("health-no-order");
+async fn health_is_null_until_the_store_is_read() {
+    let fixture = Fixture::new("health-unread");
     let state = state_of(fixture.runtime());
     let before_refresh = serde_json::to_value(connector_home_health(&state)).unwrap();
     assert_eq!(before_refresh["metrics"]["webSearch"], Value::Null);
+    assert!(web_search_health(&state)["providers"].is_array());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_reports_the_routing_look_and_the_declared_routes() {
+    use plexus_core::web_search::routing::fake::FakeRouter;
+    use plexus_core::web_search::routing::{Discovery, DiscoveryOutcome, RouteRef};
+    let all_routes = json!([
+        {"provider": "brave", "model": "web-search"},
+        {"provider": "deepseek", "model": "search"},
+        {"provider": "exa", "model": "search"},
+        {"provider": "kimi-for-coding", "model": "search"},
+        {"provider": "ollama-cloud", "model": "web-search"},
+        {"provider": "tavily", "model": "search"},
+    ]);
+
+    // A module that could not open its daemon route has nothing to look over.
+    let mut fixture = Fixture::new("health-routing");
+    fixture.web_search = Arc::new(WebSearchService::production());
+    let health = web_search_health(&state_of(fixture.runtime()));
     assert_eq!(
-        web_search_health(&state),
-        json!({"order": null, "providers": []})
+        health["routing"],
+        json!({"discovery": "unreachable", "provider": null, "at_ms": null})
+    );
+    // Without a declaration update, HELLO's declaration of every row stands.
+    assert_eq!(
+        health["routes"],
+        json!({"declared": all_routes, "updated_at_ms": null})
+    );
+
+    let router = Arc::new(FakeRouter::ranked(Vec::new()));
+    fixture.web_search = Arc::new(WebSearchService::production().with_router(router.clone()));
+    let health = web_search_health(&state_of(fixture.runtime()));
+    assert_eq!(
+        health["routing"],
+        json!({"discovery": null, "provider": null, "at_ms": null}),
+        "no look has been made before the first search that needs routing"
+    );
+    for (outcome, provider, name) in [
+        (DiscoveryOutcome::Found, Some("striatum"), "found"),
+        (DiscoveryOutcome::None, None, "none"),
+        (DiscoveryOutcome::Several, None, "several"),
+        (DiscoveryOutcome::Unreachable, None, "unreachable"),
+    ] {
+        router.set_discovery(Some(Discovery {
+            outcome,
+            provider: provider.map(str::to_owned),
+            at_ms: NOW_MS,
+        }));
+        let health = web_search_health(&state_of(fixture.runtime()));
+        assert_eq!(
+            health["routing"],
+            json!({"discovery": name, "provider": provider, "at_ms": NOW_MS})
+        );
+    }
+
+    // An accepted update replaces the declared set and stamps its time.
+    let snapshot =
+        crate::web_search_health::snapshot(&fixture.store, &["direct".to_string()], NOW_MS)
+            .unwrap();
+    let rendered = crate::web_search_health::render(
+        Some(&snapshot),
+        &fixture.web_search,
+        Some(&crate::search_declarations::DeclarationStatus {
+            routes: vec![RouteRef::new("exa", "search")],
+            updated_at_ms: Some(NOW_MS + 1),
+        }),
+    );
+    assert_eq!(
+        rendered["routes"],
+        json!({"declared": [{"provider": "exa", "model": "search"}], "updated_at_ms": NOW_MS + 1})
     );
 }
 
@@ -344,11 +454,14 @@ async fn health_and_the_unavailable_detail_never_print_an_instance_address_or_ve
     );
     assert_no_instance_or_vendor_text(&reply.to_string(), "the web_search_unavailable reply");
     assert_eq!(
-        column(&health, "connection_id"),
+        provider_column(&health, "searxng", "connection_id"),
         [json!("conn-searxng")],
         "{health}"
     );
-    assert_eq!(column(&health, "cooldown_remaining_ms"), [json!(60_000)]);
+    assert_eq!(
+        provider_column(&health, "searxng", "cooldown_remaining_ms"),
+        [json!(60_000)]
+    );
     assert_no_instance_or_vendor_text(&health.to_string(), "health");
 }
 
@@ -358,7 +471,10 @@ async fn health_and_the_unavailable_detail_never_print_an_instance_address_or_ve
 async fn searxng_diagnostics_fixture() {
     let (reply, health) = failing_searxng_search("health-searxng-log").await;
     assert_eq!(code(&reply), "web_search_unavailable", "{reply}");
-    assert_eq!(column(&health, "connection_id"), [json!("conn-searxng")]);
+    assert_eq!(
+        provider_column(&health, "searxng", "connection_id"),
+        [json!("conn-searxng")]
+    );
     // A known last line: the parent test finds it to show the child's stderr
     // really carries the module's log lines.
     eprintln!(warn health: "searxng diagnostics fixture finished");

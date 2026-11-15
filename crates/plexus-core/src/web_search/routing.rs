@@ -110,6 +110,62 @@ pub trait RoutingPeer: Send + Sync {
         scope: Option<&CallScope>,
         timeout: Duration,
     ) -> Result<Value, RoutingCallError>;
+
+    /// What this route's last look for a routing provider found, for the
+    /// health report; `None` when it has not looked yet or never looks.
+    fn last_discovery(&self) -> Option<Discovery> {
+        None
+    }
+}
+
+/// What a look in the daemon catalog for the routing provider found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryOutcome {
+    /// Exactly one verified routing provider.
+    Found,
+    /// No verified routing provider.
+    None,
+    /// More than one, so plexus used none of them.
+    Several,
+    /// The catalog itself could not be read.
+    Unreachable,
+}
+
+impl DiscoveryOutcome {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Found => "found",
+            Self::None => "none",
+            Self::Several => "several",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
+/// One look for the routing provider: what it found, the provider's module
+/// id when there was exactly one, and when it looked (Unix milliseconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovery {
+    pub outcome: DiscoveryOutcome,
+    pub provider: Option<String>,
+    pub at_ms: i64,
+}
+
+impl Discovery {
+    /// Classify one catalog read: `None` when the catalog could not be read.
+    pub fn of(catalog: Option<&Value>, at_ms: i64) -> Self {
+        let (outcome, provider) = match catalog.map(routing_provider) {
+            None => (DiscoveryOutcome::Unreachable, None),
+            Some(Ok(module)) => (DiscoveryOutcome::Found, Some(module)),
+            Some(Err(DiscoveryFailure::None)) => (DiscoveryOutcome::None, None),
+            Some(Err(DiscoveryFailure::Ambiguous)) => (DiscoveryOutcome::Several, None),
+        };
+        Self {
+            outcome,
+            provider,
+            at_ms,
+        }
+    }
 }
 
 /// The `route.select` body plexus sends for one search, envelope included.
@@ -415,6 +471,9 @@ pub fn live_routes(
 pub struct CatalogRoutingPeer {
     route: crate::github_identity::SubcPrefrontalRoutePeer,
     provider: std::sync::Mutex<Option<String>>,
+    /// The last look's result, kept apart from `provider` so a health report
+    /// never waits behind a catalog read in progress.
+    discovery: std::sync::Mutex<Option<Discovery>>,
 }
 
 impl CatalogRoutingPeer {
@@ -422,6 +481,7 @@ impl CatalogRoutingPeer {
         Self {
             route,
             provider: std::sync::Mutex::new(None),
+            discovery: std::sync::Mutex::new(None),
         }
     }
 
@@ -433,23 +493,43 @@ impl CatalogRoutingPeer {
         if let Some(module) = cached.as_ref() {
             return Ok(module.clone());
         }
-        let modules = self.route.catalog_modules(timeout).map_err(|_| {
-            RoutingCallError::Unreachable("the daemon catalog could not be read".into())
-        })?;
-        let module = routing_provider(&modules).map_err(|failure| {
-            RoutingCallError::Unreachable(match failure {
-                DiscoveryFailure::None => "the daemon catalog lists no routing provider".into(),
-                DiscoveryFailure::Ambiguous => {
-                    "the daemon catalog lists more than one routing provider".into()
-                }
-            })
-        })?;
+        let modules = self.route.catalog_modules(timeout).ok();
+        let discovery = Discovery::of(modules.as_ref(), crate::storage::now_ms());
+        *self
+            .discovery
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(discovery.clone());
+        let module = match discovery.outcome {
+            DiscoveryOutcome::Found => discovery.provider.unwrap_or_default(),
+            DiscoveryOutcome::Unreachable => {
+                return Err(RoutingCallError::Unreachable(
+                    "the daemon catalog could not be read".into(),
+                ))
+            }
+            DiscoveryOutcome::None => {
+                return Err(RoutingCallError::Unreachable(
+                    "the daemon catalog lists no routing provider".into(),
+                ))
+            }
+            DiscoveryOutcome::Several => {
+                return Err(RoutingCallError::Unreachable(
+                    "the daemon catalog lists more than one routing provider".into(),
+                ))
+            }
+        };
         *cached = Some(module.clone());
         Ok(module)
     }
 }
 
 impl RoutingPeer for CatalogRoutingPeer {
+    fn last_discovery(&self) -> Option<Discovery> {
+        self.discovery
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     fn call(
         &self,
         method: &str,

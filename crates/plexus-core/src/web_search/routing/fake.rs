@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{RouteRef, RoutingCallError, RoutingPeer};
+use super::{Discovery, RouteRef, RoutingCallError, RoutingPeer};
 
 /// How the fake answers.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +30,7 @@ pub struct FakeRouter {
     describe: Mutex<Value>,
     calls: Mutex<Vec<(String, Value)>>,
     decisions: AtomicUsize,
+    discovery: Mutex<Option<Discovery>>,
 }
 
 impl FakeRouter {
@@ -42,6 +43,7 @@ impl FakeRouter {
             describe: Mutex::new(Self::serving_search_describe()),
             calls: Mutex::new(Vec::new()),
             decisions: AtomicUsize::new(0),
+            discovery: Mutex::new(None),
         }
     }
 
@@ -65,6 +67,11 @@ impl FakeRouter {
 
     pub fn set_mode(&self, mode: FakeMode) {
         *self.mode.lock().unwrap() = mode;
+    }
+
+    /// What [`RoutingPeer::last_discovery`] reports.
+    pub fn set_discovery(&self, discovery: Option<Discovery>) {
+        *self.discovery.lock().unwrap() = discovery;
     }
 
     pub fn set_describe(&self, describe: Value) {
@@ -133,6 +140,10 @@ impl FakeRouter {
 }
 
 impl RoutingPeer for FakeRouter {
+    fn last_discovery(&self) -> Option<Discovery> {
+        self.discovery.lock().unwrap().clone()
+    }
+
     fn call(
         &self,
         method: &str,

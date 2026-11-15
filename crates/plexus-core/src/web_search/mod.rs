@@ -314,6 +314,18 @@ impl WebSearchService {
         self
     }
 
+    /// Whether this service has a route to routing at all. Without one (the
+    /// module could not open its daemon connection), no search that needs a
+    /// vendor can run.
+    pub fn has_router(&self) -> bool {
+        self.router.is_some()
+    }
+
+    /// The routing route's last look for a routing provider, if it looked.
+    pub fn routing_discovery(&self) -> Option<routing::Discovery> {
+        self.router.as_ref()?.last_discovery()
+    }
+
     /// Record that plexus just added a route to its routing declaration. For
     /// [`routing::DECLARATION_GRACE_MS`] after this, a `no_route` answer is
     /// treated as routing not having read the new declaration yet.

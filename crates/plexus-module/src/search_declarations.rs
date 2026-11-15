@@ -36,6 +36,29 @@ pub struct SearchDeclarations {
     /// Connected providers without a catalog row already logged, so each is
     /// named once per process rather than on every pass.
     unrouted_logged: Mutex<BTreeSet<&'static str>>,
+    /// What health reports, kept apart from `declared` so a health answer
+    /// never waits behind an update in flight.
+    status: Mutex<DeclarationStatus>,
+}
+
+/// The routes the daemon catalog carries for plexus, and when plexus last
+/// replaced them (Unix milliseconds; `None` while HELLO's declaration stands).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclarationStatus {
+    pub routes: Vec<RouteRef>,
+    pub updated_at_ms: Option<i64>,
+}
+
+impl DeclarationStatus {
+    /// The declaration HELLO made: every route in the provider table.
+    pub fn at_hello() -> Self {
+        let mut routes = routing::table_routes();
+        routes.sort();
+        Self {
+            routes,
+            updated_at_ms: None,
+        }
+    }
 }
 
 impl SearchDeclarations {
@@ -49,13 +72,18 @@ impl SearchDeclarations {
             version,
             pending,
             // What the HELLO manifest declared.
-            declared: Mutex::new({
-                let mut routes = routing::table_routes();
-                routes.sort();
-                routes
-            }),
+            declared: Mutex::new(DeclarationStatus::at_hello().routes),
             unrouted_logged: Mutex::new(BTreeSet::new()),
+            status: Mutex::new(DeclarationStatus::at_hello()),
         }
+    }
+
+    /// The declaration as the daemon catalog last accepted it.
+    pub fn status(&self) -> DeclarationStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Bring the declaration in line with the live connections of
@@ -99,6 +127,13 @@ impl SearchDeclarations {
         plexus_core::diag!(info web_search:
             "routing declaration now lists {} web search route(s)", live.len()
         );
+        *self
+            .status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = DeclarationStatus {
+            routes: live.clone(),
+            updated_at_ms: Some(plexus_core::storage::now_ms()),
+        };
         *declared = live;
     }
 

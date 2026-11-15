@@ -81,6 +81,24 @@ left of the search's existing 120-second admission deadline.
 - A caller granted no provider: `web_search_not_granted`, or a module grant
   refusal naming the module-wide web search target (connection null).
 
+## Health
+
+The health report's `webSearch` section shows:
+
+- `routing`: the last look for a routing provider in the daemon catalog,
+  `{discovery, provider, at_ms}`, with `discovery` one of `found`, `none`,
+  `several` or `unreachable` (the catalog could not be read, or the module has
+  no daemon route to look over), or `null` before any search needed routing.
+- `routes`: `{declared, updated_at_ms}`, the routes plexus last declared to
+  routing and when it last replaced the declaration (`null` while HELLO's,
+  which lists every catalog row, stands).
+- `providers`: one row per routed provider in table order, one per connection
+  when it has several, then any connected provider without a catalog row.
+  Each row carries `route` (`null` without a row), `connection_id`,
+  `principal`, `connection_present`, `cooldown_remaining_ms`, `allowance_used`
+  and `allowance_limit`. The stored order and `order_position` are no longer
+  reported.
+
 ## Order and compatibility mode
 
 The stored `web_search_order` is no longer read and the no-order Exa
