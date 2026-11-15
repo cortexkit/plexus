@@ -47,7 +47,9 @@ treated as "not seen yet" (retryable `backend_unavailable` with backend
 3. `route.select` is sent with `consumer`, `kind: "search"`,
    `privacy: "remote_allowed"`, `requirements: {iq: 75}` (the constant
    `SEARCH_DEMAND_IQ`; the contract defines no default level for a search
-   consumer, and 75 is the level routing's recorded search pairs use),
+   consumer, and 75 is the level used by the `route.select` request/reply
+   pairs recorded from routing's own handler, vendored in the directory
+   named below),
    `eligible_routes` and `allowance_left`. The request bytes are checked
    against routing's recorded pairs in
    `crates/plexus-module/tests/fixtures/route-select-search-v1/`.
@@ -62,7 +64,10 @@ treated as "not seen yet" (retryable `backend_unavailable` with backend
 6. A failed attempt is followed by a new select with the failed route removed,
    at most once per route first offered.
 
-Selects and reports are sent under the search's own scope stamp. Each routing
+Selects and reports are sent on a route bound to the search's own scope (the
+daemon's stamp naming the session or run the search was made in), so routing
+attributes the decision and its cost to that work rather than to plexus
+(CONTRACT.md §3); a search made on an unscoped route selects unscoped. Each routing
 call waits at most `ROUTING_CALL_TIMEOUT` (3 s; reports 2 s), cut to what is
 left of the search's existing 120-second admission deadline.
 

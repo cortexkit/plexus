@@ -82,8 +82,7 @@ pub enum WebSearchRefusal {
     },
     /// Routing, which chooses the provider for every search that needs a
     /// vendor, cannot be reached or cannot serve search right now. Sent as
-    /// `backend_unavailable` with backend `routing`, which every reader
-    /// already retries.
+    /// the retryable `backend_unavailable` code, with backend `routing`.
     RoutingUnavailable,
     /// The provider rejected this request; trying another account cannot repair it.
     RequestRejected {

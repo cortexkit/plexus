@@ -21,8 +21,9 @@ pub(super) enum Classified {
 
 /// How an attempt that reached (or may have reached) the vendor is reported
 /// to routing. The vendor's HTTP status 401 is the only credential failure
-/// (as is plexus's own handle-credential refusal); a 403, or a manifest
-/// signal on any other status, never reports `credential`, because routing
+/// (as is plexus's own handle-credential refusal). A 403, or a
+/// `credential_rejected` error signal that a provider's catalog manifest
+/// attaches to some other status, never reports `credential`, because routing
 /// would then block the credential for every use. A throttle carries the
 /// wait only when the vendor named it.
 pub(super) fn attempt_status(
