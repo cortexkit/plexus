@@ -48,6 +48,7 @@ mod remaining_tool_guard;
 mod reply_guard;
 mod request_execution;
 pub mod scope_reader;
+mod search_declarations;
 pub mod smoke;
 mod startup;
 #[cfg(test)]
@@ -1067,6 +1068,14 @@ fn spawn_trigger_scheduler_every(
                         }
                         if health_probe_due && !stopping.load(std::sync::atomic::Ordering::Relaxed) {
                               refresh_store_health(&state, &principals);
+                        }
+                        // Every pass, so a provider connected or removed since
+                        // the last one reaches routing's declaration promptly.
+                        // Nothing is sent while the declaration already matches.
+                        if !stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                            if let Some(declarations) = &state.runtime.search_declarations {
+                                declarations.reconcile(state.store(), &principals, &state.runtime.web_search);
+                            }
                         }
                         if sweep_due && !stopping.load(std::sync::atomic::Ordering::Relaxed) {
                             state.runtime.mcp_transport.sweep_idle();

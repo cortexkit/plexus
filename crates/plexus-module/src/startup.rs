@@ -156,6 +156,13 @@ pub(super) fn spawn(
                 // Approval rechecks use this connection after readiness. Do not
                 // hold a writer clone during slow initialization: a stop must
                 // be able to close and drain the daemon connection immediately.
+                state.runtime.search_declarations = Some(Arc::new(
+                    crate::search_declarations::SearchDeclarations::new(
+                        writer.clone(),
+                        PROTOCOL_VERSION,
+                        Arc::clone(&control_replies),
+                    ),
+                ));
                 state.runtime.engine = state.runtime.engine.clone().with_scope_reader(Arc::new(
                     DaemonScopeReader::new(writer, PROTOCOL_VERSION, control_replies),
                 ));

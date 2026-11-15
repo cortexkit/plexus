@@ -34,6 +34,21 @@ pub struct SubcPrefrontalRoutePeer {
     call_options: Option<subc_client_rs::CallOptions>,
 }
 
+/// How a [`SubcPrefrontalRoutePeer::call_module`] call failed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModuleCallError {
+    /// No answer: the route did not open in time, the send failed, or the
+    /// reply never came or could not be read.
+    NoAnswer,
+    /// The daemon refused to open the route, or the module answered with an
+    /// error frame.
+    Refused {
+        code: String,
+        message: String,
+        detail: Option<Value>,
+    },
+}
+
 /// How one call over [`SubcPrefrontalRoutePeer`] failed.
 enum RouteCallFailure {
     NotSent,
@@ -174,6 +189,93 @@ impl SubcPrefrontalRoutePeer {
         scope: Option<subc_protocol::scope::ScopeSelector>,
         timeout: Option<std::time::Duration>,
     ) -> Result<Value, RouteCallFailure> {
+        self.call_value_at(self.target.clone(), operation, params, scope, timeout)
+    }
+
+    /// Open a consumer connection with no fixed peer, for callers that find
+    /// their peer module at call time and name it on every
+    /// [`Self::call_module`].
+    pub fn connect_unbound(
+        connection_file: &std::path::Path,
+        identity: subc_protocol::BindIdentity,
+    ) -> Result<Self, PrefrontalRouteError> {
+        Self::connect_target(
+            connection_file,
+            subc_protocol::RouteTarget::ManagementSurface {
+                module_id: String::new(),
+            },
+            identity,
+        )
+    }
+
+    /// Call `operation` on `module_id`'s management surface over this
+    /// connection, under `scope`'s stamp when one is given, within `timeout`.
+    pub fn call_module(
+        &self,
+        module_id: &str,
+        operation: &str,
+        params: Value,
+        scope: Option<&crate::scope::CallScope>,
+        timeout: std::time::Duration,
+    ) -> Result<Value, ModuleCallError> {
+        let selector = match scope {
+            Some(scope) => Some(subc_protocol::scope::ScopeSelector::new(
+                crate::scope::parse_scope_owner(&scope.owner).ok_or(ModuleCallError::NoAnswer)?,
+                scope.scope_ref.clone(),
+                Some(scope.scope_epoch),
+            )),
+            None => None,
+        };
+        self.call_value_at(
+            subc_protocol::RouteTarget::ManagementSurface {
+                module_id: module_id.to_owned(),
+            },
+            operation,
+            params,
+            selector,
+            Some(timeout),
+        )
+        .map_err(|failure| match failure {
+            RouteCallFailure::Module {
+                code,
+                message,
+                detail,
+            } => ModuleCallError::Refused {
+                code,
+                message,
+                detail,
+            },
+            _ => ModuleCallError::NoAnswer,
+        })
+    }
+
+    /// The daemon's module catalog (`catalog.list`'s `modules`), read within
+    /// `timeout`.
+    pub fn catalog_modules(&self, timeout: std::time::Duration) -> Result<Value, ModuleCallError> {
+        let consumer = Arc::clone(&self.consumer);
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Err(ModuleCallError::NoAnswer);
+        };
+        blocking_route_call(|| {
+            run_on(runtime, async move {
+                let list = tokio::time::timeout(timeout, consumer.catalog_list())
+                    .await
+                    .map_err(|_| PrefrontalRouteError::OutcomeUnknown)?
+                    .map_err(|_| PrefrontalRouteError::NotSent)?;
+                serde_json::to_value(&list.modules).map_err(|_| PrefrontalRouteError::Transport)
+            })
+        })
+        .map_err(|_| ModuleCallError::NoAnswer)
+    }
+
+    fn call_value_at(
+        &self,
+        target: subc_protocol::RouteTarget,
+        operation: &str,
+        params: Value,
+        scope: Option<subc_protocol::scope::ScopeSelector>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Value, RouteCallFailure> {
         // Prefrontal's management surface follows the same route envelope as
         // claustrum: management operation under `method`, arguments under
         // `params`.
@@ -183,7 +285,6 @@ impl SubcPrefrontalRoutePeer {
         }))
         .map_err(|_| RouteCallFailure::Transport)?;
         let consumer = Arc::clone(&self.consumer);
-        let target = self.target.clone();
         let identity = self.identity.clone();
         let mut options = self.call_options.clone().unwrap_or_default();
         if let Some(timeout) = timeout {

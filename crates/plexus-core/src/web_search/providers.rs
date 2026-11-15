@@ -86,6 +86,36 @@ pub fn provider_named(name: &str) -> Option<&'static ProviderName> {
     PROVIDER_NAMES.iter().find(|provider| provider.name == name)
 }
 
+/// The Fusiform catalog row routing knows each provider's search by, as
+/// `(plexus provider name, Fusiform provider, Fusiform model)`. This is the
+/// only place a provider is tied to a routing route. A provider missing here
+/// has no catalog row yet: plexus never declares it to routing and never
+/// offers it for selection, so it is not searched until a row exists.
+pub const SEARCH_ROUTES: &[(&str, &str, &str)] = &[
+    ("exa", "exa", "search"),
+    ("tavily", "tavily", "search"),
+    ("brave", "brave", "web-search"),
+    ("deepseek", "deepseek", "search"),
+    ("kimi", "kimi-for-coding", "search"),
+    ("ollama", "ollama-cloud", "web-search"),
+];
+
+/// The routing route `(provider, model)` for one plexus provider name.
+pub fn search_route(name: &str) -> Option<(&'static str, &'static str)> {
+    SEARCH_ROUTES
+        .iter()
+        .find(|(provider, _, _)| *provider == name)
+        .map(|(_, route_provider, model)| (*route_provider, *model))
+}
+
+/// The plexus provider a routing route names, if it is one of ours.
+pub fn provider_for_route(route_provider: &str, model: &str) -> Option<&'static ProviderName> {
+    SEARCH_ROUTES
+        .iter()
+        .find(|(_, provider, row)| *provider == route_provider && *row == model)
+        .and_then(|(name, _, _)| provider_named(name))
+}
+
 /// Vault service identities, not model-routing aliases or credential names.
 /// SearXNG needs an operator-selected instance and is deliberately absent.
 pub const VAULT_SEARCH_PROVIDERS: &[(&str, &str)] = &[
@@ -134,6 +164,28 @@ mod tests {
         for excluded in ["searxng", "kimi", "ollama", "moonshot", "EXA", "unknown"] {
             assert!(provider_for_vault_service(excluded).is_none(), "{excluded}");
         }
+    }
+
+    #[test]
+    fn search_routes_name_known_providers_and_their_catalog_rows() {
+        assert_eq!(
+            SEARCH_ROUTES,
+            &[
+                ("exa", "exa", "search"),
+                ("tavily", "tavily", "search"),
+                ("brave", "brave", "web-search"),
+                ("deepseek", "deepseek", "search"),
+                ("kimi", "kimi-for-coding", "search"),
+                ("ollama", "ollama-cloud", "web-search"),
+            ]
+        );
+        for (name, provider, model) in SEARCH_ROUTES {
+            assert_eq!(search_route(name), Some((*provider, *model)));
+            assert_eq!(provider_for_route(provider, model).unwrap().name, *name);
+        }
+        assert_eq!(search_route("searxng"), None);
+        assert!(provider_for_route("kimi", "search").is_none());
+        assert!(provider_for_route("exa", "web-search").is_none());
     }
 
     #[test]

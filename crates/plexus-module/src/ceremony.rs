@@ -1133,68 +1133,19 @@ fn web_search_change_result(
     json!({"result": change})
 }
 
+/// Retired: routing now chooses each web search's provider, so a stored
+/// order would change nothing. The command is refused by name, before any
+/// argument is read, and the stored order row is left untouched so an older
+/// plexus can still read it after a rollback.
 pub(crate) fn set_web_search_order(
-    state: &Arc<ModuleState>,
-    principal_key: &str,
-    params: &Value,
+    _state: &Arc<ModuleState>,
+    _principal_key: &str,
+    _params: &Value,
 ) -> Value {
-    let clear = match web_search_clear(params) {
-        Ok(clear) => clear,
-        Err(error) => return error,
-    };
-    let providers = match params.get("providers") {
-        None if clear => Vec::new(),
-        Some(Value::Array(names)) if names.iter().all(Value::is_string) => names
-            .iter()
-            .map(|name| name.as_str().unwrap().to_owned())
-            .collect::<Vec<_>>(),
-        _ => {
-            return json!({"error": {"code": "invalid_request", "message": "providers must be an array of names"}})
-        }
-    };
-    if clear && !providers.is_empty() {
-        return json!({"error": {"code": "invalid_request", "message": "clear takes no provider names"}});
-    }
-    if !clear && providers.is_empty() {
-        return json!({"error": {"code": "invalid_request", "message": "web search order requires at least one name"}});
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    for provider in &providers {
-        if let Err(error) = known_web_search_provider(provider) {
-            return error;
-        }
-        if !seen.insert(provider) {
-            return json!({"error": {"code": "invalid_request", "message": "duplicate web search provider"}});
-        }
-    }
-    let dry_run = match boolean_flag(params, "dry_run", true) {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    let previous = if dry_run {
-        state.store().web_search_order()
-    } else if clear {
-        state.store().clear_web_search_order()
-    } else {
-        state.store().set_web_search_order(&providers)
-    };
-    let previous = match previous {
-        Ok(previous) => previous,
-        Err(error) => {
-            return crate::wire::store_failure(
-                "web search order change",
-                "web search order could not be read or changed",
-                &error,
-            )
-        }
-    };
-    web_search_change_result(
-        state,
-        principal_key,
-        "set_web_search_order",
-        dry_run,
-        json!({"previous": previous, "new": if clear { None } else { Some(providers) }}),
-    )
+    json!({"error": {
+        "code": "web_search_order_retired",
+        "message": "set_web_search_order is retired: routing now chooses the provider for each web search. Monthly allowances still apply; use set_web_search_allowance.",
+    }})
 }
 
 pub(crate) fn set_web_search_allowance(

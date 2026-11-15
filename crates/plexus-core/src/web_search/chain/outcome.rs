@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::governance::DispatchOutcome;
+use crate::web_search::routing;
 
 pub(super) const UNAVAILABLE_COOLDOWN_MS: u64 = 60_000;
 pub(super) const CREDENTIAL_COOLDOWN_MS: u64 = 60_000;
@@ -16,6 +17,54 @@ pub(super) enum Classified {
         reason: SkipReason,
         cooldown_ms: u64,
     },
+}
+
+/// How an attempt that reached (or may have reached) the vendor is reported
+/// to routing. The vendor's HTTP status 401 is the only credential failure
+/// (as is plexus's own handle-credential refusal); a 403, or a manifest
+/// signal on any other status, never reports `credential`, because routing
+/// would then block the credential for every use. A throttle carries the
+/// wait only when the vendor named it.
+pub(super) fn attempt_status(
+    classified: &Classified,
+    dispatched: &DispatchOutcome,
+) -> routing::AttemptStatus {
+    use routing::AttemptStatus;
+    match classified {
+        Classified::Serve(results) if results.is_empty() => AttemptStatus::ServedEmpty,
+        Classified::Serve(_) => AttemptStatus::Served,
+        Classified::Reject => AttemptStatus::Rejected,
+        Classified::MoveOn { reason, .. } => match reason {
+            SkipReason::Quota => AttemptStatus::Quota,
+            SkipReason::Throttled => AttemptStatus::Throttled {
+                retry_after_ms: dispatched.retry_after_ms.filter(|_| {
+                    matches!(dispatched.outcome, TransportOutcome::VendorFailed { .. })
+                }),
+            },
+            SkipReason::Credential => {
+                let code = failure_code(dispatched);
+                if http_status(code) == Some(401) || code == Some("handle_credential_rejected") {
+                    AttemptStatus::Credential
+                } else {
+                    AttemptStatus::Unavailable
+                }
+            }
+            _ => AttemptStatus::Unavailable,
+        },
+    }
+}
+
+fn failure_code(dispatched: &DispatchOutcome) -> Option<&str> {
+    match &dispatched.outcome {
+        TransportOutcome::VendorFailed { code, .. } | TransportOutcome::NotSent { code, .. } => {
+            Some(code.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn http_status(code: Option<&str>) -> Option<u16> {
+    code.and_then(|code| code.strip_prefix("http_")?.parse::<u16>().ok())
 }
 
 pub(super) fn classify(

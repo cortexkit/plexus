@@ -104,6 +104,9 @@ pub struct ModuleRuntime {
     /// behind an `Arc` so its in-memory state outlives any one call.
     pub web_search: Arc<WebSearchService>,
     pub code_search: Arc<plexus_core::code_search::CodeSearchService>,
+    /// Keeps routing's view of plexus's search routes current. Set once the
+    /// daemon connection is known, after composition.
+    pub(crate) search_declarations: Option<Arc<crate::search_declarations::SearchDeclarations>>,
 }
 
 impl ModuleRuntime {
@@ -180,8 +183,9 @@ impl ModuleRuntime {
             github_handle_credentials,
             github_control_reader: None,
             endpoint_override: None,
-            web_search: Arc::new(WebSearchService::production()),
+            web_search: Arc::new(production_web_search(connection_file)),
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),
+            search_declarations: None,
         }
     }
 
@@ -225,8 +229,9 @@ impl ModuleRuntime {
             github_handle_credentials: None,
             github_control_reader: None,
             endpoint_override: None,
-            web_search: Arc::new(WebSearchService::production()),
+            web_search: Arc::new(WebSearchService::production().with_stored_order_router_for_test()),
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),
+            search_declarations: None,
         }
     }
 
@@ -271,13 +276,33 @@ impl ModuleRuntime {
             github_handle_credentials: None,
             github_control_reader: None,
             endpoint_override,
-            web_search: Arc::new(WebSearchService::production()),
+            web_search: Arc::new(WebSearchService::production().with_stored_order_router_for_test()),
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),
+            search_declarations: None,
         }
     }
 
     pub fn credential_source(&self) -> &Arc<dyn CredentialSource> {
         self.engine.credential_source()
+    }
+}
+
+/// The web search service, choosing providers through the routing provider
+/// found in the daemon catalog. When no consumer connection can be opened the
+/// service has no router, and every search that needs a vendor is refused as
+/// retryable; cache hits still answer.
+fn production_web_search(connection_file: &Path) -> WebSearchService {
+    match plexus_core::SubcPrefrontalRoutePeer::connect_unbound(
+        connection_file,
+        plexus_bind_identity(),
+    ) {
+        Ok(route) => WebSearchService::production().with_router(Arc::new(
+            plexus_core::web_search::routing::CatalogRoutingPeer::new(route),
+        )),
+        Err(_) => {
+            eprintln!(warn wire: "{}", peer_failure_warning("web search routing", "routing/v1"));
+            WebSearchService::production()
+        }
     }
 }
 

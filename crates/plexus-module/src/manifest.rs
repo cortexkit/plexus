@@ -431,7 +431,7 @@ pub fn build_with_launch_nonce_source(
                 ManagementOperation {
                     name: ADMIN_SET_WEB_SEARCH_ORDER_OP.to_string(),
                     kind: ManagementOperationKind::Mutate,
-                    description: Some("Preview or apply the web search provider order, or clear it for compatibility mode".to_string()),
+                    description: Some("Retired: refuses by name, since routing now chooses each web search's provider".to_string()),
                 },
                 ManagementOperation {
                     name: ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP.to_string(),
@@ -478,6 +478,16 @@ pub fn build_with_launch_nonce_source(
             observability: Vec::new(),
             identity_scope: Vec::new(),
         }])
+    // Routing chooses each web search's provider among the routes declared
+    // here. HELLO declares every route in the provider table because the
+    // store, and so which providers are connected, cannot be read yet: its
+    // location arrives in HELLO_ACK. Right after readiness plexus narrows the
+    // declaration to providers with a live connection. An extra route is
+    // harmless meanwhile, since every select offers only routes plexus can
+    // serve and routing never chooses outside that offer.
+    .role_declarations(plexus_core::web_search::routing::role_declarations(
+        &plexus_core::web_search::routing::table_routes(),
+    ))
     .build()
 }
 

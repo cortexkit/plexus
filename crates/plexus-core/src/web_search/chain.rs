@@ -1,10 +1,13 @@
-//! Ordered provider admission. Compatibility searches never enter this walk.
+//! Provider admission for every web search: plexus finds the providers that
+//! could serve, routing chooses one, and plexus dispatches it.
 
 use super::*;
 use crate::storage::web_search_store::{
     WebSearchAllowanceAdmission, WebSearchAllowanceReservation,
 };
+use super::routing::{self, RouteRef, RoutingPeer};
 use crate::transport::TransmissionState;
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::time::Duration;
 
 mod outcome;
@@ -191,11 +194,13 @@ impl WebSearchService {
         )
     }
 
-    /// Serve a chain search from the cache, or return `None` for a miss.
+    /// Serve a search from the cache, or return `None` for a miss. Cache hits
+    /// need no routing: they are tried before any select, send no select and
+    /// no report, and still answer while routing is unreachable.
     ///
     /// The entry was served by one provider, and a hit is used only if this
-    /// caller could be served by that same provider now: it is still in the
-    /// order, the caller resolves exactly one connection for it, that
+    /// caller could be served by that same provider now: it is still a search
+    /// candidate, the caller resolves exactly one connection for it, that
     /// connection passes policy, action status and health and the cached-read
     /// policy, and for a per-connection instance the instance matches.
     /// Cooldown and allowance limit vendor contact, not cached reads, so they
@@ -209,7 +214,7 @@ impl WebSearchService {
     fn chain_cache_hit(
         &self,
         store: &PlexusStore,
-        order: &[String],
+        candidates: &[String],
         key: &CacheKey,
         caller_key: &CallerKey,
         is_flow: bool,
@@ -218,7 +223,7 @@ impl WebSearchService {
     ) -> Option<WebSearchResponse> {
         let entry = self.cache.get_served(key, now_ms)?;
         let name = entry.served.provider.as_str();
-        if !order.iter().any(|ordered| ordered == name) {
+        if !candidates.iter().any(|candidate| candidate == name) {
             return None;
         }
         let provider = providers::provider_named(name)?;
@@ -272,10 +277,63 @@ impl WebSearchService {
         })
     }
 
+    /// The routing facts for this search: a cached `role.describe` answer, or
+    /// a fresh one. `Err` carries an operator-log reason.
+    fn routing_facts(
+        &self,
+        peer: &dyn RoutingPeer,
+        timeout: Duration,
+    ) -> Result<routing::DescribeFacts, String> {
+        let now = (self.clock)();
+        let mut cached = self
+            .routing_describe
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((until, facts)) = *cached {
+            if until > now {
+                return Ok(facts);
+            }
+        }
+        let facts =
+            routing::read_describe_reply(peer.call("role.describe", json!({}), None, timeout))?;
+        *cached = Some((now.saturating_add(routing::DESCRIBE_TTL_MS), facts));
+        Ok(facts)
+    }
+
+    fn forget_routing_facts(&self) {
+        *self
+            .routing_describe
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    /// Tell routing how one attempt that reached (or may have reached) the
+    /// vendor ended. A failed report is logged and changes nothing here.
+    fn report_attempt(
+        &self,
+        peer: &dyn RoutingPeer,
+        decision_id: &str,
+        status: routing::AttemptStatus,
+        facts: routing::DescribeFacts,
+        scope: Option<&crate::scope::CallScope>,
+    ) {
+        if let Err(error) = peer.call(
+            "route.report",
+            routing::report_params(decision_id, status, facts.attempt_outcomes),
+            scope,
+            routing::ROUTING_REPORT_TIMEOUT,
+        ) {
+            eprintln!(warn web_search: "web_search route.report for {decision_id} failed: {error:?}");
+        }
+    }
+
+    /// A search that needs a vendor: work out which providers could serve it
+    /// now, let routing choose among them, dispatch the chosen provider and
+    /// report how the attempt ended. A failed attempt is followed by a new
+    /// select without that route, at most once per eligible route.
     pub(super) fn run_chain<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         &self,
         engine: &GovernanceEngine<C, T>,
-        order: &[String],
         query: &WebSearchQuery,
         now_ms: i64,
         audit: &mut CallAudit,
@@ -296,6 +354,7 @@ impl WebSearchService {
                 agent_id: audit.search.agent_id.clone(),
             }
         };
+        let candidates = self.search_candidates(engine.store());
         let cache_key = CacheKey::new(cache::CHAIN_CACHE_BACKEND, query);
         if let Some(hit) = audit
             .federated
@@ -303,7 +362,7 @@ impl WebSearchService {
             .then(|| {
                 self.chain_cache_hit(
                     engine.store(),
-                    order,
+                    &candidates,
                     &cache_key,
                     &caller_key,
                     is_flow,
@@ -317,7 +376,6 @@ impl WebSearchService {
         }
         let mut deadline_at_ms =
             (self.clock)().saturating_add(WEB_SEARCH_CHAIN_DEADLINE.as_millis() as i64);
-        let mut deadline_stopped = false;
         // Owned, so the walk can update the audit record while it holds the name.
         let caller = &audit.search.caller.clone();
         let mut all_not_granted = true;
@@ -327,10 +385,15 @@ impl WebSearchService {
         let mut federated_gate_refusal = None;
         let mut federated_consent_refusal = None;
 
-        for (position, name) in order.iter().enumerate() {
+        // Which providers could serve this search right now, using only checks
+        // that contact nobody: capability, the caller's grant, connection and
+        // action status, policy, this process's cooldowns and any monthly
+        // allowance the operator set. Only these are offered to routing.
+        let mut eligible = Vec::<Candidate>::new();
+        for (position, name) in candidates.iter().enumerate() {
             let Some(provider) = providers::provider_named(name) else {
-                // Persisted orders are validated on write. Fail closed if an
-                // imported or damaged store contains an unrecognized name.
+                // Every candidate is a provider-table name; fail closed if a
+                // damaged store ever supplies another.
                 all_not_granted = false;
                 audit.chain.as_mut().unwrap().skipped.push(ProviderSkip {
                     provider: name.clone(),
@@ -383,7 +446,7 @@ impl WebSearchService {
             if position == 0 && not_granted {
                 first_grant_refusal = resolved.as_ref().err().cloned();
             }
-            let attempt = (|| {
+            let checked = (|| {
                 let prepared = match prepared {
                     Some(Ok(prepared)) => Some(prepared),
                     Some(Err(_)) => return Err(SkipReason::Capability),
@@ -409,17 +472,162 @@ impl WebSearchService {
                 } else {
                     prepared
                 };
-                // Once admission closes, retain capability and grant reasons but
-                // never enter another policy or per-call approval check.
-                if deadline_stopped {
-                    return Err(SkipReason::Deadline);
-                }
-                if audit.federated.is_none() {
-                    self.chain_checks(engine.store(), &connection, &action, now_ms)?;
-                }
-                let (Some(backend), Some(prepared)) = (backend, prepared) else {
+                self.chain_checks(engine.store(), &connection, &action, now_ms)?;
+                let (Some(backend), Some(prepared), Some(route)) =
+                    (backend, prepared, self.route_of(name))
+                else {
                     return Err(SkipReason::Unavailable);
                 };
+                // A provider with an operator-set allowance is offered only
+                // while that allowance has searches left this month, so
+                // routing can never pick a provider plexus would have to pay
+                // past its allowance. The count itself is still reserved at
+                // dispatch, in the same transaction as before.
+                let allowance_left = match engine.store().web_search_allowance(name) {
+                    Ok(None) => false,
+                    Ok(Some(allowance)) => {
+                        let used = engine
+                            .store()
+                            .web_search_allowance_used(
+                                name,
+                                &connection.principal,
+                                (self.clock)(),
+                            )
+                            .map_err(|error| {
+                                eprintln!(error web_search: "web_search allowance unreadable for {name}: {error}");
+                                SkipReason::Unavailable
+                            })?;
+                        if used >= allowance {
+                            return Err(SkipReason::Allowance);
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        eprintln!(error web_search: "web_search allowance unreadable for {name}: {error}");
+                        return Err(SkipReason::Unavailable);
+                    }
+                };
+                Ok(Candidate {
+                    name: name.clone(),
+                    provider,
+                    identity,
+                    route,
+                    backend: Arc::clone(backend),
+                    connection,
+                    action,
+                    prepared,
+                    allowance_left,
+                })
+            })();
+            match checked {
+                Ok(candidate) => eligible.push(candidate),
+                Err(reason) => audit.chain.as_mut().unwrap().skipped.push(ProviderSkip {
+                    provider: name.clone(),
+                    reason,
+                }),
+            }
+        }
+        if all_not_granted {
+            return Err(first_grant_refusal.unwrap_or(WebSearchRefusal::NotGranted));
+        }
+
+        let peer = if eligible.is_empty() {
+            None
+        } else {
+            match self.routing_peer(&candidates) {
+                Some(peer) => Some(peer),
+                None => {
+                    eprintln!(warn web_search: "web_search has no routing provider to choose a search provider");
+                    return Err(WebSearchRefusal::RoutingUnavailable);
+                }
+            }
+        };
+        // Selects and reports go out under the search's own scope stamp.
+        let route_scope = audit.search.scope.clone();
+        let selects = eligible.len();
+        for _ in 0..selects {
+            let Some(peer) = peer.as_deref() else { break };
+            if eligible.is_empty() {
+                break;
+            }
+            // Check before selecting, so neither a select nor an attempt starts
+            // without the time a whole attempt may take.
+            let remaining = deadline_at_ms.saturating_sub((self.clock)());
+            if remaining < WEB_SEARCH_ATTEMPT_BOUND.as_millis() as i64 {
+                for candidate in eligible.drain(..) {
+                    audit.chain.as_mut().unwrap().skipped.push(ProviderSkip {
+                        provider: candidate.name,
+                        reason: SkipReason::Deadline,
+                    });
+                }
+                break;
+            }
+            let timeout = routing::ROUTING_CALL_TIMEOUT
+                .min(Duration::from_millis(u64::try_from(remaining).unwrap_or(0)));
+            let facts = match self.routing_facts(peer, timeout) {
+                Ok(facts) => facts,
+                Err(why) => {
+                    eprintln!(warn web_search: "web_search routing cannot serve search: {why}");
+                    return Err(WebSearchRefusal::RoutingUnavailable);
+                }
+            };
+            let routes = eligible
+                .iter()
+                .map(|candidate| candidate.route.clone())
+                .collect::<Vec<_>>();
+            let allowance_left = eligible
+                .iter()
+                .filter(|candidate| candidate.allowance_left)
+                .map(|candidate| candidate.route.clone())
+                .collect::<Vec<_>>();
+            let selection = match routing::read_select_reply(peer.call(
+                "route.select",
+                routing::select_params(&routes, &allowance_left),
+                route_scope.as_ref(),
+                timeout,
+            )) {
+                routing::SelectOutcome::Selected(selection) => selection,
+                routing::SelectOutcome::NoRoute { reason } => {
+                    let added_at = self.routes_added_at_ms.load(AtomicOrdering::Acquire);
+                    if (self.clock)().saturating_sub(added_at) < routing::DECLARATION_GRACE_MS {
+                        // Routing may not have read a route plexus just
+                        // declared, so this is not yet "nothing can serve".
+                        eprintln!(warn web_search: "web_search routing found no route ({reason:?}) inside the redeclaration window");
+                        return Err(WebSearchRefusal::RoutingUnavailable);
+                    }
+                    eprintln!(info web_search: "web_search routing found no adequate route: {reason:?}");
+                    break;
+                }
+                routing::SelectOutcome::Unavailable(why) => {
+                    self.forget_routing_facts();
+                    eprintln!(warn web_search: "web_search route.select failed: {why}");
+                    return Err(WebSearchRefusal::RoutingUnavailable);
+                }
+            };
+            let Some(index) = eligible
+                .iter()
+                .position(|candidate| candidate.route == selection.route)
+            else {
+                eprintln!(warn web_search:
+                    "web_search routing answered route {}/{}, which plexus did not offer",
+                    selection.route.provider, selection.route.model
+                );
+                return Err(WebSearchRefusal::RoutingUnavailable);
+            };
+            let Candidate {
+                name,
+                provider,
+                identity,
+                route: _,
+                backend,
+                connection,
+                action,
+                prepared,
+                allowance_left: _,
+            } = eligible.remove(index);
+            let name = &name;
+            let mut report = None::<routing::AttemptStatus>;
+            let attempt = (|| {
                 let federated_request = audit.federated.as_ref().map(|authority| {
                     let mut request = authority.bind(
                         AuthorizationRequest::new(
@@ -509,8 +717,6 @@ impl WebSearchService {
                             ));
                         }
                     }
-                }
-                if audit.federated.is_some() {
                     self.chain_checks(engine.store(), &connection, &action, now_ms)?;
                 }
 
@@ -520,7 +726,6 @@ impl WebSearchService {
                 if deadline_at_ms.saturating_sub((self.clock)())
                     < WEB_SEARCH_ATTEMPT_BOUND.as_millis() as i64
                 {
-                    deadline_stopped = true;
                     return Err(SkipReason::Deadline);
                 }
                 // Check 7. The store decides eligibility and reserves the count
@@ -596,18 +801,26 @@ impl WebSearchService {
                 let dispatched = engine.revalidate_and_dispatch(&reservation);
                 // Revalidation refusals also report NotSent. Sent and
                 // OutcomeUnknown may have reached the vendor, so they keep it.
-                if dispatched.transmission != TransmissionState::NotSent {
+                let reached_vendor = dispatched.transmission != TransmissionState::NotSent;
+                if reached_vendor {
                     hold.keep();
                 } else {
                     drop(hold);
                 }
                 audit.search.transmission = Some(dispatched.transmission);
-                let results = match outcome::classify(
+                let classified = outcome::classify(
                     backend.as_ref(),
                     &dispatched,
                     usize::from(prepared.query.max_results),
                     crate::storage::now_ms(),
-                ) {
+                );
+                // Routing hears only about attempts that reached, or may have
+                // reached, the vendor; one stopped before sending says nothing
+                // about the route.
+                if reached_vendor {
+                    report = Some(outcome::attempt_status(&classified, &dispatched));
+                }
+                let results = match classified {
                     outcome::Classified::Serve(results) => results,
                     outcome::Classified::Reject => {
                         eprintln!(warn web_search: "web_search request rejected by {}", name);
@@ -637,6 +850,15 @@ impl WebSearchService {
                     instance_digest(name, backend.as_ref(), &connection),
                 ))
             })();
+            if let Some(status) = report {
+                self.report_attempt(
+                    peer,
+                    &selection.decision_id,
+                    status,
+                    facts,
+                    route_scope.as_ref(),
+                );
+            }
             if let Some(refusal) = federated_consent_refusal.take() {
                 return Err(refusal);
             }
@@ -670,9 +892,6 @@ impl WebSearchService {
             }
         }
         let skipped = &audit.chain.as_ref().unwrap().skipped;
-        if all_not_granted {
-            return Err(first_grant_refusal.unwrap_or(WebSearchRefusal::NotGranted));
-        }
         if !skipped.is_empty()
             && skipped
                 .iter()
@@ -689,6 +908,71 @@ impl WebSearchService {
             providers: skipped.clone(),
         })
     }
+
+    /// The providers a search may use, in the order their skips are recorded:
+    /// every provider-table name with a routing route and a registered backend.
+    fn search_candidates(&self, store: &PlexusStore) -> Vec<String> {
+        // Test services may take their candidates from a stored order.
+        #[cfg(any(test, feature = "test-support"))]
+        if self.stored_order_router {
+            if let Ok(Some(order)) = store.web_search_order() {
+                return order;
+            }
+        }
+        let _ = store;
+        providers::SEARCH_ROUTES
+            .iter()
+            .map(|(name, _, _)| *name)
+            .filter(|name| self.chain_backends.contains_key(name))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The routing route that names provider `name`.
+    fn route_of(&self, name: &str) -> Option<RouteRef> {
+        if let Some((provider, model)) = providers::search_route(name) {
+            return Some(RouteRef::new(provider, model));
+        }
+        // Test services may search providers that have no catalog row yet.
+        #[cfg(any(test, feature = "test-support"))]
+        if self.stored_order_router && providers::provider_named(name).is_some() {
+            return Some(RouteRef::new(name, "search"));
+        }
+        None
+    }
+
+    /// The route plexus asks to choose a provider over.
+    fn routing_peer(&self, candidates: &[String]) -> Option<Arc<dyn RoutingPeer>> {
+        if let Some(router) = &self.router {
+            return Some(Arc::clone(router));
+        }
+        // Test services without a router rank their candidates in order.
+        #[cfg(any(test, feature = "test-support"))]
+        if self.stored_order_router {
+            return Some(Arc::new(routing::fake::FakeRouter::ranked(
+                candidates
+                    .iter()
+                    .filter_map(|name| self.route_of(name))
+                    .collect(),
+            )));
+        }
+        let _ = candidates;
+        None
+    }
+}
+
+/// One provider that passed every check that contacts nobody, with what its
+/// attempt will need if routing chooses it.
+struct Candidate {
+    name: String,
+    provider: &'static providers::ProviderName,
+    identity: BackendIdentity,
+    route: RouteRef,
+    backend: Arc<dyn WebSearchBackend>,
+    connection: ConnectionRecord,
+    action: CatalogAction,
+    prepared: capability::PreparedSearch,
+    allowance_left: bool,
 }
 
 #[cfg(test)]

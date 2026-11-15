@@ -1,31 +1,29 @@
 //! `web_search`: a vendor-neutral, governed web search tool.
 //!
 //! The module's handler only unpacks the wire frame; everything that decides
-//! whether a search runs lives here. With no stored provider order, the checks
-//! retain the Exa compatibility contract:
+//! whether a search runs lives here. Every search:
 //!
-//! 1. validate the closed argument schema;
-//! 2. attribute the agent only from the daemon scope stamp;
-//! 3. refuse source-code lookups without spending rate-limit budget;
-//! 4. find the one granted backend connection and require a usable action;
-//! 5. charge the caller's and the backend's rate limits;
-//! 6. serve from the cache only under current policy, or authorize and
-//!    dispatch through governance. The stamped agent never adds an agent
-//!    grant requirement to a search.
+//! 1. validates the closed argument schema;
+//! 2. attributes the agent only from the daemon scope stamp;
+//! 3. refuses source-code lookups without spending rate-limit budget;
+//! 4. tries the cache, whose entry records the provider that served it and is
+//!    used only if this caller could be served by that provider now (no
+//!    routing is involved, so a hit answers even while routing is down);
+//! 5. on a miss, prepares each provider's capability, resolves the caller's
+//!    grant and checks policy, action status, connection health, cooldown and
+//!    any monthly allowance, and offers the providers that pass to routing
+//!    (see `routing`), which chooses one;
+//! 6. for the chosen provider, checks the deadline, reserves any monthly
+//!    allowance, charges rate limits and authorizes a governed dispatch, then
+//!    reports the outcome to routing. A failed attempt asks routing again
+//!    without that provider.
 //!
-//! With a stored order, `chain` first tries the cache, whose entry records the
-//! provider that served it and is used only if this caller could be served by
-//! that provider now. On a miss it prepares each provider's capability, resolves
-//! the caller's grant, then checks policy, action status, connection health and
-//! cooldown and the chain deadline, then reserves any monthly allowance, before
-//! charging rate limits and authorizing a governed dispatch.
-//! Argument validation and source-code refusal run once before either path.
-//!
+//! The stamped agent never adds an agent grant requirement to a search.
 //! Every call writes one `web_search` audit row. A dispatched call also leaves
 //! the engine's own authorization and dispatch rows.
 //! Federated calls use direct-owned candidates and search-subject consent instead
 //! of module grants. They run all dispatch gates before row, rate and cache checks;
-//! the compatibility and cache-first ordering above remains local-only.
+//! the cache-first ordering above remains local-only.
 
 pub mod backend;
 pub mod cache;
@@ -37,6 +35,7 @@ pub(crate) mod federated;
 pub mod limiter;
 pub mod providers;
 pub mod query;
+pub mod routing;
 
 use std::sync::Arc;
 
@@ -81,6 +80,11 @@ pub enum WebSearchRefusal {
     BackendUnavailable {
         backend: String,
     },
+    /// Routing, which chooses the provider for every search that needs a
+    /// vendor, cannot be reached or cannot serve search right now. Sent as
+    /// `backend_unavailable` with backend `routing`, which every reader
+    /// already retries.
+    RoutingUnavailable,
     /// The provider rejected this request; trying another account cannot repair it.
     RequestRejected {
         backend: String,
@@ -116,7 +120,7 @@ impl WebSearchRefusal {
             Self::Grant(refusal) => refusal.code(),
             Self::PolicyBlocked => "policy_blocked",
             Self::RateLimited { .. } => "rate_limited",
-            Self::BackendUnavailable { .. } => "backend_unavailable",
+            Self::BackendUnavailable { .. } | Self::RoutingUnavailable => "backend_unavailable",
             Self::RequestRejected { .. } => "web_search_request_rejected",
             Self::BackendQuarantined { .. } => "backend_quarantined",
             Self::BackendAmbiguous => "backend_ambiguous",
@@ -137,6 +141,9 @@ impl WebSearchRefusal {
             }
             Self::RateLimited { .. } => "web search rate limit reached; retry after retry_after_ms",
             Self::BackendUnavailable { .. } => crate::transport::OPERATOR_DIAGNOSTIC_MESSAGE,
+            Self::RoutingUnavailable => {
+                "web search provider selection is unavailable right now; retry shortly"
+            }
             Self::RequestRejected { .. } => "the web search provider rejected the request",
             Self::WebSearchUnavailable { .. } => crate::transport::OPERATOR_DIAGNOSTIC_MESSAGE,
             Self::BackendQuarantined { .. } => {
@@ -168,6 +175,7 @@ impl WebSearchRefusal {
             Self::BackendUnavailable { backend }
             | Self::BackendQuarantined { backend }
             | Self::RequestRejected { backend } => error["backend"] = json!(backend),
+            Self::RoutingUnavailable => error["backend"] = json!("routing"),
             Self::InvalidQuery { field } => error["field"] = json!(field),
             Self::WebSearchUnavailable { providers } => error["detail"] = json!(providers),
             Self::Governance(_)
@@ -236,6 +244,19 @@ pub struct WebSearchService {
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     chain_backends: std::collections::BTreeMap<&'static str, Arc<dyn WebSearchBackend>>,
     chain_cooldowns: std::sync::Mutex<std::collections::HashMap<String, i64>>,
+    /// The route to the routing provider that chooses each search's provider.
+    /// Without one, a search that needs a vendor is refused as retryable.
+    router: Option<Arc<dyn routing::RoutingPeer>>,
+    /// The last `role.describe` answer that served search, with the clock
+    /// time until which it is trusted.
+    routing_describe: std::sync::Mutex<Option<(i64, routing::DescribeFacts)>>,
+    /// When plexus last added a route to its routing declaration, on this
+    /// service's clock; see [`routing::DECLARATION_GRACE_MS`].
+    routes_added_at_ms: std::sync::atomic::AtomicI64,
+    /// Test services choose providers in stored order through an in-process
+    /// router, so tests written for ordered searches keep their meaning.
+    #[cfg(any(test, feature = "test-support"))]
+    stored_order_router: bool,
 }
 
 /// What the one `web_search` audit row of a call records: the fields every
@@ -260,6 +281,11 @@ impl WebSearchService {
         Self {
             chain_backends: [(backend.name(), backend.clone())].into(),
             chain_cooldowns: Default::default(),
+            router: None,
+            routing_describe: Default::default(),
+            routes_added_at_ms: std::sync::atomic::AtomicI64::new(i64::MIN),
+            #[cfg(any(test, feature = "test-support"))]
+            stored_order_router: false,
             backend,
             limiter: RateLimiter::default(),
             cache: ResultCache::default(),
@@ -267,15 +293,39 @@ impl WebSearchService {
         }
     }
 
-    /// Exa over REST. A stored provider order can dispatch to Exa only; use
+    /// A service whose only search backend is Exa over REST; use
     /// [`Self::production`] for every implemented provider.
     pub fn exa() -> Self {
         Self::new(Arc::new(ExaRestBackend))
     }
 
-    /// The service the module runs: Exa over REST for searches with no stored
-    /// order, plus every backend [`registered_backend`] implements for ordered
-    /// searches. With no order stored it behaves exactly as [`Self::exa`].
+    /// Choose every search's provider through `router`.
+    pub fn with_router(mut self, router: Arc<dyn routing::RoutingPeer>) -> Self {
+        self.router = Some(router);
+        self
+    }
+
+    /// A test service that, with no router set, chooses providers in the
+    /// stored `web_search_order` (or provider-table order without one)
+    /// through an in-process router, and may search providers that have no
+    /// routing catalog row yet. Production services never do either.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_stored_order_router_for_test(mut self) -> Self {
+        self.stored_order_router = true;
+        self
+    }
+
+    /// Record that plexus just added a route to its routing declaration. For
+    /// [`routing::DECLARATION_GRACE_MS`] after this, a `no_route` answer is
+    /// treated as routing not having read the new declaration yet.
+    pub fn note_routes_added(&self) {
+        self.routes_added_at_ms
+            .store((self.clock)(), std::sync::atomic::Ordering::Release);
+    }
+
+    /// The service the module runs: every backend [`registered_backend`]
+    /// implements. It searches only once a router is set with
+    /// [`Self::with_router`].
     pub fn production() -> Self {
         providers::PROVIDER_NAMES
             .iter()
@@ -287,7 +337,7 @@ impl WebSearchService {
         self.backend.name()
     }
 
-    /// The names of the providers a stored order can dispatch to, in name order.
+    /// The names of the providers a search can dispatch to, in name order.
     pub fn chain_backend_names(&self) -> Vec<&'static str> {
         self.chain_backends.keys().copied().collect()
     }
@@ -298,7 +348,7 @@ impl WebSearchService {
         (self.clock)()
     }
 
-    /// How long ordered searches still skip `connection_id` after a failure
+    /// How long searches still skip `connection_id` after a failure
     /// cooled it down, in milliseconds; 0 when it is not cooling. Cooldowns
     /// live only in this process, so a restarted module reports 0.
     pub fn cooldown_remaining_ms(&self, connection_id: &str) -> u64 {
@@ -431,9 +481,6 @@ impl WebSearchService {
         now_ms: i64,
         audit: &mut CallAudit,
     ) -> Result<WebSearchResponse, WebSearchRefusal> {
-        let store = engine.store();
-        let backend = self.backend.as_ref();
-        let caller = audit.search.caller.clone();
         let query = WebSearchQuery::parse(arguments)?;
         audit.search.record_query(&query.query);
         audit.search.record_filters(query.audited_filters());
@@ -450,185 +497,7 @@ impl WebSearchService {
             return Err(WebSearchRefusal::CodeLookup);
         }
 
-        let order = store.web_search_order().map_err(|error| {
-            eprintln!(error web_search: "web_search order unreadable: {error}");
-            self.unavailable()
-        })?;
-        if let Some(order) = order {
-            return self.run_chain(engine, &order, &query, now_ms, audit);
-        }
-
-        let limits = match store.web_search_limits(backend.name()) {
-            Ok(limits) => limits.unwrap_or_else(default_limits),
-            Err(error) => {
-                eprintln!(error web_search: "web_search limits unreadable for {}: {error}", backend.name());
-                return Err(self.unavailable());
-            }
-        };
-        let caller_key = if let Some(authority) = &audit.federated {
-            authority
-                .caller_key()
-                .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?
-        } else {
-            CallerKey {
-                principal: caller.clone(),
-                agent_id: agent.attributed.clone(),
-            }
-        };
-
-        let is_flow = audit
-            .search
-            .scope
-            .as_ref()
-            .is_some_and(|scope| scope.flow_id.is_some());
-        let (connection, action) = if audit.federated.is_some() {
-            facade::resolve_federated_connection(
-                store,
-                now_ms,
-                facade::SearchTarget {
-                    tool: facade::SearchTool::Web,
-                    app_key: backend.app_key(),
-                    action: backend.action(),
-                },
-            )
-            .map_err(|denial| self.refusal_from(denial))?
-        } else {
-            self.backing_connection(store, &caller, now_ms, is_flow)?
-        };
-        audit.search.resolved(&connection, &action);
-        let federated_request = audit.federated.as_ref().map(|authority| {
-            let mut request = authority.bind(
-                AuthorizationRequest::new(
-                    &caller,
-                    &connection.connection_id,
-                    backend.action(),
-                    backend.vendor_args(&query, now_ms),
-                )
-                .without_per_call_approval(),
-            );
-            if let Some(scope) = &audit.search.scope {
-                request = request.with_scope_attribution_only(scope.clone());
-            }
-            if let Some(origin) = &audit.search.relay_origin {
-                request = request.with_relay_origin(origin.clone());
-            }
-            request
-        });
-        if let Some(request) = &federated_request {
-            engine
-                .preflight_federated_search(request.clone())
-                .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?;
-        }
-        facade::standing_checks(store, facade::SearchTool::Web, &connection, &action, now_ms)
-            .map_err(|denial| self.refusal_from(denial))?;
-        if let (Some(request), Some(authority)) = (&federated_request, audit.federated.as_mut()) {
-            engine
-                .apply_federated_search(request, authority)
-                .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?;
-            if authority.answer.is_some() {
-                engine
-                    .preflight_federated_search(request.clone())
-                    .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?;
-                facade::standing_checks(
-                    store,
-                    facade::SearchTool::Web,
-                    &connection,
-                    &action,
-                    now_ms,
-                )
-                .map_err(|denial| self.refusal_from(denial))?;
-            }
-        }
-        // Charge the rate buckets only once the caller is known to hold a grant
-        // on a usable connection. The backend bucket is shared by every caller,
-        // so charging earlier would let an ungranted caller drain it for all.
-        self.limiter
-            .try_acquire(backend.name(), &caller_key, limits, now_ms)
-            .map_err(|retry_after_ms| WebSearchRefusal::RateLimited { retry_after_ms })?;
-
-        if let Some(authority) = audit.federated.as_mut() {
-            engine
-                .consume_federated_search(authority)
-                .map_err(|denial| WebSearchRefusal::Governance(Box::new(denial)))?;
-        }
-
-        // Search is authorized by the carrier's module grant. The stamped agent
-        // supplies attribution and a rate-limit key, not a second grant layer.
-        // Only after that grant, the standing checks (policy allows the search
-        // outright) and the rate limit pass may the shared cache answer. The
-        // cache saves the vendor call; it does not bypass policy.
-        let key = CacheKey::new(backend.name(), &query);
-        if let Some(results) = self.cache.get(&key, now_ms) {
-            return Ok(WebSearchResponse {
-                results,
-                backend: backend.name().to_string(),
-                cached: true,
-            });
-        }
-
-        let mut request = AuthorizationRequest::new(
-            &caller,
-            &connection.connection_id,
-            backend.action(),
-            backend.vendor_args(&query, now_ms),
-        )
-        .without_per_call_approval();
-        if let Some(agent_id) = &agent.attributed {
-            request = request.with_attributed_agent(agent_id);
-        }
-        // The scope goes on the audit rows only: it never makes the engine
-        // require the agent's own grant for a search.
-        if let Some(scope) = &audit.search.scope {
-            request = request.with_scope_attribution_only(scope.clone());
-        }
-        if let Some(relay_origin) = &audit.search.relay_origin {
-            request = request.with_relay_origin(relay_origin.clone());
-        }
-        let reservation = engine
-            .authorize(if let Some(authority) = &audit.federated {
-                authority.bind(federated_request.unwrap_or(request))
-            } else {
-                request
-            })
-            .map_err(|denial| {
-                if audit.federated.is_some() {
-                    return WebSearchRefusal::Governance(Box::new(denial));
-                }
-                eprintln!(warn web_search:
-                    "web_search authorization refused on {} ({})",
-                    connection.connection_id,
-                    denial.reason_code()
-                );
-                self.refusal_for_denial(&caller, &denial)
-            })?;
-        audit.search.request_id = Some(reservation.request_id.clone());
-        let dispatched = engine.revalidate_and_dispatch(&reservation);
-        let fetched_at_ms = crate::storage::now_ms();
-        audit.search.transmission = Some(dispatched.transmission);
-        let body = facade::vendor_body(
-            facade::SearchTool::Web,
-            backend.name(),
-            &connection.connection_id,
-            &dispatched,
-        )
-        .map_err(|denial| self.refusal_from(denial))?;
-        let results = backend
-            .map_reply(&body, usize::from(query.max_results), fetched_at_ms)
-            .map(backend::sanitize_results)
-            .map_err(|error| {
-                eprintln!(warn web_search:
-                    "web_search backend {} reply unreadable: {}",
-                    backend.name(),
-                    error.0
-                );
-                self.unavailable()
-            })?;
-        self.cache.put(key, results.clone(), now_ms);
-        Ok(WebSearchResponse {
-            results,
-            backend: backend.name().to_string(),
-            cached: false,
-        })
+        self.run_chain(engine, &query, now_ms, audit)
     }
 
     /// The one connection that backs a search for `caller`, with its search
