@@ -1,5 +1,12 @@
 # Web-search provider chain: rollout and catalog compatibility
 
+> **Superseded for provider choice.** Routing (the `routing/v1` provider in the
+> daemon catalog) now chooses each web search's provider; see
+> `web-search-routing.md`. The stored order and `set-web-search-order` are
+> retired (the command is refused as `web_search_order_retired`), and there is
+> no compatibility mode. Connections, grants, allowances and limits below still
+> apply.
+
 ## Status and safety boundary
 
 This is an operator runbook, not a deployment record. **All live steps are

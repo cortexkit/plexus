@@ -232,22 +232,8 @@ impl WebSearchService {
             app_key: provider.app_key,
             action: provider.action,
         };
-        let target = crate::grant_refusal::GrantTarget::new(
-            crate::grant_refusal::Layer::Module,
-            &audit.search.caller,
-            "web_search",
-            Some(provider.name),
-            provider.action,
-        );
         let (connection, action) = self
-            .backing_connection_for(
-                store,
-                &audit.search.caller,
-                now_ms,
-                is_flow,
-                identity,
-                target,
-            )
+            .resolve_provider(store, &audit.search.caller, now_ms, is_flow, false, provider)
             .ok()?;
         // Policy must allow the search outright: a cache hit never parks an
         // approval request, so ask_first refuses here like block does.
@@ -410,34 +396,14 @@ impl WebSearchService {
             // A query that cannot fit a provider still contributes its grant
             // result when deciding whether every provider lacks permission.
             let prepared = backend.map(|backend| backend.prepare(query, now_ms));
-            let target = crate::grant_refusal::GrantTarget::new(
-                crate::grant_refusal::Layer::Module,
+            let resolved = self.resolve_provider(
+                engine.store(),
                 caller,
-                "web_search",
-                Some(provider.name),
-                provider.action,
+                now_ms,
+                is_flow,
+                audit.federated.is_some(),
+                provider,
             );
-            let resolved = if audit.federated.is_some() {
-                facade::resolve_federated_connection(
-                    engine.store(),
-                    now_ms,
-                    facade::SearchTarget {
-                        tool: facade::SearchTool::Web,
-                        app_key: identity.app_key,
-                        action: identity.action,
-                    },
-                )
-                .map_err(|denial| self.refusal_from(denial))
-            } else {
-                self.backing_connection_for(
-                    engine.store(),
-                    caller,
-                    now_ms,
-                    is_flow,
-                    identity,
-                    target,
-                )
-            };
             let not_granted = matches!(
                 &resolved,
                 Err(WebSearchRefusal::NotGranted | WebSearchRefusal::Grant(_))
@@ -534,7 +500,10 @@ impl WebSearchService {
             }
         }
         if all_not_granted {
-            return Err(first_grant_refusal.unwrap_or(WebSearchRefusal::NotGranted));
+            return Err(Self::module_grant_refusal(
+                first_grant_refusal.unwrap_or(WebSearchRefusal::NotGranted),
+                caller,
+            ));
         }
 
         let peer = if eligible.is_empty() {
@@ -915,9 +884,70 @@ impl WebSearchService {
         })
     }
 
+    /// The one connection that would serve `provider` for `caller`, with its
+    /// search action: the caller's granted connection for a local search, the
+    /// directly owned one for a federated search. Searches, cache hits and
+    /// [`WebSearchService::would_ask`] all resolve through here.
+    pub(super) fn resolve_provider(
+        &self,
+        store: &PlexusStore,
+        caller: &str,
+        now_ms: i64,
+        is_flow: bool,
+        federated: bool,
+        provider: &providers::ProviderName,
+    ) -> Result<(ConnectionRecord, CatalogAction), WebSearchRefusal> {
+        let identity = BackendIdentity {
+            app_key: provider.app_key,
+            action: provider.action,
+        };
+        if federated {
+            return facade::resolve_federated_connection(
+                store,
+                now_ms,
+                facade::SearchTarget {
+                    tool: facade::SearchTool::Web,
+                    app_key: identity.app_key,
+                    action: identity.action,
+                },
+            )
+            .map_err(|denial| self.refusal_from(denial));
+        }
+        self.backing_connection_for(
+            store,
+            caller,
+            now_ms,
+            is_flow,
+            identity,
+            crate::grant_refusal::GrantTarget::new(
+                crate::grant_refusal::Layer::Module,
+                caller,
+                "web_search",
+                Some(provider.name),
+                provider.action,
+            ),
+        )
+    }
+
+    /// A refusal for a caller no provider is granted to. Web search is
+    /// granted per module, not per provider, so a grant refusal names the
+    /// module-wide web search target; `grants.would_ask` reads that same
+    /// target back.
+    pub(super) fn module_grant_refusal(refusal: WebSearchRefusal, caller: &str) -> WebSearchRefusal {
+        match refusal {
+            WebSearchRefusal::Grant(refusal) => {
+                WebSearchRefusal::Grant(crate::grant_refusal::GrantRefusal::new(
+                    Self::grant_target(caller),
+                    refusal.detail().cause,
+                ))
+            }
+            other => other,
+        }
+    }
+
     /// The providers a search may use, in the order their skips are recorded:
     /// every provider-table name with a routing route and a registered backend.
-    fn search_candidates(&self, store: &PlexusStore) -> Vec<String> {
+    pub(super) fn search_candidates(&self, store: &PlexusStore) -> Vec<String> {
         // Test services may take their candidates from a stored order.
         #[cfg(any(test, feature = "test-support"))]
         if self.stored_order_router {

@@ -26,62 +26,40 @@ fn changes(fixture: &Fixture, action: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Routing now chooses each search's provider, so the order command is
+/// refused by name whatever it is asked, and the stored order row is kept
+/// untouched for a rollback to read.
 #[tokio::test]
-async fn order_previews_applies_reorders_and_clears_with_exact_audit_values() {
-    let fixture = Fixture::new("order-ceremony");
-    let dry = command(&fixture, ORDER, json!({"providers": ["exa", "tavily"]})).await;
-    assert_eq!(
-        dry["result"],
-        json!({"previous": null, "new": ["exa", "tavily"], "outcome": "would_set", "dry_run": true})
-    );
-    assert_eq!(fixture.store.web_search_order().unwrap(), None);
-    assert!(changes(&fixture, "set_web_search_order").is_empty());
-
-    for (providers, previous) in [
-        (json!(["exa", "tavily"]), Value::Null),
-        (json!(["tavily", "exa"]), json!(["exa", "tavily"])),
+async fn order_command_is_retired_by_name_and_leaves_the_stored_order() {
+    let fixture = Fixture::new("order-retired");
+    fixture
+        .store
+        .set_web_search_order(&["tavily".into(), "exa".into()])
+        .unwrap();
+    for params in [
+        json!({"providers": ["exa", "tavily"]}),
+        json!({"providers": ["exa"], "dry_run": false}),
+        json!({"clear": true, "dry_run": false}),
+        json!({"providers": "malformed"}),
+        json!({}),
     ] {
-        let reply = command(
-            &fixture,
-            ORDER,
-            json!({"providers": providers, "dry_run": false}),
-        )
-        .await;
-        assert_eq!(reply["result"]["previous"], previous, "{reply}");
-        assert_eq!(reply["result"]["new"], providers);
-        assert_eq!(reply["result"]["outcome"], "set");
+        let reply = command(&fixture, ORDER, params.clone()).await;
+        assert_eq!(code(&reply), "web_search_order_retired", "{params}: {reply}");
+        let message = reply["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("set_web_search_order") && message.contains("routing"),
+            "{reply}"
+        );
     }
-    let dry_clear = command(&fixture, ORDER, json!({"clear": true})).await;
-    assert_eq!(dry_clear["result"]["outcome"], "would_clear");
-    assert_eq!(dry_clear["result"]["previous"], json!(["tavily", "exa"]));
-    assert_eq!(dry_clear["result"]["new"], Value::Null);
     assert_eq!(
         fixture.store.web_search_order().unwrap(),
         Some(vec!["tavily".into(), "exa".into()])
     );
-    assert_eq!(changes(&fixture, "set_web_search_order").len(), 2);
-    let cleared = command(&fixture, ORDER, json!({"clear": true, "dry_run": false})).await;
-    assert_eq!(cleared["result"]["outcome"], "cleared");
-    assert_eq!(fixture.store.web_search_order().unwrap(), None);
-    assert_eq!(
-        changes(&fixture, "set_web_search_order"),
-        vec![
-            json!({"previous": null, "new": ["exa", "tavily"]}),
-            json!({"previous": ["exa", "tavily"], "new": ["tavily", "exa"]}),
-            json!({"previous": ["tavily", "exa"], "new": null}),
-        ]
-    );
-    let search = fixture
-        .search(
-            Principal::Direct,
-            json!({"query": "compatibility after clear"}),
-        )
-        .await;
-    assert_eq!(search["result"]["backend"], "exa", "{search}");
+    assert!(changes(&fixture, "set_web_search_order").is_empty());
 }
 
 #[tokio::test]
-async fn allowance_previews_applies_and_clears_only_the_named_provider_without_an_order() {
+async fn allowance_previews_applies_and_clears_only_the_named_provider() {
     let fixture = Fixture::new("allowance-ceremony");
     let dry = command(&fixture, ALLOWANCE, json!({"provider": "exa", "count": 1})).await;
     assert_eq!(
@@ -104,21 +82,26 @@ async fn allowance_previews_applies_and_clears_only_the_named_provider_without_a
             Some(count)
         );
         if count == 1 {
-            for query in [
-                "stored allowance without order",
-                "another compatibility search",
-            ] {
-                let reply = fixture
-                    .search(Principal::Direct, json!({"query": query}))
-                    .await;
-                assert_eq!(reply["result"]["backend"], "exa", "{reply}");
-            }
+            // Every search is metered against a set allowance: the first
+            // spends it, and the next finds Exa's allowance used up.
+            let served = fixture
+                .search(Principal::Direct, json!({"query": "stored allowance"}))
+                .await;
+            assert_eq!(served["result"]["backend"], "exa", "{served}");
+            let refused = fixture
+                .search(Principal::Direct, json!({"query": "another search"}))
+                .await;
+            assert_eq!(
+                refused["error"]["detail"],
+                json!([{"provider": "exa", "reason": "allowance"}]),
+                "{refused}"
+            );
             assert_eq!(
                 fixture
                     .store
                     .web_search_allowance_used("exa", "direct", NOW_MS)
                     .unwrap(),
-                0
+                1
             );
         }
     }
@@ -171,7 +154,6 @@ async fn admin_commands_accept_every_table_name_and_reject_unknown_names() {
     let limit = manifest::ADMIN_SET_WEB_SEARCH_LIMIT_OP;
     for provider in PROVIDER_NAMES {
         for (op, params) in [
-            (ORDER, json!({"providers": [provider.name]})),
             (ALLOWANCE, json!({"provider": provider.name, "count": 1})),
             (
                 limit,
@@ -199,7 +181,6 @@ async fn admin_commands_accept_every_table_name_and_reject_unknown_names() {
     for unknown in ["", "EXA", "exa_rest", "tavily_rest", "bing", "public"] {
         for dry_run in [true, false] {
             for (op, params) in [
-                (ORDER, json!({"providers": [unknown], "dry_run": dry_run})),
                 (
                     ALLOWANCE,
                     json!({"provider": unknown, "count": 1, "dry_run": dry_run}),
@@ -219,36 +200,10 @@ async fn admin_commands_accept_every_table_name_and_reject_unknown_names() {
         }
     }
     assert_eq!(
-        changes(&fixture, "set_web_search_order").len(),
-        PROVIDER_NAMES.len()
-    );
-    assert_eq!(
         changes(&fixture, "set_web_search_allowance").len(),
         PROVIDER_NAMES.len()
     );
     assert_eq!(fixture.store.web_search_limits("bing").unwrap(), None);
-}
-
-#[tokio::test]
-async fn order_rejects_empty_duplicate_and_malformed_lists_without_writes() {
-    let fixture = Fixture::new("order-invalid");
-    for dry_run in [true, false] {
-        for params in [
-            json!({}),
-            json!({"providers": []}),
-            json!({"providers": ["exa", "tavily", "exa"]}),
-            json!({"providers": "exa"}),
-            json!({"providers": ["exa", 1]}),
-            json!({"providers": null}),
-        ] {
-            let mut params = params;
-            params["dry_run"] = json!(dry_run);
-            let reply = command(&fixture, ORDER, params).await;
-            assert_eq!(code(&reply), "invalid_request", "{reply}");
-        }
-    }
-    assert_eq!(fixture.store.web_search_order().unwrap(), None);
-    assert!(changes(&fixture, "set_web_search_order").is_empty());
 }
 
 #[tokio::test]
@@ -290,8 +245,6 @@ async fn clear_rejects_names_counts_missing_provider_and_nonboolean_intent() {
     let fixture = Fixture::new("clear-invalid");
     for dry_run in [true, false] {
         for (op, mut params) in [
-            (ORDER, json!({"clear": true, "providers": ["exa"]})),
-            (ORDER, json!({"clear": "true", "providers": ["exa"]})),
             (ALLOWANCE, json!({"clear": true})),
             (
                 ALLOWANCE,
@@ -311,17 +264,13 @@ async fn clear_rejects_names_counts_missing_provider_and_nonboolean_intent() {
             assert_eq!(code(&reply), "invalid_request", "{op}: {reply}");
         }
     }
-    assert!(changes(&fixture, "set_web_search_order").is_empty());
     assert!(changes(&fixture, "set_web_search_allowance").is_empty());
 }
 
 #[tokio::test]
-async fn order_and_allowance_require_direct_management_and_explicit_apply() {
+async fn allowance_requires_direct_management_and_explicit_apply() {
     let fixture = Fixture::new("admin-authority");
-    for (op, mut params) in [
-        (ORDER, json!({"providers": ["exa"]})),
-        (ALLOWANCE, json!({"provider": "exa", "count": 2})),
-    ] {
+    for (op, mut params) in [(ALLOWANCE, json!({"provider": "exa", "count": 2}))] {
         let preview = command(&fixture, op, params.clone()).await;
         assert_eq!(preview["result"]["dry_run"], true, "{preview}");
         for dry_run in [Value::Null, json!("false")] {
@@ -348,14 +297,12 @@ async fn order_and_allowance_require_direct_management_and_explicit_apply() {
             .await;
         assert!(tool.get("error").is_some(), "{tool}");
     }
-    assert_eq!(fixture.store.web_search_order().unwrap(), None);
     assert_eq!(fixture.store.web_search_allowance("exa").unwrap(), None);
-    assert!(changes(&fixture, "set_web_search_order").is_empty());
     assert!(changes(&fixture, "set_web_search_allowance").is_empty());
 }
 
 /// code_search charges the grep_app row of the limits table, so the limit op
-/// must accept it; the order and allowance ops stay web-search only. An
+/// must accept it; the allowance op stays web-search only. An
 /// applied change reports and audits the row the write itself replaced.
 #[tokio::test]
 async fn code_search_limits_are_settable_and_report_the_replaced_row() {
@@ -423,10 +370,7 @@ async fn code_search_limits_are_settable_and_report_the_replaced_row() {
         summary,
         "backend=grep_app per_caller_per_minute 3 -> 4, per_backend_per_minute 7 -> 9 (previous values were set)"
     );
-    for (op, params) in [
-        (ORDER, json!({"providers": [backend]})),
-        (ALLOWANCE, json!({"provider": backend, "count": 1})),
-    ] {
+    for (op, params) in [(ALLOWANCE, json!({"provider": backend, "count": 1}))] {
         let reply = command(&fixture, op, params).await;
         assert_eq!(code(&reply), "unknown_backend", "{op}: {reply}");
     }

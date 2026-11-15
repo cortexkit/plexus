@@ -302,6 +302,7 @@ async fn failing_searxng_search(label: &str) -> (Value, Value) {
     let mut fixture = Fixture::new(label);
     fixture.web_search = Arc::new(
         WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW_MS))
+            .with_stored_order_router_for_test()
             .with_chain_backend(Arc::new(SearxngBackend)),
     );
     add_owned_connection(
@@ -388,98 +389,28 @@ fn diagnostics_never_print_an_instance_address_or_vendor_text() {
     assert_no_instance_or_vendor_text(&stderr, "diagnostics");
 }
 
-/// Every `fetched_at` value in `value`, which records when the reply arrived
-/// and so differs between otherwise identical runs.
-fn fetched_at_values(value: &Value, found: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            for (key, value) in map {
-                match (key.as_str(), value) {
-                    ("fetched_at", Value::String(at)) => found.push(at.clone()),
-                    _ => fetched_at_values(value, found),
-                }
-            }
-        }
-        Value::Array(items) => items.iter().for_each(|item| fetched_at_values(item, found)),
-        _ => {}
-    }
-}
-
-/// `reply` serialized with every receipt time replaced by one placeholder.
-fn without_receipt_times(reply: &Value) -> String {
-    let mut found = Vec::new();
-    fetched_at_values(reply, &mut found);
-    let mut rendered = reply.to_string();
-    for at in found {
-        rendered = rendered.replace(&at, "<fetched_at>");
-    }
-    rendered
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn with_no_order_the_production_service_searches_as_exa_does() {
-    let mut transcripts = Vec::new();
-    for (label, service) in [
-        ("compat-exa", WebSearchService::exa()),
-        ("compat-production", WebSearchService::production()),
-    ] {
-        let mut fixture = Fixture::new(label);
-        fixture.web_search = Arc::new(service);
-        let mut replies = Vec::new();
-        for _ in 0..2 {
-            // The second search is answered from the cache.
-            replies.push(
-                fixture
-                    .search(Principal::Direct, json!({"query": "rust async runtimes"}))
-                    .await,
-            );
-        }
-        let stranger = Principal::Reserved {
-            module_id: "prefrontal-core".to_string(),
-        };
-        replies.push(fixture.search(stranger, json!({"query": "anything"})).await);
-        fixture.transport.set_response(MockResponse::VendorError {
-            code: "http_503".to_string(),
-            message: "outage".to_string(),
-        });
-        replies.push(
-            fixture
-                .search(Principal::Direct, json!({"query": "outage"}))
-                .await,
-        );
-        fixture.add_connection("conn-exa-second");
-        fixture.grant("grant-second", "conn-exa-second", &Principal::Direct);
-        replies.push(
-            fixture
-                .search(Principal::Direct, json!({"query": "ambiguous"}))
-                .await,
-        );
-        let requests = fixture
-            .transport
-            .requests()
-            .into_iter()
-            .map(|request| (request.connection_id, request.action, request.args))
-            .collect::<Vec<_>>();
-        transcripts.push((
-            replies
-                .iter()
-                .map(without_receipt_times)
-                .collect::<Vec<_>>(),
-            requests,
-            format!("{:?}", fixture.audit()),
-        ));
-    }
+async fn an_exa_only_install_searches_through_routing() {
+    use plexus_core::web_search::routing::{fake::FakeRouter, RouteRef};
+    let router = Arc::new(FakeRouter::ranked(vec![RouteRef::new("exa", "search")]));
+    let mut fixture = Fixture::new("exa-only-routed");
+    fixture.web_search = Arc::new(WebSearchService::production().with_router(router.clone()));
+    let served = fixture
+        .search(Principal::Direct, json!({"query": "rust async runtimes"}))
+        .await;
+    assert_eq!(served["result"]["backend"], "exa", "{served}");
+    assert_eq!(served["result"]["cached"], false, "{served}");
+    // Exa is the only provider with a connection, so it is all plexus offers.
     assert_eq!(
-        transcripts[0]
-            .0
-            .iter()
-            .map(|reply| reply.contains("\"error\""))
-            .collect::<Vec<_>>(),
-        [false, false, true, true, true],
-        "the transcript covers a served search, a cache hit and three refusals"
+        router.params("route.select"),
+        [json!({
+            "allowance_left": [],
+            "consumer": "plexus.web_search",
+            "eligible_routes": [{"model": "search", "provider": "exa"}],
+            "kind": "search",
+            "privacy": "remote_allowed",
+            "requirements": {"iq": 75},
+        })]
     );
-    assert_eq!(
-        transcripts[0], transcripts[1],
-        "with no order the production service must search exactly as WebSearchService::exa()"
-    );
+    assert_eq!(fixture.transport.requests().len(), 1);
 }

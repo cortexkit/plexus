@@ -510,29 +510,6 @@ impl WebSearchService {
         self.run_chain(engine, &query, now_ms, audit)
     }
 
-    /// The one connection that backs a search for `caller`, with its search
-    /// action. Candidates are resolved through `connection_for_invoke`, the
-    /// same owner resolution the governance engine applies, so the connection
-    /// checked here is the one `authorize` will load. A candidate counts only
-    /// if the caller's module grant on it admits the action.
-    fn backing_connection(
-        &self,
-        store: &PlexusStore,
-        caller: &str,
-        now_ms: i64,
-        is_flow: bool,
-    ) -> Result<(ConnectionRecord, CatalogAction), WebSearchRefusal> {
-        let backend = self.backend.as_ref();
-        self.backing_connection_for(
-            store,
-            caller,
-            now_ms,
-            is_flow,
-            chain::BackendIdentity::of(backend),
-            Self::grant_target(caller),
-        )
-    }
-
     fn backing_connection_for(
         &self,
         store: &PlexusStore,
@@ -567,16 +544,40 @@ impl WebSearchService {
         )
     }
 
-    /// Read the same candidate and policy as a search, without rate charging,
-    /// cache mutation, reservations, approval requests or vendor contact.
+    /// Whether a search by `caller`, made from a flow, could pass: read the
+    /// same candidates, connections and policy as a search, without rate
+    /// charging, cache mutation, reservations, approval requests or vendor
+    /// contact. Any provider whose connection the policy allows answers
+    /// `allow`; otherwise the first provider that resolves a connection gives
+    /// its policy's effect. With none resolving, the first provider's refusal
+    /// is returned, a grant refusal naming the module-wide web search target.
     pub fn would_ask(
         &self,
         store: &PlexusStore,
         caller: &str,
     ) -> Result<&'static str, WebSearchRefusal> {
         let now = (self.clock)();
-        let (connection, action) = self.backing_connection(store, caller, now, true)?;
-        self.policy_effect(store, &connection, &action, now)
+        let mut first = None;
+        for name in self.search_candidates(store) {
+            let Some(provider) = providers::provider_named(&name) else {
+                continue;
+            };
+            let effect = self
+                .resolve_provider(store, caller, now, true, false, provider)
+                .and_then(|(connection, action)| {
+                    self.policy_effect(store, &connection, &action, now)
+                });
+            if effect == Ok("allow") {
+                return effect;
+            }
+            match (&first, &effect) {
+                (None, _) | (Some(Err(_)), Ok(_)) => first = Some(effect),
+                _ => {}
+            }
+        }
+        first
+            .unwrap_or(Err(WebSearchRefusal::NotGranted))
+            .map_err(|refusal| Self::module_grant_refusal(refusal, caller))
     }
 
     fn policy_effect(

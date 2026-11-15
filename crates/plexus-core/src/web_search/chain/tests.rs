@@ -209,7 +209,7 @@ fn capability_precedes_grant_but_every_check_two_counts() {
 }
 
 #[test]
-fn all_ungranted_flow_uses_first_provider_and_its_own_cause() {
+fn all_ungranted_flow_names_the_module_capability_with_the_first_providers_cause() {
     let (engine, transport, path) =
         super::super::tests::granted_exa_engine_with_path("chain-first-grant-cause");
     let sql = rusqlite::Connection::open(&*path).unwrap();
@@ -243,7 +243,8 @@ fn all_ungranted_flow_uses_first_provider_and_its_own_cause() {
     };
     let target = crate::grant_refusal::GrantTarget::decode(&refusal.detail().grant).unwrap();
     assert_eq!(target.tool, "web_search");
-    assert_eq!(target.connection.as_deref(), Some("exa"));
+    // Web search is granted per module, so the refusal names no provider.
+    assert_eq!(target.connection.as_deref(), None);
     assert_eq!(target.grantee, "direct");
     assert_eq!(refusal.detail().cause, crate::grant_refusal::Cause::Expired);
     assert!(transport.requests().is_empty());

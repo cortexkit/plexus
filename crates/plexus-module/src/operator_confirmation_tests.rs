@@ -658,20 +658,12 @@ async fn ungated_ceremonies_never_request_confirmation() {
             json!({"backend":"exa","per_caller_per_minute":100,"per_backend_per_minute":200,"dry_run":false}),
         ),
         (
-            manifest::ADMIN_SET_WEB_SEARCH_ORDER_OP,
-            json!({"providers":["exa","brave"],"dry_run":false}),
-        ),
-        (
             manifest::ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP,
             json!({"provider":"exa","count":100,"dry_run":false}),
         ),
         (
             manifest::ADMIN_SET_WEB_SEARCH_ALLOWANCE_OP,
             json!({"provider":"exa","clear":true,"dry_run":false}),
-        ),
-        (
-            manifest::ADMIN_SET_WEB_SEARCH_ORDER_OP,
-            json!({"clear":true,"dry_run":false}),
         ),
         (relay::STATUS_OP, json!({})),
         (

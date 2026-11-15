@@ -167,15 +167,21 @@ impl Fixture {
     }
 
     fn add_connection(&self, connection_id: &str) {
+        self.add_provider_connection(connection_id, "exa_rest");
+    }
+
+    /// An active connection of `app_key` owned by `direct`, with an active
+    /// search action.
+    fn add_provider_connection(&self, connection_id: &str, app_key: &str) {
         self.store
             .insert_connection(
                 "direct",
                 connection_id,
-                "exa_rest",
+                app_key,
                 "pending",
                 &json!({"required": [], "optional": [], "write_enabling": []}),
             )
-            .expect("insert exa connection");
+            .expect("insert search connection");
         let ticket = self
             .store
             .create_binding_ticket("direct", connection_id, HANDLE)
@@ -705,7 +711,11 @@ async fn a_block_policy_refuses_a_cached_query() {
     let second = fixture
         .search(Principal::Direct, json!({"query": "policy me"}))
         .await;
-    assert_eq!(code(&second), "policy_blocked", "{second}");
+    assert_eq!(code(&second), "web_search_unavailable", "{second}");
+    assert_eq!(
+        second["error"]["detail"],
+        json!([{"provider": "exa", "reason": "policy"}])
+    );
     assert_eq!(fixture.requests(), 1, "the refused hit sent nothing");
 }
 
@@ -729,7 +739,11 @@ async fn an_ask_first_policy_refuses_a_cached_query_without_parking_a_request() 
     let second = fixture
         .search(Principal::Direct, json!({"query": "ask me"}))
         .await;
-    assert_eq!(code(&second), "policy_ask_first", "{second}");
+    assert_eq!(code(&second), "web_search_unavailable", "{second}");
+    assert_eq!(
+        second["error"]["detail"],
+        json!([{"provider": "exa", "reason": "policy"}])
+    );
     assert_eq!(fixture.requests(), 1);
     assert!(fixture
         .store
@@ -860,7 +874,7 @@ async fn a_different_max_results_is_a_cache_miss() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_quarantined_search_action_refuses_by_name() {
+async fn a_quarantined_search_action_is_skipped_as_quarantined() {
     let fixture = Fixture::new("quarantined");
     fixture
         .store
@@ -869,8 +883,11 @@ async fn a_quarantined_search_action_refuses_by_name() {
     let reply = fixture
         .search(Principal::Direct, json!({"query": "quarantine"}))
         .await;
-    assert_eq!(code(&reply), "backend_quarantined", "{reply}");
-    assert_eq!(reply["error"]["backend"], "exa");
+    assert_eq!(code(&reply), "web_search_unavailable", "{reply}");
+    assert_eq!(
+        reply["error"]["detail"],
+        json!([{"provider": "exa", "reason": "quarantined"}])
+    );
     assert_eq!(fixture.requests(), 0);
 }
 
@@ -884,8 +901,11 @@ async fn a_vendor_5xx_is_unavailable_and_keeps_vendor_text_out_of_the_reply() {
     let reply = fixture
         .search(Principal::Direct, json!({"query": "outage"}))
         .await;
-    assert_eq!(code(&reply), "backend_unavailable", "{reply}");
-    assert_eq!(reply["error"]["backend"], "exa");
+    assert_eq!(code(&reply), "web_search_unavailable", "{reply}");
+    assert_eq!(
+        reply["error"]["detail"],
+        json!([{"provider": "exa", "reason": "unavailable"}])
+    );
     let rendered = reply.to_string();
     assert!(rendered.contains("ck module logs plexus"), "{rendered}");
     for vendor_text in ["ghs_SECRET123", "?token=abc", "http_503"] {
@@ -905,7 +925,11 @@ async fn two_eligible_connections_are_ambiguous() {
     let reply = fixture
         .search(Principal::Direct, json!({"query": "which one"}))
         .await;
-    assert_eq!(code(&reply), "backend_ambiguous", "{reply}");
+    assert_eq!(code(&reply), "web_search_unavailable", "{reply}");
+    assert_eq!(
+        reply["error"]["detail"],
+        json!([{"provider": "exa", "reason": "ambiguous"}])
+    );
     assert_eq!(fixture.requests(), 0);
     let single = fixture.search(aft(), json!({"query": "which one"})).await;
     assert!(
@@ -1685,13 +1709,11 @@ async fn flow_web_search_ask_first_refuses_cache_hits_and_misses_without_parking
         }
         flow_policy(&fixture, "ask_first");
         let reply = fixture.send_scoped(basal(), flow_stamp(), body).await;
-        assert_eq!(code(&reply), "policy_ask_first", "{reply}");
-        assert!(
-            reply["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("cannot be approved per call"),
-            "{reply}"
+        // The ask_first policy skips the only provider, so nothing can serve.
+        assert_eq!(code(&reply), "web_search_unavailable", "{reply}");
+        assert_eq!(
+            reply["error"]["detail"],
+            json!([{"provider": "exa", "reason": "policy"}])
         );
         assert!(fixture
             .store
@@ -2860,6 +2882,49 @@ async fn typed_flow_web_search_capability_ref_restores_without_agent_grant() {
     );
 }
 
+/// A flow's web search grant refusal names web search as one capability of
+/// the module, whichever providers are connected, so the same reference
+/// restores once any search connection is granted, here with no Exa
+/// connection at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_flow_web_search_ref_restores_without_an_exa_connection() {
+    let mut fixture = Fixture::new("typed-search-tavily");
+    fixture.web_search =
+        Arc::new(WebSearchService::production().with_stored_order_router_for_test());
+    fixture.sql(&format!(
+        "UPDATE connections SET status='revoked' WHERE connection_id='{CONNECTION}'"
+    ));
+    fixture.add_provider_connection("conn-tavily", "tavily_rest");
+    let denied = fixture
+        .send_scoped(basal(), owned_flow_stamp(), carrier_calls()[0].clone())
+        .await;
+    assert_eq!(code(&denied), "module_grant_absent", "{denied}");
+    check_detail(
+        &denied["error"]["detail"],
+        "module",
+        Value::Null,
+        "search",
+        "missing",
+    );
+    let item = json!({"grant":denied["error"]["detail"]["grant"]});
+    let before = fixture.flow_query(json!([item])).await;
+    assert_eq!(
+        before["result"]["items"][0]["detail"],
+        denied["error"]["detail"],
+        "{before}"
+    );
+    fixture.grant("tavily-basal", "conn-tavily", &basal());
+    let after = fixture.flow_query(json!([item])).await;
+    assert_eq!(after["result"]["items"][0]["verdict"], "yes", "{after}");
+    // The granted search now reaches Tavily's connection.
+    fixture
+        .send_scoped(basal(), owned_flow_stamp(), carrier_calls()[0].clone())
+        .await;
+    let requests = fixture.transport.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].connection_id, "conn-tavily");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn typed_would_ask_policy_projection_matches_flow_without_reservations() {
     let fixture = Fixture::new("typed-policy");
@@ -3272,12 +3337,14 @@ async fn ask_first_search_refuses_without_card_or_vendor_contact() {
         "search must never file an approval row"
     );
     assert_eq!(f.requests(), sent);
-    assert_eq!(code(&cold), "policy_ask_first", "{cold}");
-    let text = cold["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("cannot be approved per call"), "{cold}");
-    assert!(text.contains("allow or block"), "{cold}");
+    // The ask_first policy skips the only provider, so nothing can serve.
+    assert_eq!(code(&cold), "web_search_unavailable", "{cold}");
+    assert_eq!(
+        cold["error"]["detail"],
+        json!([{"provider": "exa", "reason": "policy"}])
+    );
     let cached = f.send_scoped(aft(), scope, cached_query).await;
-    assert_eq!(code(&cached), "policy_ask_first", "{cached}");
+    assert_eq!(code(&cached), "web_search_unavailable", "{cached}");
     assert_eq!(spy.calls(), 0);
     assert_eq!(f.requests(), sent);
 }
