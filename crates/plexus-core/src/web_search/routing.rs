@@ -60,7 +60,8 @@ const REQUIRED_GROUPS: [&str; 4] = [
 ];
 const ATTEMPT_OUTCOMES_GROUP: &str = "report_attempt_outcomes";
 
-/// One routing route: a Fusiform search row.
+/// One search route, identified by provider and model: the key of the search
+/// row in the model catalog module (Fusiform) that routing prices it from.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RouteRef {
     pub provider: String,

@@ -16,8 +16,9 @@ Plexus's manifest carries two role declarations, built in one place
 
 - `routing/v1`: consumer `plexus.web_search`, `kind: "search"`, selectors
   `["plexus"]`.
-- `search-provider/v1`: `{routes: [{provider, model}]}`, one Fusiform search
-  row per provider. The provider-to-row table is `SEARCH_ROUTES` in
+- `search-provider/v1`: `{routes: [{provider, model}]}`, one route per
+  provider, each naming the search row in Fusiform (the fleet's model
+  catalog module, where routing reads prices and grades). The provider-to-row table is `SEARCH_ROUTES` in
   `web_search/providers.rs` (exa `exa/search`, tavily `tavily/search`, brave
   `brave/web-search`, deepseek `deepseek/search`, kimi
   `kimi-for-coding/search`, ollama `ollama-cloud/web-search`). A provider
