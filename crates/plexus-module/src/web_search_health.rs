@@ -8,7 +8,7 @@
 //!
 //! The store facts (which connections exist, allowance limits and this
 //! month's counts) are read on the scheduler task with the rest of the store
-//! snapshot, because the control-lane health answer does no store IO.
+//! snapshot, because answering a health check does no store IO.
 //! Cooldowns, the declaration and the routing look live in the running
 //! module's memory, so the report reads them when it is built and a restarted
 //! module starts them afresh.
