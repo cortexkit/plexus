@@ -150,7 +150,9 @@ pub struct Selection {
 pub enum SelectOutcome {
     Selected(Selection),
     /// Routing found no adequate route among the eligible ones (`no_route`).
-    NoRoute { reason: Option<String> },
+    NoRoute {
+        reason: Option<String>,
+    },
     /// Routing could not be reached or refused for another reason. The text
     /// is for the operator log only.
     Unavailable(String),
@@ -208,7 +210,9 @@ pub struct DescribeFacts {
 
 /// Check a `role.describe` reply: the router must be a version 1 routing
 /// provider that serves search selection over an eligible route subset.
-pub fn read_describe_reply(reply: Result<Value, RoutingCallError>) -> Result<DescribeFacts, String> {
+pub fn read_describe_reply(
+    reply: Result<Value, RoutingCallError>,
+) -> Result<DescribeFacts, String> {
     let body = match reply {
         Ok(body) => body,
         Err(RoutingCallError::Refused { code, .. }) => {
@@ -429,10 +433,9 @@ impl CatalogRoutingPeer {
         if let Some(module) = cached.as_ref() {
             return Ok(module.clone());
         }
-        let modules = self
-            .route
-            .catalog_modules(timeout)
-            .map_err(|_| RoutingCallError::Unreachable("the daemon catalog could not be read".into()))?;
+        let modules = self.route.catalog_modules(timeout).map_err(|_| {
+            RoutingCallError::Unreachable("the daemon catalog could not be read".into())
+        })?;
         let module = routing_provider(&modules).map_err(|failure| {
             RoutingCallError::Unreachable(match failure {
                 DiscoveryFailure::None => "the daemon catalog lists no routing provider".into(),
@@ -457,7 +460,10 @@ impl RoutingPeer for CatalogRoutingPeer {
         let started = std::time::Instant::now();
         let module = self.provider(timeout)?;
         let remaining = timeout.saturating_sub(started.elapsed());
-        match self.route.call_module(&module, method, params, scope, remaining) {
+        match self
+            .route
+            .call_module(&module, method, params, scope, remaining)
+        {
             Ok(reply) => Ok(reply),
             Err(crate::github_identity::ModuleCallError::Refused { code, .. })
                 if matches!(code.as_str(), "unknown_module" | "target_unavailable") =>
@@ -479,9 +485,11 @@ impl RoutingPeer for CatalogRoutingPeer {
                 message,
                 detail: detail.unwrap_or_else(|| json!({})),
             }),
-            Err(crate::github_identity::ModuleCallError::NoAnswer) => Err(
-                RoutingCallError::Unreachable(format!("routing provider {module} did not answer {method}")),
-            ),
+            Err(crate::github_identity::ModuleCallError::NoAnswer) => {
+                Err(RoutingCallError::Unreachable(format!(
+                    "routing provider {module} did not answer {method}"
+                )))
+            }
         }
     }
 }

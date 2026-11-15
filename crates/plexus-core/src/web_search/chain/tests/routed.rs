@@ -47,8 +47,14 @@ fn allowance_left_offers_routes_with_searches_left_and_drops_spent_ones() {
     transport.set_response(hit());
     let router = router(&["tavily", "exa"]);
     let service = routed_service(&router, &Arc::new(AtomicI64::new(NOW)));
-    engine.store().set_web_search_allowance("tavily", 2).unwrap();
-    assert_eq!(search(&service, &engine, "direct").unwrap().backend, "tavily");
+    engine
+        .store()
+        .set_web_search_allowance("tavily", 2)
+        .unwrap();
+    assert_eq!(
+        search(&service, &engine, "direct").unwrap().backend,
+        "tavily"
+    );
     assert_eq!(
         router.params("route.select")[0],
         json!({
@@ -62,16 +68,29 @@ fn allowance_left_offers_routes_with_searches_left_and_drops_spent_ones() {
     );
     // The second search spends Tavily's allowance; from then on it is not
     // offered at all, so routing cannot choose it.
-    service.search(&engine, "direct", json!({"query":"second report"}).as_object().unwrap()).unwrap();
+    service
+        .search(
+            &engine,
+            "direct",
+            json!({"query":"second report"}).as_object().unwrap(),
+        )
+        .unwrap();
     let third = service
-        .search(&engine, "direct", json!({"query":"third report"}).as_object().unwrap())
+        .search(
+            &engine,
+            "direct",
+            json!({"query":"third report"}).as_object().unwrap(),
+        )
         .unwrap();
     assert_eq!(third.backend, "exa");
     let selects = router.params("route.select");
     assert_eq!(selects[2]["eligible_routes"], json!([route("exa")]));
     assert_eq!(selects[2]["allowance_left"], json!([]));
     assert_eq!(
-        engine.store().web_search_allowance_used("tavily", "direct", NOW).unwrap(),
+        engine
+            .store()
+            .web_search_allowance_used("tavily", "direct", NOW)
+            .unwrap(),
         2
     );
 }
@@ -122,12 +141,17 @@ fn zero_results_are_served_and_end_the_walk() {
     let router = router(&["exa", "tavily"]);
     let service = routed_service(&router, &Arc::new(AtomicI64::new(NOW)));
     let response = search(&service, &engine, "direct").unwrap();
-    assert_eq!((response.backend.as_str(), response.results.len()), ("exa", 0));
+    assert_eq!(
+        (response.backend.as_str(), response.results.len()),
+        ("exa", 0)
+    );
     assert_eq!(router.params("route.select").len(), 1);
     assert_eq!(
         router.params("route.report"),
-        [json!({"decision_id": "dec_000000000000", "outcome": "completed",
-            "attempt_outcome": {"status": "served_empty"}})]
+        [
+            json!({"decision_id": "dec_000000000000", "outcome": "completed",
+            "attempt_outcome": {"status": "served_empty"}})
+        ]
     );
     assert_eq!(transport.requests().len(), 1);
 }
@@ -143,9 +167,17 @@ fn unreachable_routing_refuses_retryably_without_vendor_contact_but_cache_answer
     let calls = router.methods().len();
     let cached = search(&service, &engine, "direct").unwrap();
     assert!(cached.cached, "a cache hit answers while routing is down");
-    assert_eq!(router.methods().len(), calls, "a cache hit sends no select or report");
+    assert_eq!(
+        router.methods().len(),
+        calls,
+        "a cache hit sends no select or report"
+    );
     let refusal = service
-        .search(&engine, "direct", json!({"query":"uncached"}).as_object().unwrap())
+        .search(
+            &engine,
+            "direct",
+            json!({"query":"uncached"}).as_object().unwrap(),
+        )
         .unwrap_err();
     assert_eq!(refusal, WebSearchRefusal::RoutingUnavailable);
     assert_eq!(
@@ -204,7 +236,10 @@ fn no_route_just_after_adding_a_route_is_routing_unavailable() {
     let now = Arc::new(AtomicI64::new(NOW));
     let service = routed_service(&router, &now);
     // Before any route was added, no_route means no provider could serve.
-    assert_eq!(search(&service, &engine, "direct"), Err(unavailable(&[("tavily", SkipReason::NotGranted)])));
+    assert_eq!(
+        search(&service, &engine, "direct"),
+        Err(unavailable(&[("tavily", SkipReason::NotGranted)]))
+    );
     service.note_routes_added();
     now.store(NOW + routing::DECLARATION_GRACE_MS - 1, Ordering::SeqCst);
     assert_eq!(
@@ -212,7 +247,10 @@ fn no_route_just_after_adding_a_route_is_routing_unavailable() {
         Err(WebSearchRefusal::RoutingUnavailable)
     );
     now.store(NOW + routing::DECLARATION_GRACE_MS, Ordering::SeqCst);
-    assert_eq!(search(&service, &engine, "direct"), Err(unavailable(&[("tavily", SkipReason::NotGranted)])));
+    assert_eq!(
+        search(&service, &engine, "direct"),
+        Err(unavailable(&[("tavily", SkipReason::NotGranted)]))
+    );
     assert!(transport.requests().is_empty());
 }
 
@@ -228,8 +266,10 @@ fn forbidden_reply_reports_unavailable_never_credential() {
     assert!(search(&service, &engine, "direct").is_err());
     assert_eq!(
         router.params("route.report"),
-        [json!({"decision_id": "dec_000000000000", "outcome": "failed",
-            "attempt_outcome": {"status": "unavailable"}})]
+        [
+            json!({"decision_id": "dec_000000000000", "outcome": "failed",
+            "attempt_outcome": {"status": "unavailable"}})
+        ]
     );
 }
 

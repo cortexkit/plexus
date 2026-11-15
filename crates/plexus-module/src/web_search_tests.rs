@@ -153,10 +153,10 @@ impl Fixture {
             store,
             transport,
             credentials,
-            web_search: Arc::new(WebSearchService::with_clock(
-                Arc::new(ExaRestBackend),
-                Arc::new(|| NOW_MS),
-            ).with_stored_order_router_for_test()),
+            web_search: Arc::new(
+                WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW_MS))
+                    .with_stored_order_router_for_test(),
+            ),
             path,
         };
         fixture.add_connection(CONNECTION);
@@ -2909,8 +2909,7 @@ async fn typed_flow_web_search_ref_restores_without_an_exa_connection() {
     let item = json!({"grant":denied["error"]["detail"]["grant"]});
     let before = fixture.flow_query(json!([item])).await;
     assert_eq!(
-        before["result"]["items"][0]["detail"],
-        denied["error"]["detail"],
+        before["result"]["items"][0]["detail"], denied["error"]["detail"],
         "{before}"
     );
     fixture.grant("tavily-basal", "conn-tavily", &basal());

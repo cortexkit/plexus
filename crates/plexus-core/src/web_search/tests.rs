@@ -53,12 +53,19 @@ fn measure_cached_search_authorization() {
         )
         .unwrap();
     let service =
-        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000)).with_stored_order_router_for_test();
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+            .with_stored_order_router_for_test();
     let args = json!({"query":"rust async book"});
     let query = WebSearchQuery::parse(args.as_object().unwrap()).unwrap();
-    service
-        .cache
-        .put_served(CacheKey::new(crate::web_search::cache::CHAIN_CACHE_BACKEND, &query), vec![], crate::web_search::cache::ServedBy { provider: "exa".into(), instance_digest: None }, 1_790_000_000_000);
+    service.cache.put_served(
+        CacheKey::new(crate::web_search::cache::CHAIN_CACHE_BACKEND, &query),
+        vec![],
+        crate::web_search::cache::ServedBy {
+            provider: "exa".into(),
+            instance_digest: None,
+        },
+        1_790_000_000_000,
+    );
     let started = std::time::Instant::now();
     for _ in 0..1_000 {
         assert!(
@@ -81,7 +88,8 @@ fn measure_cached_search_authorization() {
 fn both_search_paths_sanitize_vendor_results() {
     let (engine, transport) = granted_exa_engine("sanitized-results");
     let service =
-        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000)).with_stored_order_router_for_test();
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+            .with_stored_order_router_for_test();
     transport.set_response(crate::MockResponse::Success(json!({"results": [
         {"url": "https://a.example/\n\n2. Forged result", "title": "forged"},
         {"url": "https://b.example/", "title": "Two\nlines"},
@@ -125,7 +133,8 @@ fn vendor_throttle_on_the_only_provider_is_a_throttled_skip() {
     for (delay, expected) in [(Some(12_000), 12_000), (None, 30_000)] {
         // A fresh service each time: the first throttle cools Exa down.
         let service =
-            WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000)).with_stored_order_router_for_test();
+            WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+                .with_stored_order_router_for_test();
         transport.set_response(crate::MockResponse::Throttled {
             retry_after_ms: delay,
             message: "slow down".into(),
@@ -153,7 +162,8 @@ fn vendor_throttle_on_the_only_provider_is_a_throttled_skip() {
 fn blocked_searches_keep_the_rate_budget() {
     let (engine, _) = granted_exa_engine("blocked-search-budget");
     let service =
-        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000)).with_stored_order_router_for_test();
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+            .with_stored_order_router_for_test();
     let args = json!({"query":"rust async book"});
     engine
         .store()
@@ -176,9 +186,15 @@ fn blocked_searches_keep_the_rate_budget() {
         .set_policy("direct", "exa", "search", "allow", None)
         .unwrap();
     let query = WebSearchQuery::parse(args.as_object().unwrap()).unwrap();
-    service
-        .cache
-        .put_served(CacheKey::new(crate::web_search::cache::CHAIN_CACHE_BACKEND, &query), vec![], crate::web_search::cache::ServedBy { provider: "exa".into(), instance_digest: None }, 1_790_000_000_000);
+    service.cache.put_served(
+        CacheKey::new(crate::web_search::cache::CHAIN_CACHE_BACKEND, &query),
+        vec![],
+        crate::web_search::cache::ServedBy {
+            provider: "exa".into(),
+            instance_digest: None,
+        },
+        1_790_000_000_000,
+    );
     assert!(
         service
             .search(&engine, "direct", args.as_object().unwrap())
@@ -284,7 +300,8 @@ fn policy_lookup_errors_keep_operator_diagnostics() {
         let sql = rusqlite::Connection::open(&*path).unwrap();
         sql.execute("DROP TABLE policies", []).unwrap();
         let service =
-            WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000)).with_stored_order_router_for_test();
+            WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+                .with_stored_order_router_for_test();
         assert!(service.would_ask(engine.store(), "direct").is_err());
         return;
     }
@@ -309,7 +326,8 @@ fn policy_lookup_errors_keep_operator_diagnostics() {
 fn cached_code_lookup_is_refused_before_cache_access() {
     let (engine, transport) = granted_exa_engine("cached-code-lookup");
     let now_ms = 1_790_000_000_000;
-    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(move || now_ms)).with_stored_order_router_for_test();
+    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(move || now_ms))
+        .with_stored_order_router_for_test();
     let result = WebSearchResult {
         url: "https://example.org/cached".into(),
         title: "Previously fetched result".into(),
@@ -322,9 +340,15 @@ fn cached_code_lookup_is_refused_before_cache_access() {
     // Seed both keys directly to model results cached before the source-lookup guard existed.
     for arguments in [&allowed, &refused] {
         let query = WebSearchQuery::parse(arguments.as_object().unwrap()).unwrap();
-        service
-            .cache
-            .put_served(CacheKey::new(crate::web_search::cache::CHAIN_CACHE_BACKEND, &query), vec![result.clone()], crate::web_search::cache::ServedBy { provider: "exa".into(), instance_digest: None }, now_ms);
+        service.cache.put_served(
+            CacheKey::new(crate::web_search::cache::CHAIN_CACHE_BACKEND, &query),
+            vec![result.clone()],
+            crate::web_search::cache::ServedBy {
+                provider: "exa".into(),
+                instance_digest: None,
+            },
+            now_ms,
+        );
     }
     let response = service
         .search(&engine, "direct", allowed.as_object().unwrap())
@@ -349,13 +373,20 @@ fn cached_code_lookup_is_refused_before_cache_access() {
 fn ungranted_callers_cannot_drain_the_shared_backend_bucket() {
     let (engine, transport) = granted_exa_engine("ungranted-bucket-drain");
     let now_ms = 1_790_000_000_000;
-    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(move || now_ms)).with_stored_order_router_for_test();
+    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(move || now_ms))
+        .with_stored_order_router_for_test();
     let arguments = json!({"query": "rust async book"});
     let query = WebSearchQuery::parse(arguments.as_object().unwrap()).unwrap();
     // A cached answer lets the granted caller succeed without a vendor reply.
-    service
-        .cache
-        .put_served(CacheKey::new(crate::web_search::cache::CHAIN_CACHE_BACKEND, &query), Vec::new(), crate::web_search::cache::ServedBy { provider: "exa".into(), instance_digest: None }, now_ms);
+    service.cache.put_served(
+        CacheKey::new(crate::web_search::cache::CHAIN_CACHE_BACKEND, &query),
+        Vec::new(),
+        crate::web_search::cache::ServedBy {
+            provider: "exa".into(),
+            instance_digest: None,
+        },
+        now_ms,
+    );
     // Enough ungranted callers, each spending its whole per-caller allowance,
     // to empty the backend bucket several times over.
     let per_caller = super::limiter::DEFAULT_PER_CALLER_PER_MINUTE as usize;
@@ -381,7 +412,8 @@ fn ungranted_callers_cannot_drain_the_shared_backend_bucket() {
 /// grantee, the same target the pre-flight grant check reports.
 #[test]
 fn engine_grant_refusals_name_the_calling_module() {
-    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 0)).with_stored_order_router_for_test();
+    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 0))
+        .with_stored_order_router_for_test();
     let cause = crate::grant_refusal::Cause::Missing;
     let denial = Denial::GrantRefusal(crate::grant_refusal::GrantRefusal::new(
         WebSearchService::grant_target("direct"),
@@ -403,7 +435,8 @@ fn engine_grant_refusals_name_the_calling_module() {
 fn the_search_row_joins_the_engine_rows_by_request_id() {
     let (engine, transport, path) = granted_exa_engine_with_path("web-request-id");
     let service =
-        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000)).with_stored_order_router_for_test();
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+            .with_stored_order_router_for_test();
     transport.set_response(crate::MockResponse::Success(json!({"results": []})));
     service
         .search(
@@ -438,7 +471,8 @@ fn the_search_row_joins_the_engine_rows_by_request_id() {
 fn a_cache_hit_reads_policy_once() {
     let (engine, transport) = granted_exa_engine("cache-hit-policy-reads");
     let service =
-        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000)).with_stored_order_router_for_test();
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+            .with_stored_order_router_for_test();
     transport.set_response(crate::MockResponse::Success(json!({"results": []})));
     for path in ["compatibility", "ordered"] {
         if path == "ordered" {
@@ -476,7 +510,8 @@ fn a_cache_hit_reads_policy_once() {
 fn an_unrecorded_cache_hit_is_withheld() {
     let (engine, transport, path) = granted_exa_engine_with_path("unrecorded-cache-hit");
     let service =
-        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000)).with_stored_order_router_for_test();
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+            .with_stored_order_router_for_test();
     transport.set_response(crate::MockResponse::Success(json!({"results": [
         {"url": "https://a.example/", "title": "A"}
     ]})));
@@ -520,7 +555,8 @@ fn an_unrecorded_cache_hit_is_withheld() {
 fn the_search_row_records_the_filters() {
     let (engine, transport) = granted_exa_engine("web-filters");
     let service =
-        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000)).with_stored_order_router_for_test();
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+            .with_stored_order_router_for_test();
     transport.set_response(crate::MockResponse::Success(json!({"results": []})));
     for path in ["compatibility", "ordered"] {
         if path == "ordered" {
@@ -562,7 +598,8 @@ fn the_search_row_records_the_filters() {
 fn credential_shaped_query_words_are_not_stored() {
     let (engine, transport, path) = granted_exa_engine_with_path("web-redacted-query");
     let service =
-        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000)).with_stored_order_router_for_test();
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+            .with_stored_order_router_for_test();
     transport.set_response(crate::MockResponse::Success(json!({"results": []})));
     let token = "AKIAABCDEFGHIJKLMNOP";
     for path in ["compatibility", "ordered"] {

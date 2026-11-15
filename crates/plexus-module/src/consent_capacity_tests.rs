@@ -239,7 +239,9 @@ async fn parked_calls_do_not_starve_work(recalled: bool) {
                 ),
             },
         ));
-    runtime.web_search = Arc::new(plexus_core::web_search::WebSearchService::exa().with_stored_order_router_for_test());
+    runtime.web_search = Arc::new(
+        plexus_core::web_search::WebSearchService::exa().with_stored_order_router_for_test(),
+    );
     fixture
         .transport
         .set_response(plexus_core::MockResponse::Success(json!({"results":[]})));

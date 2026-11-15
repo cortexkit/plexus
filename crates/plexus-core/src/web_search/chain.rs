@@ -1,11 +1,11 @@
 //! Provider admission for every web search: plexus finds the providers that
 //! could serve, routing chooses one, and plexus dispatches it.
 
+use super::routing::{self, RouteRef, RoutingPeer};
 use super::*;
 use crate::storage::web_search_store::{
     WebSearchAllowanceAdmission, WebSearchAllowanceReservation,
 };
-use super::routing::{self, RouteRef, RoutingPeer};
 use crate::transport::TransmissionState;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::time::Duration;
@@ -47,15 +47,6 @@ pub struct ProviderSkip {
 pub(super) struct BackendIdentity {
     pub app_key: &'static str,
     pub action: &'static str,
-}
-
-impl BackendIdentity {
-    pub fn of(backend: &dyn WebSearchBackend) -> Self {
-        Self {
-            app_key: backend.app_key(),
-            action: backend.action(),
-        }
-    }
 }
 
 /// One provider's reserved monthly allowance count while its attempt is in
@@ -233,7 +224,14 @@ impl WebSearchService {
             action: provider.action,
         };
         let (connection, action) = self
-            .resolve_provider(store, &audit.search.caller, now_ms, is_flow, false, provider)
+            .resolve_provider(
+                store,
+                &audit.search.caller,
+                now_ms,
+                is_flow,
+                false,
+                provider,
+            )
             .ok()?;
         // Policy must allow the search outright: a cache hit never parks an
         // approval request, so ask_first refuses here like block does.
@@ -933,7 +931,10 @@ impl WebSearchService {
     /// granted per module, not per provider, so a grant refusal names the
     /// module-wide web search target; `grants.would_ask` reads that same
     /// target back.
-    pub(super) fn module_grant_refusal(refusal: WebSearchRefusal, caller: &str) -> WebSearchRefusal {
+    pub(super) fn module_grant_refusal(
+        refusal: WebSearchRefusal,
+        caller: &str,
+    ) -> WebSearchRefusal {
         match refusal {
             WebSearchRefusal::Grant(refusal) => {
                 WebSearchRefusal::Grant(crate::grant_refusal::GrantRefusal::new(

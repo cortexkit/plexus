@@ -172,10 +172,10 @@ fn fixture(label: &str, provider_reply: Value) -> Fixture {
     fixture
         .transport
         .set_response(MockResponse::Success(provider_reply));
-    fixture.web_search = Arc::new(WebSearchService::with_clock(
-        Arc::new(FixedFetchedAtExa),
-        Arc::new(|| NOW_MS),
-    ).with_stored_order_router_for_test());
+    fixture.web_search = Arc::new(
+        WebSearchService::with_clock(Arc::new(FixedFetchedAtExa), Arc::new(|| NOW_MS))
+            .with_stored_order_router_for_test(),
+    );
     fixture
 }
 

@@ -86,7 +86,8 @@ fn connect(
 }
 
 fn service() -> WebSearchService {
-    WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)).with_stored_order_router_for_test()
+    WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW))
+        .with_stored_order_router_for_test()
         .with_chain_backend(Arc::new(SearxngRestBackend))
 }
 

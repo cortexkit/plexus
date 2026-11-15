@@ -38,8 +38,10 @@ fn daemon(
                 0,
                 0,
                 request.header.corr,
-                serde_json::to_vec(&ModuleControlResponseToModule::CatalogUpdateRoleDeclarations {})
-                    .unwrap(),
+                serde_json::to_vec(
+                    &ModuleControlResponseToModule::CatalogUpdateRoleDeclarations {},
+                )
+                .unwrap(),
             )
             .unwrap();
             assert!(pending.complete(reply));
@@ -54,8 +56,11 @@ fn declaration_follows_live_connections_and_marks_added_routes() {
     let (writer, outbound) = mpsc::channel::<Frame>(4);
     let pending = Arc::new(PendingControlReplies::default());
     let responder = daemon(outbound, Arc::clone(&pending));
-    let declarations =
-        SearchDeclarations::new(writer, subc_protocol::PROTOCOL_VERSION, Arc::clone(&pending));
+    let declarations = SearchDeclarations::new(
+        writer,
+        subc_protocol::PROTOCOL_VERSION,
+        Arc::clone(&pending),
+    );
     let now = Arc::new(AtomicI64::new(NOW));
     let clock = Arc::clone(&now);
     let search = WebSearchService::with_clock(
@@ -118,5 +123,7 @@ fn an_error_reply_is_a_failed_update() {
         .unwrap(),
     )
     .unwrap();
-    assert!(update_reply(&reply).unwrap_err().contains("invalid_request"));
+    assert!(update_reply(&reply)
+        .unwrap_err()
+        .contains("invalid_request"));
 }

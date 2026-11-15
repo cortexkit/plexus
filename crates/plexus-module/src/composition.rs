@@ -229,7 +229,9 @@ impl ModuleRuntime {
             github_handle_credentials: None,
             github_control_reader: None,
             endpoint_override: None,
-            web_search: Arc::new(WebSearchService::production().with_stored_order_router_for_test()),
+            web_search: Arc::new(
+                WebSearchService::production().with_stored_order_router_for_test(),
+            ),
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),
             search_declarations: None,
         }
@@ -276,7 +278,9 @@ impl ModuleRuntime {
             github_handle_credentials: None,
             github_control_reader: None,
             endpoint_override,
-            web_search: Arc::new(WebSearchService::production().with_stored_order_router_for_test()),
+            web_search: Arc::new(
+                WebSearchService::production().with_stored_order_router_for_test(),
+            ),
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),
             search_declarations: None,
         }

@@ -105,9 +105,11 @@ impl SearchDeclarations {
     fn send(&self, routes: &[RouteRef]) -> Result<(), String> {
         let declarations = serde_json::to_value(routing::role_declarations(routes))
             .map_err(|error| format!("encode declarations: {error}"))?;
-        let body = serde_json::to_vec(&ModuleControlRequestFromModule::CatalogUpdateRoleDeclarations {
-            role_declarations: declarations,
-        })
+        let body = serde_json::to_vec(
+            &ModuleControlRequestFromModule::CatalogUpdateRoleDeclarations {
+                role_declarations: declarations,
+            },
+        )
         .map_err(|error| format!("encode catalog.update_role_declarations: {error}"))?;
         // One deadline covers queuing the request and waiting for the reply.
         let deadline = std::time::Instant::now() + UPDATE_TIMEOUT;
@@ -157,7 +159,9 @@ fn update_reply(reply: &Frame) -> Result<(), String> {
         let detail = serde_json::from_slice::<ErrorBody>(&reply.body)
             .map(|body| format!("{}: {}", body.code, body.message))
             .unwrap_or_else(|_| "an unreadable error body".to_string());
-        return Err(format!("catalog.update_role_declarations refused: {detail}"));
+        return Err(format!(
+            "catalog.update_role_declarations refused: {detail}"
+        ));
     }
     match serde_json::from_slice::<ModuleControlResponseToModule>(&reply.body) {
         Ok(ModuleControlResponseToModule::CatalogUpdateRoleDeclarations {}) => Ok(()),

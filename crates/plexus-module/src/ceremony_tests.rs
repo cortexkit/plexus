@@ -617,13 +617,12 @@ fn web_search_preview_flags_are_named_refusals() {
     let (state, _) = grant_test_state("web-search-preview");
     for flag in [json!("false"), json!(0), Value::Null, json!({})] {
         let params = json!({"providers":["exa"],"provider":"exa","count":10,"dry_run":flag});
-        for reply in [set_web_search_allowance(&state, "direct", &params)] {
-            assert_eq!(reply["error"]["code"], "invalid_request", "{reply}");
-            assert_eq!(
-                reply["error"]["message"], "dry_run must be a boolean",
-                "{reply}"
-            );
-        }
+        let reply = set_web_search_allowance(&state, "direct", &params);
+        assert_eq!(reply["error"]["code"], "invalid_request", "{reply}");
+        assert_eq!(
+            reply["error"]["message"], "dry_run must be a boolean",
+            "{reply}"
+        );
         assert_eq!(state.store().web_search_order().unwrap(), None);
         assert_eq!(state.store().web_search_allowance("exa").unwrap(), None);
     }

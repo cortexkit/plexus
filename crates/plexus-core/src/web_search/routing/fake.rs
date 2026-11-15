@@ -146,7 +146,9 @@ impl RoutingPeer for FakeRouter {
             .push((method.to_owned(), params.clone()));
         let mode = self.mode.lock().unwrap().clone();
         if mode == FakeMode::Unreachable {
-            return Err(RoutingCallError::Unreachable("fake router unreachable".into()));
+            return Err(RoutingCallError::Unreachable(
+                "fake router unreachable".into(),
+            ));
         }
         match method {
             "role.describe" => Ok(json!({"result": self.describe.lock().unwrap().clone()})),

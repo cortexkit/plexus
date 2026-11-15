@@ -51,7 +51,8 @@ fn cache_service(now: &Arc<AtomicI64>) -> WebSearchService {
     let mut service = WebSearchService::with_clock(
         Arc::new(ExaRestBackend),
         Arc::new(move || clock.load(Ordering::SeqCst)),
-    ).with_stored_order_router_for_test();
+    )
+    .with_stored_order_router_for_test();
     for name in ["tavily", "brave"] {
         service = service.with_chain_backend(Arc::new(TestBackend {
             name,

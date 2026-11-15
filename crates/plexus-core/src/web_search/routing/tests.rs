@@ -64,8 +64,14 @@ fn describe_must_serve_search_selection() {
     );
     for (member, value) in [
         ("kinds", json!(["image"])),
-        ("capabilities", json!(["select_kind", "select_media", "select_eligible_routes"])),
-        ("capabilities", json!(["select_kind", "select_media", "select_search"])),
+        (
+            "capabilities",
+            json!(["select_kind", "select_media", "select_eligible_routes"]),
+        ),
+        (
+            "capabilities",
+            json!(["select_kind", "select_media", "select_search"]),
+        ),
         ("version", json!(2)),
         ("role", json!("tools")),
     ] {
@@ -76,7 +82,10 @@ fn describe_must_serve_search_selection() {
             "{member}"
         );
     }
-    assert!(read_describe_reply(Ok(serving)).is_err(), "a bare answer is not a reply");
+    assert!(
+        read_describe_reply(Ok(serving)).is_err(),
+        "a bare answer is not a reply"
+    );
 }
 
 #[test]
@@ -123,7 +132,10 @@ fn the_catalog_must_list_exactly_one_verified_routing_provider() {
     };
     let routing = entry("striatum", true, &["routing/v1"]);
     assert_eq!(
-        routing_provider(&json!([entry("plexus", true, &["tool-provider/v1"]), routing])),
+        routing_provider(&json!([
+            entry("plexus", true, &["tool-provider/v1"]),
+            routing
+        ])),
         Ok("striatum".into())
     );
     assert_eq!(

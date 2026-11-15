@@ -44,7 +44,11 @@ async fn order_command_is_retired_by_name_and_leaves_the_stored_order() {
         json!({}),
     ] {
         let reply = command(&fixture, ORDER, params.clone()).await;
-        assert_eq!(code(&reply), "web_search_order_retired", "{params}: {reply}");
+        assert_eq!(
+            code(&reply),
+            "web_search_order_retired",
+            "{params}: {reply}"
+        );
         let message = reply["error"]["message"].as_str().unwrap();
         assert!(
             message.contains("set_web_search_order") && message.contains("routing"),
@@ -270,33 +274,33 @@ async fn clear_rejects_names_counts_missing_provider_and_nonboolean_intent() {
 #[tokio::test]
 async fn allowance_requires_direct_management_and_explicit_apply() {
     let fixture = Fixture::new("admin-authority");
-    for (op, mut params) in [(ALLOWANCE, json!({"provider": "exa", "count": 2}))] {
-        let preview = command(&fixture, op, params.clone()).await;
-        assert_eq!(preview["result"]["dry_run"], true, "{preview}");
-        for dry_run in [Value::Null, json!("false")] {
-            params["dry_run"] = dry_run;
-            let reply = command(&fixture, op, params.clone()).await;
-            assert_eq!(code(&reply), "invalid_request", "{reply}");
-            assert_eq!(
-                reply["error"]["message"], "dry_run must be a boolean",
-                "{reply}"
-            );
-        }
-        params["dry_run"] = json!(true);
-        let preview = command(&fixture, op, params.clone()).await;
-        assert_eq!(preview["result"]["dry_run"], true, "{preview}");
-        params["dry_run"] = json!(false);
-        for principal in [aft(), basal()] {
-            let reply = fixture
-                .send(principal, json!({"method": op, "params": params}))
-                .await;
-            assert_eq!(code(&reply), "operator_authority_required", "{reply}");
-        }
-        let tool = fixture
-            .send(Principal::Direct, json!({"name": op, "arguments": params}))
-            .await;
-        assert!(tool.get("error").is_some(), "{tool}");
+    let op = ALLOWANCE;
+    let mut params = json!({"provider": "exa", "count": 2});
+    let preview = command(&fixture, op, params.clone()).await;
+    assert_eq!(preview["result"]["dry_run"], true, "{preview}");
+    for dry_run in [Value::Null, json!("false")] {
+        params["dry_run"] = dry_run;
+        let reply = command(&fixture, op, params.clone()).await;
+        assert_eq!(code(&reply), "invalid_request", "{reply}");
+        assert_eq!(
+            reply["error"]["message"], "dry_run must be a boolean",
+            "{reply}"
+        );
     }
+    params["dry_run"] = json!(true);
+    let preview = command(&fixture, op, params.clone()).await;
+    assert_eq!(preview["result"]["dry_run"], true, "{preview}");
+    params["dry_run"] = json!(false);
+    for principal in [aft(), basal()] {
+        let reply = fixture
+            .send(principal, json!({"method": op, "params": params}))
+            .await;
+        assert_eq!(code(&reply), "operator_authority_required", "{reply}");
+    }
+    let tool = fixture
+        .send(Principal::Direct, json!({"name": op, "arguments": params}))
+        .await;
+    assert!(tool.get("error").is_some(), "{tool}");
     assert_eq!(fixture.store.web_search_allowance("exa").unwrap(), None);
     assert!(changes(&fixture, "set_web_search_allowance").is_empty());
 }
@@ -370,8 +374,11 @@ async fn code_search_limits_are_settable_and_report_the_replaced_row() {
         summary,
         "backend=grep_app per_caller_per_minute 3 -> 4, per_backend_per_minute 7 -> 9 (previous values were set)"
     );
-    for (op, params) in [(ALLOWANCE, json!({"provider": backend, "count": 1}))] {
-        let reply = command(&fixture, op, params).await;
-        assert_eq!(code(&reply), "unknown_backend", "{op}: {reply}");
-    }
+    let reply = command(
+        &fixture,
+        ALLOWANCE,
+        json!({"provider": backend, "count": 1}),
+    )
+    .await;
+    assert_eq!(code(&reply), "unknown_backend", "{reply}");
 }

@@ -6722,9 +6722,9 @@ mod code_search_tests;
 #[cfg(test)]
 mod federated_tests;
 #[cfg(test)]
-mod web_search_tests;
-#[cfg(test)]
 mod route_select_search_vectors_tests;
+#[cfg(test)]
+mod web_search_tests;
 
 #[cfg(test)]
 mod web_search_rendering_tests;

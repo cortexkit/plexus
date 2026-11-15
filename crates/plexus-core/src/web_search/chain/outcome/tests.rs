@@ -384,10 +384,22 @@ fn attempt_statuses_follow_the_classification() {
             retry_after_ms: None
         }
     );
-    assert_eq!(status(failed("http_402", "pay"), None), AttemptStatus::Quota);
-    assert_eq!(status(failed("http_400", "bad"), None), AttemptStatus::Rejected);
-    assert_eq!(status(failed("http_422", "bad"), None), AttemptStatus::Rejected);
-    assert_eq!(status(failed("http_503", "down"), None), AttemptStatus::Unavailable);
+    assert_eq!(
+        status(failed("http_402", "pay"), None),
+        AttemptStatus::Quota
+    );
+    assert_eq!(
+        status(failed("http_400", "bad"), None),
+        AttemptStatus::Rejected
+    );
+    assert_eq!(
+        status(failed("http_422", "bad"), None),
+        AttemptStatus::Rejected
+    );
+    assert_eq!(
+        status(failed("http_503", "down"), None),
+        AttemptStatus::Unavailable
+    );
     assert_eq!(
         status(
             TransportOutcome::Completed {

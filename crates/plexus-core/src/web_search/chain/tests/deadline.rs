@@ -43,7 +43,8 @@ fn clocked_service(now: &Arc<AtomicI64>) -> WebSearchService {
     let mut service = WebSearchService::with_clock(
         Arc::new(ExaRestBackend),
         Arc::new(move || clock.load(Ordering::SeqCst)),
-    ).with_stored_order_router_for_test();
+    )
+    .with_stored_order_router_for_test();
     for name in ["tavily", "brave", "deepseek", "jina", "kagi"] {
         service = service.with_chain_backend(Arc::new(TestBackend {
             name,
@@ -281,7 +282,8 @@ fn budget_starts_at_walk_entry_not_the_earlier_search_timestamp() {
             }
             clock.load(Ordering::SeqCst)
         }),
-    ).with_stored_order_router_for_test()
+    )
+    .with_stored_order_router_for_test()
     .with_chain_backend(Arc::new(TestBackend {
         name: "tavily",
         preparations: Arc::new(AtomicUsize::new(0)),

@@ -87,7 +87,8 @@ fn connect(engine: &Engine, schema: Value) {
     store.set_web_search_allowance("zai", 10).unwrap();
 }
 fn service() -> WebSearchService {
-    WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)).with_stored_order_router_for_test()
+    WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW))
+        .with_stored_order_router_for_test()
         .with_chain_backend(Arc::new(ZaiMcpBackend::default()))
 }
 fn run<C: CredentialSource, T: crate::transport::Transport>(
@@ -421,7 +422,8 @@ fn quarantined_zai_never_reaches_schema_hook() {
         action.quarantine_reason.as_deref(),
         Some("schema_changed_requires_review")
     );
-    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)).with_stored_order_router_for_test()
+    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW))
+        .with_stored_order_router_for_test()
         .with_chain_backend(Arc::new(HookTrap));
     assert_eq!(
         run(&service, &engine, json!({"query":"weather report"})),

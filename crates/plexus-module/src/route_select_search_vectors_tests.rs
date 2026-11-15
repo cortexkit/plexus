@@ -81,7 +81,10 @@ fn vendored_pairs_match_their_checksums() {
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        listed.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+        listed
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
         PAIRS
     );
     for (name, digest) in listed {

@@ -64,7 +64,8 @@ impl WebSearchBackend for TestBackend {
 }
 
 fn service() -> WebSearchService {
-    let mut service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)).with_stored_order_router_for_test();
+    let mut service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW))
+        .with_stored_order_router_for_test();
     for name in ["tavily", "deepseek"] {
         service = service.with_chain_backend(Arc::new(TestBackend {
             name,
@@ -573,4 +574,3 @@ fn connection_resolution_is_per_caller_not_per_provider() {
     assert_eq!(requests[0].connection_id, "exa");
     assert_eq!(requests[1].connection_id, "exa-two");
 }
-
