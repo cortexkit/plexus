@@ -1,0 +1,1 @@
+{"request":{"method":"route.select","params":{"allowance_left":[],"consumer":"plexus.web_search","eligible_routes":[],"kind":"search","privacy":"remote_allowed","requirements":{"iq":75}}},"reply":{"code":"no_route","message":"no route meets the request: no_available_model","detail":{"reason":"no_available_model"}}}

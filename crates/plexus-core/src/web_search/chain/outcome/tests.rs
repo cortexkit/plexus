@@ -338,3 +338,63 @@ fn default_errors_are_unavailable() {
         assert_move(outcome, None, SkipReason::Unavailable, 60_000);
     }
 }
+
+#[test]
+fn only_a_401_reports_a_credential_failure() {
+    use crate::manifest::ErrorSignal;
+    use crate::web_search::routing::AttemptStatus;
+    let status = |code: &str, signal| {
+        let mut dispatched = dispatch(failed(code, "refused"), None);
+        dispatched.error_signal = signal;
+        attempt_status(
+            &classify(&ExaRestBackend, &dispatched, 5, 1_790_000_000_000),
+            &dispatched,
+        )
+    };
+    assert_eq!(status("http_401", None), AttemptStatus::Credential);
+    // A manifest may name a 403 a credential rejection, and plexus still
+    // cools that connection down as one, but routing is told only that the
+    // provider was unavailable: a 403 is never a credential failure there.
+    assert_eq!(
+        status("http_403", Some(ErrorSignal::CredentialRejected)),
+        AttemptStatus::Unavailable
+    );
+    assert_eq!(status("http_403", None), AttemptStatus::Unavailable);
+}
+
+#[test]
+fn attempt_statuses_follow_the_classification() {
+    use crate::web_search::routing::AttemptStatus;
+    let status = |outcome, retry| {
+        let dispatched = dispatch(outcome, retry);
+        attempt_status(
+            &classify(&ExaRestBackend, &dispatched, 5, 1_790_000_000_000),
+            &dispatched,
+        )
+    };
+    assert_eq!(
+        status(failed("http_429", "slow down"), Some(1_500)),
+        AttemptStatus::Throttled {
+            retry_after_ms: Some(1_500)
+        }
+    );
+    assert_eq!(
+        status(failed("http_429", "slow down"), None),
+        AttemptStatus::Throttled {
+            retry_after_ms: None
+        }
+    );
+    assert_eq!(status(failed("http_402", "pay"), None), AttemptStatus::Quota);
+    assert_eq!(status(failed("http_400", "bad"), None), AttemptStatus::Rejected);
+    assert_eq!(status(failed("http_422", "bad"), None), AttemptStatus::Rejected);
+    assert_eq!(status(failed("http_503", "down"), None), AttemptStatus::Unavailable);
+    assert_eq!(
+        status(
+            TransportOutcome::Completed {
+                response: Some(json!({"results": []}))
+            },
+            None
+        ),
+        AttemptStatus::ServedEmpty
+    );
+}

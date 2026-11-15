@@ -229,7 +229,7 @@ fn a_cached_allow_charges_the_federated_rate_bucket_once_and_rate_limited_keeps_
         f.web = WebSearchService::with_clock(
             Arc::new(ExaRestBackend),
             Arc::new(move || service_clock.load(std::sync::atomic::Ordering::SeqCst)),
-        );
+        ).with_stored_order_router_for_test();
         f.cache();
         f.limits(2, 100);
         pending(&f, &requester, &args());

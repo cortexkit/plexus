@@ -323,6 +323,16 @@ impl WebSearchService {
             .store((self.clock)(), std::sync::atomic::Ordering::Release);
     }
 
+    /// When [`Self::note_routes_added`] was last called, on this service's
+    /// clock; `None` if never.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn routes_added_at_for_test(&self) -> Option<i64> {
+        let at = self
+            .routes_added_at_ms
+            .load(std::sync::atomic::Ordering::Acquire);
+        (at != i64::MIN).then_some(at)
+    }
+
     /// The service the module runs: every backend [`registered_backend`]
     /// implements. It searches only once a router is set with
     /// [`Self::with_router`].

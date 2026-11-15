@@ -100,7 +100,7 @@ fn connect(engine: &Engine) {
 }
 
 fn service() -> WebSearchService {
-    WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW))
+    WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)).with_stored_order_router_for_test()
         .with_chain_backend(Arc::new(TinyFishRestBackend))
 }
 
@@ -359,8 +359,9 @@ fn capability_skip_before_dispatch_has_no_allowance_or_cooldown() {
         search: facade::SearchAudit::new(facade::SearchTool::Web, "direct", None, None, None),
         chain: None,
     };
+    order(&engine, &["tinyfish"]);
     assert_eq!(
-        service.run_chain(&engine, &["tinyfish".into()], &query, NOW, &mut audit),
+        service.run_chain(&engine, &query, NOW, &mut audit),
         Err(unavailable(&[("tinyfish", SkipReason::Capability)]))
     );
     assert!(

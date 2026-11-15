@@ -43,7 +43,7 @@ fn clocked_service(now: &Arc<AtomicI64>) -> WebSearchService {
     let mut service = WebSearchService::with_clock(
         Arc::new(ExaRestBackend),
         Arc::new(move || clock.load(Ordering::SeqCst)),
-    );
+    ).with_stored_order_router_for_test();
     for name in ["tavily", "brave", "deepseek", "jina", "kagi"] {
         service = service.with_chain_backend(Arc::new(TestBackend {
             name,
@@ -206,7 +206,7 @@ fn exactly_sixty_five_seconds_remaining_is_admitted() {
 }
 
 #[test]
-fn after_deadline_only_capability_and_grant_checks_run() {
+fn after_deadline_no_further_attempt_starts() {
     let (fixture, _, path) =
         super::super::super::tests::granted_exa_engine_with_path("deadline-narrowing");
     for name in ["tavily", "brave", "kagi"] {
@@ -246,15 +246,19 @@ fn after_deadline_only_capability_and_grant_checks_run() {
             "direct",
             json!({"query":"x".repeat(200)}).as_object().unwrap(),
         ),
+        // Checks that contact nobody run for every provider before routing is
+        // asked, so their reasons come first. After Exa's slow attempt the
+        // deadline stops admission, and the one provider still offered is
+        // skipped for the deadline without another attempt.
         Err(unavailable(&[
-            ("exa", SkipReason::Unavailable),
-            ("tavily", SkipReason::Deadline),
-            ("brave", SkipReason::Deadline),
+            ("brave", SkipReason::ConnectionUnusable),
             ("deepseek", SkipReason::Capability),
             ("jina", SkipReason::NotGranted),
             ("kagi", SkipReason::Ambiguous),
+            ("exa", SkipReason::Unavailable),
+            ("tavily", SkipReason::Deadline),
         ])),
-        "after a deadline stop, policy and approval must not replace the deadline reason"
+        "after a deadline stop, no further attempt starts"
     );
     assert_eq!(*transport.requests.lock().unwrap(), ["exa"]);
     assert_eq!(vault.reads.load(Ordering::SeqCst), 1);
@@ -277,7 +281,7 @@ fn budget_starts_at_walk_entry_not_the_earlier_search_timestamp() {
             }
             clock.load(Ordering::SeqCst)
         }),
-    )
+    ).with_stored_order_router_for_test()
     .with_chain_backend(Arc::new(TestBackend {
         name: "tavily",
         preparations: Arc::new(AtomicUsize::new(0)),
@@ -323,10 +327,12 @@ fn policy_and_cooldown_precede_the_first_deadline_stop() {
             "direct",
             json!({"query":"weather report"}).as_object().unwrap(),
         ),
+        // Policy and cooldown exclude providers before routing is asked, so
+        // they are never reported as deadline stops.
         Err(unavailable(&[
-            ("exa", SkipReason::Unavailable),
             ("tavily", SkipReason::Policy),
             ("brave", SkipReason::Cooldown),
+            ("exa", SkipReason::Unavailable),
             ("jina", SkipReason::Deadline),
         ]))
     );

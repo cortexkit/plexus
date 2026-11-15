@@ -37,7 +37,7 @@ fn clocked_service(now: &Arc<AtomicI64>) -> WebSearchService {
     WebSearchService::with_clock(
         Arc::new(ExaRestBackend),
         Arc::new(move || clock.load(Ordering::SeqCst)),
-    )
+    ).with_stored_order_router_for_test()
     .with_chain_backend(Arc::new(TestBackend {
         name: "tavily",
         preparations: Arc::new(AtomicUsize::new(0)),

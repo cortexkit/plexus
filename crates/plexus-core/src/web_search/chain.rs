@@ -472,7 +472,13 @@ impl WebSearchService {
                 } else {
                     prepared
                 };
-                self.chain_checks(engine.store(), &connection, &action, now_ms)?;
+                // A federated search meets its dispatch gates and consent
+                // first, and the standing checks and cooldown after them, once
+                // routing chose the provider, so a gate's own refusal or
+                // consent request is what the caller sees.
+                if audit.federated.is_none() {
+                    self.chain_checks(engine.store(), &connection, &action, now_ms)?;
+                }
                 let (Some(backend), Some(prepared), Some(route)) =
                     (backend, prepared, self.route_of(name))
                 else {

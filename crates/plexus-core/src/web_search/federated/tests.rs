@@ -171,7 +171,7 @@ impl Fixture {
             )
             .with_scope_reader(reader.clone()),
             db,
-            web: WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)),
+            web: WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)).with_stored_order_router_for_test(),
             code: crate::code_search::CodeSearchService::with_clock(Arc::new(|| NOW)),
             tool,
             reader,
@@ -204,21 +204,15 @@ impl Fixture {
     fn cache(&self) {
         let query =
             WebSearchQuery::parse(json!({"query":"rust async book"}).as_object().unwrap()).unwrap();
-        if matches!(self.tool, Tool::OrderedWeb) {
-            self.web.cache.put_served(
-                CacheKey::new(crate::web_search::cache::CHAIN_CACHE_BACKEND, &query),
-                vec![],
-                crate::web_search::cache::ServedBy {
-                    provider: "exa".into(),
-                    instance_digest: None,
-                },
-                NOW,
-            );
-        } else {
-            self.web
-                .cache
-                .put(CacheKey::new("exa", &query), vec![], NOW);
-        }
+        self.web.cache.put_served(
+            CacheKey::new(crate::web_search::cache::CHAIN_CACHE_BACKEND, &query),
+            vec![],
+            crate::web_search::cache::ServedBy {
+                provider: "exa".into(),
+                instance_digest: None,
+            },
+            NOW,
+        );
     }
     fn limits(&self, caller: u32, backend: u32) {
         self.engine
@@ -704,7 +698,9 @@ fn candidates_use_direct_namespace_and_the_same_ambiguity_and_status_checks() {
         .unwrap();
         assert_eq!(
             f.search(&caller()).unwrap_err()["error"]["code"],
-            if matches!(tool, Tool::OrderedWeb) {
+            // Every web search now takes the routed walk, which reports an
+            // ambiguous provider as a skip; code search still refuses it alone.
+            if matches!(tool, Tool::OrderedWeb | Tool::Web) {
                 "web_search_unavailable"
             } else {
                 "backend_ambiguous"

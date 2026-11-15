@@ -168,7 +168,7 @@ impl Fixture {
             ),
             store,
             transport,
-            web: WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)),
+            web: WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)).with_stored_order_router_for_test(),
             code: CodeSearchService::with_clock(Arc::new(|| NOW)),
             path,
         }

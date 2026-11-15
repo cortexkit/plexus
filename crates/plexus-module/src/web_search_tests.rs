@@ -156,7 +156,7 @@ impl Fixture {
             web_search: Arc::new(WebSearchService::with_clock(
                 Arc::new(ExaRestBackend),
                 Arc::new(|| NOW_MS),
-            )),
+            ).with_stored_order_router_for_test()),
             path,
         };
         fixture.add_connection(CONNECTION);

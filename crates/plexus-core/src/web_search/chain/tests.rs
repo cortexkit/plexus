@@ -17,6 +17,7 @@ mod ollama;
 mod outcomes;
 mod parallel;
 mod perplexity;
+mod routed;
 mod searxng;
 mod synthetic;
 mod tavily;
@@ -63,7 +64,7 @@ impl WebSearchBackend for TestBackend {
 }
 
 fn service() -> WebSearchService {
-    let mut service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW));
+    let mut service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)).with_stored_order_router_for_test();
     for name in ["tavily", "deepseek"] {
         service = service.with_chain_backend(Arc::new(TestBackend {
             name,
@@ -494,170 +495,6 @@ fn validation_and_code_lookup_precede_all_provider_work() {
 }
 
 #[test]
-fn compatibility_refusals_survive_set_then_clear() {
-    for scenario in [
-        "not_granted",
-        "flow_grant",
-        "ambiguous",
-        "quarantined",
-        "ask_first",
-        "blocked",
-        "vendor_5xx",
-        "unusable",
-    ] {
-        let (engine, transport, path) =
-            super::super::tests::granted_exa_engine_with_path(&format!("compatibility-{scenario}"));
-        let sql = rusqlite::Connection::open(&*path).unwrap();
-        let service = service();
-        let caller = if scenario == "not_granted" || scenario == "flow_grant" {
-            "stranger"
-        } else {
-            "direct"
-        };
-        let scope = (scenario == "flow_grant").then(|| CallScope {
-            flow_id: Some("flow".into()),
-            owner: "direct".into(),
-            scope_ref: "head".into(),
-            scope_epoch: 1,
-            kind: None,
-            parent: None,
-            parent_state: None,
-            agent_id: None,
-            delegates: false,
-            owner_authorized: true,
-        });
-        let expected = match scenario {
-            "not_granted" => WebSearchRefusal::NotGranted,
-            "flow_grant" => WebSearchRefusal::Grant(crate::grant_refusal::GrantRefusal::new(
-                WebSearchService::grant_target(caller),
-                crate::grant_refusal::Cause::Missing,
-            )),
-            "ambiguous" => {
-                add_connection(&engine, "exa-two", "exa", Some("direct"));
-                WebSearchRefusal::BackendAmbiguous
-            }
-            "quarantined" => {
-                sql.execute("UPDATE catalog_actions SET status = 'quarantined'", [])
-                    .unwrap();
-                WebSearchRefusal::BackendQuarantined {
-                    backend: "exa".into(),
-                }
-            }
-            "ask_first" => {
-                engine
-                    .store()
-                    .set_policy("direct", "exa", "search", "ask_first", None)
-                    .unwrap();
-                WebSearchRefusal::PerCallApprovalUnsupported
-            }
-            "blocked" => {
-                engine
-                    .store()
-                    .set_policy("direct", "exa", "search", "block", None)
-                    .unwrap();
-                WebSearchRefusal::PolicyBlocked
-            }
-            "unusable" => {
-                engine
-                    .store()
-                    .set_connection_health("direct", "exa", "degraded", &json!({"healthy":false}))
-                    .unwrap();
-                WebSearchRefusal::BackendUnavailable {
-                    backend: "exa".into(),
-                }
-            }
-            "vendor_5xx" => {
-                transport.set_response(crate::transport::MockResponse::VendorError {
-                    code: "http_503".into(),
-                    message: "vendor diagnostic must stay private".into(),
-                });
-                WebSearchRefusal::BackendUnavailable {
-                    backend: "exa".into(),
-                }
-            }
-            _ => unreachable!(),
-        };
-        let args = json!({"query":"weather report"});
-        let before = service.search_scoped(
-            &engine,
-            caller,
-            args.as_object().unwrap(),
-            scope.as_ref(),
-            None,
-        );
-        assert_eq!(before, Err(expected.clone()), "never-set: {scenario}");
-        order(&engine, &["exa", "tavily"]);
-        engine.store().clear_web_search_order().unwrap();
-        assert_eq!(
-            service.search_scoped(
-                &engine,
-                caller,
-                args.as_object().unwrap(),
-                scope.as_ref(),
-                None
-            ),
-            before,
-            "set-then-clear: {scenario}"
-        );
-        let wire = expected.to_wire().to_string();
-        assert!(!wire.contains("web_search_unavailable"));
-        assert!(!wire.contains("vendor diagnostic"));
-        assert_eq!(
-            transport.requests().len(),
-            if scenario == "vendor_5xx" { 2 } else { 0 },
-            "dispatch count: {scenario}"
-        );
-    }
-}
-
-#[test]
-fn compatibility_keeps_exa_cache_bucket_and_audit_without_chain_state() {
-    let (engine, transport) = super::super::tests::granted_exa_engine("compatibility-state");
-    let service = service();
-    engine.store().set_web_search_allowance("exa", 1).unwrap();
-    service
-        .chain_cooldowns
-        .lock()
-        .unwrap()
-        .insert("exa".into(), NOW + 60_000);
-    let args = json!({"query":"weather report"});
-    let query = WebSearchQuery::parse(args.as_object().unwrap()).unwrap();
-    service.cache.put(CacheKey::new("exa", &query), vec![], NOW);
-    engine
-        .store()
-        .set_web_search_limits(
-            "exa",
-            crate::storage::web_search_store::WebSearchLimits {
-                per_caller_per_minute: 2,
-                per_backend_per_minute: 2,
-            },
-        )
-        .unwrap();
-    let before = search(&service, &engine, "direct").unwrap();
-    assert!(before.cached);
-    assert_eq!(before.backend, "exa");
-    order(&engine, &["exa", "tavily"]);
-    engine.store().clear_web_search_order().unwrap();
-    assert_eq!(search(&service, &engine, "direct"), Ok(before));
-    assert_eq!(
-        search(&service, &engine, "direct"),
-        Err(WebSearchRefusal::RateLimited {
-            retry_after_ms: 30_000
-        })
-    );
-    let rows = engine.store().list_audit("direct").unwrap();
-    for row in rows
-        .iter()
-        .filter(|row| row.gate.as_deref() == Some("web_search"))
-    {
-        assert_eq!(row.app_key.as_deref(), Some("exa_rest"));
-        assert_eq!(row.connection_id.as_deref(), Some("exa"));
-        assert_eq!(row.args_redaction_summary.as_deref(), Some("{}"));
-    }
-    assert!(transport.requests().is_empty());
-}
-
-#[test]
 fn authorize_denial_reasons_follow_legacy_mapping() {
     use crate::governance::{GrantDenial, PolicyDenial};
     let service = service();
@@ -736,45 +573,3 @@ fn connection_resolution_is_per_caller_not_per_provider() {
     assert_eq!(requests[1].connection_id, "exa-two");
 }
 
-#[test]
-fn compatibility_dispatch_ignores_exhausted_allowance_and_cooldown() {
-    let (engine, transport) =
-        super::super::tests::granted_exa_engine("compatibility-dormant-admission");
-    engine.store().set_web_search_allowance("exa", 1).unwrap();
-    let _reservation = engine
-        .store()
-        .reserve_web_search_allowance("exa", "direct", NOW)
-        .unwrap();
-    let service = service();
-    service
-        .chain_cooldowns
-        .lock()
-        .unwrap()
-        .insert("exa".into(), NOW + 60_000);
-    transport.set_response(crate::transport::MockResponse::Success(
-        json!({"results":[]}),
-    ));
-    let before = search(&service, &engine, "direct").unwrap();
-    assert!(!before.cached);
-    order(&engine, &["exa", "tavily"]);
-    engine.store().clear_web_search_order().unwrap();
-    let after = service
-        .search(
-            &engine,
-            "direct",
-            json!({"query":"different weather report"})
-                .as_object()
-                .unwrap(),
-        )
-        .unwrap();
-    assert!(!after.cached);
-    assert_eq!(after.backend, "exa");
-    assert_eq!(transport.requests().len(), 2);
-    assert_eq!(
-        engine
-            .store()
-            .web_search_allowance_used("exa", "direct", NOW)
-            .unwrap(),
-        1
-    );
-}

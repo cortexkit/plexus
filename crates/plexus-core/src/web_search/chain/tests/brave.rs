@@ -181,7 +181,7 @@ fn recorded_walk(record: &str, providers: &[&str]) -> Recorded {
         vault.clone(),
         Arc::new(RestTransport::new(config)),
     );
-    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW))
+    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)).with_stored_order_router_for_test()
         .with_chain_backend(Arc::new(BraveRestBackend));
     let result = service.search(
         &engine,
@@ -418,7 +418,7 @@ fn a_query_too_long_after_operators_skips_brave_without_dispatch() {
     let (engine, transport) = super::super::super::tests::granted_exa_engine("chain-brave-skip");
     add_connection(&engine, CONNECTION, "brave", Some("direct"));
     order(&engine, &["brave"]);
-    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW))
+    let service = WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| NOW)).with_stored_order_router_for_test()
         .with_chain_backend(Arc::new(BraveRestBackend));
     let refusal = service
         .search(

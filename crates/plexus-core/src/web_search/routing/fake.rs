@@ -20,6 +20,8 @@ pub enum FakeMode {
     Unreachable,
     /// `route.select` is refused with this code; other ops answer normally.
     RefuseSelect(String),
+    /// `route.select` answers this route whatever was offered.
+    Answer(RouteRef),
 }
 
 pub struct FakeRouter {
@@ -90,7 +92,7 @@ impl FakeRouter {
             .collect()
     }
 
-    fn select(&self, params: &Value) -> Result<Value, RoutingCallError> {
+    fn select(&self, params: &Value, forced: Option<RouteRef>) -> Result<Value, RoutingCallError> {
         let offered: Vec<RouteRef> = params["eligible_routes"]
             .as_array()
             .into_iter()
@@ -102,11 +104,12 @@ impl FakeRouter {
                 ))
             })
             .collect();
-        let chosen = self
-            .ranking
-            .iter()
-            .find(|route| offered.contains(route))
-            .or_else(|| offered.first());
+        let chosen = forced.as_ref().or_else(|| {
+            self.ranking
+                .iter()
+                .find(|route| offered.contains(route))
+                .or_else(|| offered.first())
+        });
         let Some(route) = chosen else {
             return Err(RoutingCallError::Refused {
                 code: "no_route".into(),
@@ -153,7 +156,8 @@ impl RoutingPeer for FakeRouter {
                     message: "refused by the fake router".into(),
                     detail: json!({}),
                 }),
-                _ => self.select(&params),
+                FakeMode::Answer(route) => self.select(&params, Some(route)),
+                _ => self.select(&params, None),
             },
             "route.report" => Ok(json!({"result": {
                 "decision_id": params["decision_id"],
