@@ -29,7 +29,9 @@ HELLO declares every row, because the store (and so which providers are
 connected) cannot be read before HELLO_ACK. After readiness, and on every
 scheduler pass, plexus narrows the declaration to providers with a live
 connection and sends `catalog.update_role_declarations` whenever that set
-changes. Routing rereads the catalog about every 30 seconds, so for
+changes. Routing sees the change within seconds through the daemon's
+`catalog.watch` push, but falls back to rereading the catalog about every 30
+seconds while that push is down, so for
 `DECLARATION_GRACE_MS` (35 s) after a route is added, a `no_route` answer is
 treated as "not seen yet" (retryable `backend_unavailable` with backend
 `routing`). Narrowing only removes routes and opens no such window.

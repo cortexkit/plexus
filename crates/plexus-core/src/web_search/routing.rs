@@ -46,8 +46,12 @@ pub const ROUTING_REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DESCRIBE_TTL_MS: i64 = 60_000;
 /// How long after plexus adds a route to its declaration a `no_route` answer
 /// is read as "routing has not seen the new declaration yet" rather than "no
-/// provider can serve". Routing rereads the daemon catalog about every 30
-/// seconds; the extra 5 seconds cover one reread taking a while.
+/// provider can serve". Routing normally sees a declaration change within
+/// seconds through the daemon's catalog push, but while that push is down it
+/// falls back to rereading the catalog about every 30 seconds, so the window
+/// stays sized for the fallback; the extra 5 seconds cover one reread taking a
+/// while. Only a just-added route is affected, and the refusal inside the
+/// window is retryable, so the long window costs little.
 pub const DECLARATION_GRACE_MS: i64 = 35_000;
 
 /// The optional routing groups a search select needs (§16.4.2: `select_search`
