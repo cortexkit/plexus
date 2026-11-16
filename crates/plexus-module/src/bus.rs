@@ -114,8 +114,10 @@ impl EventPublisher for ClientEventPublisher {
     }
 }
 
-/// Searches only enqueue. The outbox task supplies a weak reference to its
-/// connector-home session so searches cannot keep it alive after claim loss.
+/// Searches only enqueue. The outbox task supplies a weak reference to its bus
+/// session, which exists only while this machine holds the connector-home role
+/// (the one machine allowed to act on outside services). The weak reference
+/// means a search cannot keep the session alive after that role is lost.
 #[derive(Default)]
 pub(crate) struct RouteFactBus {
     binding: Mutex<Option<RouteFactBinding>>,
