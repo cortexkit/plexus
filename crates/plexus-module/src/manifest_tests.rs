@@ -961,3 +961,14 @@ fn manifest_exposes_the_privileged_ops_on_a_management_surface() {
         ]
     );
 }
+#[test]
+fn declares_registration_channel_without_changing_capabilities() {
+    let manifest = build("plexus");
+    let encoded = serde_json::to_value(&manifest).unwrap();
+    assert_eq!(encoded["registration_channel"], true);
+    assert!(encoded["capabilities"]["provides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "bind-no-project/v1"));
+}

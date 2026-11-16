@@ -1685,6 +1685,8 @@ enum NonceHandoff {
     /// environment copy and then execs the module, which keeps descriptor 3.
     /// This is what a module sees once the daemon stops setting the copy.
     DescriptorOnly,
+    /// Plexus runs directly on the daemon's private registration channel.
+    RegistrationChannel,
 }
 
 /// How long the harness waits for the in-process daemon to publish its
@@ -1738,18 +1740,22 @@ async fn start_live_daemon_with_federation(
     // Empty, or the line that removes the environment copy of the nonce
     // before a launcher execs its module.
     let unset_nonce = match nonce_handoff {
-        NonceHandoff::DescriptorAndEnvironment => "",
+        NonceHandoff::DescriptorAndEnvironment | NonceHandoff::RegistrationChannel => "",
         NonceHandoff::DescriptorOnly => "unset SUBC_LAUNCH_NONCE\n",
     };
+    // These legacy launchers must use the nonce-only TCP connection, including
+    // its fake confirmation peer. Close the daemon's channel handoff at fd 4
+    // before exec; the RegistrationChannel case launches the binary directly.
+    let legacy_handoff = "exec 4<&-\nunset SUBC_REGISTRATION_FD SUBC_REGISTRATION_PIPE\n";
     fs::write(
         &vault_launcher,
-        format!("{unset_nonce}exec {test_binary} --exact vault_route_fixture --nocapture\n"),
+        format!("{legacy_handoff}{unset_nonce}exec {test_binary} --exact vault_route_fixture --nocapture\n"),
     )
     .unwrap();
     let entorhinal_launcher = directory.join("entorhinal-fixture.sh");
     fs::write(
         &entorhinal_launcher,
-        format!("{unset_nonce}exec {test_binary} --exact vault_route_fixture --nocapture\n"),
+        format!("{legacy_handoff}{unset_nonce}exec {test_binary} --exact vault_route_fixture --nocapture\n"),
     )
     .unwrap();
     // Only the module's supervisor connection uses the fake confirmation peer.
@@ -1758,9 +1764,12 @@ async fn start_live_daemon_with_federation(
     let launcher = directory.join("plexus-confirmation-peer.sh");
     let quoted_binary = single_quoted(&binary_path);
     let quoted_connection = single_quoted(&confirmation_file);
-    fs::write(&launcher, format!("{unset_nonce}attempts=0\nwhile [ ! -f {quoted_connection} ]; do\n  attempts=$((attempts + 1))\n  [ \"$attempts\" -lt 3000 ] || exit 1\n  sleep 0.01\ndone\nexec {quoted_binary} --subc {quoted_connection}\n")).unwrap();
-    let plexus_program = PathBuf::from("/bin/sh");
-    let plexus_args = json!([launcher]);
+    fs::write(&launcher, format!("{legacy_handoff}{unset_nonce}attempts=0\nwhile [ ! -f {quoted_connection} ]; do\n  attempts=$((attempts + 1))\n  [ \"$attempts\" -lt 3000 ] || exit 1\n  sleep 0.01\ndone\nexec {quoted_binary} --subc {quoted_connection}\n")).unwrap();
+    let (plexus_program, plexus_args) = if nonce_handoff == NonceHandoff::RegistrationChannel {
+        (binary_path, json!([]))
+    } else {
+        (PathBuf::from("/bin/sh"), json!([launcher]))
+    };
     let daemon_config_path = directory.join("subc.jsonc");
     let mut config = json!({
         "version": 1,
@@ -1800,6 +1809,9 @@ async fn start_live_daemon_with_federation(
             }
         }
     });
+    if nonce_handoff == NonceHandoff::RegistrationChannel {
+        config["modules"][MODULE_ID]["registration_channel"] = json!(true);
+    }
     if federation {
         for id in ["callosum", "cingulate"] {
             // The test registers these stand-ins with the supervisor's nonce,
@@ -2934,6 +2946,98 @@ async fn imported_github_grant_lists_and_revokes_through_direct_management() {
     assert!(entries
         .iter()
         .any(|row| row["grant_id"] == grant_id && row["principal"] == "direct"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registration_channel_starts_plexus_and_claim_binds_outbound_role_route() {
+    let (mut daemon, connection) =
+        start_live_daemon_with(conformance_catalog_dir(), NonceHandoff::RegistrationChannel).await;
+    let mut client = connect_client(&connection).await;
+    wait_for_module_catalog(&mut client).await;
+    let route = open_management_route(&mut client).await;
+    // The supervised Entorhinal double returns held_here only for an outbound
+    // route attested as reserved:plexus. Readiness alone cannot satisfy this.
+    let reply = send_management_request(
+        &mut client,
+        route,
+        98,
+        plexus_module::connector_home::STATUS_OP,
+        json!({}),
+    )
+    .await;
+    assert_eq!(reply.header.ty, FrameType::Response);
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(body["result"]["role"]["held_here"], true, "{body}");
+    assert_eq!(body["result"]["connectorHome"]["state"], "held", "{body}");
+    daemon.stop();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registration_channel_admin_confirmation_reaches_daemon_and_fails_closed() {
+    let (mut daemon, connection) =
+        start_live_daemon_with(conformance_catalog_dir(), NonceHandoff::RegistrationChannel).await;
+    let mut client = connect_client(&connection).await;
+    wait_for_module_catalog(&mut client).await;
+    open_management_route(&mut client).await;
+    let binary = ckdev_binary(env!("CARGO_BIN_EXE_ck-plexus-admin"));
+    let connection_file = daemon.connection_file_path.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        bounded::child_output(
+            std::process::Command::new(binary)
+                .arg("issue-ticket")
+                .arg("--subc")
+                .arg(connection_file)
+                .args([
+                    "--app",
+                    "exa",
+                    "--actions",
+                    "*",
+                    "--credential-id",
+                    "test:channel",
+                ]),
+            Duration::from_secs(60),
+            "channel admin confirmation",
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("operator_confirmation_unavailable"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("operator_presence_unavailable"), "{stderr}");
+    assert!(output.stdout.is_empty(), "no ticket may be returned");
+    // A headless daemon's named refusal proves that operator.confirm used the
+    // real registration connection, not the harness's permissive TCP proxy.
+    let trace = DAEMON_TRACE.lock().unwrap();
+    assert!(
+        trace
+            .lines()
+            .any(|line| line.contains("operator_confirm_audit")
+                && line.contains("plexus")
+                && line.contains("operator_prompt_setup_required")),
+        "{trace}"
+    );
+    drop(trace);
+    assert_eq!(daemon.operator_peer.approvals(), 0);
+    let database = rusqlite::Connection::open_with_flags(
+        daemon.directory.join("home/cortexkit/plexus/store.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    for table in ["binding_tickets", "connections"] {
+        let count: i64 = database
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "refused confirmation must not change {table}");
+    }
+    daemon.stop();
 }
 
 /// Supervised test-only vault: enrollment must prove the reference over the same

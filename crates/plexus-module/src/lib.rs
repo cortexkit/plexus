@@ -44,6 +44,7 @@ pub mod manifest;
 pub mod operator_confirmation;
 pub mod principal;
 pub use federated::FEDERATED_CALLERS_ENABLED;
+mod registration;
 pub mod relay;
 mod remaining_tool_guard;
 mod reply_guard;
@@ -355,6 +356,7 @@ struct ModuleConfig {
     connection_file_path: PathBuf,
     module_id: String,
     audit_retention_window_ms: i64,
+    registration_channel: bool,
 }
 
 impl ModuleConfig {
@@ -370,6 +372,7 @@ impl ModuleConfig {
             connection_file_path,
             module_id,
             audit_retention_window_ms,
+            registration_channel: false,
         })
     }
 }
@@ -504,8 +507,22 @@ pub async fn run_entry() -> Result<(), ModuleError> {
     run(config).await
 }
 
-async fn run(config: ModuleConfig) -> Result<(), ModuleError> {
-    let stream = connect_to_subc(&config.connection_file_path).await?;
+async fn run(mut config: ModuleConfig) -> Result<(), ModuleError> {
+    let channel = subc_client_rs::registration::adopt_channel()
+        .map_err(|error| ModuleError::Message(format!("adopt registration channel: {error}")))?;
+    config.registration_channel = channel.is_some();
+    let stream: Box<dyn subc_client_rs::ModuleStream> = if let Some(mut channel) = channel {
+        let connection = connection_file::read(&config.connection_file_path)
+            .map_err(|error| ModuleError::Message(format!("reading connection file: {error}")))?;
+        authenticate_client(&mut channel, &connection, std::time::Duration::from_secs(5))
+            .await
+            .map_err(|error| {
+                ModuleError::Message(format!("authenticate registration channel: {error}"))
+            })?;
+        channel
+    } else {
+        Box::new(connect_to_subc(&config.connection_file_path).await?)
+    };
     let (mut reader, writer_half) = tokio::io::split(stream);
     let (writer, receiver) = mpsc::channel::<Frame>(EGRESS_BUFFER);
     let writer_task = tokio::spawn(drain_writer(writer_half, receiver));
@@ -579,6 +596,15 @@ where
     let hello_ack = expect_hello_ack(reader).await?;
     let negotiated_ver = hello_ack.negotiated_ver;
     let control_replies = Arc::clone(&route_bindings.control_replies);
+    let _registration = if config.registration_channel {
+        Some(registration::install(
+            &writer,
+            negotiated_ver,
+            Arc::clone(&control_replies),
+        )?)
+    } else {
+        None
+    };
     let startup = startup::spawn(
         hello_ack,
         config.connection_file_path.clone(),
@@ -1125,24 +1151,27 @@ async fn send_hello(
     writer: &mpsc::Sender<Frame>,
     config: &ModuleConfig,
 ) -> Result<Vec<subc_protocol::manifest::ProviderRole>, ModuleError> {
-    // Read through the process's one cached accessor, never the environment
-    // directly. The daemon hands the nonce over as a pipe on descriptor 3 (the
-    // SUBC_LAUNCH_NONCE environment copy is being retired), and the pipe can
-    // be read only once. This process has a second reader: the subc client
-    // library presents the same nonce when plexus opens its outbound routes
-    // (vault reads, Prefrontal calls), and it reads this same cache. Reading
-    // the pipe here by any other means would leave that reader with nothing.
-    // Nothing is spawned before this point, so no child has inherited the
-    // descriptor.
-    //
-    // A descriptor that is named but unreadable stops startup with the
-    // accessor's own error. Sending HELLO without the nonce instead would get
-    // a reserved module refused by the daemon for a missing nonce, an error
-    // that says nothing about the unreadable descriptor.
-    let launch_nonce = subc_os::launch_nonce().map_err(launch_nonce_refused)?;
-    let launch_nonce_source = launch_nonce.as_ref().map(|nonce| {
-        subc_protocol::manifest::LaunchNonceSource::from_wire_name(nonce.source().as_str())
-    });
+    // A channel HELLO authenticates the inherited connection itself. Only the
+    // legacy connection reads the cached nonce accessor: consuming its pipe
+    // directly would leave the SDK's later outbound route binds without it.
+    // An unreadable nonce descriptor stops legacy startup rather than sending
+    // an unattested HELLO that conceals the descriptor failure.
+    let launch_nonce = if config.registration_channel {
+        None
+    } else {
+        subc_os::launch_nonce().map_err(launch_nonce_refused)?
+    };
+    // When registration_channel is not enabled in the daemon configuration,
+    // the supervisor may hand over both a channel and a legacy launch nonce.
+    // As in the SDK serving loop, retain only its source as provenance on the
+    // channel path; the nonce itself never enters that HELLO.
+    let launch_nonce_source = if config.registration_channel {
+        subc_client_rs::launch_nonce_source()
+    } else {
+        launch_nonce.as_ref().map(|nonce| {
+            subc_protocol::manifest::LaunchNonceSource::from_wire_name(nonce.source().as_str())
+        })
+    };
     let mut manifest =
         manifest::build_with_launch_nonce_source(&config.module_id, launch_nonce_source);
     manifest.ready = Some(false);

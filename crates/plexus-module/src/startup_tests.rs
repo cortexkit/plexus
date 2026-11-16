@@ -11,6 +11,23 @@ use tokio::sync::oneshot;
 
 const RESPONSE_DEADLINE: Duration = Duration::from_secs(5);
 
+#[tokio::test]
+async fn registration_channel_hello_omits_nonce_and_stays_warming() {
+    let (writer, mut responses) = mpsc::channel(2);
+    let mut config = config();
+    config.registration_channel = true;
+    let provides = send_hello(&writer, &config).await.unwrap();
+    let frame = recv_within(responses.recv(), RESPONSE_DEADLINE, "channel HELLO").await;
+    let body: Value = serde_json::from_slice(&frame.body).unwrap();
+    assert!(body.get("launch_nonce").is_none(), "{body}");
+    assert_eq!(body["manifest"]["registration_channel"], true);
+    assert_eq!(body["manifest"]["ready"], false);
+    assert_eq!(
+        body["manifest"]["provides"],
+        serde_json::to_value(provides).unwrap()
+    );
+}
+
 struct ObservedReader {
     inner: tokio::io::DuplexStream,
     reads: mpsc::UnboundedSender<usize>,
@@ -216,6 +233,7 @@ impl Transport for FirstPoll {
 
 fn config() -> ModuleConfig {
     ModuleConfig {
+        registration_channel: false,
         module_id: DEFAULT_MODULE_ID.into(),
         connection_file_path: PathBuf::from("unused-startup-fixture-connection"),
         audit_retention_window_ms: DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY,

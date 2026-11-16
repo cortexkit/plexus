@@ -23,7 +23,7 @@ use plexus_core::storage::event_outbox::{OutboxCursor, OutboxVersion};
 use plexus_core::{event_key::PUBLISHED_EVENTS, storage::now_ms, EventHeaders, PlexusStore};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use subc_client_rs::{CallOptions, ConsumerIdentity, ConsumerOptions, SubcConsumer};
+use subc_client_rs::{CallOptions, ConsumerOptions, SubcConsumer};
 use subc_protocol::{BindIdentity, RouteTarget};
 use tokio::sync::mpsc;
 
@@ -174,14 +174,10 @@ impl Credential {
 pub struct CredentialRoute {
     consumer: SubcConsumer,
     identity: BindIdentity,
-    principal: ConsumerIdentity,
 }
 
 impl CredentialRoute {
     pub async fn connect(path: &Path) -> Result<Self, String> {
-        let nonce = subc_client_rs::launch_nonce()
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "plexus launch nonce absent".to_string())?;
         let consumer = tokio::time::timeout(
             Duration::from_secs(2),
             SubcConsumer::connect(path, ConsumerOptions::default()),
@@ -192,10 +188,6 @@ impl CredentialRoute {
         Ok(Self {
             consumer,
             identity: BindIdentity::new("plexus", "bus"),
-            principal: ConsumerIdentity {
-                module_id: "plexus".into(),
-                launch_nonce: nonce.value().to_owned(),
-            },
         })
     }
 
@@ -212,7 +204,6 @@ impl CredentialRoute {
                 body,
                 CallOptions {
                     timeout: Duration::from_secs(2),
-                    consumer_identity: Some(self.principal.clone()),
                     ..Default::default()
                 },
             )

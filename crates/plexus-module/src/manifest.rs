@@ -210,6 +210,7 @@ pub fn build_with_launch_nonce_source(
     // module claims about itself. A field nobody reads is not documentation,
     // it is an assertion that invites a reader to believe it means something.
     ModuleManifest::builder(module_id, env!("CARGO_PKG_VERSION"))
+        .registration_channel(true)
         // Keep the legacy flow opt-in, flow-scopes/v1, alongside
         // call-modes/v1. Both promise flow behavior: flows never acquire owner
         // consent, and their audit rows retain the flow identity. Call modes
