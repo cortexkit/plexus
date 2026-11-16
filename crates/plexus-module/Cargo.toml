@@ -48,9 +48,10 @@ subc-client-rs = { workspace = true }
 # the crate here makes the workspace's exact pin bind the version.
 subc-os = { workspace = true }
 zeroize = { workspace = true }
-cortexkit-bus-trait = "=0.3.0"
+cortexkit-bus-trait = "=0.3.1"
 cortexkit-bus-naming = "=0.4.0"
-cortexkit-bus-nats = "=0.3.0"
+cortexkit-bus-nats = "=0.5.0"
+cortexkit-bus-client = "=0.1.2"
 async-nats = { version = "0.50", default-features = false, features = ["jetstream", "kv", "nkeys", "nuid", "ring", "server_2_10"] }
 async-trait = "0.1"
 base64 = "0.22"
@@ -64,7 +65,9 @@ plexus-core = { path = "../plexus-core", features = ["test-support"] }
 plexus-module = { path = ".", features = ["test-support"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-cortexkit-bus-inmemory = "=0.3.0"
+cortexkit-bus-inmemory = "=0.4.0"
+cortexkit-bus-testkit = "=0.9.2"
+nkeys = "=0.4.5"
 tokio = { workspace = true, features = ["test-util"] }
 cortexkit-test-support = "=0.1.10"
 # The daemon bootstrap the conformance harness spawns in-process; only the test
