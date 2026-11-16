@@ -5885,6 +5885,7 @@ impl PlexusStore {
                     )?;
                     if relay_activity.is_some()
                         && matches!(outcome, TriggerEventInsertOutcome::Inserted { .. })
+                        && !relay::github_sends_no_webhook(event)
                     {
                         if let Some((identity, time, action)) =
                             event.identity.as_ref().and_then(|identity| {

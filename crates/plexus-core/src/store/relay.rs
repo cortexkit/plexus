@@ -518,7 +518,7 @@ fn paired_watches(conn: &Connection, repo: &str, action: &str) -> rusqlite::Resu
 
 /// The watch action whose polled inserts can prove the relay missed a delivery.
 ///
-/// Only completed CI runs and jobs qualify: GitHub sends exactly one
+/// Only webhook-backed completed CI runs and jobs qualify: GitHub sends one
 /// `workflow_run` or `workflow_job` "completed" webhook for each, and the relay
 /// stores it under the same event key a poll would derive. Issues and pull
 /// requests do not: their `updated_at` also moves on activity the relay
@@ -533,6 +533,15 @@ pub(super) fn poll_coverage_action(event_name: &str) -> Option<&'static str> {
         | crate::event_key::GITHUB_CI_JOB_FAILED => Some("list_workflow_runs"),
         _ => None,
     }
+}
+
+/// GitHub sends no `workflow_run` webhook for a run with a startup failure.
+pub(super) fn github_sends_no_webhook(event: &KeyedPollEventInput<'_>) -> bool {
+    event
+        .identity
+        .as_ref()
+        .is_some_and(|identity| identity.event_name == crate::event_key::GITHUB_CI_RUN_COMPLETED)
+        && event.event.payload["conclusion"] == "startup_failure"
 }
 
 pub(super) fn covers_poll_watch(

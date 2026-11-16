@@ -3180,6 +3180,51 @@ mod tests {
         assert_eq!(observer.0.lock().unwrap().len(), 3);
     }
 
+    fn assert_polled_run_relay_activity(conclusion: &str, expects_relay_activity: bool) {
+        let f = Fixture::new();
+        let run = run(1, 1, f.now, "completed", Some(conclusion));
+        f.add(run.clone(), vec![], true);
+        let observer = Arc::new(RelayInsertRecorder::default());
+        let mut poller = TestPoller::new(f.engine.clone());
+        poller.relay_health = Some(observer.clone());
+        assert_eq!(
+            poller.poll_ci_runs_at(PRINCIPAL, &f.watch(), f.now),
+            PollCycle::Completed {
+                inserted: 1,
+                duplicates: 0
+            }
+        );
+        assert_eq!(
+            f.events(),
+            vec![("ci_run".into(), run.clone(), f.now + 60_000)]
+        );
+        let markers = f.markers();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].event_name, RUN_EVENT);
+        assert_eq!(
+            serde_json::from_str::<Value>(&markers[0].body).unwrap(),
+            run
+        );
+        assert_eq!(
+            *observer.0.lock().unwrap(),
+            if expects_relay_activity {
+                vec![f.now + 60_000]
+            } else {
+                vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn startup_failure_runs_are_stored_without_relay_misses() {
+        assert_polled_run_relay_activity("startup_failure", false);
+    }
+
+    #[test]
+    fn successful_runs_still_count_for_relay_misses() {
+        assert_polled_run_relay_activity("success", true);
+    }
+
     #[test]
     fn carried_over_jobs_are_dropped_without_relay_misses() {
         const TEST: &str =
