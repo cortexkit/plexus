@@ -267,6 +267,58 @@ fn result_of(body: &Value) -> Option<&Value> {
 pub struct DescribeFacts {
     /// The router reads `attempt_outcome` on reports (§16.6).
     pub attempt_outcomes: bool,
+    /// The router durably consumes body-bearing route facts from the bus.
+    pub route_fact_stream: bool,
+}
+
+/// Read only routing's describe capability, never its catalog declaration.
+pub fn routing_advertises_route_fact_stream(facts: DescribeFacts) -> bool {
+    facts.route_fact_stream
+}
+
+/// A body-capable publisher for `plexus.route_fact.v1`, without a reader token.
+/// Success means durable acceptance with `Nats-Msg-Id` equal to `msg_id`.
+/// No production implementation is installed until cortexkit-bus-client's
+/// body-bearing `BusClient::publish_event` is available on the shared connection.
+pub trait RouteFactPublisher: Send + Sync {
+    fn publish_event(
+        &self,
+        event: &str,
+        version: u32,
+        reader: Option<&str>,
+        msg_id: &str,
+        body: &[u8],
+    ) -> Result<(), String>;
+}
+
+/// Outcome and usage reports for one decision must not share a deduplication id.
+/// Only the outcome form is sent here; other forms use direct `route.report` calls.
+pub fn route_report_message_id(params: &Value) -> Option<String> {
+    let decision = params.get("decision_id")?.as_str()?;
+    if decision.is_empty() || !params.get("outcome").is_some_and(Value::is_string) {
+        return None;
+    }
+    Some(format!("{decision}:outcome"))
+}
+
+/// Drain outside the search path; a failed publish leaves the row for retry.
+pub fn drain_route_facts(
+    store: &crate::PlexusStore,
+    publisher: &dyn RouteFactPublisher,
+    limit: usize,
+) -> Result<usize, String> {
+    let rows = store
+        .pending_route_facts(limit)
+        .map_err(|error| error.to_string())?;
+    let mut published = 0;
+    for row in rows {
+        publisher.publish_event("route_fact", 1, None, &row.msg_id, row.body.as_bytes())?;
+        store
+            .delete_published_route_fact(&row.msg_id)
+            .map_err(|error| error.to_string())?;
+        published += 1;
+    }
+    Ok(published)
 }
 
 /// Check a `role.describe` reply: the router must be a version 1 routing
@@ -304,6 +356,7 @@ pub fn read_describe_reply(
     }
     Ok(DescribeFacts {
         attempt_outcomes: listed("capabilities", ATTEMPT_OUTCOMES_GROUP),
+        route_fact_stream: listed("capabilities", "route_fact_stream"),
     })
 }
 

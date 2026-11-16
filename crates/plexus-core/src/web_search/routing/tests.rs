@@ -46,7 +46,8 @@ fn describe_must_serve_search_selection() {
     assert_eq!(
         read_describe_reply(Ok(json!({"result": serving.clone()}))),
         Ok(DescribeFacts {
-            attempt_outcomes: true
+            attempt_outcomes: true,
+            route_fact_stream: false,
         })
     );
     let mut legacy_reports = serving.clone();
@@ -59,7 +60,8 @@ fn describe_must_serve_search_selection() {
     assert_eq!(
         read_describe_reply(Ok(json!({"result": legacy_reports}))),
         Ok(DescribeFacts {
-            attempt_outcomes: false
+            attempt_outcomes: false,
+            route_fact_stream: false,
         })
     );
     for (member, value) in [
@@ -85,6 +87,41 @@ fn describe_must_serve_search_selection() {
     assert!(
         read_describe_reply(Ok(serving)).is_err(),
         "a bare answer is not a reply"
+    );
+}
+
+#[test]
+fn describe_reads_route_fact_stream_only_from_capabilities() {
+    let mut answer = fake::FakeRouter::serving_search_describe();
+    assert!(!routing_advertises_route_fact_stream(
+        read_describe_reply(Ok(json!({"result":answer}))).unwrap()
+    ));
+    answer["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("route_fact_stream"));
+    assert!(routing_advertises_route_fact_stream(
+        read_describe_reply(Ok(json!({"result":answer}))).unwrap()
+    ));
+}
+
+#[test]
+fn outcome_report_message_ids_include_the_delivery_key() {
+    assert_eq!(
+        route_report_message_id(&report_params("dec", AttemptStatus::Served, true)),
+        Some("dec:outcome".into())
+    );
+    assert_eq!(
+        route_report_message_id(&report_params("dec", AttemptStatus::Served, false)),
+        Some("dec:outcome".into())
+    );
+    assert_eq!(
+        route_report_message_id(&json!({"decision_id":"dec", "usage":{}})),
+        None
+    );
+    assert_eq!(
+        route_report_message_id(&json!({"outcome":"completed"})),
+        None
     );
 }
 

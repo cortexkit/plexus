@@ -96,19 +96,13 @@ fn sweep_retired_agents_with_budget(
         agents.rotate_left(start);
     }
     for (index, agent_id) in agents.iter().enumerate() {
-        match registry.lookup(agent_id) {
-            AgentLookup::Retired => {
-                if let Err(error) = store
-                    .retire_github_agent(agent_id)
-                    .and_then(|()| revoke_agent(store, agent_id, &mut sweep))
-                {
-                    sweep.revocation_failures += 1;
-                    eprintln!(warn governance: "retired agent {agent_id:?}: cleanup failed: {error}");
-                }
-                sweep.agents_gone.push(agent_id.clone());
+        match check_agent(store, registry, agent_id, &mut sweep) {
+            Ok(true) => {}
+            Err(error) => {
+                sweep.revocation_failures += 1;
+                eprintln!(warn governance: "retired agent {agent_id:?}: cleanup failed: {error}");
             }
-            AgentLookup::Known | AgentLookup::Unknown => {}
-            AgentLookup::Unavailable => {
+            Ok(false) => {
                 // The sweep runs inline in the scheduler pass, and a lookup
                 // that goes unanswered has already waited out the route call's
                 // full timeout (30 s by default). Asking every remaining agent
@@ -126,6 +120,35 @@ fn sweep_retired_agents_with_budget(
         }
     }
     Ok(sweep)
+}
+
+/// Re-resolve one wake's agent through the registry. False means retry without ack.
+pub fn check_retired_agent(
+    store: &PlexusStore,
+    registry: &dyn AgentRegistry,
+    agent_id: &str,
+) -> Result<bool, StoreError> {
+    let mut sweep = RetirementSweep::default();
+    let complete = check_agent(store, registry, agent_id, &mut sweep)?;
+    Ok(complete && sweep.revocation_failures == 0)
+}
+
+fn check_agent(
+    store: &PlexusStore,
+    registry: &dyn AgentRegistry,
+    agent_id: &str,
+    sweep: &mut RetirementSweep,
+) -> Result<bool, StoreError> {
+    match registry.lookup(agent_id) {
+        AgentLookup::Unavailable => Ok(false),
+        AgentLookup::Known | AgentLookup::Unknown => Ok(true),
+        AgentLookup::Retired => {
+            sweep.agents_gone.push(agent_id.to_owned());
+            store.retire_github_agent(agent_id)?;
+            revoke_agent(store, agent_id, sweep)?;
+            Ok(true)
+        }
+    }
 }
 
 fn revoke_agent(

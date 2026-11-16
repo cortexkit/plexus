@@ -38,6 +38,8 @@ const TABLES: &[&str] = &[
     // that was not yet published is still published from the new store.
     "event_outbox",
     "event_outbox_failures",
+    // Router reports have no connection authority or foreign keys to scrub.
+    "route_fact_outbox",
     // Where the webhook relay stream was committed, so delivery resumes
     // instead of replaying or skipping.
     "relay_cursor",

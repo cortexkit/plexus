@@ -4,6 +4,32 @@ const BODY: &str = r#"{"number":1.0,"\ue000":1,"😀":2}"#;
 const LEGACY_HASH: &str = "sha256:0c7b15c538e300d7538923c11a6c3bf905197b3d66498688e84a75d4810ff80b";
 const CREDENTIAL: &[u8] = b"plexus:vault-reference:v1\0apikey:fixture";
 
+#[test]
+fn route_fact_reports_survive_store_cutover() {
+    let f = Fixture::new();
+    let source = open_sqlite(&descriptor(&f.from).unwrap()).unwrap();
+    source.migrate("plexus", MIGRATIONS).unwrap();
+    let body = r#"{"op":"route.report","params":{"decision_id":"d","outcome":"completed"}}"#;
+    source.with_conn(|conn| {
+        conn.execute("INSERT INTO route_fact_outbox(msg_id,body,created_at_ms) VALUES('d:outcome',?1,123)", [body])?;
+        Ok(())
+    }).unwrap();
+    drop(source);
+    let report = f.import();
+    let carried = report
+        .iter()
+        .find(|row| row.table == "route_fact_outbox")
+        .unwrap();
+    assert_eq!((carried.read, carried.carried, carried.scrubbed), (1, 1, 0));
+    assert_eq!(
+        scalar::<String>(
+            &f.destination(),
+            "SELECT body FROM route_fact_outbox WHERE msg_id='d:outcome'"
+        ),
+        body
+    );
+}
+
 struct Fixture {
     // Under the shared test scratch root, so a killed run's leftovers are swept
     // by age like every other test's and never land in the source tree.

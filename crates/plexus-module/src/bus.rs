@@ -417,6 +417,9 @@ async fn connect_with_signer(
 #[async_trait]
 #[allow(clippy::double_must_use)]
 pub trait EventPublisher: Send + Sync {
+    fn connection(&self) -> Option<NatsConnection> {
+        None
+    }
     async fn publish(
         &self,
         subject: &str,
@@ -434,6 +437,9 @@ pub struct NatsEventPublisher {
 
 #[async_trait]
 impl EventPublisher for NatsEventPublisher {
+    fn connection(&self) -> Option<NatsConnection> {
+        Some(self.connection.clone())
+    }
     async fn publish(
         &self,
         subject: &str,
@@ -881,10 +887,12 @@ pub(crate) struct BusSession {
     publisher: Box<dyn EventPublisher>,
     route: Option<Arc<dyn CredentialProvider>>,
     _transport: Option<SessionRuntime>,
+    wakes: Option<crate::bus_wakes::WakeTask>,
 }
 
 impl Drop for BusSession {
     fn drop(&mut self) {
+        drop(self.wakes.take());
         // Stop the transport before dropping the last client sender: sender
         // closure must not give the library a chance to flush queued commands.
         drop(self._transport.take());
@@ -894,6 +902,9 @@ impl Drop for BusSession {
 #[async_trait]
 #[allow(clippy::double_must_use)]
 pub(crate) trait SessionFactory: Send + Sync {
+    fn needs_idle_session(&self) -> bool {
+        false
+    }
     async fn open(&self) -> Result<BusSession, String>;
     async fn renew(&self, session: &mut BusSession) -> Result<(), String>;
 }
@@ -934,11 +945,15 @@ async fn build_session(
         }),
         route: Some(route),
         _transport: Some(transport),
+        wakes: None,
     })
 }
 
 #[async_trait]
 impl SessionFactory for ProductionSessions {
+    fn needs_idle_session(&self) -> bool {
+        true
+    }
     async fn open(&self) -> Result<BusSession, String> {
         let path = self.path.as_ref().ok_or("ckbus_connection_file_absent")?;
         let route = Arc::new(CredentialRoute::connect(path).await?);
@@ -992,6 +1007,7 @@ pub(crate) fn spawn_outbox_drain(
         let mut session: Option<BusSession> = None;
         let mut delay = Duration::ZERO;
         let mut failures = 0u32;
+        let mut wake_setup_logged = false;
         let mut claim = state.runtime.connector_home.decisions();
         loop {
             tokio::select! {
@@ -1009,15 +1025,42 @@ pub(crate) fn spawn_outbox_drain(
                 continue;
             }
             let work = async {
-                if !outbox_has_pending(state.store()).await? {
+                let pending = outbox_has_pending(state.store()).await?;
+                if !pending && !factory.needs_idle_session() {
                     return Ok(0);
                 }
                 if session.is_none() {
-                    session = Some(factory.open().await?);
+                    session = Some(factory.open().await.map_err(|error| {
+                        if pending {
+                            error
+                        } else {
+                            "wake_only_bus_unavailable".into()
+                        }
+                    })?);
                 }
                 let active = session.as_mut().expect("opened session");
                 if active.credential.exp.saturating_sub(now_ms() / 1000) < 300 {
-                    factory.renew(active).await?;
+                    factory.renew(active).await.map_err(|error| {
+                        if pending {
+                            error
+                        } else {
+                            "wake_only_bus_unavailable".into()
+                        }
+                    })?;
+                }
+                if active.wakes.is_none() {
+                    // Share the held session and its claim-loss teardown. Loss wakes
+                    // refresh promptly; acquisition still uses connector-home's 30 s role.read tick.
+                    if let Some(connection) = active.publisher.connection() {
+                        active.wakes = Some(crate::bus_wakes::spawn_change_watch(
+                            state.clone(),
+                            connection,
+                            &active.account,
+                        )?);
+                    }
+                }
+                if !outbox_has_pending(state.store()).await? {
+                    return Ok(0);
                 }
                 let result = drain_pass_skipping(
                     state.store(),
@@ -1057,7 +1100,16 @@ pub(crate) fn spawn_outbox_drain(
                         session = None;
                     }
                     if error != "connector_home_not_held" {
-                        state.health.record_publish_error(error);
+                        if error == "wake_only_bus_unavailable" {
+                            // Optional wakes cannot degrade an idle publisher's health.
+                            state.health.clear_publish_error();
+                            if !wake_setup_logged {
+                                plexus_core::diag!(info bus: "change watch setup unavailable; timers remain active");
+                                wake_setup_logged = true;
+                            }
+                        } else {
+                            state.health.record_publish_error(error);
+                        }
                         failures = failures.saturating_add(1);
                         delay = reconnect_backoff(failures);
                     }

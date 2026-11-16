@@ -504,6 +504,9 @@ where
             }
         };
         if event_retention_due {
+            if let Err(error) = self.store.prune_route_facts(now_ms) {
+                eprintln!(warn scheduler: "route fact retention failed: {error}");
+            }
             match self.store.prune_all_events(
                 crate::poller::UNACKED_MAX_AGE_MS,
                 crate::poller::UNACKED_MAX_ROWS,

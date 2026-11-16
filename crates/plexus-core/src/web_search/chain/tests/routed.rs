@@ -7,6 +7,141 @@ use crate::web_search::routing::fake::{FakeMode, FakeRouter};
 use crate::web_search::routing::RouteRef;
 use std::sync::atomic::AtomicI64;
 
+#[derive(Default)]
+struct BodyPublisher(std::sync::Mutex<Vec<(String, Value)>>);
+impl routing::RouteFactPublisher for BodyPublisher {
+    fn publish_event(
+        &self,
+        event: &str,
+        version: u32,
+        reader: Option<&str>,
+        msg_id: &str,
+        body: &[u8],
+    ) -> Result<(), String> {
+        assert_eq!((event, version, reader), ("route_fact", 1, None));
+        self.0
+            .lock()
+            .unwrap()
+            .push((msg_id.into(), serde_json::from_slice(body).unwrap()));
+        Ok(())
+    }
+}
+
+#[test]
+fn route_reports_call_until_advertised_then_return_to_dual_delivery() {
+    let (engine, transport) = super::super::super::tests::granted_exa_engine("routed-stream");
+    transport.set_response(hit());
+    let router = router(&["exa"]);
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let publisher = Arc::new(BodyPublisher::default());
+    let service = routed_service(&router, &clock).with_route_fact_publisher(publisher.clone());
+    search(&service, &engine, "direct").unwrap();
+    assert_eq!(router.params("route.report").len(), 1);
+    let row = engine.store().pending_route_facts(10).unwrap().remove(0);
+    assert_eq!(row.msg_id, "dec_000000000000:outcome");
+    assert_eq!(
+        serde_json::from_str::<Value>(&row.body).unwrap(),
+        json!({"op":"route.report", "params":router.params("route.report")[0]})
+    );
+
+    let mut describe = FakeRouter::serving_search_describe();
+    describe["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("route_fact_stream"));
+    router.set_describe(describe);
+    clock.store(NOW + routing::DESCRIBE_TTL_MS, Ordering::SeqCst);
+    service
+        .search(
+            &engine,
+            "direct",
+            json!({"query":"different query"}).as_object().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(router.params("route.report").len(), 1);
+    assert_eq!(engine.store().pending_route_facts(10).unwrap().len(), 2);
+    assert!(
+        publisher.0.lock().unwrap().is_empty(),
+        "search waited on publication"
+    );
+
+    router.set_describe(FakeRouter::serving_search_describe());
+    clock.store(NOW + 2 * routing::DESCRIBE_TTL_MS, Ordering::SeqCst);
+    service
+        .search(
+            &engine,
+            "direct",
+            json!({"query":"third query"}).as_object().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(router.params("route.report").len(), 2);
+    assert_eq!(service.drain_route_facts(engine.store(), 10).unwrap(), 3);
+    assert!(engine.store().pending_route_facts(1).unwrap().is_empty());
+    assert_eq!(publisher.0.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn missing_publisher_and_failed_insert_keep_reports_call_only() {
+    let (engine, _) = super::super::super::tests::granted_exa_engine("routed-stream-fallback");
+    let router = router(&["exa"]);
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let service = routed_service(&router, &clock);
+    let facts = routing::DescribeFacts {
+        attempt_outcomes: true,
+        route_fact_stream: true,
+    };
+    service.report_attempt(
+        engine.store(),
+        router.as_ref(),
+        "no-publisher",
+        routing::AttemptStatus::Served,
+        facts,
+        None,
+    );
+    assert_eq!(router.params("route.report").len(), 1);
+    assert!(engine.store().pending_route_facts(1).unwrap().is_empty());
+
+    engine.store().fail_route_fact_insert_for_test();
+    let service = service.with_route_fact_publisher(Arc::new(BodyPublisher::default()));
+    service.report_attempt(
+        engine.store(),
+        router.as_ref(),
+        "failed-insert",
+        routing::AttemptStatus::Served,
+        facts,
+        None,
+    );
+    assert_eq!(router.params("route.report").len(), 2);
+    assert!(engine.store().pending_route_facts(1).unwrap().is_empty());
+}
+
+#[test]
+fn unreachable_describe_preserves_last_stream_advertisement() {
+    let router = router(&["exa"]);
+    let mut describe = FakeRouter::serving_search_describe();
+    describe["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("route_fact_stream"));
+    router.set_describe(describe);
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let service = routed_service(&router, &clock);
+    assert!(
+        service
+            .routing_facts(router.as_ref(), Duration::from_secs(1))
+            .unwrap()
+            .route_fact_stream
+    );
+    router.set_mode(FakeMode::Unreachable);
+    clock.store(NOW + routing::DESCRIBE_TTL_MS, Ordering::SeqCst);
+    assert!(
+        service
+            .routing_facts(router.as_ref(), Duration::from_secs(1))
+            .unwrap()
+            .route_fact_stream
+    );
+}
+
 fn route(provider: &str) -> Value {
     json!({"model": "search", "provider": provider})
 }

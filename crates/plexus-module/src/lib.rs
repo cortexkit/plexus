@@ -21,6 +21,7 @@ macro_rules! eprintln {
 #[path = "../../plexus-core/tests/support/bounded.rs"]
 mod bounded;
 pub mod bus;
+pub mod bus_wakes;
 pub mod ceremony;
 mod composite_admin;
 pub mod composition;

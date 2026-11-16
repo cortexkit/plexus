@@ -278,32 +278,53 @@ impl WebSearchService {
                 return Ok(facts);
             }
         }
-        let facts =
-            routing::read_describe_reply(peer.call("role.describe", json!({}), None, timeout))?;
+        let reply = peer.call("role.describe", json!({}), None, timeout);
+        if matches!(reply, Err(routing::RoutingCallError::Unreachable(_))) {
+            if let Some((_, facts)) = *cached {
+                return Ok(facts);
+            }
+        }
+        let facts = routing::read_describe_reply(reply)?;
         *cached = Some((now.saturating_add(routing::DESCRIBE_TTL_MS), facts));
         Ok(facts)
     }
 
-    fn forget_routing_facts(&self) {
-        *self
+    fn expire_routing_facts(&self) {
+        let mut cached = self
             .routing_describe
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((until, _)) = cached.as_mut() {
+            *until = i64::MIN;
+        }
     }
 
     /// Tell routing how one attempt that reached (or may have reached) the
-    /// vendor ended. A failed report is logged and changes nothing here.
+    /// vendor ended. Searches never wait for a stream publish.
     fn report_attempt(
         &self,
+        store: &PlexusStore,
         peer: &dyn RoutingPeer,
         decision_id: &str,
         status: routing::AttemptStatus,
         facts: routing::DescribeFacts,
         scope: Option<&crate::scope::CallScope>,
     ) {
+        let params = routing::report_params(decision_id, status, facts.attempt_outcomes);
+        // A crash after dispatch audit but before this insert can lose one report, as today's call can.
+        let queued = self.route_fact_publisher.is_some() && routing::route_report_message_id(&params).is_some_and(|msg_id| match store.enqueue_route_fact(&msg_id, &params, crate::storage::now_ms()) {
+            Ok(queued) => queued,
+            Err(error) => {
+                eprintln!(warn web_search: "route fact enqueue for {decision_id} failed: {error}");
+                false
+            }
+        });
+        if queued && routing::routing_advertises_route_fact_stream(facts) {
+            return;
+        }
         if let Err(error) = peer.call(
             "route.report",
-            routing::report_params(decision_id, status, facts.attempt_outcomes),
+            params,
             scope,
             routing::ROUTING_REPORT_TIMEOUT,
         ) {
@@ -572,7 +593,7 @@ impl WebSearchService {
                     break;
                 }
                 routing::SelectOutcome::Unavailable(why) => {
-                    self.forget_routing_facts();
+                    self.expire_routing_facts();
                     eprintln!(warn web_search: "web_search route.select failed: {why}");
                     return Err(WebSearchRefusal::RoutingUnavailable);
                 }
@@ -825,6 +846,7 @@ impl WebSearchService {
             })();
             if let Some(status) = report {
                 self.report_attempt(
+                    engine.store(),
                     peer,
                     &selection.decision_id,
                     status,

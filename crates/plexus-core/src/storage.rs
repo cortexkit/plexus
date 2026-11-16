@@ -1300,6 +1300,17 @@ CREATE UNIQUE INDEX github_manifest_proposal_id ON github_manifest_binding(propo
         version: 61,
         statements: include_str!("federated_schema.sql"),
     },
+    Migration {
+        version: 62,
+        statements: r#"
+CREATE TABLE route_fact_outbox (
+    msg_id TEXT PRIMARY KEY NOT NULL,
+    body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 4096),
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX route_fact_outbox_age ON route_fact_outbox(created_at_ms, msg_id);
+"#,
+    },
 ];
 
 /// The backfill half of migration 48, shared with the store import so a store
@@ -1354,6 +1365,8 @@ pub mod relay;
 
 #[path = "store/event_outbox.rs"]
 pub mod event_outbox;
+#[path = "store/route_fact_outbox.rs"]
+pub mod route_fact_outbox;
 pub use event_outbox::{
     EventHeaders, KeyedEventIdentity, KeyedPollEventInput, OutboxVersion, PollGapInput,
 };

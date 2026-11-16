@@ -905,6 +905,7 @@ impl SessionFactory for FixtureSessions {
         }
         self.opened.notify_one();
         Ok(BusSession {
+            wakes: None,
             credential: credential("nats://localhost:4222".into()),
             account: AccountNames::derive("box_test").unwrap(),
             publisher: Box::new(FlipPublisher {
@@ -1071,6 +1072,7 @@ impl SessionFactory for CountingSessions {
         // including empty passes that never call the publisher.
         credential.exp = 0;
         Ok(BusSession {
+            wakes: None,
             credential,
             account: AccountNames::derive("box_test").unwrap(),
             publisher: Box::new(self.publisher.clone()),
@@ -1092,6 +1094,43 @@ const OUTBOX_WAKE_DEADLINE: Duration = Duration::from_secs(3);
 const OUTBOX_DRAIN_DEADLINE: Duration = Duration::from_secs(20);
 
 #[tokio::test]
+async fn idle_reader_setup_failure_keeps_publisher_healthy() {
+    struct MissingReaderSession(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl SessionFactory for MissingReaderSession {
+        fn needs_idle_session(&self) -> bool {
+            true
+        }
+        async fn open(&self) -> Result<BusSession, String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("nats_connect_failed".into())
+        }
+        async fn renew(&self, _: &mut BusSession) -> Result<(), String> {
+            unreachable!()
+        }
+    }
+    let (_scratch, store) = test_store("idle-reader-missing");
+    let state = Arc::new(ModuleState {
+        runtime: crate::runtime_for_test(store),
+        health: Arc::new(crate::health::HealthState::new()),
+    });
+    let factory = Arc::new(MissingReaderSession(std::sync::atomic::AtomicUsize::new(0)));
+    let (shutdown, stop) = mpsc::channel(1);
+    let task = spawn_outbox_drain(state.clone(), stop, factory.clone());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while factory.0.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(state.health.last_publish_error().is_none());
+    assert!(!task.is_finished());
+    shutdown.send(()).await.unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn idle_without_a_bus_is_healthy_pending_failure_degrades_and_publish_recovers() {
     struct OutageSessions {
         ready: std::sync::atomic::AtomicBool,
@@ -1106,6 +1145,7 @@ async fn idle_without_a_bus_is_healthy_pending_failure_degrades_and_publish_reco
                 return Err("nats_connect_failed".into());
             }
             Ok(BusSession {
+                wakes: None,
                 credential: credential("nats://127.0.0.1:4222".into()),
                 account: AccountNames::derive("box_test").unwrap(),
                 publisher: Box::new(self.publisher.clone()),

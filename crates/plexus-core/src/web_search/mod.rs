@@ -249,6 +249,7 @@ pub struct WebSearchService {
     /// The last `role.describe` answer that served search, with the clock
     /// time until which it is trusted.
     routing_describe: std::sync::Mutex<Option<(i64, routing::DescribeFacts)>>,
+    route_fact_publisher: Option<Arc<dyn routing::RouteFactPublisher>>,
     /// When plexus last added a route to its routing declaration, on this
     /// service's clock; see [`routing::DECLARATION_GRACE_MS`].
     routes_added_at_ms: std::sync::atomic::AtomicI64,
@@ -282,6 +283,7 @@ impl WebSearchService {
             chain_cooldowns: Default::default(),
             router: None,
             routing_describe: Default::default(),
+            route_fact_publisher: None,
             routes_added_at_ms: std::sync::atomic::AtomicI64::new(i64::MIN),
             #[cfg(any(test, feature = "test-support"))]
             stored_order_router: false,
@@ -302,6 +304,24 @@ impl WebSearchService {
     pub fn with_router(mut self, router: Arc<dyn routing::RoutingPeer>) -> Self {
         self.router = Some(router);
         self
+    }
+
+    /// Enable durable reports only when a body-capable drainer is installed.
+    /// Production sends only direct `route.report` calls until cortexkit-bus-client's
+    /// body publisher is wired.
+    pub fn with_route_fact_publisher(
+        mut self,
+        publisher: Arc<dyn routing::RouteFactPublisher>,
+    ) -> Self {
+        self.route_fact_publisher = Some(publisher);
+        self
+    }
+
+    pub fn drain_route_facts(&self, store: &PlexusStore, limit: usize) -> Result<usize, String> {
+        match self.route_fact_publisher.as_deref() {
+            Some(publisher) => routing::drain_route_facts(store, publisher, limit),
+            None => Ok(0),
+        }
     }
 
     /// A test service that, with no router set, chooses providers in the
