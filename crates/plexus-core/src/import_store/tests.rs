@@ -577,7 +577,8 @@ fn production_v23_round_trip_dispositions_and_routing() {
             | "web_search_auto_connections"
             | "federated_rows"
             | "federated_card_records"
-            | "federated_processed_cards" => (0, 0, 0),
+            | "federated_processed_cards"
+            | "route_fact_outbox" => (0, 0, 0),
             _ => (1, 1, 0),
         };
         assert_eq!(
