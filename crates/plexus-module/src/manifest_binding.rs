@@ -33,12 +33,24 @@ fn spawn_every(
         let mut watch: Option<plexus_core::credentials::CkcredWatch> = None;
         let mut last_discovery = None;
         let mut last_watch_attempt = None;
+        let mut last_bus_pass = None;
+        let mut bus_pending = false;
         let mut tick = tokio::time::interval(interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let event = tokio::select! {
                 biased;
                 _ = stop.recv() => break,
+                _ = state.runtime.manifest_binding_wake.notified() => {
+                    bus_pending = true;
+                    continue;
+                },
+                _ = tokio::time::sleep_until(last_bus_pass.unwrap_or_else(tokio::time::Instant::now)), if bus_pending => {
+                    bus_pending = false;
+                    last_bus_pass = Some(tokio::time::Instant::now() + Duration::from_secs(10));
+                    last_discovery = None;
+                    None
+                },
                 _ = tick.tick() => None,
                 value = async {
                     match watch.as_mut() {
@@ -162,6 +174,56 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bus_wake_runs_one_coalesced_discovery_pass_before_the_timer() {
+        let store = Arc::new(crate::test_support::open_memory_store(
+            "manifest-bus-worker",
+        ));
+        store
+            .put_github_handle(&plexus_core::storage::github_store::GithubHandle {
+                app_handle_id: "test-app".into(),
+                agent_id: "test-agent".into(),
+                app_id: 7,
+                installation_id: None,
+                credential_reference: "github_app:test-app".into(),
+                credential_generation: 1,
+                status: "enabled".into(),
+                proven_at: None,
+                connection_principal: "direct".into(),
+                connection_id: "test-connection".into(),
+            })
+            .unwrap();
+        let mut runtime = crate::runtime_for_test(store);
+        let reader = Arc::new(Reader(AtomicUsize::new(0)));
+        runtime.vault_peer = Some(Arc::new(Vault {
+            watches: Mutex::new(vec![]),
+        }));
+        runtime.github_control_reader = Some(reader.clone());
+        runtime.github_handle_credentials =
+            Some(crate::consent_test_support::anonymous_handle_credentials());
+        runtime.engine = runtime
+            .engine
+            .with_consent_cards(crate::consent_test_support::pending_cards());
+        let state = Arc::new(ModuleState {
+            runtime,
+            health: Arc::new(crate::health::HealthState::new()),
+        });
+        let (stop, rx) = mpsc::channel(1);
+        let task = spawn_every(state.clone(), rx, Duration::from_secs(60 * 60));
+        until(|| reader.0.load(Ordering::SeqCst) == 1).await;
+        state.runtime.manifest_binding_wake.notify_one();
+        state.runtime.manifest_binding_wake.notify_one();
+        until(|| reader.0.load(Ordering::SeqCst) == 2).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            reader.0.load(Ordering::SeqCst),
+            2,
+            "one discovery consumes a burst"
+        );
+        stop.send(()).await.unwrap();
+        task.await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

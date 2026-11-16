@@ -7,24 +7,20 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
     future::Future,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use async_trait::async_trait;
-use base64::Engine;
+use cortexkit_bus_client::{BusClient, BusClientOptions};
 use cortexkit_bus_naming::AccountNames;
-use cortexkit_bus_nats::{ConnectConfig, NatsConnection};
+use cortexkit_bus_nats::NatsConnection;
 use cortexkit_bus_trait::{BusError, ContentDigest, Headers, PublishReceipt, Stream};
 use plexus_core::storage::event_outbox::{OutboxCursor, OutboxVersion};
 use plexus_core::{event_key::PUBLISHED_EVENTS, storage::now_ms, EventHeaders, PlexusStore};
-use serde::Deserialize;
-use serde_json::{json, Value};
-use subc_client_rs::{CallOptions, ConsumerOptions, SubcConsumer};
-use subc_protocol::{BindIdentity, RouteTarget};
+use subc_client_rs::{ConsumerOptions, SubcConsumer};
 use tokio::sync::mpsc;
 
 use tracing_subscriber::layer::SubscriberExt;
@@ -39,12 +35,6 @@ fn session_reusable(error: &str) -> bool {
         error,
         "nats_publish_refused" | "nats_publish_clamped" | "nats_publish_capacity"
     )
-}
-
-fn zeroizing_string<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<zeroize::Zeroizing<String>, D::Error> {
-    String::deserialize(deserializer).map(zeroize::Zeroizing::new)
 }
 
 const OWN_CRATE_NAMES: &[&str] = &[
@@ -78,332 +68,6 @@ pub(crate) fn init_logger_from_env() -> Result<cortexkit_log::Handle, cortexkit_
     Ok(handle)
 }
 
-/// NATS credential issued by ck-bus through the module supervisor.
-/// Secret material (`jwt`, `credential_public`) is deliberately omitted from `Debug`.
-#[derive(Clone, Deserialize)]
-pub struct Credential {
-    #[serde(deserialize_with = "zeroizing_string")]
-    pub jwt: zeroize::Zeroizing<String>,
-    pub exp: i64,
-    pub acct: String,
-    pub account_public: String,
-    pub inbox_prefix: String,
-    pub server_url: String,
-    pub credential_public: String,
-    pub user_jwt_id: String,
-    pub spawn_generation: u64,
-    pub credential_epoch: u64,
-}
-
-impl fmt::Debug for Credential {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Credential")
-            .field("acct", &self.acct)
-            .field("account_public", &self.account_public)
-            .field("server_url", &self.server_url)
-            .field("user_jwt_id", &self.user_jwt_id)
-            .field("spawn_generation", &self.spawn_generation)
-            .field("credential_epoch", &self.credential_epoch)
-            .field("exp", &self.exp)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Credential {
-    pub fn validate(&self) -> Result<(), String> {
-        AccountNames::derive(&self.acct).map_err(|_| "ckbus_invalid_account")?;
-        let config =
-            ConnectConfig::new(&self.credential_public).map_err(|_| "ckbus_invalid_key")?;
-        if config.inbox_prefix() != self.inbox_prefix {
-            return Err("ckbus inbox prefix mismatch".into());
-        }
-        let address = self
-            .server_url
-            .parse::<async_nats::ServerAddr>()
-            .map_err(|_| "ckbus_invalid_server_url")?;
-        let is_local = address.scheme() == "nats"
-            && address.username().is_none()
-            && address.password().is_none()
-            && matches!(address.host(), "127.0.0.1" | "localhost" | "::1");
-        if !is_local {
-            return Err("ckbus server must be local loopback".into());
-        }
-        if self.exp <= (now_ms() / 1000) {
-            return Err("expired ckbus credential".into());
-        }
-        Ok(())
-    }
-}
-
-#[derive(Deserialize)]
-struct Renewal {
-    #[serde(deserialize_with = "zeroizing_string")]
-    jwt: zeroize::Zeroizing<String>,
-    exp: i64,
-    credential_public: String,
-    user_jwt_id: String,
-    spawn_generation: u64,
-    credential_epoch: u64,
-}
-
-impl fmt::Debug for Renewal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Renewal")
-            .field("exp", &self.exp)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Credential {
-    fn apply(&mut self, renew: Renewal) -> Result<(), String> {
-        if renew.credential_public != self.credential_public
-            || renew.spawn_generation != self.spawn_generation
-            || renew.credential_epoch != self.credential_epoch
-            || renew.exp <= self.exp
-        {
-            return Err("ckbus renewal identity or expiry mismatch".into());
-        }
-        self.jwt = renew.jwt;
-        self.exp = renew.exp;
-        self.user_jwt_id = renew.user_jwt_id;
-        Ok(())
-    }
-}
-
-/// Calls ck-bus at the `ckbus` module route over subc to issue and renew credentials.
-pub struct CredentialRoute {
-    consumer: SubcConsumer,
-    identity: BindIdentity,
-}
-
-impl CredentialRoute {
-    pub async fn connect(path: &Path) -> Result<Self, String> {
-        let consumer = tokio::time::timeout(
-            Duration::from_secs(2),
-            SubcConsumer::connect(path, ConsumerOptions::default()),
-        )
-        .await
-        .map_err(|_| "ckbus route connect timeout".to_string())?
-        .map_err(|e| e.to_string())?;
-        Ok(Self {
-            consumer,
-            identity: BindIdentity::new("plexus", "bus"),
-        })
-    }
-
-    async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
-        let body = serde_json::to_vec(&json!({"method": method, "params": params}))
-            .map_err(|_| "ckbus_request_encode_failed")?;
-        let reply = self
-            .consumer
-            .call(
-                RouteTarget::ManagementSurface {
-                    module_id: "ckbus".into(),
-                },
-                self.identity.clone(),
-                body,
-                CallOptions {
-                    timeout: Duration::from_secs(2),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|error| trusted_refusal_code(error.code()).to_string())?;
-        let value: Value = serde_json::from_slice(&reply).map_err(|_| "ckbus_invalid_json")?;
-        credential_result(value)
-    }
-
-    pub async fn issue(&self) -> Result<Credential, String> {
-        let credential: Credential =
-            serde_json::from_value(self.call("ckbus.credential", json!({})).await?)
-                .map_err(|_| "ckbus_invalid_credential")?;
-        credential.validate()?;
-        Ok(credential)
-    }
-
-    pub async fn sign(&self, key: &str, nonce: &[u8]) -> Result<Vec<u8>, String> {
-        let value = self
-            .call(
-                "ckbus.nonce_sign",
-                json!({
-                    "credential_public": key,
-                    "nonce_b64": base64::engine::general_purpose::STANDARD.encode(nonce),
-                }),
-            )
-            .await?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(
-                value["signature_b64"]
-                    .as_str()
-                    .ok_or_else(|| "ckbus signature absent".to_string())?,
-            )
-            .map_err(|_| "ckbus_invalid_signature")?;
-        if bytes.len() != 64 {
-            return Err("ckbus signature must be 64 bytes".into());
-        }
-        Ok(bytes)
-    }
-}
-
-type SignFuture<'a> = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send + Sync + 'a>,
->;
-trait NonceSigner: Send + Sync {
-    fn sign<'a>(&'a self, key: &'a str, nonce: &'a [u8]) -> SignFuture<'a>;
-}
-
-impl NonceSigner for CredentialRoute {
-    fn sign<'a>(&'a self, key: &'a str, nonce: &'a [u8]) -> SignFuture<'a> {
-        // The consumer's stream future is Send but not Sync; NATS requires its
-        // auth future to be both. Lock only while polling, preserving cancellation.
-        let future = Mutex::new(Box::pin(CredentialRoute::sign(self, key, nonce)));
-        Box::pin(std::future::poll_fn(move |cx| {
-            future
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .as_mut()
-                .poll(cx)
-        }))
-    }
-}
-
-#[async_trait]
-#[allow(clippy::double_must_use)]
-trait CredentialProvider: NonceSigner {
-    async fn issue(&self) -> Result<Credential, String>;
-    async fn renewal(&self, credential: &Credential) -> Result<Renewal, String>;
-}
-
-#[async_trait]
-impl CredentialProvider for CredentialRoute {
-    async fn issue(&self) -> Result<Credential, String> {
-        CredentialRoute::issue(self).await
-    }
-    async fn renewal(&self, credential: &Credential) -> Result<Renewal, String> {
-        let value = self
-            .call(
-                "ckbus.credential_renew",
-                json!({"credential_public":credential.credential_public}),
-            )
-            .await?;
-        serde_json::from_value(value).map_err(|_| "ckbus_invalid_renewal".into())
-    }
-}
-
-async fn renew_credential(
-    provider: &(impl CredentialProvider + ?Sized),
-    credential: &mut Credential,
-) -> Result<(), String> {
-    match provider.renewal(credential).await {
-        Ok(renewal) => credential.apply(renewal)?,
-        Err(error) if fresh_required(&error) => *credential = provider.issue().await?,
-        Err(error) => return Err(error),
-    }
-    credential.validate()
-}
-
-fn trusted_refusal_code(code: Option<&str>) -> &'static str {
-    match code {
-        Some("ckbus_credential_superseded") => "ckbus_credential_superseded",
-        Some("ckbus_credential_revoked") => "ckbus_credential_revoked",
-        Some("ckbus_generation_not_live") => "ckbus_generation_not_live",
-        _ => "ckbus_refused",
-    }
-}
-
-fn credential_result(value: Value) -> Result<Value, String> {
-    if let Some(error) = value.get("error") {
-        // Only trusted structural codes leave this boundary. Peer messages,
-        // unrecognized codes and malformed replies can contain credential data.
-        let code = trusted_refusal_code(error.get("code").and_then(Value::as_str));
-        return Err(code.into());
-    }
-    value
-        .get("result")
-        .cloned()
-        .ok_or_else(|| "ckbus_missing_result".into())
-}
-
-fn fresh_required(error: &str) -> bool {
-    error.contains("ckbus_credential_superseded")
-        || error.contains("ckbus_credential_revoked")
-        || error.contains("ckbus_generation_not_live")
-}
-
-async fn connect_with_signer(
-    route: Arc<dyn NonceSigner>,
-    credential: &Credential,
-) -> Result<(NatsConnection, AccountNames), String> {
-    credential.validate()?;
-    let key = credential.credential_public.clone();
-    let jwt = credential.jwt.clone();
-    let auth_error = Arc::new(Mutex::new(None::<String>));
-    let callback_error = auth_error.clone();
-    let first_attempt = std::sync::atomic::AtomicBool::new(true);
-    let options = async_nats::ConnectOptions::with_auth_callback(move |nonce| {
-        let route = route.clone();
-        let key = key.clone();
-        let jwt = jwt.clone();
-        let callback_error = callback_error.clone();
-        async move {
-            let mut last = String::new();
-            for attempt in 0..=3 {
-                match route.sign(&key, &nonce).await {
-                    Ok(signature) => {
-                        let mut auth = async_nats::Auth::new();
-                        auth.jwt = Some(jwt.to_string());
-                        auth.signature = Some(signature);
-                        return Ok(auth);
-                    }
-                    Err(e) => {
-                        last = e;
-                        *callback_error.lock().unwrap() = Some(last.clone());
-                        if fresh_required(&last) {
-                            break;
-                        }
-                        if attempt < 3 {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    }
-                }
-            }
-            *callback_error.lock().unwrap() = Some(last.clone());
-            Err(async_nats::AuthError::new(last))
-        }
-    })
-    .max_reconnects(1)
-    // Suppress client auto-reconnect with a year-long delay on its one retry.
-    // async-nats treats 0 as unlimited, so use a positive limit. Reconnect only
-    // by rebuilding a session after the drain checks that this machine still
-    // holds the connector-home claim.
-    .reconnect_delay_callback(move |_| {
-        if first_attempt.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            Duration::ZERO
-        } else {
-            Duration::from_secs(365 * 24 * 60 * 60)
-        }
-    })
-    .ignore_discovered_servers()
-    // Four nonce-sign calls can each take two seconds, plus retry spacing.
-    .connection_timeout(Duration::from_secs(10));
-
-    let connection = NatsConnection::connect(
-        &credential.server_url,
-        options,
-        ConnectConfig::new(&credential.credential_public).map_err(|e| e.to_string())?,
-    )
-    .await
-    .map_err(|_| {
-        auth_error
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap_or_else(|| "nats_connect_failed".into())
-    })?;
-    let account = AccountNames::derive(&credential.acct).map_err(|e| e.to_string())?;
-    Ok((connection, account))
-}
-
 /// Abstract publisher for event notices.
 #[async_trait]
 #[allow(clippy::double_must_use)]
@@ -424,6 +88,83 @@ pub trait EventPublisher: Send + Sync {
 pub struct NatsEventPublisher {
     pub connection: NatsConnection,
     pub stream_name: String,
+}
+
+/// Read the current NATS connection for each notice after a credential re-issue.
+/// The raw stream publisher preserves GitHub's empty payload and digest header;
+/// readers retrieve the stored event body from Plexus rather than from the bus.
+struct ClientEventPublisher(Arc<BusClient>);
+
+#[async_trait]
+impl EventPublisher for ClientEventPublisher {
+    async fn publish(
+        &self,
+        subject: &str,
+        id: &str,
+        digest: ContentDigest,
+        headers: Headers,
+    ) -> Result<PublishReceipt, String> {
+        let account = AccountNames::derive(self.0.acct()).map_err(|_| "ckbus_invalid_account")?;
+        NatsEventPublisher {
+            connection: self.0.connection(),
+            stream_name: account.streams().event.clone(),
+        }
+        .publish(subject, id, digest, headers)
+        .await
+    }
+}
+
+/// Searches only enqueue. The outbox task supplies a weak reference to its
+/// connector-home session so searches cannot keep it alive after claim loss.
+#[derive(Default)]
+pub(crate) struct RouteFactBus {
+    binding: Mutex<Option<RouteFactBinding>>,
+}
+
+struct RouteFactBinding {
+    client: std::sync::Weak<BusClient>,
+    home: std::sync::Weak<crate::connector_home::ConnectorHome>,
+}
+
+impl RouteFactBus {
+    fn bind(&self, client: &Arc<BusClient>, home: &Arc<crate::connector_home::ConnectorHome>) {
+        *self.binding.lock().unwrap_or_else(|p| p.into_inner()) = Some(RouteFactBinding {
+            client: Arc::downgrade(client),
+            home: Arc::downgrade(home),
+        });
+    }
+}
+
+impl plexus_core::web_search::routing::RouteFactPublisher for RouteFactBus {
+    fn publish_event<'a>(
+        &'a self,
+        event: &'a str,
+        version: u32,
+        reader: Option<&'a str>,
+        msg_id: &'a str,
+        body: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let (client, home) = self
+                .binding
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .and_then(|binding| Some((binding.client.upgrade()?, binding.home.upgrade()?)))
+                .ok_or("route_fact_session_absent")?;
+            if !home.held() {
+                return Err("connector_home_not_held".into());
+            }
+            let receipt = client
+                .publish_event(event, version, reader, msg_id, body.to_vec())
+                .await
+                .map_err(|_| "route_fact_publish_failed")?;
+            if receipt.duplicate() {
+                plexus_core::diag!(debug bus: "route fact retry acknowledged: id={msg_id}");
+            }
+            Ok(())
+        })
+    }
 }
 
 #[async_trait]
@@ -651,7 +392,7 @@ async fn outbox_has_pending(store: &Arc<PlexusStore>) -> Result<bool, String> {
                 return Ok(true);
             }
         }
-        Ok::<_, cortexkit_store::StoreError>(false)
+        Ok::<_, cortexkit_store::StoreError>(!db.pending_route_facts(1)?.is_empty())
     })
     .await
     .map_err(|_| "outbox_read_join_failed")?
@@ -873,10 +614,9 @@ impl Drop for SessionRuntime {
 }
 
 pub(crate) struct BusSession {
-    credential: Credential,
+    client: Option<Arc<BusClient>>,
     account: AccountNames,
     publisher: Box<dyn EventPublisher>,
-    route: Option<Arc<dyn CredentialProvider>>,
     _transport: Option<SessionRuntime>,
     wakes: Option<crate::bus_wakes::WakeTask>,
 }
@@ -893,11 +633,12 @@ impl Drop for BusSession {
 #[async_trait]
 #[allow(clippy::double_must_use)]
 pub(crate) trait SessionFactory: Send + Sync {
+    #[cfg(test)]
+    fn observe_pass(&self) {}
     fn needs_idle_session(&self) -> bool {
         false
     }
     async fn open(&self) -> Result<BusSession, String>;
-    async fn renew(&self, session: &mut BusSession) -> Result<(), String>;
 }
 
 struct ProductionSessions {
@@ -907,34 +648,38 @@ pub(crate) fn session_factory(path: Option<PathBuf>) -> Arc<dyn SessionFactory> 
     Arc::new(ProductionSessions { path })
 }
 
-async fn build_session(
-    route: Arc<dyn CredentialProvider>,
-    credential: Credential,
-) -> Result<BusSession, String> {
+async fn build_session(path: PathBuf) -> Result<BusSession, String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()
         .map_err(|_| "bus_runtime_failed")?;
     let transport = SessionRuntime(Some(runtime));
-    let auth_route = route.clone();
-    let auth_credential = credential.clone();
-    let (connection, account) = transport
+    let client = transport
         .0
         .as_ref()
         .unwrap()
-        .spawn(async move { connect_with_signer(auth_route, &auth_credential).await })
+        .spawn(async move {
+            let consumer = Arc::new(
+                SubcConsumer::connect(&path, ConsumerOptions::default())
+                    .await
+                    .map_err(|_| "ckbus_route_connect_failed")?,
+            );
+            BusClient::connect(
+                consumer,
+                BusClientOptions::new("plexus").map_err(|_| "ckbus_options_failed")?,
+            )
+            .await
+            .map(Arc::new)
+            .map_err(|_| "ckbus_connect_failed")
+        })
         .await
         .map_err(|_| "bus_connect_join_failed")??;
-    let stream_name = account.streams().event.clone();
+    let account = AccountNames::derive(client.acct()).map_err(|_| "ckbus_invalid_account")?;
     Ok(BusSession {
-        credential,
+        client: Some(client.clone()),
         account,
-        publisher: Box::new(NatsEventPublisher {
-            connection,
-            stream_name,
-        }),
-        route: Some(route),
+        publisher: Box::new(ClientEventPublisher(client)),
         _transport: Some(transport),
         wakes: None,
     })
@@ -947,19 +692,7 @@ impl SessionFactory for ProductionSessions {
     }
     async fn open(&self) -> Result<BusSession, String> {
         let path = self.path.as_ref().ok_or("ckbus_connection_file_absent")?;
-        let route = Arc::new(CredentialRoute::connect(path).await?);
-        let credential = route.issue().await?;
-        build_session(route, credential).await
-    }
-    async fn renew(&self, session: &mut BusSession) -> Result<(), String> {
-        let route = session.route.as_ref().ok_or("ckbus_route_absent")?.clone();
-        let mut credential = session.credential.clone();
-        renew_credential(route.as_ref(), &mut credential).await?;
-        // The auth callback captures a credential snapshot. Rebuild the whole
-        // transport for both renewal and fresh issuance, never just the metadata.
-        drop(session._transport.take());
-        *session = build_session(route, credential).await?;
-        Ok(())
+        build_session(path.clone()).await
     }
 }
 
@@ -1020,6 +753,8 @@ pub(crate) fn spawn_outbox_drain(
                 if !pending && !factory.needs_idle_session() {
                     return Ok(0);
                 }
+                #[cfg(test)]
+                factory.observe_pass();
                 if session.is_none() {
                     session = Some(factory.open().await.map_err(|error| {
                         if pending {
@@ -1030,28 +765,27 @@ pub(crate) fn spawn_outbox_drain(
                     })?);
                 }
                 let active = session.as_mut().expect("opened session");
-                if active.credential.exp.saturating_sub(now_ms() / 1000) < 300 {
-                    factory.renew(active).await.map_err(|error| {
-                        if pending {
-                            error
-                        } else {
-                            "wake_only_bus_unavailable".into()
-                        }
-                    })?;
+                if active
+                    .client
+                    .as_ref()
+                    .is_some_and(|client| client.connection_changes().has_changed().is_err())
+                {
+                    return Err("ckbus_maintenance_stopped".into());
                 }
                 if active.wakes.is_none() {
                     // Share the held session and its claim-loss teardown. Loss wakes
                     // refresh promptly; acquisition still uses connector-home's 30 s role.read tick.
-                    if let Some(connection) = active.publisher.connection() {
-                        active.wakes = Some(crate::bus_wakes::spawn_change_watch(
+                    if let Some(client) = &active.client {
+                        state
+                            .runtime
+                            .route_facts
+                            .bind(client, &state.runtime.connector_home);
+                        active.wakes = Some(crate::bus_wakes::spawn_session_watches(
                             state.clone(),
-                            connection,
+                            client.clone(),
                             &active.account,
                         )?);
                     }
-                }
-                if !outbox_has_pending(state.store()).await? {
-                    return Ok(0);
                 }
                 let result = drain_pass_skipping(
                     state.store(),
@@ -1062,8 +796,13 @@ pub(crate) fn spawn_outbox_drain(
                     &unpublishable,
                 )
                 .await;
+                let route_result = state
+                    .runtime
+                    .web_search
+                    .drain_route_facts(state.store(), OUTBOX_BATCH)
+                    .await;
                 refresh_unpublishable_count(&state).await?;
-                result
+                result.and_then(|count| route_result.map(|routes| count + routes))
             };
             let result = tokio::select! {
                 biased;
@@ -1077,7 +816,9 @@ pub(crate) fn spawn_outbox_drain(
                         state.health.clear_publish_error();
                     }
                     failures = 0;
-                    delay = if unpublishable.pending_more() {
+                    delay = if unpublishable.pending_more()
+                        || outbox_has_pending(state.store()).await.unwrap_or(false)
+                    {
                         Duration::ZERO
                     } else {
                         OUTBOX_IDLE
@@ -1114,3 +855,7 @@ pub(crate) fn spawn_outbox_drain(
 #[cfg(test)]
 #[path = "bus_tests.rs"]
 pub mod tests;
+
+#[cfg(test)]
+#[path = "bus_live_tests.rs"]
+mod live_tests;

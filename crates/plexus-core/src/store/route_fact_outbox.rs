@@ -30,14 +30,16 @@ impl PlexusStore {
         if body.len() > ROUTE_FACT_MAX_BYTES {
             return Ok(false);
         }
-        self.inner.with_conn_fenced(|conn| {
+        let queued = self.inner.with_conn_fenced(|conn| {
             conn.execute(
                 "INSERT INTO route_fact_outbox(msg_id, body, created_at_ms)
                  VALUES (?1, ?2, ?3) ON CONFLICT(msg_id) DO NOTHING",
                 (msg_id, body, at_ms),
             )?;
             Ok(true)
-        })
+        })?;
+        self.outbox_ready.notify_one();
+        Ok(queued)
     }
 
     pub fn pending_route_facts(&self, limit: usize) -> Result<Vec<RouteFact>, StoreError> {

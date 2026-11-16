@@ -95,6 +95,8 @@ pub struct ModuleRuntime {
     pub repository_registry: Option<Arc<dyn plexus_core::repository_ownership::RepositoryRegistry>>,
     /// One cursor and whole-pass lock for hourly and bus-woken ownership checks.
     pub ownership_resume: Arc<plexus_core::repository_ownership::OwnershipResume>,
+    pub(crate) manifest_binding_wake: Arc<tokio::sync::Notify>,
+    pub(crate) route_facts: Arc<crate::bus::RouteFactBus>,
     pub github_handle_credentials: Option<Arc<dyn HandleCredentialProvider>>,
     /// Optional read-only installation peer for management ceremonies.
     pub github_control_reader:
@@ -167,6 +169,7 @@ impl ModuleRuntime {
             CatalogRefreshPolicy::default(),
         )
         .with_rest_transport(Arc::clone(&rest_transport));
+        let route_facts = Arc::new(crate::bus::RouteFactBus::default());
         Self {
             federated_admission: crate::federated::Admission::default(),
             vault_peer,
@@ -183,10 +186,15 @@ impl ModuleRuntime {
             ),
             repository_registry: production_repository_registry(connection_file),
             ownership_resume: Default::default(),
+            manifest_binding_wake: Default::default(),
             github_handle_credentials,
             github_control_reader: None,
             endpoint_override: None,
-            web_search: Arc::new(production_web_search(connection_file)),
+            web_search: Arc::new(
+                production_web_search(connection_file)
+                    .with_route_fact_publisher(route_facts.clone()),
+            ),
+            route_facts,
             code_search: Arc::new(plexus_core::code_search::CodeSearchService::default()),
             search_declarations: None,
         }
@@ -230,6 +238,8 @@ impl ModuleRuntime {
             flow_audiences: crate::flow_audience::FlowAudiences::global_fixture(),
             repository_registry: None,
             ownership_resume: Default::default(),
+            manifest_binding_wake: Default::default(),
+            route_facts: Default::default(),
             github_handle_credentials: None,
             github_control_reader: None,
             endpoint_override: None,
@@ -283,6 +293,8 @@ impl ModuleRuntime {
             github_handle_credentials: None,
             github_control_reader: None,
             endpoint_override,
+            manifest_binding_wake: Default::default(),
+            route_facts: Default::default(),
             web_search: Arc::new(
                 WebSearchService::production().with_stored_order_router_for_test(),
             ),

@@ -307,8 +307,6 @@ impl WebSearchService {
     }
 
     /// Enable durable reports only when a body-capable drainer is installed.
-    /// Production sends only direct `route.report` calls until cortexkit-bus-client's
-    /// body publisher is wired.
     pub fn with_route_fact_publisher(
         mut self,
         publisher: Arc<dyn routing::RouteFactPublisher>,
@@ -317,9 +315,13 @@ impl WebSearchService {
         self
     }
 
-    pub fn drain_route_facts(&self, store: &PlexusStore, limit: usize) -> Result<usize, String> {
+    pub async fn drain_route_facts(
+        &self,
+        store: &PlexusStore,
+        limit: usize,
+    ) -> Result<usize, String> {
         match self.route_fact_publisher.as_deref() {
-            Some(publisher) => routing::drain_route_facts(store, publisher, limit),
+            Some(publisher) => routing::drain_route_facts(store, publisher, limit).await,
             None => Ok(0),
         }
     }

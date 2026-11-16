@@ -10,21 +10,89 @@ use std::sync::atomic::AtomicI64;
 #[derive(Default)]
 struct BodyPublisher(std::sync::Mutex<Vec<(String, Value)>>);
 impl routing::RouteFactPublisher for BodyPublisher {
-    fn publish_event(
-        &self,
-        event: &str,
+    fn publish_event<'a>(
+        &'a self,
+        event: &'a str,
         version: u32,
-        reader: Option<&str>,
-        msg_id: &str,
-        body: &[u8],
-    ) -> Result<(), String> {
-        assert_eq!((event, version, reader), ("route_fact", 1, None));
-        self.0
-            .lock()
-            .unwrap()
-            .push((msg_id.into(), serde_json::from_slice(body).unwrap()));
-        Ok(())
+        reader: Option<&'a str>,
+        msg_id: &'a str,
+        body: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            assert_eq!((event, version, reader), ("route_fact", 1, None));
+            self.0
+                .lock()
+                .unwrap()
+                .push((msg_id.into(), serde_json::from_slice(body).unwrap()));
+            Ok(())
+        })
     }
+}
+
+#[test]
+fn search_returns_while_route_fact_publisher_is_stuck() {
+    struct StuckPublisher;
+    impl routing::RouteFactPublisher for StuckPublisher {
+        fn publish_event<'a>(
+            &'a self,
+            _: &'a str,
+            _: u32,
+            _: Option<&'a str>,
+            _: &'a str,
+            _: &'a [u8],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+        {
+            Box::pin(std::future::pending())
+        }
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let (engine, transport) =
+            super::super::super::tests::granted_exa_engine("routed-stuck-publisher");
+        transport.set_response(hit());
+        let router = router(&["exa"]);
+        let mut describe = FakeRouter::serving_search_describe();
+        describe["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("route_fact_stream"));
+        router.set_describe(describe);
+        let service = routed_service(&router, &Arc::new(AtomicI64::new(NOW)))
+            .with_route_fact_publisher(Arc::new(StuckPublisher));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut drain = Box::pin(service.drain_route_facts(engine.store(), 1));
+        engine
+            .store()
+            .enqueue_route_fact(
+                "old:outcome",
+                &json!({"decision_id":"old","outcome":"completed"}),
+                NOW,
+            )
+            .unwrap();
+        // Poll an actual drain to its blocked publication, not just a publisher
+        // that would block if some later caller invoked it.
+        assert!(runtime
+            .block_on(async {
+                tokio::time::timeout(Duration::from_millis(20), drain.as_mut()).await
+            })
+            .is_err());
+        let result = search(&service, &engine, "direct");
+        tx.send((
+            result.is_ok(),
+            engine.store().pending_route_facts(10).unwrap().len(),
+            router.params("route.report").len(),
+        ))
+        .unwrap();
+    });
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("search must not wait for publish"),
+        (true, 2, 0)
+    );
+    worker.join().unwrap();
 }
 
 #[test]
@@ -75,7 +143,15 @@ fn route_reports_call_until_advertised_then_return_to_dual_delivery() {
         )
         .unwrap();
     assert_eq!(router.params("route.report").len(), 2);
-    assert_eq!(service.drain_route_facts(engine.store(), 10).unwrap(), 3);
+    assert_eq!(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(service.drain_route_facts(engine.store(), 10))
+            .unwrap(),
+        3
+    );
     assert!(engine.store().pending_route_facts(1).unwrap().is_empty());
     assert_eq!(publisher.0.lock().unwrap().len(), 3);
 }

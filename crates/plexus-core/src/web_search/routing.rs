@@ -276,19 +276,20 @@ pub fn routing_advertises_route_fact_stream(facts: DescribeFacts) -> bool {
     facts.route_fact_stream
 }
 
+pub type RouteFactPublish<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
+
 /// A body-capable publisher for `plexus.route_fact.v1`, without a reader token.
 /// Success means durable acceptance with `Nats-Msg-Id` equal to `msg_id`.
-/// No production implementation is installed until cortexkit-bus-client's
-/// body-bearing `BusClient::publish_event` is available on the shared connection.
 pub trait RouteFactPublisher: Send + Sync {
-    fn publish_event(
-        &self,
-        event: &str,
+    fn publish_event<'a>(
+        &'a self,
+        event: &'a str,
         version: u32,
-        reader: Option<&str>,
-        msg_id: &str,
-        body: &[u8],
-    ) -> Result<(), String>;
+        reader: Option<&'a str>,
+        msg_id: &'a str,
+        body: &'a [u8],
+    ) -> RouteFactPublish<'a>;
 }
 
 /// Outcome and usage reports for one decision must not share a deduplication id.
@@ -302,7 +303,7 @@ pub fn route_report_message_id(params: &Value) -> Option<String> {
 }
 
 /// Drain outside the search path; a failed publish leaves the row for retry.
-pub fn drain_route_facts(
+pub async fn drain_route_facts(
     store: &crate::PlexusStore,
     publisher: &dyn RouteFactPublisher,
     limit: usize,
@@ -312,7 +313,9 @@ pub fn drain_route_facts(
         .map_err(|error| error.to_string())?;
     let mut published = 0;
     for row in rows {
-        publisher.publish_event("route_fact", 1, None, &row.msg_id, row.body.as_bytes())?;
+        publisher
+            .publish_event("route_fact", 1, None, &row.msg_id, row.body.as_bytes())
+            .await?;
         store
             .delete_published_route_fact(&row.msg_id)
             .map_err(|error| error.to_string())?;

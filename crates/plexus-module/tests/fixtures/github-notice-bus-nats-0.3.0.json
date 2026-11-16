@@ -1,0 +1,21 @@
+{
+  "headers": {
+    "Ck-Content-Digest": [
+      "2ea12d51a5606b0be919f419b10410cadee17092112410d61e79ed6fab0f9db7"
+    ],
+    "Nats-Msg-Id": [
+      "fixture-fact"
+    ],
+    "kind": [
+      "github_issue_changed"
+    ],
+    "project": [
+      "project-a"
+    ],
+    "repo": [
+      "owner/repo"
+    ]
+  },
+  "payload": [],
+  "subject": "ck.box_test.event.plexus.github_issue_changed.v1"
+}

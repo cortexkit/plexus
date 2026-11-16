@@ -6,6 +6,8 @@ use plexus_core::{
     test_scratch::Scratch,
     ActorAttribution, PlexusStore, PollEventInput,
 };
+use serde_json::{json, Value};
+use std::path::Path;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -14,63 +16,15 @@ fn current_health(state: &ModuleState) -> subc_protocol::session::ModuleControlR
     crate::connector_home_health(state)
 }
 
-struct TestSigner;
-impl NonceSigner for TestSigner {
-    fn sign<'a>(&'a self, _: &'a str, _: &'a [u8]) -> SignFuture<'a> {
-        Box::pin(async { Ok(vec![1; 64]) })
-    }
-}
-
-#[tokio::test]
-async fn auth_callback_budget_includes_slow_nonce_retries() {
-    struct SlowSigner(std::sync::atomic::AtomicU32);
-    impl NonceSigner for SlowSigner {
-        fn sign<'a>(&'a self, _: &'a str, _: &'a [u8]) -> SignFuture<'a> {
-            Box::pin(async move {
-                tokio::time::sleep(Duration::from_millis(900)).await;
-                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
-                    Err("ckbus_refused".into())
-                } else {
-                    Ok(vec![1; 64])
-                }
-            })
-        }
-    }
-    let (url, mut auth, _, _, server) =
-        loopback_with_deadlines(Duration::from_secs(8), Duration::from_secs(15)).await;
-    let result = tokio::time::timeout(
-        Duration::from_secs(12),
-        connect_with_signer(
-            Arc::new(SlowSigner(std::sync::atomic::AtomicU32::new(0))),
-            &credential(url),
-        ),
+async fn test_connection(url: String) -> (NatsConnection, AccountNames) {
+    let connection = NatsConnection::connect(
+        url,
+        async_nats::ConnectOptions::new(),
+        cortexkit_bus_nats::ConnectConfig::new("KEY").unwrap(),
     )
     .await
     .unwrap();
-    server.abort();
-    assert!(
-        result.is_ok(),
-        "slow nonce retries must fit within the connection budget"
-    );
-    assert!(tokio::time::timeout(Duration::from_secs(3), auth.recv())
-        .await
-        .unwrap()
-        .is_some());
-}
-
-fn credential(url: String) -> Credential {
-    Credential {
-        jwt: "SECRET-JWT-for-loopback".to_string().into(),
-        exp: now_ms() / 1000 + 900,
-        acct: "box_test".into(),
-        account_public: "ACCOUNT".into(),
-        inbox_prefix: "_INBOX.KEY".into(),
-        server_url: url,
-        credential_public: "KEY".into(),
-        user_jwt_id: "id".into(),
-        spawn_generation: 1,
-        credential_epoch: 1,
-    }
+    (connection, AccountNames::derive("box_test").unwrap())
 }
 
 // Speaks only the protocol exercised by the real NATS adapter: INFO,
@@ -138,205 +92,6 @@ async fn loopback_with_deadlines(
             }).await.expect("loopback server exchange deadline");
     });
     (url, auth_rx, publish_rx, ack, task)
-}
-
-struct TestCredentials {
-    fresh: Credential,
-    replaced: bool,
-}
-impl NonceSigner for TestCredentials {
-    fn sign<'a>(&'a self, _: &'a str, _: &'a [u8]) -> SignFuture<'a> {
-        Box::pin(async { Ok(vec![1; 64]) })
-    }
-}
-#[async_trait]
-impl CredentialProvider for TestCredentials {
-    async fn issue(&self) -> Result<Credential, String> {
-        Ok(self.fresh.clone())
-    }
-    async fn renewal(&self, old: &Credential) -> Result<Renewal, String> {
-        if self.replaced {
-            return Err("ckbus_credential_revoked".into());
-        }
-        Ok(Renewal {
-            jwt: self.fresh.jwt.clone(),
-            exp: old.exp + 900,
-            credential_public: old.credential_public.clone(),
-            user_jwt_id: "renewed".into(),
-            spawn_generation: old.spawn_generation,
-            credential_epoch: old.credential_epoch,
-        })
-    }
-}
-
-#[tokio::test]
-async fn renewal_rebuild_authenticates_new_jwt_and_replacement_key() {
-    tokio::time::timeout(Duration::from_secs(8), async {
-        for replaced in [false, true] {
-            let (url, mut auth, _, _, server) = loopback().await;
-            let original = credential(url);
-            let mut fresh = original.clone();
-            fresh.jwt = "NEW-JWT-after-renewal".to_string().into();
-            if replaced {
-                fresh.credential_public = "REPLACEMENT".into();
-                fresh.inbox_prefix = "_INBOX.REPLACEMENT".into();
-            }
-            let provider = Arc::new(TestCredentials {
-                fresh: fresh.clone(),
-                replaced,
-            });
-            let mut session = build_session(provider, original.clone()).await.unwrap();
-            assert_eq!(
-                crate::bounded::recv_within(
-                    auth.recv(),
-                    Duration::from_secs(5),
-                    "first CONNECT with the original JWT",
-                )
-                .await,
-                original.jwt.as_str()
-            );
-            ProductionSessions { path: None }
-                .renew(&mut session)
-                .await
-                .unwrap();
-            assert_eq!(
-                crate::bounded::recv_within(
-                    auth.recv(),
-                    Duration::from_secs(5),
-                    "next CONNECT after renewal",
-                )
-                .await,
-                fresh.jwt.as_str(),
-                "next CONNECT must use renewed JWT"
-            );
-            assert_eq!(
-                session.credential.credential_public,
-                fresh.credential_public
-            );
-            drop(session);
-            server.abort();
-        }
-    })
-    .await
-    .expect("renewal loopback exchange deadline");
-    for code in [
-        "ckbus_credential_revoked",
-        "ckbus_credential_superseded",
-        "ckbus_generation_not_live",
-    ] {
-        let error = subc_client_rs::CallError::Module(subc_protocol::ErrorBody {
-            code: code.into(),
-            message: "secret".into(),
-            detail: None,
-        });
-        assert!(fresh_required(trusted_refusal_code(error.code())));
-    }
-}
-
-#[test]
-fn malformed_credential_errors_never_echo_peer_text() {
-    for value in [
-        json!({"jwt":"secret-reply", "alien":"secret-reply"}),
-        json!({"error":{"code":"secret-reply", "message":"secret-reply"}}),
-    ] {
-        let error = credential_result(value).unwrap_err();
-        assert!(!error.contains("secret-reply"));
-    }
-    let renewal = Renewal {
-        jwt: "renewal-secret".to_string().into(),
-        exp: 1,
-        credential_public: "key-secret".into(),
-        user_jwt_id: "id".into(),
-        spawn_generation: 1,
-        credential_epoch: 1,
-    };
-    assert!(!format!("{renewal:?}").contains("secret"));
-}
-
-#[test]
-fn credential_url_requires_exact_loopback_without_userinfo() {
-    for url in [
-        "nats://localhost:4222@evil.example:4222",
-        "nats://localhost.evil:4222",
-        "nats://user@localhost:4222",
-        "tls://localhost:4222",
-    ] {
-        assert!(credential(url.into()).validate().is_err(), "{url}");
-    }
-    for url in [
-        "nats://127.0.0.1:4222",
-        "nats://localhost:4222",
-        "nats://[::1]:4222",
-    ] {
-        assert!(credential(url.into()).validate().is_ok(), "{url}");
-    }
-}
-
-#[tokio::test]
-async fn trace_loopback_never_logs_jwt() {
-    const CHILD: &str = "PLEXUS_TRACE_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        // The layer's async_nats ceiling must keep transport trace output out
-        // even when CK_LOG enables trace for the whole module.
-        for spec in ["trace", "plexus=trace"] {
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-            command
-                .args([
-                    "--exact",
-                    "bus::tests::trace_loopback_never_logs_jwt",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .env("CK_LOG", spec);
-            let output = crate::bounded::child_output(
-                &mut command,
-                Duration::from_secs(30),
-                "trace-filter test child",
-            )
-            .expect("run trace-filter test child");
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            crate::test_support::assert_exactly_one_test_passed(
-                "bus::tests::trace_loopback_never_logs_jwt",
-                &output,
-            );
-        }
-        return;
-    }
-    let scratch = Scratch::database("safe-trace");
-    let logs = scratch.path().with_extension("logs");
-    let (layer, handle) = safe_log_layer(cortexkit_log::Config::in_dir("plexus", &logs)).unwrap();
-    tracing::subscriber::set_global_default(tracing_subscriber::Registry::default().with(layer))
-        .unwrap();
-    let (url, mut auth, _, _, server) = loopback().await;
-    let cred = credential(url);
-    let (connection, _) = tokio::time::timeout(
-        Duration::from_secs(3),
-        connect_with_signer(Arc::new(TestSigner), &cred),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), auth.recv())
-            .await
-            .expect("CONNECT observation deadline")
-            .unwrap(),
-        cred.jwt.as_str()
-    );
-    tracing::trace!("trace-control-visible");
-    let text = std::fs::read_to_string(handle.path()).unwrap();
-    assert!(
-        text.contains("trace-control-visible"),
-        "trace must really be enabled: {text}"
-    );
-    assert!(!text.contains(cred.jwt.as_str()), "JWT leaked: {text}");
-    drop(connection);
-    server.abort();
-    std::fs::remove_dir_all(logs).unwrap();
 }
 
 /// Dispatches an event from a synthetic dependency callsite. Tracing derives a
@@ -906,19 +661,15 @@ impl SessionFactory for FixtureSessions {
         self.opened.notify_one();
         Ok(BusSession {
             wakes: None,
-            credential: credential("nats://localhost:4222".into()),
+            client: None,
             account: AccountNames::derive("box_test").unwrap(),
             publisher: Box::new(FlipPublisher {
                 inner: self.publisher.clone(),
                 claim: self.claim.clone(),
                 home: self.home.clone(),
             }),
-            route: None,
             _transport: None,
         })
-    }
-    async fn renew(&self, _: &mut BusSession) -> Result<(), String> {
-        Ok(())
     }
 }
 
@@ -986,9 +737,6 @@ async fn task_stop_cancels_connection_setup() {
         async fn open(&self) -> Result<BusSession, String> {
             self.0.notify_one();
             std::future::pending().await
-        }
-        async fn renew(&self, _: &mut BusSession) -> Result<(), String> {
-            unreachable!()
         }
     }
     let (_scratch, store) = test_store("stop_setup");
@@ -1067,24 +815,18 @@ async fn idle_fallback_waits_thirty_seconds_and_wakes_do_not_defeat_backoff() {
 #[async_trait]
 impl SessionFactory for CountingSessions {
     async fn open(&self) -> Result<BusSession, String> {
-        let mut credential = credential("nats://localhost:4222".into());
-        // Keep renewal due so this fixture observes every scheduler pass,
-        // including empty passes that never call the publisher.
-        credential.exp = 0;
         Ok(BusSession {
             wakes: None,
-            credential,
+            client: None,
             account: AccountNames::derive("box_test").unwrap(),
             publisher: Box::new(self.publisher.clone()),
-            route: None,
             _transport: None,
         })
     }
-    async fn renew(&self, _: &mut BusSession) -> Result<(), String> {
+    fn observe_pass(&self) {
         self.passes
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.entered.notify_one();
-        Ok(())
     }
 }
 
@@ -1104,9 +846,6 @@ async fn idle_reader_setup_failure_keeps_publisher_healthy() {
         async fn open(&self) -> Result<BusSession, String> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err("nats_connect_failed".into())
-        }
-        async fn renew(&self, _: &mut BusSession) -> Result<(), String> {
-            unreachable!()
         }
     }
     let (_scratch, store) = test_store("idle-reader-missing");
@@ -1146,15 +885,11 @@ async fn idle_without_a_bus_is_healthy_pending_failure_degrades_and_publish_reco
             }
             Ok(BusSession {
                 wakes: None,
-                credential: credential("nats://127.0.0.1:4222".into()),
+                client: None,
                 account: AccountNames::derive("box_test").unwrap(),
                 publisher: Box::new(self.publisher.clone()),
-                route: None,
                 _transport: None,
             })
-        }
-        async fn renew(&self, _: &mut BusSession) -> Result<(), String> {
-            Ok(())
         }
     }
     let (_scratch, store) = test_store("demand-health-boundary");
@@ -1420,22 +1155,36 @@ async fn task_repeats_full_batches_without_waiting_for_another_wake() {
 #[tokio::test]
 async fn task_stop_cancels_real_ack_wait_and_leaves_marker_pending() {
     struct RealFixture {
-        credential: Credential,
+        url: String,
     }
     #[async_trait]
     impl SessionFactory for RealFixture {
         async fn open(&self) -> Result<BusSession, String> {
-            build_session(
-                Arc::new(TestCredentials {
-                    fresh: self.credential.clone(),
-                    replaced: false,
+            let transport = SessionRuntime(Some(
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
+                    .unwrap(),
+            ));
+            let url = self.url.clone();
+            let (connection, account) = transport
+                .0
+                .as_ref()
+                .unwrap()
+                .spawn(test_connection(url))
+                .await
+                .unwrap();
+            Ok(BusSession {
+                client: None,
+                account: account.clone(),
+                publisher: Box::new(NatsEventPublisher {
+                    connection,
+                    stream_name: account.streams().event.clone(),
                 }),
-                self.credential.clone(),
-            )
-            .await
-        }
-        async fn renew(&self, session: &mut BusSession) -> Result<(), String> {
-            ProductionSessions { path: None }.renew(session).await
+                _transport: Some(transport),
+                wakes: None,
+            })
         }
     }
     let (_scratch, store) = test_store("stop_real_ack");
@@ -1455,13 +1204,7 @@ async fn task_stop_cancels_real_ack_wait_and_leaves_marker_pending() {
         health: Arc::new(crate::health::HealthState::new()),
     });
     let (shutdown, stop) = mpsc::channel(1);
-    let task = spawn_outbox_drain(
-        state,
-        stop,
-        Arc::new(RealFixture {
-            credential: credential(url),
-        }),
-    );
+    let task = spawn_outbox_drain(state, stop, Arc::new(RealFixture { url }));
     tokio::time::timeout(OUTBOX_DRAIN_DEADLINE, received.recv())
         .await
         .expect("notice before stop deadline")
@@ -1554,10 +1297,7 @@ async fn assert_real_nats_ack_ordering(name: &str, outbox_read_delay: Duration) 
     tokio::time::timeout(Duration::from_secs(30), async {
         let (url, _auth, mut received, ack, server) =
             loopback_with_deadlines(REAL_NATS_STEP_DEADLINE, Duration::from_secs(30)).await;
-        let cred = credential(url);
-        let (connection, account) = connect_with_signer(Arc::new(TestSigner), &cred)
-            .await
-            .unwrap();
+        let (connection, account) = test_connection(url).await;
         let acked = Arc::new(tokio::sync::Notify::new());
         let started = Arc::new(tokio::sync::Notify::new());
         let publisher = AckObservedPublisher {
@@ -2096,9 +1836,7 @@ async fn real_nats_stream_stores_both_versions_with_distinct_transport_ids() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }).await.expect("real JetStream server startup deadline: nats-server did not accept connections within 3 seconds");
-            let (connection, account) = connect_with_signer(Arc::new(TestSigner), &credential(url))
-                .await
-                .unwrap();
+            let (connection, account) = test_connection(url).await;
             let context = async_nats::jetstream::new(client);
             let mut stream = context
                 .create_stream(async_nats::jetstream::stream::Config {
@@ -2664,31 +2402,6 @@ async fn outbox_health_gauge_is_sampled_hourly_not_every_refresh() {
     }
     crate::refresh_store_health(&state, &["direct".into()]);
     assert_eq!(depth(), 2, "an expired sample must refresh from the store");
-}
-
-#[test]
-fn credential_debug_never_exposes_secret_material() {
-    let cred = Credential {
-        jwt: "super-secret-jwt-token-xyz123".to_string().into(),
-        exp: 1800000000,
-        acct: "box_prod".to_string(),
-        account_public: "ACCTPUBKEY".to_string(),
-        inbox_prefix: "_INBOX.PUBKEY".to_string(),
-        server_url: "nats://127.0.0.1:4222".to_string(),
-        credential_public: "SENSITIVE_KEY_456".to_string(),
-        user_jwt_id: "ujwt-1".to_string(),
-        spawn_generation: 1,
-        credential_epoch: 0,
-    };
-    let debug_str = format!("{cred:?}");
-    assert!(
-        !debug_str.contains("super-secret-jwt-token-xyz123"),
-        "JWT must never appear in Debug: {debug_str}"
-    );
-    assert!(
-        !debug_str.contains("SENSITIVE_KEY_456"),
-        "credential_public must never appear in Debug: {debug_str}"
-    );
 }
 
 /// The first ten outbox reconnect delays, as the bus computed them before its

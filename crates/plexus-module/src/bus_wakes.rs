@@ -3,6 +3,7 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use cortexkit_bus_client::{BusClient, EventItem, EventReader};
 use cortexkit_bus_naming::AccountNames;
 use cortexkit_bus_nats::NatsConnection;
 use cortexkit_bus_trait::{BusResult, Register, RegisterUpdate, RegisterWatch, WatchEvent};
@@ -22,15 +23,200 @@ pub struct AgentChangedDelivery {
 pub enum AgentChangedItem {
     Delivery(AgentChangedDelivery),
     Malformed,
+    Handled,
 }
 
-/// cortexkit-bus-client's body-capable EventReader will supply this bind-only seam.
-/// It must bind `m_plexus`, never create a durable or fetch another credential.
+/// The reader attaches only to an existing durable subscription. The bus
+/// service creates and configures that subscription.
 #[async_trait]
 pub trait AgentChangedReader: Send {
     async fn next(&mut self) -> Result<Option<AgentChangedItem>, String>;
     async fn ack(&mut self) -> Result<(), String>;
     async fn nak(&mut self, delay: Duration) -> Result<(), String>;
+}
+
+struct SessionEvents {
+    client: Arc<BusClient>,
+    state: Arc<ModuleState>,
+    account: AccountNames,
+    reader: Option<EventReader>,
+    pending: Option<EventItem>,
+}
+
+#[cfg(test)]
+pub(crate) fn session_reader(
+    client: Arc<BusClient>,
+    state: Arc<ModuleState>,
+    account: AccountNames,
+) -> Box<dyn AgentChangedReader> {
+    Box::new(SessionEvents {
+        client,
+        state,
+        account,
+        reader: None,
+        pending: None,
+    })
+}
+
+#[async_trait]
+impl AgentChangedReader for SessionEvents {
+    async fn next(&mut self) -> Result<Option<AgentChangedItem>, String> {
+        if self.reader.is_none() {
+            let durable =
+                AccountNames::module_consumer_name("plexus").map_err(|error| error.to_string())?;
+            self.reader = Some(
+                self.client
+                    .event_reader(&durable)
+                    .await
+                    .map_err(|_| "event_reader_bind_failed")?,
+            );
+        }
+        let item = match self.reader.as_mut().expect("attached reader").next().await {
+            Ok(item) => item,
+            Err(_) => {
+                self.reader = None;
+                return Err("event_reader_failed".into());
+            }
+        };
+        let result = match &item {
+            EventItem::Delivery(delivery)
+                if delivery.subject.module == "cingulate"
+                    && delivery.subject.event == "card_settled"
+                    && delivery.subject.version == 1
+                    && delivery.subject.reader.as_deref() == Some("plexus") =>
+            {
+                schedule_card_settled(&self.state, &delivery.body).await?;
+                AgentChangedItem::Handled
+            }
+            EventItem::Delivery(delivery) => AgentChangedItem::Delivery(AgentChangedDelivery {
+                subject: match delivery.subject.reader.as_deref() {
+                    Some(reader) => self.account.event_subject_with_reader(
+                        &delivery.subject.module,
+                        &delivery.subject.event,
+                        delivery.subject.version,
+                        reader,
+                    ),
+                    None => self.account.event_subject(
+                        &delivery.subject.module,
+                        &delivery.subject.event,
+                        delivery.subject.version,
+                    ),
+                }
+                .map_err(|error| error.to_string())?,
+                msg_id: delivery.msg_id.clone(),
+                body: delivery.body.to_vec(),
+                headers: delivery.headers().clone(),
+                sequence: delivery.stream_sequence,
+            }),
+            EventItem::Malformed(_) => {
+                diag!(debug bus: "malformed event received");
+                AgentChangedItem::Malformed
+            }
+            _ => return Err("unknown_event_item".into()),
+        };
+        self.pending = Some(item);
+        Ok(Some(result))
+    }
+
+    async fn ack(&mut self) -> Result<(), String> {
+        match self.pending.take() {
+            Some(EventItem::Delivery(delivery)) => delivery.ack().await,
+            Some(EventItem::Malformed(delivery)) => delivery.term().await,
+            None => return Ok(()),
+            _ => return Err("unknown_event_item".into()),
+        }
+        .map_err(|_| "event_ack_failed".into())
+    }
+
+    async fn nak(&mut self, delay: Duration) -> Result<(), String> {
+        if let Some(EventItem::Delivery(delivery)) = self.pending.take() {
+            delivery.nak(delay).await.map_err(|_| "event_nak_failed")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct CardSettled {
+    elicitation_id: String,
+    feed: String,
+    seq: u64,
+}
+
+async fn schedule_card_settled(state: &Arc<ModuleState>, body: &[u8]) -> Result<(), String> {
+    let Some(pointer) = serde_json::from_slice::<CardSettled>(body)
+        .ok()
+        .filter(|pointer| pointer.feed == "answers" && !pointer.elicitation_id.is_empty())
+    else {
+        diag!(debug bus: "malformed card settlement ignored");
+        return Ok(());
+    };
+    let store = state.store().clone();
+    let _sequence = pointer.seq;
+    let pending = tokio::task::spawn_blocking(move || {
+        store.github_manifest_bindings().map(|rows| {
+            rows.into_iter().any(|row| {
+                row.present
+                    && row.state == "pending"
+                    && row.card_id.as_deref() == Some(pointer.elicitation_id.as_str())
+            })
+        })
+    })
+    .await
+    .map_err(|_| "manifest_card_lookup_join_failed")?
+    .map_err(|_| "manifest_card_lookup_failed")?;
+    if pending {
+        state.runtime.manifest_binding_wake.notify_one();
+    } else {
+        diag!(debug bus: "card settlement is not a pending manifest binding");
+    }
+    Ok(())
+}
+
+pub(crate) fn spawn_session_watches(
+    state: Arc<ModuleState>,
+    client: Arc<BusClient>,
+    account: &AccountNames,
+) -> Result<WakeTask, String> {
+    let account = account.clone();
+    let mut changes = client.connection_changes();
+    let mut watch = spawn_change_watch(state.clone(), client.connection(), &account)?;
+    let events = WakeTask(tokio::spawn({
+        let client = client.clone();
+        let state = state.clone();
+        let account = account.clone();
+        async move {
+            let mut reader = SessionEvents {
+                client,
+                state: state.clone(),
+                account: account.clone(),
+                reader: None,
+                pending: None,
+            };
+            let (_stop, rx) = tokio::sync::mpsc::channel(1);
+            run_agent_changed_reader(
+                &mut reader,
+                state.store().clone(),
+                state.runtime.agent_registry.clone(),
+                &account,
+                rx,
+            )
+            .await;
+        }
+    }));
+    Ok(WakeTask(tokio::spawn(async move {
+        let _events = events;
+        loop {
+            if changes.changed().await.is_err() {
+                return;
+            }
+            drop(watch);
+            watch = match spawn_change_watch(state.clone(), client.connection(), &account) {
+                Ok(watch) => watch,
+                Err(_) => return,
+            };
+        }
+    })))
 }
 
 /// A missing durable is a retryable reader failure, never module startup failure.
@@ -88,6 +274,10 @@ pub async fn read_agent_changed_once(
     let Some(item) = reader.next().await? else {
         return Err("agent_changed_reader_ended".into());
     };
+    if matches!(item, AgentChangedItem::Handled) {
+        reader.ack().await?;
+        return Ok(true);
+    }
     let expected = account
         .event_subject("prefrontal-core", "agent_changed", 1)
         .map_err(|error| error.to_string())?;
