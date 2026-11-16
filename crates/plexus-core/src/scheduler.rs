@@ -269,8 +269,8 @@ where
     agent_sweep_resume: crate::agent_retirement::SweepResume,
     repository_registry: Option<Arc<dyn crate::repository_ownership::RepositoryRegistry>>,
     ownership_throttle: crate::repository_ownership::OwnershipThrottle,
-    /// Where the next ownership reconciliation starts after one stopped early.
-    ownership_resume: crate::repository_ownership::OwnershipResume,
+    /// Shared with ownership wakes so all passes serialize and resume together.
+    ownership_resume: Arc<crate::repository_ownership::OwnershipResume>,
     /// Watches waiting out [`CREDENTIAL_REPAIR_RETRY_MS`], by subscription id,
     /// with the pass time before which they are not polled.
     credential_repair_waits: Mutex<std::collections::HashMap<String, i64>>,
@@ -383,6 +383,15 @@ where
         registry: Arc<dyn crate::repository_ownership::RepositoryRegistry>,
     ) -> Self {
         self.repository_registry = Some(registry);
+        self
+    }
+
+    /// Share the reconciliation cursor and its whole-pass lock with bus wakes.
+    pub fn with_ownership_resume(
+        mut self,
+        resume: Arc<crate::repository_ownership::OwnershipResume>,
+    ) -> Self {
+        self.ownership_resume = resume;
         self
     }
 

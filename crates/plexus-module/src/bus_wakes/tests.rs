@@ -319,6 +319,96 @@ struct InitiallyMissingBucket {
     bus: InMemoryBus,
     attempts: Arc<AtomicUsize>,
 }
+
+#[tokio::test(start_paused = true)]
+async fn registry_wake_and_scheduler_share_one_ownership_resume_point() {
+    let (_scratch, state) = fixture();
+    let store = state.store().clone();
+    let source =
+        subc_jsonc::jsonc_to_json(include_str!("../../../../catalog/github.jsonc")).unwrap();
+    let manifest = plexus_core::ingest_value(serde_json::from_str(&source).unwrap()).unwrap();
+    store.upsert_manifest("system", &manifest).unwrap();
+    store
+        .insert_connection("direct", "ownership", "github", "active", &json!({}))
+        .unwrap();
+    store.upsert_catalog_action(&plexus_core::CatalogActionInput {
+        connection_id: "ownership".into(), principal: "direct".into(),
+        name: "list_issues".into(), title: None,
+        schema: json!({"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"}}}),
+        schema_hash: "ownership-schema".into(), risk: "read".into(), severity: "S2".into(),
+        status: "active".into(), quarantine_reason: None, reconciliation: None, ask_first: false,
+    }).unwrap();
+    store
+        .insert_grant(&plexus_core::GrantInput {
+            grant_id: "ownership-poll".into(),
+            principal: "direct".into(),
+            connection_id: "ownership".into(),
+            grantee_principal: "direct".into(),
+            risk_ceiling: "read".into(),
+            action_selectors: vec!["list_issues".into()],
+            authority_kind: "poll".into(),
+            expires_at: None,
+        })
+        .unwrap();
+    for repo in ["a", "b"] {
+        store
+            .subscribe_with_cursor_state(
+                "direct",
+                "ownership",
+                "list_issues",
+                300,
+                &json!({}),
+                &json!({"owner":"owner","repo":repo}),
+            )
+            .unwrap()
+            .unwrap();
+    }
+    let peer = Peer::new(Err(PrefrontalRouteError::Transport));
+    let mut runtime = crate::runtime_for_test(store);
+    runtime.repository_registry = Some(Arc::new(
+        plexus_core::repository_ownership::EntorhinalRepositoryRegistry::new(peer.clone()),
+    ));
+    let state = Arc::new(ModuleState {
+        runtime,
+        health: Arc::new(crate::health::HealthState::new()),
+    });
+    let bus = InMemoryBus::new(InMemoryConfig::default());
+    let mut watch = bus.watch("").await.unwrap();
+    let wake_state = state.clone();
+    let wake = tokio::spawn(async move {
+        consume_changes(&mut watch, &wake_state, &mut OwnershipWake::default()).await
+    });
+    bus.put("registry", vec![]).await.unwrap();
+    until(|| peer.calls.lock().unwrap().len() == 1).await;
+
+    let (stop, receiver) = tokio::sync::mpsc::channel(1);
+    let scheduler = crate::spawn_trigger_scheduler(state, receiver, 604_800_000);
+    until(|| peer.calls.lock().unwrap().len() >= 2).await;
+    stop.send(()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), scheduler)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        *peer.calls.lock().unwrap(),
+        [
+            ("resolve_remote".into(), json!({"owner":"owner","repo":"a"})),
+            ("resolve_remote".into(), json!({"owner":"owner","repo":"b"})),
+        ],
+        "the scheduler must start after the unanswered repository from the wake"
+    );
+
+    bus.put("registry", vec![]).await.unwrap();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    until(|| peer.calls.lock().unwrap().len() == 3).await;
+    assert_eq!(
+        peer.calls.lock().unwrap()[2],
+        ("resolve_remote".into(), json!({"owner":"owner","repo":"a"})),
+        "the next wake must resume after the scheduler's unanswered repository"
+    );
+    wake.abort();
+    let _ = wake.await;
+}
 #[async_trait]
 impl ChangesSource for InitiallyMissingBucket {
     async fn watch(&self) -> BusResult<Box<dyn RegisterWatch>> {

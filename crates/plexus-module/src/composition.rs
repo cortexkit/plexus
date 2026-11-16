@@ -93,6 +93,8 @@ pub struct ModuleRuntime {
     pub agent_registry: Arc<dyn AgentRegistry>,
     pub flow_audiences: crate::flow_audience::FlowAudiences,
     pub repository_registry: Option<Arc<dyn plexus_core::repository_ownership::RepositoryRegistry>>,
+    /// One cursor and whole-pass lock for hourly and bus-woken ownership checks.
+    pub ownership_resume: Arc<plexus_core::repository_ownership::OwnershipResume>,
     pub github_handle_credentials: Option<Arc<dyn HandleCredentialProvider>>,
     /// Optional read-only installation peer for management ceremonies.
     pub github_control_reader:
@@ -180,6 +182,7 @@ impl ModuleRuntime {
                     .map(|peer| peer.with_call_timeout(std::time::Duration::from_secs(3))),
             ),
             repository_registry: production_repository_registry(connection_file),
+            ownership_resume: Default::default(),
             github_handle_credentials,
             github_control_reader: None,
             endpoint_override: None,
@@ -226,6 +229,7 @@ impl ModuleRuntime {
             agent_registry,
             flow_audiences: crate::flow_audience::FlowAudiences::global_fixture(),
             repository_registry: None,
+            ownership_resume: Default::default(),
             github_handle_credentials: None,
             github_control_reader: None,
             endpoint_override: None,
@@ -275,6 +279,7 @@ impl ModuleRuntime {
             agent_registry,
             flow_audiences: crate::flow_audience::FlowAudiences::global_fixture(),
             repository_registry: None,
+            ownership_resume: Default::default(),
             github_handle_credentials: None,
             github_control_reader: None,
             endpoint_override,

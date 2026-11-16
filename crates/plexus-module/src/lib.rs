@@ -884,6 +884,7 @@ fn spawn_trigger_scheduler_every(
         plexus_core::Scheduler::new(state.runtime.engine.clone(), audit_retention_window_ms)
             .with_stop_flag(Arc::clone(&stopping))
             .with_relay_health(state.health.relay.clone())
+            .with_ownership_resume(Arc::clone(&state.runtime.ownership_resume))
             .with_agent_registry(Arc::clone(&state.runtime.agent_registry));
     let scheduler = match &state.runtime.repository_registry {
         Some(registry) => scheduler.with_repository_registry(Arc::clone(registry)),

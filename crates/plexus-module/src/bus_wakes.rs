@@ -189,7 +189,6 @@ async fn run_change_watch(state: Arc<ModuleState>, source: impl ChangesSource) {
 struct OwnershipWake {
     pending: bool,
     last: Option<tokio::time::Instant>,
-    resume: plexus_core::repository_ownership::OwnershipResume,
 }
 
 impl OwnershipWake {
@@ -229,11 +228,9 @@ async fn consume_changes<W: RegisterWatch + ?Sized>(
                 ownership.last = Some(tokio::time::Instant::now());
                 if let Some(registry) = state.runtime.repository_registry.clone() {
                     let state = state.clone();
-                    let resume = std::mem::take(&mut ownership.resume);
-                    if let Ok(resume) = tokio::task::spawn_blocking(move || {
-                        plexus_core::repository_ownership::run_and_report(state.store(), registry.as_ref(), plexus_core::storage::now_ms(), &resume);
-                        resume
-                    }).await { ownership.resume = resume; }
+                    let _ = tokio::task::spawn_blocking(move || {
+                        plexus_core::repository_ownership::run_and_report(state.store(), registry.as_ref(), plexus_core::storage::now_ms(), &state.runtime.ownership_resume);
+                    }).await;
                 }
             }
         }
