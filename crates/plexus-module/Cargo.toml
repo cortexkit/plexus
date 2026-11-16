@@ -49,7 +49,7 @@ subc-client-rs = { workspace = true }
 subc-os = { workspace = true }
 zeroize = { workspace = true }
 cortexkit-bus-trait = "=0.3.0"
-cortexkit-bus-naming = "=0.2.0"
+cortexkit-bus-naming = "=0.4.0"
 cortexkit-bus-nats = "=0.3.0"
 async-nats = { version = "0.50", default-features = false, features = ["jetstream", "kv", "nkeys", "nuid", "ring", "server_2_10"] }
 async-trait = "0.1"
