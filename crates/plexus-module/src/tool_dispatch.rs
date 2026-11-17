@@ -307,8 +307,8 @@ pub(super) async fn handle_tool_request_with_reply_guard(
     let epoch = frame.header.epoch;
     let correlation = frame.header.corr;
     if budget.expired() {
-        // No bot write handler has run, so nothing was sent and the same nonce
-        // remains safe to retry. Event reads also retain their retry hint.
+        // No bot write handler has run, so nothing was sent and a retry with the
+        // caller's same request nonce is safe. Event reads also keep their retry hint.
         let expired = match serde_json::from_slice::<Value>(&frame.body)
             .ok()
             .and_then(|body| body.as_object().cloned())
@@ -408,8 +408,9 @@ pub(super) async fn handle_tool_request_with_reply_guard(
         == Some(plexus_core::github::reads::bot::BULK_METHOD)
     {
         // Programmatic bulk reads reuse the facade's stamped route and all of
-        // its authority checks. Keep the legacy result/error envelope for AFT's
-        // gh-shim bulk-read decoder; this method is not a tool invocation.
+        // its authority checks. Keep the legacy result/error envelope, because
+        // AFT's GitHub command relay (its gh-shim) decodes bulk reads in that
+        // shape; this method is not a tool invocation.
         let reply = blocking_section(|| {
             facade_tool_reply_with_budget(&frame, object, state, route_bindings, budget)
         })?;

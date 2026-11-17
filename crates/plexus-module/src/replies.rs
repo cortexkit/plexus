@@ -375,7 +375,8 @@ pub(super) fn with_call_tool_result_with_repo(
 /// A refusal adds `content` and `isError: true`. Web search retains Prefrontal's
 /// web search relay wording so moving providers does not change model text.
 /// For other tools, typed grant refusals carry
-/// the full envelope as JSON text so restoration clients can read detail;
+/// the full envelope as JSON text, so a relay that rebuilds the reply from
+/// that text (as the gh-shim does above) still reads the refusal's detail;
 /// other refusals retain the code, message, retry delay and field in one line.
 ///
 /// What may be disclosed does not change: the text is rendered only from the

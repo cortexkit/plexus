@@ -463,9 +463,9 @@ impl PlexusStore {
             if subscription_exists.is_none() {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
-            // No classification: this entry point takes a raw payload with no
-            // manifest context, so there is nothing to classify FROM. The poll
-            // path is where the reviewed kind is known.
+            // No classification: this entry point takes a raw payload without
+            // the watch's manifest, so there is nothing to classify from. The
+            // poll path classifies, because it knows the kind the manifest declares.
             insert_event_row(
                 conn,
                 principal,
@@ -475,9 +475,6 @@ impl PlexusStore {
                     vendor_event_id,
                     payload,
                     observed_at_ms,
-                    // No manifest context on this entry point, so there is
-                    // nothing to classify FROM. The poll path is where the
-                    // reviewed kind is known.
                     item_kind: None,
                     activity_at_ms: None,
                     actor: &ActorAttribution::NotEnriched,

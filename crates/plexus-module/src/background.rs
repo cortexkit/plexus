@@ -26,7 +26,8 @@ const POOL_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 ///
 /// A health probe may make one blocking vendor call per connection, so it must
 /// not run on the one-second scheduler tick. Sixty seconds bounds recovery
-/// latency while keeping that work off the five-second control-lane deadline;
+/// latency while keeping that work away from the daemon's health checks, which
+/// plexus must answer within five seconds;
 /// no caller depends on sub-minute connection recovery.
 const HEALTH_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 

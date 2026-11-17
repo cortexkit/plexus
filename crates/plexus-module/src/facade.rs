@@ -4,8 +4,8 @@ use super::*;
 
 // Only Basal may carry flows so relaying cannot replace its module grants with
 // a broader module's grants and widen the flow's authority.
-// Basal also needs first-party standing at route.bind (principal.rs) to reach
-// Plexus at all.
+// Basal must also be on the first-party list that route.bind admits
+// (principal.rs) to reach Plexus at all.
 //
 // The rule also runs the other way: a flow carrier's call must carry a flow
 // stamp. Basal holds broad module grants on behalf of flows. A call without the

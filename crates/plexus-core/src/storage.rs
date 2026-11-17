@@ -315,11 +315,12 @@ impl PlexusStore {
                 outcome.recorded, outcome.chain_max
             );
         }
-        // Canonical restores replace the database, not its siblings. Replay before
-        // returning any authority-bearing handle, under the same writer fence.
-        // An empty replay needs no write fence. Store copies can retain a database
-        // epoch ahead of their fresh lease; opening them must not claim authority
-        // when there are no revocations to apply.
+        // A store restore replaces store.db but not the revocation journal beside
+        // it, so a restored database can be missing revocations the journal still
+        // holds. Replay them before returning any handle that grants authority,
+        // under the same writer fence. An empty replay needs no fence: a copied
+        // store can record a higher writer epoch than its new lease file, and
+        // opening it must not take the writer role when there is nothing to apply.
         if revocations != 0 {
             store.with_conn_fenced(|conn| {
                 crate::grant_journal::scan(
@@ -450,8 +451,8 @@ pub fn now_ms() -> i64 {
         // authority comparison treating expired authority as live: with now = 0,
         // an expired grant reads live (0 < expires_at) and an approval window never lapses.
         // A module that cannot read its clock cannot enforce time-bounded
-        // authority; refusing to run is the honest failure, and the
-        // supervisor's restart budget parks it in front of an operator.
+        // authority; refusing to run is the honest failure. The supervisor stops
+        // restarting a module that keeps failing and reports it to the operator.
         .expect(
             "system clock reads before the Unix epoch; refusing to serve time-bounded authority",
         )

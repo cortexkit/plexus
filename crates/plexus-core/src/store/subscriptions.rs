@@ -368,7 +368,9 @@ impl PlexusStore {
         )
     }
 
-    // Automatic watches validate the entire pair before inserting either row.
+    // Validates a watch without inserting it. The repository-ownership pass
+    // creates each repository's watches as a set, so it prepares every one
+    // first and inserts none if any is refused.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_subscription(
         &self,

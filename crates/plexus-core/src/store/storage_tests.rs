@@ -2936,7 +2936,7 @@ fn migration_49_resolves_duplicate_policies_to_the_governing_row() {
 /// schema generation). Its defensive arms must fail CLOSED: an action
 /// whose risk is missing is not seeded at all (reconcile's quarantine is
 /// the reviewed path for unclassified rows), and a manifest whose tier is
-/// unreadable seeds its actions at S4 so execution requires a decision-plane
+/// unreadable seeds its actions at S4 so execution requires an explicit
 /// authorization verdict instead of bypassing that check at a lower tier.
 /// MUTATIONS: restoring `unwrap_or("read")` on the risk arm reddens the
 /// skip assertions; restoring `unwrap_or("S1")` on the tier arm reddens
@@ -6101,8 +6101,8 @@ fn recent_unacked_event_survives_prune_and_is_delivered() {
     // stamped `now_ms()` and pruned a few statements later, so a 1ms bound
     // asserts that fewer than one millisecond of wall clock passes between an
     // insert and a prune on a machine running the rest of the suite in
-    // parallel. It held when this test ran alone and failed in a full gate
-    // run, which is the signature of a threshold below scheduling
+    // parallel. It held when this test ran alone and failed in a full
+    // test-suite run, which is the signature of a threshold below scheduling
     // granularity rather than of a real defect.
     //
     // Sixty seconds keeps the property under test intact -- an event far

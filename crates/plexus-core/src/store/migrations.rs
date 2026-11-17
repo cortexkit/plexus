@@ -329,8 +329,9 @@ CREATE INDEX idx_reservations_terminal_created_at
     WHERE status IN ('invalidated', 'dispatched', 'expired');
 "#,
     },
-    // Catalog health refreshes reapply invalidation even for unchanged quarantine.
-    // Index only live reservations so these safety checks never walk spent history.
+    // Each catalog refresh invalidates the live reservations of a quarantined
+    // action again, even when the action was already quarantined. Index only
+    // live reservations so these repeated checks never walk spent history.
     Migration {
         version: 28,
         statements: r#"
