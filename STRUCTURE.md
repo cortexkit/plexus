@@ -21,11 +21,11 @@ scripts/                 Test gate, trains, release, staging, deploy acceptance
 ## Where new code goes
 
 - **A vendor:** a new `catalog/<vendor>.jsonc`. Core's `manifest::tests::every_shipped_manifest_is_valid` and `crates/plexus-conformance/tests/it/shipped_catalog_ingests.rs` prove the manifest parses. Review output contracts as well as input schemas; credential-returning actions are never declared. See `docs/design/manifest-model.md`.
-- **A wire tool or operation:** a handler in `crates/plexus-module/src/lib.rs`, declared in `crates/plexus-module/src/manifest.rs`.
+- **A wire tool or operation:** a handler in the matching `crates/plexus-module/src/facade*.rs` or `management.rs` file, routed by `tool_dispatch.rs` and declared in `crates/plexus-module/src/manifest.rs`.
 - **A GitHub read:** use the separate `github_read` tool and its shared GitHub read implementation; the `github` facade serves only `bot_request`, `bindings.read`, and `bindings.read_for_agent`.
-- **Agent identity:** daemon scope stamps in `crates/plexus-core/src/scope.rs`, carried by route bindings in `crates/plexus-module/src/lib.rs`. Bot writes resolve the stamped agent's bound handle in `github/facade/gates.rs`; identity-token arguments are refused centrally before tool dispatch.
-- **A governance gate:** `authorize` in `crates/plexus-core/src/governance.rs`.
-- **A table or column:** append a `Migration` to `MIGRATIONS` in `crates/plexus-core/src/storage.rs` and rehearse it with `examples/migration_rehearsal.rs`.
+- **Agent identity:** daemon scope stamps in `crates/plexus-core/src/scope.rs`, carried by route bindings in `crates/plexus-module/src/routes.rs`. Bot writes resolve the stamped agent's bound handle in `github/facade/gates.rs`; identity-token arguments are refused centrally before tool dispatch.
+- **A governance gate:** `authorize` in `crates/plexus-core/src/governance.rs`, with its gate checks in `governance/gates.rs`.
+- **A table or column:** append a `Migration` to `MIGRATIONS` in `crates/plexus-core/src/store/migrations.rs` and rehearse it with `examples/migration_rehearsal.rs`.
 - **A cursor strategy:** implement `CursorStrategy` in `poller.rs`, add the `CursorKind` variant in `manifest.rs`, and widen the `trigger_subscriptions` CHECK constraint with a migration.
 - **A GitHub bot request kind:** map it in `crates/plexus-core/src/github/facade/request_map.rs` with its argument allowlist and pre-reads, list its legs in `facade/effects.rs`, declare its actions `facade_only` in `catalog/github_rest.jsonc`, and add it to the import's action table in `github/control/mod.rs` so imported agents are granted it.
 - **A transport:** a new `crates/plexus-core/src/<transport>.rs`, routed in `crates/plexus-module/src/composition.rs` and accepted by manifest validation.

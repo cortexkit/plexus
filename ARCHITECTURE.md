@@ -38,8 +38,8 @@ Plexus serves tool-provider/v1's `tool.catalog` with per-tool capability tags fr
 | Area | Location |
 | --- | --- |
 | Manifest model and validation | `crates/plexus-core/src/manifest.rs` |
-| Store, migrations, retention | `crates/plexus-core/src/storage.rs` |
-| Governance pipeline | `crates/plexus-core/src/governance.rs` |
+| Store, migrations, retention | `crates/plexus-core/src/storage.rs` and its area files in `src/store/` |
+| Governance pipeline | `crates/plexus-core/src/governance.rs` and `src/governance/` |
 | Catalog ingest and discovery | `crates/plexus-core/src/catalog.rs` |
 | Daemon scope identity and rechecks | `crates/plexus-core/src/scope.rs` |
 | Poller and scheduler | `crates/plexus-core/src/poller.rs`, `scheduler.rs` |
