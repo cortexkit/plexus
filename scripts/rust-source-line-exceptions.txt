@@ -1,3 +1,1 @@
 # Tracked Rust path, maximum lines, reason. Remove each row when its split lands.
-crates/plexus-module/src/lib.rs 6836 split in progress
-crates/plexus-core/src/governance.rs 5456 split in progress
