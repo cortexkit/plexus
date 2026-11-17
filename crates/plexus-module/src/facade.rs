@@ -43,6 +43,15 @@ pub(super) fn facade_tool_reply_with_budget(
     };
     let name = object.get("name").and_then(Value::as_str).unwrap_or("");
     let mut reply = reply;
+    if reply
+        .get("error")
+        .is_some_and(|error| error.get("transmission").is_none())
+        && is_bot_read_call(frame, object, route_bindings)?
+    {
+        // Bot-read dispatch failures carry their own transmission. A refusal
+        // from shared facade admission happens before any GitHub request.
+        reply["error"]["transmission"] = json!("not_sent");
+    }
     if name == manifest::INVOKE_TOOL
         && route_bindings
             .binding(frame.header.channel, frame.header.epoch)?
@@ -962,6 +971,32 @@ enum BotReadForm {
     JobLogRange,
 }
 
+fn is_bot_read_call(
+    frame: &Frame,
+    object: &serde_json::Map<String, Value>,
+    route_bindings: &RouteBindings,
+) -> Result<bool, ModuleError> {
+    if object.get("method").and_then(Value::as_str)
+        == Some(plexus_core::github::reads::bot::BULK_METHOD)
+    {
+        return Ok(true);
+    }
+    if object.get("name").and_then(Value::as_str) != Some(manifest::GITHUB_READ_TOOL) {
+        return Ok(false);
+    }
+    let arguments = object.get("arguments").unwrap_or(&Value::Null);
+    let action = arguments["action"].as_str().unwrap_or("");
+    let principal_key = if action == "github.actions.job_log" {
+        route_bindings
+            .binding(frame.header.channel, frame.header.epoch)?
+            .map(|binding| principal::principal_key(&binding.principal))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    Ok(BotReadForm::of(action, &principal_key, &arguments["args"]).is_some())
+}
+
 impl BotReadForm {
     fn of(action: &str, principal_key: &str, args: &Value) -> Option<Self> {
         if plexus_core::github::reads::bot::ACTIONS.contains(&action) {
@@ -1023,10 +1058,29 @@ fn bot_read_reply(result: Result<Value, plexus_core::github::reads::bot::BotRead
         Err(BotReadError::JobNotFinished) => {
             refusal("job_not_finished", "the job has not completed", "sent")
         }
-        Err(BotReadError::JobLog(code)) => refusal(code, code, "sent"),
-        Err(BotReadError::Denied(denial)) => denial_response(&denial),
+        Err(BotReadError::JobLog(code)) => refusal(
+            code,
+            match code {
+                "job_log_unavailable" => "GitHub has no available log for this job",
+                "job_log_redirect_refused" => {
+                    "The job log download did not provide an allowed storage redirect"
+                }
+                "job_log_read_limit" => "The job log download exceeded its time or byte limit",
+                _ => "The job log download failed or returned an invalid response",
+            },
+            "sent",
+        ),
+        Err(BotReadError::Denied(denial)) => {
+            let mut reply = denial_response(&denial);
+            reply["error"]["transmission"] = json!("not_sent");
+            reply
+        }
         Err(BotReadError::Dispatch(outcome)) => github_read_failure(outcome),
-        Err(BotReadError::InvalidResponse) => json!({"error":{"code":"read_response_invalid"}}),
+        Err(BotReadError::InvalidResponse) => refusal(
+            "read_response_invalid",
+            "GitHub returned an unusable read response",
+            "sent",
+        ),
     }
 }
 
@@ -1037,7 +1091,7 @@ pub(super) fn github_read_failure(outcome: TransportOutcome) -> Value {
         TransportOutcome::OutcomeUnknown => ("unknown", None),
         TransportOutcome::NotSent { code, .. } => ("not_sent", Some(code)),
     };
-    json!({"error":{"code":"read_dispatch_failed", "outcome":{"transmission":transmission,"code":code,
+    json!({"error":{"code":"read_dispatch_failed", "transmission":transmission, "outcome":{"transmission":transmission,"code":code,
         "message":"GitHub read dispatch did not complete"}}})
 }
 
@@ -1132,5 +1186,83 @@ fn withdraw_response(
             "the withdrawal could not be completed",
             &error,
         ),
+    }
+}
+
+#[cfg(test)]
+mod bot_read_reply_tests {
+    use super::*;
+    use plexus_core::github::reads::bot::BotReadError;
+
+    #[test]
+    fn every_bot_read_refusal_has_top_level_transmission() {
+        let mut errors = vec![
+            BotReadError::AgentIdentityRequired,
+            BotReadError::RepositoryNotVisible,
+            BotReadError::EndpointNotAllowed {
+                field: "repository".into(),
+            },
+            BotReadError::BudgetExhausted {
+                retry_after_ms: 123,
+            },
+            BotReadError::ResponseTooLarge,
+            BotReadError::Vendor { status: 503 },
+            BotReadError::JobNotFinished,
+            BotReadError::InvalidResponse,
+            BotReadError::Denied(plexus_core::Denial::StoreFailure),
+        ];
+        errors.extend(
+            [
+                "job_log_unavailable",
+                "job_log_redirect_refused",
+                "job_log_read_limit",
+                "job_log_download_failed",
+            ]
+            .map(BotReadError::JobLog),
+        );
+        errors.extend(
+            [
+                TransportOutcome::Completed { response: None },
+                TransportOutcome::VendorFailed {
+                    code: "vendor_failure".into(),
+                    message: "private vendor message".into(),
+                },
+                TransportOutcome::OutcomeUnknown,
+                TransportOutcome::NotSent {
+                    code: "not_connected".into(),
+                    message: "private transport message".into(),
+                },
+            ]
+            .map(BotReadError::Dispatch),
+        );
+        for error in errors {
+            // Keep this match exhaustive so adding a refusal variant also
+            // requires choosing its transmission semantics in the shape test.
+            let expected = match &error {
+                BotReadError::AgentIdentityRequired
+                | BotReadError::RepositoryNotVisible
+                | BotReadError::EndpointNotAllowed { .. }
+                | BotReadError::BudgetExhausted { .. }
+                | BotReadError::Denied(_) => "not_sent",
+                BotReadError::ResponseTooLarge
+                | BotReadError::Vendor { .. }
+                | BotReadError::JobNotFinished
+                | BotReadError::JobLog(_)
+                | BotReadError::InvalidResponse => "sent",
+                BotReadError::Dispatch(TransportOutcome::Completed { .. }) => "completed",
+                BotReadError::Dispatch(TransportOutcome::VendorFailed { .. }) => "failed",
+                BotReadError::Dispatch(TransportOutcome::OutcomeUnknown) => "unknown",
+                BotReadError::Dispatch(TransportOutcome::NotSent { .. }) => "not_sent",
+            };
+            let reply = bot_read_reply(Err(error.clone()));
+            assert_eq!(
+                reply.pointer("/error/transmission").and_then(Value::as_str),
+                Some(expected),
+                "missing or incorrect top-level transmission for {error:?}: {reply}"
+            );
+            if matches!(error, BotReadError::Dispatch(_)) {
+                assert_eq!(reply["error"]["outcome"]["transmission"], expected);
+            }
+        }
     }
 }
