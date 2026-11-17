@@ -106,11 +106,15 @@ mod tests {
     #[test]
     fn migration_62_adds_reports_without_changing_existing_data() {
         let inner = cortexkit_store::open_sqlite(&descriptor()).unwrap();
-        let migrations = super::super::MIGRATIONS;
-        assert_eq!(migrations.last().unwrap().version, 62);
-        inner
-            .migrate("plexus", &migrations[..migrations.len() - 1])
-            .unwrap();
+        // Pinned to migration 62 by version, not by position: later migrations
+        // append after it and must not move what this test applies.
+        let all = super::super::MIGRATIONS;
+        let at = all
+            .iter()
+            .position(|migration| migration.version == 62)
+            .expect("migration 62 exists");
+        let migrations = &all[..=at];
+        inner.migrate("plexus", &migrations[..at]).unwrap();
         inner.with_conn_fenced(|conn| conn.execute_batch("INSERT INTO connections(principal,connection_id,app_key,status,created_at_ms,updated_at_ms) VALUES('owner','c','exa_rest','active',1,2)")).unwrap();
         let outcome = inner.migrate("plexus", migrations).unwrap();
         assert_eq!((outcome.applied, outcome.recorded), (1, 62));
