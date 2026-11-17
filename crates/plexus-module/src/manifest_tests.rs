@@ -486,7 +486,7 @@ fn every_served_events_op_and_its_fields_are_advertised() {
         .filter_map(serde_json::Value::as_str)
         .collect();
     let marker = "(manifest::EVENTS_TOOL, Some(\"";
-    let served: Vec<&str> = include_str!("lib.rs")
+    let served: Vec<&str> = include_str!("facade.rs")
         .split(marker)
         .skip(1)
         .filter_map(|rest| rest.split('"').next())

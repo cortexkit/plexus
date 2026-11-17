@@ -41,7 +41,7 @@ fn shipped_source_does_not_read_launch_nonce_environment() {
 
     let (root, files) = shipped_rust_sources();
 
-    let hello_source = root.join("crates/plexus-module/src/lib.rs");
+    let hello_source = root.join("crates/plexus-module/src/runtime_loop.rs");
     let mut visited_hello = false;
     let mut accessor_calls = 0;
     let mut violations = Vec::new();
@@ -65,7 +65,7 @@ fn shipped_source_does_not_read_launch_nonce_environment() {
     }
     assert!(
         visited_hello,
-        "scan must visit crates/plexus-module/src/lib.rs"
+        "scan must visit crates/plexus-module/src/runtime_loop.rs"
     );
     assert!(accessor_calls > 0, "HELLO must call subc_os::launch_nonce");
     assert!(
