@@ -13,6 +13,13 @@ class PrepushTests(Scratch):
         (self.checkout / 'scripts').mkdir(parents=True)
         shutil.copy2(SCRIPTS / 'prepush.sh', self.checkout / 'scripts/prepush.sh')
         shutil.copy2(SCRIPTS / 'check-exit-traps.py', self.checkout / 'scripts/check-exit-traps.py')
+        shutil.copy2(SCRIPTS / 'check-rust-source-lines.py', self.checkout / 'scripts/check-rust-source-lines.py')
+        shutil.copy2(SCRIPTS / 'rust-source-line-exceptions.txt',
+                     self.checkout / 'scripts/rust-source-line-exceptions.txt')
+        # The line check refuses a checkout with no tracked Rust source, so the
+        # stand-in checkout carries one small file.
+        (self.checkout / 'src').mkdir()
+        (self.checkout / 'src/lib.rs').write_text('fn main() {}\n')
         self.log = self.tmp / 'phases'
         write_executable(self.checkout / 'scripts/rust-test-gate.sh', '''#!/bin/sh
 echo "fast $*" >> "$PHASE_LOG"
