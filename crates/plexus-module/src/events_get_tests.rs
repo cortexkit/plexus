@@ -1130,6 +1130,52 @@ fn assert_issue_reply(reply: &Value, issue_key: &str) {
 }
 
 #[tokio::test]
+async fn prefrontal_rename_events_get_keeps_exact_carrier_rights() {
+    let (_scratch, store, path) = test_store("prefrontal_rename_get");
+    let (issue_key, _) = seed_test_events(&path, &store);
+    store
+        .insert_grant(&GrantInput {
+            grant_id: "grant-new-consume".into(),
+            principal: "direct".into(),
+            connection_id: "conn-github".into(),
+            grantee_principal: "reserved:prefrontal".into(),
+            risk_ceiling: "read".into(),
+            action_selectors: vec!["list_issues".into()],
+            authority_kind: "events_consume".into(),
+            expires_at: Some(i64::MAX / 2),
+        })
+        .unwrap();
+    let mut accepted = Vec::new();
+    for module in [
+        "prefrontal-core",
+        "prefrontal",
+        "prefrontal-evil",
+        "xprefrontal",
+    ] {
+        let reply = execute_tool_call(
+            store.clone(),
+            Principal::Reserved {
+                module_id: module.into(),
+            },
+            None,
+            manifest::EVENTS_GET_TOOL,
+            json!({"event_key":issue_key,"event_name":"github_issue_changed"}),
+        )
+        .await;
+        if matches!(module, "prefrontal-core" | "prefrontal") {
+            assert_issue_reply(&reply, &issue_key);
+            accepted.push(reply["result"].clone());
+        } else {
+            assert_eq!(
+                reply["error"]["code"], "events_get_carrier_refused",
+                "{reply}"
+            );
+        }
+    }
+    assert_eq!(accepted[0], accepted[1]);
+}
+
+#[tokio::test]
 async fn events_get_tool_matches_legacy_for_consumer() {
     let (_scratch, store, path) = test_store("get_tool_consumer");
     let (issue_key, _) = seed_test_events(&path, &store);

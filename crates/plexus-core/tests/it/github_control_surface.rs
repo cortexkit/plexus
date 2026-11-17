@@ -275,6 +275,36 @@ fn import_requires_direct_and_does_not_read_vault_on_refusal() {
 }
 
 #[test]
+fn prefrontal_rename_import_plan_grants_both_exact_principals() {
+    let store = store();
+    let plan = control::import(
+        &store,
+        "direct",
+        &inventory(),
+        &Credentials(AtomicUsize::new(0)),
+        &Reader(AtomicUsize::new(0)),
+        0,
+        true,
+    )
+    .unwrap();
+    let grants = plan["module_grants"].as_array().unwrap();
+    assert_eq!(grants.len(), 3);
+    let old = grants
+        .iter()
+        .find(|row| row["grantee_principal"] == "reserved:prefrontal-core")
+        .unwrap();
+    let new = grants
+        .iter()
+        .find(|row| row["grantee_principal"] == "reserved:prefrontal")
+        .unwrap();
+    assert_eq!(old["action_selectors"], new["action_selectors"]);
+    assert_eq!(old["connection_id"], new["connection_id"]);
+    for caller in ["reserved:prefrontal-evil", "reserved:xprefrontal"] {
+        assert!(!grants.iter().any(|row| row["grantee_principal"] == caller));
+    }
+}
+
+#[test]
 fn import_resolves_repositories_with_own_installation_token_and_pages_to_completion() {
     let store = store();
     let provider = Credentials(AtomicUsize::new(0));
@@ -282,7 +312,7 @@ fn import_resolves_repositories_with_own_installation_token_and_pages_to_complet
     let plan =
         control::import(&store, "direct", &inventory(), &provider, &reader, 0, true).unwrap();
     assert_eq!(plan["agents"]["agent-one"][0]["repository"], "org/last");
-    assert_eq!(plan["module_grants"].as_array().unwrap().len(), 2);
+    assert_eq!(plan["module_grants"].as_array().unwrap().len(), 3);
     assert_eq!(reader.0.load(Ordering::Relaxed), 2);
     assert!(store
         .github_handle_and_bindings("app-one")
@@ -346,7 +376,7 @@ fn import_resolves_repositories_with_own_installation_token_and_pages_to_complet
     let grants = store
         .list_grants("direct", "github-handle-app-one")
         .unwrap();
-    assert_eq!(grants.len(), 3);
+    assert_eq!(grants.len(), 4);
     assert_eq!(
         grants
             .iter()
@@ -360,6 +390,7 @@ fn import_resolves_repositories_with_own_installation_token_and_pages_to_complet
     for principal in [
         plexus_core::github::AFT_PRINCIPAL,
         plexus_core::github::PREFRONTAL_PRINCIPAL,
+        "reserved:prefrontal",
     ] {
         assert_eq!(
             store

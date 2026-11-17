@@ -398,6 +398,23 @@ fn copy_store(
             summary.scrubbed += removed as u64;
         }
     }
+    // Source grants must be present before the alias backfill, and revoked
+    // source grants must be gone so they cannot create new authority.
+    tx.execute_batch(crate::storage::PREFRONTAL_GRANT_BACKFILL)
+        .map_err(|e| format!("prefrontal grant backfill: {e}"))?;
+    let added = tx.changes();
+    if let Some(summary) = summaries.iter_mut().find(|s| s.table == "grants") {
+        summary.carried += added;
+    }
+    // A journal may also revoke a deterministic alias synthesized above.
+    // Replay again so moving an older backup cannot resurrect that alias.
+    for entry in revocations {
+        let removed = crate::grant_journal::apply(&tx, entry).map_err(|e| e.to_string())?;
+        if let Some(summary) = summaries.iter_mut().find(|s| s.table == "grants") {
+            summary.carried -= removed as u64;
+            summary.scrubbed += removed as u64;
+        }
+    }
     // A source from before recipient lists had an owner carries rows with no
     // principal; give each owner of the connection id its own copy, exactly as
     // the schema migration does for a store upgraded in place.

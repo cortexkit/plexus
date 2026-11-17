@@ -64,7 +64,7 @@ const PREFRONTAL_READS: &[&str] = crate::github::reads::BOT_ACTIONS;
 /// grant on the handle must still cover each request.
 const PREFRONTAL_WRITES: &[&str] = &["add_reaction"];
 
-/// Every action selector on prefrontal-core's module grant for one handle.
+/// Every action selector on either prefrontal identity's grant for one handle.
 pub(crate) fn prefrontal_selectors() -> Vec<String> {
     PREFRONTAL_READS
         .iter()
@@ -536,7 +536,9 @@ fn import_with(
         );
         let connection_id = handle_connection_id(&item.app_handle_id);
         module_grants.push(json!({"connection_id":connection_id,"grantee_principal":crate::github::AFT_PRINCIPAL,"action_selectors":aft}));
-        module_grants.push(json!({"connection_id":connection_id,"grantee_principal":crate::github::PREFRONTAL_PRINCIPAL,"action_selectors":prefrontal_selectors()}));
+        for principal in crate::github::PREFRONTAL_PRINCIPALS {
+            module_grants.push(json!({"connection_id":connection_id,"grantee_principal":principal,"action_selectors":prefrontal_selectors()}));
+        }
         matrix.insert(item.agent_id.clone(), agent_matrix);
         rows.push(GithubImportRow {
             handle: GithubHandle {

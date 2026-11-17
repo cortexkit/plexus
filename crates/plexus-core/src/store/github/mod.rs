@@ -1798,10 +1798,13 @@ impl PlexusStore {
                 rewrite_filters(tx, &handle.app_handle_id)?;
                 for (suffix, principal, selectors) in [
                     ("aft", crate::github::AFT_PRINCIPAL, row.module_actions.clone()),
-                    ("prefrontal", crate::github::PREFRONTAL_PRINCIPAL, crate::github::control::prefrontal_selectors()),
-                ] {
-                    // Both module grants carry a write: AFT's writes and
-                    // prefrontal-core's seen-marker reaction. Each row admits
+                ].into_iter().chain(
+                    ["prefrontal", "reserved-prefrontal"].into_iter()
+                        .zip(crate::github::PREFRONTAL_PRINCIPALS)
+                        .map(|(suffix, principal)| (suffix, principal, crate::github::control::prefrontal_selectors()))
+                ) {
+                    // AFT's writes and both prefrontal identities' seen-marker
+                    // reaction carry write authority. Each row admits
                     // only the actions its selectors name.
                     tx.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,action_selectors,authority_kind,expires_at,generation,created_at_ms)
                         VALUES (?1,?2,?3,?4,?5,?6,'invoke',NULL,1,?7)",

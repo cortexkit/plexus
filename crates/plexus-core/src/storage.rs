@@ -102,6 +102,7 @@ const APP_RETIRED_PREDICATE: &str = app_retired_predicate!();
 #[path = "store/migrations.rs"]
 mod migrations_store;
 pub use migrations_store::MIGRATIONS;
+pub(crate) use migrations_store::PREFRONTAL_GRANT_BACKFILL;
 pub(crate) use migrations_store::RECIPIENT_ALLOWLIST_PRINCIPAL_BACKFILL;
 
 #[path = "store/types.rs"]

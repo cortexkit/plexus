@@ -61,11 +61,8 @@ fn evaluate(
     scope: Option<&plexus_core::scope::CallScope>,
     request: &serde_json::Map<String, Value>,
 ) -> Value {
-    if !matches!(
-        caller,
-        principal::BASAL_PRINCIPAL | plexus_core::github::PREFRONTAL_PRINCIPAL
-    ) {
-        return tool_error("principal_denied", "grants.would_ask is reserved to reserved:prefrontal-core and flow-scoped reserved:basal");
+    if caller != principal::BASAL_PRINCIPAL && !plexus_core::github::is_prefrontal(caller) {
+        return tool_error("principal_denied", "grants.would_ask is reserved to reserved:prefrontal-core, reserved:prefrontal and flow-scoped reserved:basal");
     }
     if caller == principal::BASAL_PRINCIPAL && !scope.is_some_and(|scope| scope.flow_id.is_some()) {
         return tool_error(

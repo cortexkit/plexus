@@ -462,7 +462,7 @@ impl ConsentCards {
             scope.flow_id.is_none()
                 && ((scope.acting_agent().is_some()
                     && matches!(scope.kind.as_deref(), Some("head" | "ephemeral")))
-                    || (scope.owner == "reserved:prefrontal-core"
+                    || (crate::github::is_prefrontal(&scope.owner)
                         && scope.kind.as_deref() == Some("worker")
                         && scope.parent.is_some()))
         })
@@ -753,6 +753,27 @@ mod tests {
             delegates: true,
             owner_authorized: true,
         }
+    }
+
+    #[test]
+    fn prefrontal_rename_worker_card_scopes_keep_exact_owner_rights() {
+        let mut worker = scope();
+        worker.kind = Some("worker".into());
+        worker.parent = Some("head".into());
+        for owner in ["reserved:prefrontal-core", "reserved:prefrontal"] {
+            worker.owner = owner.into();
+            assert!(ConsentCards::available_scope(Some(&worker)), "{owner}");
+        }
+        for owner in ["reserved:prefrontal-evil", "reserved:xprefrontal"] {
+            worker.owner = owner.into();
+            assert!(!ConsentCards::available_scope(Some(&worker)), "{owner}");
+        }
+        worker.owner = "reserved:prefrontal".into();
+        worker.parent = None;
+        assert!(!ConsentCards::available_scope(Some(&worker)));
+        worker.parent = Some("head".into());
+        worker.flow_id = Some("flow".into());
+        assert!(!ConsentCards::available_scope(Some(&worker)));
     }
 
     #[test]

@@ -86,6 +86,33 @@ fn reader(body: Value) -> MemoryReader {
 }
 
 #[tokio::test]
+async fn prefrontal_rename_agent_changed_accepts_only_exact_subjects() {
+    for (module, expected_calls) in [
+        ("prefrontal-core", 1),
+        ("prefrontal", 1),
+        ("prefrontal-evil", 0),
+        ("xprefrontal", 0),
+    ] {
+        let (_scratch, state) = fixture();
+        let peer = Peer::new(Ok(json!({"agent":{"agent_id":"agent"}})));
+        let registry = Arc::new(PrefrontalAgentRegistry::new(peer.clone()));
+        let account = AccountNames::derive("box_test").unwrap();
+        let mut reader = reader(json!({"agent_id":"agent", "change":"retired", "seq":1}));
+        let Some(AgentChangedItem::Delivery(delivery)) = reader.item.as_mut() else {
+            panic!("delivery expected");
+        };
+        delivery.subject = account.event_subject(module, "agent_changed", 1).unwrap();
+        assert!(
+            read_agent_changed_once(&mut reader, state.store().clone(), registry, &account)
+                .await
+                .unwrap()
+        );
+        assert_eq!(reader.acks, 1);
+        assert_eq!(peer.calls.lock().unwrap().len(), expected_calls, "{module}");
+    }
+}
+
+#[tokio::test]
 async fn retired_event_resolves_once_and_only_well_formed_gone_revokes() {
     for (reply, revoked, acked) in [
         (json!({"gone":{"at":1,"reason":"deleted"}}), true, true),

@@ -1158,7 +1158,41 @@ CREATE TABLE route_fact_outbox (
 CREATE INDEX route_fact_outbox_age ON route_fact_outbox(created_at_ms, msg_id);
 "#,
     },
+    // Keep the old identity's grants for rollback binaries without bumping
+    // grant or connection generations or writing audit/revocation records.
+    // At rollout the live journal had no prefrontal revocations, so migrating
+    // before journal replay cannot clone an already-revoked old grant.
+    // Deterministic copy ids let later journal entries remove those same
+    // copies after a backup restore.
+    Migration {
+        version: 63,
+        statements: PREFRONTAL_GRANT_BACKFILL,
+    },
 ];
+
+/// Shared with offline store import, whose destination is migrated before
+/// source rows are copied. Existing aliases and their metadata stay untouched.
+pub(crate) const PREFRONTAL_GRANT_BACKFILL: &str = r#"
+INSERT OR IGNORE INTO grants (grant_id, principal, connection_id, grantee_principal,
+                    risk_ceiling, action_selectors, authority_kind, expires_at,
+                    generation, created_at_ms, agent_id)
+SELECT CASE WHEN old.grant_id GLOB 'github-import:*:prefrontal'
+            THEN substr(old.grant_id, 1, length(old.grant_id) - length('prefrontal')) || 'reserved-prefrontal'
+            ELSE old.grant_id || '-reserved-prefrontal' END,
+       old.principal, old.connection_id, 'reserved:prefrontal', old.risk_ceiling,
+       old.action_selectors, old.authority_kind, old.expires_at, old.generation,
+       old.created_at_ms, old.agent_id
+FROM grants old
+WHERE old.grantee_principal = 'reserved:prefrontal-core'
+  AND NOT EXISTS (
+      SELECT 1 FROM grants new
+      WHERE new.principal = old.principal
+        AND new.connection_id = old.connection_id
+        AND new.grantee_principal = 'reserved:prefrontal'
+        AND new.authority_kind = old.authority_kind
+        AND new.action_selectors = old.action_selectors
+  );
+"#;
 
 /// The backfill half of migration 48, shared with the store import so a store
 /// copied from before the migration gets the same per-owner rows.
@@ -1189,3 +1223,7 @@ CREATE UNIQUE INDEX recipient_allowlist_owner_module
 "#,
     recipient_allowlist_principal_backfill!()
 );
+
+#[cfg(test)]
+#[path = "prefrontal_rename_tests.rs"]
+mod tests;

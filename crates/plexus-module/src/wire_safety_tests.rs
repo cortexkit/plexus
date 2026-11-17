@@ -477,6 +477,20 @@ fn refused_grant_inspection_records_the_real_actor_and_decision() {
 }
 
 #[test]
+fn prefrontal_rename_grant_inspection_keeps_exact_caller_rights() {
+    let state = state();
+    let request = json!({"method":"grants.would_ask","params":{"agent_id":"agent","flow_id":"flow","items":[]}});
+    let inspect =
+        |caller| grants_would_ask::run(&state, caller, None, request.as_object().unwrap());
+    let old = inspect("reserved:prefrontal-core");
+    assert_eq!(old, json!({"result":{"items":[]}}));
+    assert_eq!(inspect("reserved:prefrontal"), old);
+    for caller in ["reserved:prefrontal-evil", "reserved:xprefrontal"] {
+        assert_eq!(inspect(caller)["error"]["code"], "principal_denied");
+    }
+}
+
+#[test]
 fn unavailable_grant_target_is_not_reported_as_malformed() {
     let state = state();
     let reply = grants_would_ask::run(&state, "reserved:prefrontal-core", None,

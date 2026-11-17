@@ -278,11 +278,12 @@ pub async fn read_agent_changed_once(
         reader.ack().await?;
         return Ok(true);
     }
-    let expected = account
-        .event_subject("prefrontal-core", "agent_changed", 1)
+    let expected = plexus_core::github::prefrontal_module_ids()
+        .map(|module| account.event_subject(module, "agent_changed", 1))
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     let agent = match item {
-        AgentChangedItem::Delivery(delivery) if delivery.subject == expected => {
+        AgentChangedItem::Delivery(delivery) if expected.contains(&delivery.subject) => {
             serde_json::from_slice::<AgentChanged>(&delivery.body)
                 .ok()
                 .filter(|event| !event.agent_id.is_empty())

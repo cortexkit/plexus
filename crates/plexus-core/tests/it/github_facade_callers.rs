@@ -259,6 +259,48 @@ fn refused(reply: &Value, code: &str) {
 }
 
 #[test]
+fn prefrontal_rename_import_grants_equal_rights_to_exact_principals() {
+    let f = Fixture::new("callers-rename", &["add_reaction"]);
+    let grants = f.store.list_grants("direct", CONNECTION).unwrap();
+    let old = grants
+        .iter()
+        .find(|g| g.grantee_principal == "reserved:prefrontal-core")
+        .unwrap();
+    let new = grants
+        .iter()
+        .find(|g| g.grantee_principal == "reserved:prefrontal")
+        .unwrap();
+    assert_eq!(old.grant_id, "github-import:app-fixture:prefrontal");
+    assert_eq!(
+        new.grant_id,
+        "github-import:app-fixture:reserved-prefrontal"
+    );
+    assert_eq!(old.action_selectors, new.action_selectors);
+    assert_eq!(old.risk_ceiling, new.risk_ceiling);
+    assert_eq!(old.authority_kind, new.authority_kind);
+    assert_eq!(old.expires_at, new.expires_at);
+    for (index, caller) in ["reserved:prefrontal-core", "reserved:prefrontal"]
+        .into_iter()
+        .enumerate()
+    {
+        let reply = f.call(caller, &seen_marker(), &format!("rename-{index}"));
+        assert_eq!(reply["result"]["status"], "completed", "{reply}");
+        refused(
+            &f.call(caller, &comment(), &format!("comment-{index}")),
+            "module_grant_absent",
+        );
+    }
+    for caller in ["reserved:prefrontal-evil", "reserved:xprefrontal"] {
+        assert!(!grants.iter().any(|g| g.grantee_principal == caller));
+        refused(
+            &f.call(caller, &seen_marker(), caller),
+            "module_grant_absent",
+        );
+    }
+    assert_eq!(f.transport.requests().len(), 2);
+}
+
+#[test]
 fn prefrontal_seen_marker_completes_through_import_and_facade() {
     let f = Fixture::new("callers-seen-marker", &["add_reaction"]);
     let reply = f.call(PREFRONTAL_PRINCIPAL, &seen_marker(), "seen");

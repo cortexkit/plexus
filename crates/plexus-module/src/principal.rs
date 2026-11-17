@@ -72,10 +72,11 @@ pub fn trust_for_principal(principal: &Option<Principal>) -> PrincipalTrust {
 /// `striatum` is the routing module. It was `prefrontal-routing` until the
 /// rename settled on 2026-11-11; the old id is retired below.
 fn is_first_party_module_id(module_id: &str) -> bool {
-    matches!(
-        module_id,
-        "prefrontal-core" | "striatum" | "aft" | "broca" | "basal" | "cingulate"
-    )
+    plexus_core::github::prefrontal_module_ids().any(|id| id == module_id)
+        || matches!(
+            module_id,
+            "striatum" | "aft" | "broca" | "basal" | "cingulate"
+        )
 }
 
 pub use plexus_core::scope::principal_label as principal_key;
@@ -105,6 +106,7 @@ mod tests {
     fn every_first_party_module_id_is_accepted() {
         for module_id in [
             "prefrontal-core",
+            "prefrontal",
             "striatum",
             "aft",
             "broca",
@@ -165,14 +167,11 @@ mod tests {
     #[test]
     fn ids_that_merely_resemble_a_first_party_id_are_denied() {
         for module_id in [
-            // `prefrontal` with no suffix: a plausible-looking id that no
-            // module registers. It was briefly in the allowlist above, added
-            // from a second-hand report of the rename rather than from the
-            // renamed module's own source, where the real ids turned out to be
-            // `prefrontal-core` and `prefrontal-routing`. Asserting it is
-            // DENIED, instead of merely deleting it, means the same guess
-            // cannot be re-added later without failing this test.
-            "prefrontal",
+            // The module was renamed from prefrontal-core to prefrontal.
+            // Both exact ids stay accepted until the old name is dropped;
+            // neither name admits prefixes or suffixes.
+            "prefrontal-evil",
+            "xprefrontal",
             "prefrontal-host:abc123",
             "prefrontal-core-evil",
             "prefrontal\u{0}-core",

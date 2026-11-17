@@ -745,11 +745,11 @@ pub(super) fn event_get_reply(
 ) -> Value {
     let is_basal_flow = principal_key == principal::BASAL_PRINCIPAL
         && route_scope.is_some_and(|scope| scope.flow_id.is_some());
-    let is_prefrontal_core = principal_key == plexus_core::github::PREFRONTAL_PRINCIPAL;
-    if !is_basal_flow && !is_prefrontal_core {
+    let is_prefrontal = plexus_core::github::is_prefrontal(principal_key);
+    if !is_basal_flow && !is_prefrontal {
         return tool_error(
             "events_get_carrier_refused",
-            "events.get is restricted to reserved:basal on a flow route or reserved:prefrontal-core",
+            "events.get is restricted to reserved:basal on a flow route, reserved:prefrontal-core or reserved:prefrontal",
         );
     }
     let Some(event_key) = arguments.get("event_key").and_then(Value::as_str) else {
