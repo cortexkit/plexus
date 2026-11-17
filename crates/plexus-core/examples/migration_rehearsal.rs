@@ -70,6 +70,23 @@ const DECLARED_CHANGES: &[DeclaredChange] = &[
             SELECT DISTINCT principal, connection_id, action_selector FROM policies)",
         why: "duplicate policy scopes resolved to the lowest policy id",
     },
+    DeclaredChange {
+        migration: 63,
+        table: "grants",
+        // Every grant held under prefrontal's old module name gains one copy
+        // under the new name, unless an equivalent copy already exists.
+        expected_after_sql: "SELECT (SELECT COUNT(*) FROM grants) + (
+            SELECT COUNT(*) FROM grants old
+            WHERE old.grantee_principal = 'reserved:prefrontal-core'
+              AND NOT EXISTS (
+                  SELECT 1 FROM grants new
+                  WHERE new.principal = old.principal
+                    AND new.connection_id = old.connection_id
+                    AND new.grantee_principal = 'reserved:prefrontal'
+                    AND new.authority_kind = old.authority_kind
+                    AND new.action_selectors = old.action_selectors))",
+        why: "prefrontal's grants copied to its new module name",
+    },
 ];
 
 /// The declared after-count of each table this run's migrations change on
