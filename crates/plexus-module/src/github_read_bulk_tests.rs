@@ -12,6 +12,17 @@ const VECTOR_NAMES: &[&str] = &[
     "job-log-range",
     "refused-response-too-large",
     "refused-endpoint-not-allowed-path",
+    "refused-vendor-error",
+    "refused-job-not-finished",
+    "refused-job-log-unavailable",
+    "refused-job-log-redirect-refused",
+    "refused-job-log-read-limit",
+    "refused-job-log-download-failed",
+    "refused-read-dispatch-failed-unknown",
+    "refused-read-dispatch-failed-not-sent",
+    "refused-read-response-invalid",
+    "refused-invalid-request",
+    "refused-denied",
 ];
 
 fn bulk_dir(kind: &str) -> std::path::PathBuf {
@@ -32,15 +43,29 @@ fn setup(
     Arc<MockTransport>,
     Scratch,
 ) {
-    let (runtime, store, transport, scratch) = imported_runtime_with_actions(&[
+    let actions = [
         "github.repo.get",
         "github.search.code",
         "github.search.issues",
         "github.actions.job.get",
         "github.actions.job_log",
-    ]);
+    ];
+    let (runtime, store, transport, scratch) =
+        imported_runtime_with_actions(if github["setup"]["deny_module_grants"] == true {
+            &[]
+        } else {
+            &actions
+        });
     for (action, reply) in github["replies"].as_object().unwrap() {
-        transport.set_response_for_method(action, "", mock(reply));
+        let response = match reply["transport"].as_str() {
+            Some("unknown") => MockResponse::OutcomeUnknown,
+            Some("not_sent") => MockResponse::TransientNotSent {
+                message: "private transport diagnostic".into(),
+            },
+            None => mock(reply),
+            Some(other) => panic!("unknown vector transport outcome {other}"),
+        };
+        transport.set_response_for_method(action, "", response);
     }
     if let Some(spent) = github["setup"]["reads_spent"].as_i64() {
         let now = plexus_core::now_ms();
@@ -55,6 +80,67 @@ fn setup(
 }
 
 fn source_vector(name: &str) -> Value {
+    let base = match name {
+        "refused-job-not-finished"
+        | "refused-job-log-unavailable"
+        | "refused-job-log-redirect-refused"
+        | "refused-job-log-read-limit"
+        | "refused-job-log-download-failed" => "job-log-range",
+        "refused-read-dispatch-failed-unknown"
+        | "refused-read-dispatch-failed-not-sent"
+        | "refused-invalid-request"
+        | "refused-denied" => "repo-get-diff",
+        "refused-read-response-invalid" => "search-code",
+        _ => return legacy_source_vector(name),
+    };
+    let mut source = legacy_source_vector(base);
+    source["name"] = json!(name);
+    let github = &mut source["github"];
+    match name {
+        "refused-job-not-finished" => {
+            github["replies"]["github.actions.job.get"]["success"]["body"]["status"] =
+                json!("in_progress");
+            github["replies"]
+                .as_object_mut()
+                .unwrap()
+                .remove("github.actions.job_log");
+            github["expected_requests"]
+                .as_array_mut()
+                .unwrap()
+                .truncate(1);
+        }
+        "refused-job-log-unavailable"
+        | "refused-job-log-redirect-refused"
+        | "refused-job-log-read-limit"
+        | "refused-job-log-download-failed" => {
+            let code = name.strip_prefix("refused-").unwrap().replace('-', "_");
+            github["replies"]["github.actions.job_log"] = json!({"vendor_error":code});
+        }
+        "refused-read-dispatch-failed-unknown" | "refused-read-dispatch-failed-not-sent" => {
+            let transmission = if name.ends_with("unknown") {
+                "unknown"
+            } else {
+                "not_sent"
+            };
+            github["replies"]["github.repo.get"] = json!({"transport":transmission});
+        }
+        "refused-read-response-invalid" => {
+            github["replies"]["github.search.code"]["success"]["body"] = json!({});
+        }
+        "refused-denied" => {
+            github["setup"] = json!({"deny_module_grants":true});
+            github["expected_requests"] = json!([]);
+        }
+        "refused-invalid-request" => {
+            github["expected_requests"] = json!([]);
+            source["request"]["params"]["args"] = json!([]);
+        }
+        _ => unreachable!(),
+    }
+    source
+}
+
+fn legacy_source_vector(name: &str) -> Value {
     let source = read_json(&vector_dir().join(format!("{name}.request.json")));
     json!({
         "name": name,
@@ -112,23 +198,39 @@ async fn bulk_vectors_replay_byte_for_byte_and_match_tool_payloads() {
             .unwrap()
             .get("content")
             .is_none());
-        let old_reply = read_json(&vector_dir().join(format!("{name}.reply.json")));
-        assert_eq!(
-            tool_body,
-            serde_json::to_vec(&old_reply).unwrap(),
-            "{name}: lean tool bytes changed"
-        );
+        if matches!(
+            *name,
+            "repo-get-diff"
+                | "search-code"
+                | "search-issues"
+                | "job-log-range"
+                | "refused-response-too-large"
+                | "refused-endpoint-not-allowed-path"
+                | "refused-vendor-error"
+        ) {
+            let old_reply = read_json(&vector_dir().join(format!("{name}.reply.json")));
+            assert_eq!(
+                tool_body,
+                serde_json::to_vec(&old_reply).unwrap(),
+                "{name}: lean tool bytes changed"
+            );
+        }
         let sent: Vec<Value> = transport.requests().iter().map(|sent| {
             json!({"connection_id": sent.connection_id, "action": sent.action, "args": sent.args})
         }).collect();
         let expected = vector["github"]["expected_requests"].as_array().unwrap();
         let twice: Vec<_> = expected.iter().chain(expected).cloned().collect();
         assert_eq!(sent, twice, "{name}: governed requests differ");
-        let units = if request["params"]["action"] == "github.actions.job_log" {
-            3
-        } else {
-            expected.len() as i64
-        };
+        let units: i64 = expected
+            .iter()
+            .map(|sent| {
+                if sent["action"] == "github.actions.job_log" {
+                    2
+                } else {
+                    1
+                }
+            })
+            .sum();
         assert_eq!(
             store
                 .github_bot_reads_in_window("app-x", plexus_core::now_ms())
@@ -141,6 +243,25 @@ async fn bulk_vectors_replay_byte_for_byte_and_match_tool_payloads() {
                 .unwrap_or_else(|| request["params"]["action"].as_str().unwrap())
                 .to_owned(),
         );
+        if reply.get("error").is_some() {
+            assert!(
+                reply["error"]["transmission"].is_string(),
+                "{name}: {reply}"
+            );
+        }
+        if reply["error"]["code"] == "read_dispatch_failed" {
+            let expected = if name.ends_with("unknown") {
+                "unknown"
+            } else {
+                "not_sent"
+            };
+            assert_eq!(reply["error"]["transmission"], expected, "{name}");
+            assert_eq!(
+                reply["error"]["outcome"]["transmission"], expected,
+                "{name}"
+            );
+            covered.insert(format!("read_dispatch_failed:{expected}"));
+        }
         let reply_path = bulk_dir("replies").join(format!("{name}.json"));
         let rendered = pretty(&json!({"name": name, "reply": reply}));
         if regenerate {
@@ -155,11 +276,21 @@ async fn bulk_vectors_replay_byte_for_byte_and_match_tool_payloads() {
             assert_eq!(std::fs::read_to_string(reply_path).unwrap(), rendered);
         }
     }
-    for required in BULK_ACTIONS
-        .iter()
-        .copied()
-        .chain(["response_too_large", "endpoint_not_allowed"])
-    {
+    for required in BULK_ACTIONS.iter().copied().chain([
+        "response_too_large",
+        "endpoint_not_allowed",
+        "vendor_error",
+        "job_not_finished",
+        "job_log_unavailable",
+        "job_log_redirect_refused",
+        "job_log_read_limit",
+        "job_log_download_failed",
+        "read_dispatch_failed:unknown",
+        "read_dispatch_failed:not_sent",
+        "read_response_invalid",
+        "invalid_request",
+        "grant_action_selector",
+    ]) {
         assert!(
             covered.contains(required),
             "no bulk vector covers {required}"
@@ -169,6 +300,99 @@ async fn bulk_vectors_replay_byte_for_byte_and_match_tool_payloads() {
         assert_eq!(
             std::fs::read_dir(bulk_dir(kind)).unwrap().count(),
             VECTOR_NAMES.len()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bot_read_admission_transmission_is_scoped_to_bot_forms() {
+    for (carrier, action, args, transmission) in [
+        ("aft", "github.repo.get", json!({}), Some("not_sent")),
+        ("other", "github.search.code", json!({}), Some("not_sent")),
+        (
+            "aft",
+            "github.actions.job_log",
+            json!({"job_id":42}),
+            Some("not_sent"),
+        ),
+        (
+            "aft",
+            "github.actions.job_log",
+            json!({"job_id":42,"max_bytes":100}),
+            None,
+        ),
+        (
+            "other",
+            "github.actions.job_log",
+            json!({"job_id":42}),
+            None,
+        ),
+    ] {
+        let vector = source_vector("repo-get-diff");
+        let (runtime, _store, transport, _scratch) = setup(&vector["github"]);
+        let body = send_bound(
+            &runtime,
+            carrier,
+            Some(head(Some("agent-x"))),
+            &json!({"name":manifest::GITHUB_READ_TOOL,"arguments":{
+                "action":action,"repository":"o/x","args":args,"unexpected":true,
+            }}),
+        )
+        .await;
+        let reply: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            reply["error"]["code"], "invalid_request",
+            "{carrier}: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["transmission"].as_str(),
+            transmission,
+            "{carrier}: {reply}"
+        );
+        assert!(transport.requests().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ask_first_bot_reads_return_approval_refusals_not_access_pending() {
+    for bulk in [false, true] {
+        let vector = source_vector("repo-get-diff");
+        let (mut runtime, store, transport, _scratch) = setup(&vector["github"]);
+        let engine = &mut Arc::get_mut(&mut runtime).unwrap().runtime.engine;
+        *engine = engine
+            .clone()
+            .with_consent_cards(crate::consent_test_support::pending_cards());
+        store
+            .set_policy(
+                "direct",
+                "github-handle-app-x",
+                "github.repo.get",
+                "ask_first",
+                None,
+            )
+            .unwrap();
+        let call = if bulk {
+            vector["request"].clone()
+        } else {
+            json!({"name":manifest::GITHUB_READ_TOOL,"arguments":vector["request"]["params"]})
+        };
+        let mut scope = head(Some("agent-x"));
+        scope.attributes.delegates = true;
+        let body = send_bound(&runtime, "aft", Some(scope), &call).await;
+        let reply: Value = serde_json::from_slice(&body).unwrap();
+        // Bot reads authorize without entering the held-call wait path that
+        // turns a pending consent card into an access_pending reply.
+        assert_eq!(reply["error"]["code"], "action_request_created", "{reply}");
+        assert_eq!(reply["error"]["transmission"], "not_sent", "{reply}");
+        let requests = store.list_action_requests("direct").unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].elicitation_id.is_some());
+        assert!(transport.requests().is_empty());
+        assert_eq!(
+            store
+                .github_bot_reads_in_window("app-x", plexus_core::now_ms())
+                .unwrap(),
+            0
         );
     }
 }

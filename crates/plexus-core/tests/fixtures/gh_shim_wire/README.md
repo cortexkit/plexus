@@ -328,17 +328,28 @@ retained for AFT's decoder, not an invitation to expose bulk data as a tool.
 the operation `request`, and the fake `github` transport replies and expected
 governed requests. `read-bulk-replies-contract/<name>.json` contains `name`
 and the full `reply` frame body. There is one pair for each action, plus
-`response_too_large` and `endpoint_not_allowed` refusals.
+`response_too_large`, `endpoint_not_allowed`, `vendor_error`, `job_not_finished`,
+`job_log_unavailable`, `job_log_redirect_refused`, `job_log_read_limit`,
+`job_log_download_failed`, `read_dispatch_failed` (both `unknown` and `not_sent`),
+`read_response_invalid`, `invalid_request` (facade admission), and
+`grant_action_selector` (the module grant allows none of the requested actions).
+Every refusal carries `error.transmission`;
+dispatch failures also keep the same value in `error.outcome.transmission`.
 
 These vectors come from the existing bot-read harness in
 `crates/plexus-module/src/bot_read_vector_tests.rs`, not the HTTP fake used by
 `replies-contract/`. Its `github_read_bulk_tests.rs` child replays them through
 the real scoped frame handler, using the same mock GitHub projections as the
-existing `github-read-bot/` vectors. It compares the operation's pinned wire
+existing `github-read-bot/` vectors. Additional refusal inputs in
+`source_vector` select incomplete jobs, log transport failures, unknown or
+unsent dispatch outcomes, unusable search responses, malformed arguments, and
+an empty module grant action selector. It compares the operation's pinned wire
 body byte for byte, and compares its facade payload to the lean tool envelope
 for small replies. It checks the exact catalog actions, connection IDs and
 arguments sent to GitHub, verifies read-budget charges, and checks the rendered
-files byte for byte. Only the
+files byte for byte. These Plexus-owned bulk vectors have no checksum manifest:
+the replay test pins their canonical frame bytes and pretty-printed files.
+Only the
 separate budget-refusal test normalizes the clock-dependent retry delay.
 
 Regenerate intentionally, then review the request and reply diff:

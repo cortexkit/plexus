@@ -1,8 +1,18 @@
 # Where these fixtures come from
 
-Copied byte-for-byte from the AFT repository, commit `5d879f59f`, directory `docs/investigations/gh-shim-wire-goldens/`. All 56 files were compared against that commit after copying and none differed. Everything in this directory except this file, `requests-contract/`, `replies-contract/` and the README's "Request and reply contract vectors" section is AFT's. Those are plexus's own, proven by plexus tests (see that README section); keep them when re-copying AFT's files. (The first copy was taken at `d5bcb0c0a`, an ancestor; `5d879f59f` adds the own-issue `issue edit` captures.)
+Copied byte-for-byte from the AFT repository, commit `5d879f59f`, directory `docs/investigations/gh-shim-wire-goldens/`. All 56 files were compared against that commit after copying and none differed. Everything in this directory except this file, `requests-contract/`, `replies-contract/`, `read-bulk-requests-contract/`, `read-bulk-replies-contract/` and the README's "Request and reply contract vectors" and "Programmatic bulk GitHub reads" sections is AFT's. Those are plexus's own, proven by plexus tests (see those README sections); keep them when re-copying AFT's files. (The first copy was taken at `d5bcb0c0a`, an ancestor; `5d879f59f` adds the own-issue `issue edit` captures.)
 
 Only the request captures are kept here: plexus serves the shim's `gh.route` requests, and its tests read `requests/*.request.json` and nothing else. AFT's directory also holds `exchanges/`, `responses/`, `exits.md` and `requests/session-v1-issue-comment.frames.json`, which describe what the route holder answers and how the shim exits. No plexus test read them, so nothing here would fail if they drifted; they were removed rather than left to suggest the response side is checked. `README.md` is AFT's description of its full directory and still mentions them.
+
+## Plexus-owned bulk read contract vectors
+
+`read-bulk-requests-contract/` and `read-bulk-replies-contract/` are generated
+by Plexus, not copied from AFT. The README's "Programmatic bulk GitHub reads"
+section gives the generator command. The real scoped frame handler renders
+the replies from fake GitHub projections, including refusal inputs declared
+in `crates/plexus-module/src/github_read_bulk_tests.rs`. Its replay test pins
+the canonical wire bytes and rendered files; there is no separate checksum
+manifest for these directories. Keep them when re-copying AFT's captures.
 
 ## Which manifest version these describe
 
