@@ -56,6 +56,9 @@ jobs:
       - name: Train preconditions
         run: ./scripts/check-train-preconditions.sh
 
+      - name: Handwritten Rust source line ceilings (no compilation)
+        run: python3 scripts/check-rust-source-lines.py
+
       - name: Check for an already successful train run
         id: main-duplicate
         env:

@@ -49,6 +49,8 @@ case "$mode" in
     echo "==> $step"
     step="fail-closed shell EXIT traps"
     python3 scripts/check-exit-traps.py
+    step="handwritten Rust source line ceilings"
+    python3 scripts/check-rust-source-lines.py
     step="fast local preflight (no compilation)"
     bash scripts/rust-test-gate.sh --fast ;;
   --full)
