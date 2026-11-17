@@ -1,4 +1,4 @@
-//! Resolution of agent ids against prefrontal's registry.
+//! Resolution of agent ids against Entorhinal's shared identity registry.
 //!
 //! Delivery routing needs an existence check when an operator changes a
 //! subscription, but polling must not pay for that check. This module keeps the
@@ -10,11 +10,12 @@ use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::Mutex;
 
+use cortexkit_agent_identity::{AgentResolveReply, AgentStatus, GoneReason};
 use serde_json::Value;
 
 use crate::github_identity::PrefrontalRoutePeer;
 
-/// The prefrontal management operation that resolves an agent registry id.
+/// The Entorhinal management operation that resolves an agent registry id.
 pub const AGENT_RESOLVE_OPERATION: &str = "agent.resolve";
 
 /// The registry's set-time verdict for a requested delivery agent.
@@ -22,7 +23,7 @@ pub const AGENT_RESOLVE_OPERATION: &str = "agent.resolve";
 pub enum AgentLookup {
     /// The registry has a live agent with this id.
     Known,
-    /// No agent has this id.
+    /// The shared identity log has not seen this id; it may not have caught up.
     Unknown,
     /// The id was a registry entry that has since been retired.
     Retired,
@@ -108,7 +109,7 @@ impl AgentRegistry for StubAgentRegistry {
     }
 }
 
-/// Production fail-closed registry used when no prefrontal route is configured.
+/// Production fail-closed registry used when the Entorhinal route is unavailable.
 pub struct FailClosedAgentRegistry;
 
 impl AgentRegistry for FailClosedAgentRegistry {
@@ -117,12 +118,12 @@ impl AgentRegistry for FailClosedAgentRegistry {
     }
 }
 
-/// [`AgentRegistry`] adapter for prefrontal's management surface.
-pub struct PrefrontalAgentRegistry<P> {
+/// [`AgentRegistry`] adapter for Entorhinal's management surface.
+pub struct EntorhinalAgentRegistry<P> {
     peer: Arc<P>,
 }
 
-impl<P> Clone for PrefrontalAgentRegistry<P> {
+impl<P> Clone for EntorhinalAgentRegistry<P> {
     fn clone(&self) -> Self {
         Self {
             peer: Arc::clone(&self.peer),
@@ -130,13 +131,13 @@ impl<P> Clone for PrefrontalAgentRegistry<P> {
     }
 }
 
-impl<P> PrefrontalAgentRegistry<P> {
+impl<P> EntorhinalAgentRegistry<P> {
     pub fn new(peer: Arc<P>) -> Self {
         Self { peer }
     }
 }
 
-impl<P: PrefrontalRoutePeer + 'static> AgentRegistry for PrefrontalAgentRegistry<P> {
+impl<P: PrefrontalRoutePeer + 'static> AgentRegistry for EntorhinalAgentRegistry<P> {
     fn lookup(&self, agent_id: &str) -> AgentLookup {
         let Ok(reply) = self.peer.call(
             AGENT_RESOLVE_OPERATION,
@@ -144,56 +145,69 @@ impl<P: PrefrontalRoutePeer + 'static> AgentRegistry for PrefrontalAgentRegistry
         ) else {
             return AgentLookup::Unavailable;
         };
-        resolve_agent_lookup_reply_for(agent_id, &reply)
+        resolve_agent_lookup_reply(agent_id, &reply)
     }
 }
 
-fn resolve_agent_lookup_reply_for(agent_id: &str, reply: &Value) -> AgentLookup {
-    let body = reply.get("result").unwrap_or(reply);
-    if body
-        .pointer("/agent/agent_id")
-        .or_else(|| body.pointer("/gone/agent_id"))
-        .is_some_and(|echo| echo.as_str() != Some(agent_id))
-    {
-        return AgentLookup::Unavailable;
-    }
-    resolve_agent_lookup_reply(reply)
-}
-
-/// Decode prefrontal's registry reply without performing I/O.
+/// Decode Entorhinal's registry reply without performing I/O.
 ///
 /// An unfamiliar success shape fails closed: accepting it as a known target
 /// would silently route work to an id whose existence was never established.
-pub fn resolve_agent_lookup_reply(reply: &Value) -> AgentLookup {
-    let reply = reply.get("result").unwrap_or(reply);
-    if reply.get("agent").is_some() && reply.get("gone").is_some() {
+pub fn resolve_agent_lookup_reply(agent_id: &str, reply: &Value) -> AgentLookup {
+    if reply.get("error").is_some() || reply.get("code").is_some() {
         return AgentLookup::Unavailable;
     }
-    // A live agent is reported as an object. `{"agent": null}` (or any other
-    // non-object) names no agent, so it must not read as proof one exists.
-    if reply.get("agent").is_some_and(Value::is_object) {
-        AgentLookup::Known
-    } else if reply.get("gone").is_some_and(|gone| {
-        gone.is_object()
-            && gone.get("at").and_then(Value::as_u64).is_some()
-            && match gone.get("reason").and_then(Value::as_str) {
-                Some("deleted") => true,
-                Some("merged") => gone.get("into_agent_id").and_then(Value::as_str).is_some(),
-                _ => false,
-            }
-    }) {
-        AgentLookup::Retired
-    } else if reply
-        .get("error")
-        .and_then(|error| error.get("code"))
-        .or_else(|| reply.get("code"))
-        .and_then(Value::as_str)
-        == Some("unknown_agent")
+    let Some(body) = reply.get("result") else {
+        return AgentLookup::Unavailable;
+    };
+    if [
+        "agent_id",
+        "generation",
+        "gone",
+        "incarnation",
+        "merged_into",
+        "status",
+    ]
+    .iter()
+    .any(|key| body.get(key).is_none())
     {
-        AgentLookup::Unknown
-    } else {
-        AgentLookup::Unavailable
+        return AgentLookup::Unavailable;
     }
+    let Ok(reply) = serde_json::from_value::<AgentResolveReply>(body.clone()) else {
+        return AgentLookup::Unavailable;
+    };
+    if reply.agent.agent_id != agent_id {
+        return AgentLookup::Unavailable;
+    }
+    // The shared types preserve unfamiliar strings and do not validate writer
+    // invariants. Plexus must require a complete tombstone before destroying
+    // authority, and must never transfer grants to a merge destination.
+    match reply.agent.status {
+        AgentStatus::Live => AgentLookup::Known,
+        AgentStatus::Unknown => AgentLookup::Unknown,
+        AgentStatus::Retired | AgentStatus::Merged
+            if reply.agent.gone.as_ref().is_some_and(|gone| {
+                gone.at >= 0 && matches!(gone.reason, GoneReason::Deleted | GoneReason::Merged)
+            }) =>
+        {
+            AgentLookup::Retired
+        }
+        _ => AgentLookup::Unavailable,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn entorhinal_reply(agent_id: &str, status: &str) -> Value {
+    let gone = match status {
+        "retired" => serde_json::json!({"at":1,"reason":"deleted"}),
+        "merged" => serde_json::json!({"at":1,"reason":"merged","into_agent_id":"survivor"}),
+        _ => Value::Null,
+    };
+    serde_json::json!({"result":{
+        "agent_id":agent_id,"status":status,"gone":gone,
+        "merged_into":if status == "merged" {Some("survivor")} else {None},
+        "generation":7,"incarnation":"0123456789abcdef"
+    }})
 }
 
 #[cfg(test)]
@@ -220,15 +234,15 @@ mod tests {
         fn default() -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
-                reply: Mutex::new(Ok(serde_json::json!({"agent": {"id": "agent-1"}}))),
+                reply: Mutex::new(Ok(entorhinal_reply("agent-1", "live"))),
             }
         }
     }
 
     #[test]
-    fn route_registry_uses_the_confirmed_prefrontal_management_operation() {
+    fn route_registry_uses_entorhinal_agent_resolve() {
         let peer = Arc::new(MockRoutePeer::default());
-        let registry = PrefrontalAgentRegistry::new(Arc::clone(&peer));
+        let registry = EntorhinalAgentRegistry::new(Arc::clone(&peer));
 
         assert_eq!(registry.lookup("agent-1"), AgentLookup::Known);
         assert_eq!(
@@ -243,45 +257,98 @@ mod tests {
     #[test]
     fn registry_rejects_reply_echoing_a_different_agent() {
         let peer = Arc::new(MockRoutePeer::default());
-        *peer.reply.lock().unwrap() =
-            Ok(serde_json::json!({"result":{"agent":{"agent_id":"someone-else"}}}));
+        *peer.reply.lock().unwrap() = Ok(entorhinal_reply("someone-else", "retired"));
         assert_eq!(
-            PrefrontalAgentRegistry::new(peer).lookup("requested-agent"),
+            EntorhinalAgentRegistry::new(peer).lookup("requested-agent"),
             AgentLookup::Unavailable
         );
     }
 
     #[test]
-    fn registry_reply_classes_stay_distinct_and_unknown_shapes_fail_closed() {
-        assert_eq!(
-            resolve_agent_lookup_reply(&serde_json::json!({"error": {"code": "unknown_agent"}})),
-            AgentLookup::Unknown
-        );
-        assert_eq!(
-            resolve_agent_lookup_reply(
-                &serde_json::json!({"gone": {"reason": "deleted", "at": 1}})
-            ),
-            AgentLookup::Retired
-        );
-        // A null or non-object agent field establishes nothing about the id,
-        // so it fails closed like any other unfamiliar shape.
-        for unproven in [
-            serde_json::json!({"agent": null}),
-            serde_json::json!({"agent": "agent-1"}),
-            serde_json::json!({"result": {"agent": null}}),
+    fn entorhinal_samples_replay_through_real_adapter() {
+        let mut count = 0;
+        for source in [
+            include_str!("../tests/fixtures/agent-identity-reads-v1/agent-resolve.json"),
+            include_str!("../tests/fixtures/agent-identity-reads-v1/agent-resolve-merged.json"),
         ] {
+            let records: Vec<Value> = serde_json::from_str(source).unwrap();
+            for record in records {
+                assert_eq!(record["op"], "agent.resolve");
+                let id = record["request"]["agent_id"].as_str().unwrap_or("");
+                let expected = match record["reply"]["result"]["status"].as_str() {
+                    Some("live") => AgentLookup::Known,
+                    Some("retired" | "merged") => AgentLookup::Retired,
+                    Some("unknown") => AgentLookup::Unknown,
+                    _ => AgentLookup::Unavailable,
+                };
+                let peer = Arc::new(MockRoutePeer::default());
+                *peer.reply.lock().unwrap() = Ok(record["reply"].clone());
+                assert_eq!(
+                    EntorhinalAgentRegistry::new(peer).lookup(id),
+                    expected,
+                    "{record}"
+                );
+                count += 1;
+            }
+        }
+        assert_eq!(count, 9);
+    }
+
+    #[test]
+    fn entorhinal_fixture_bytes_match_verified_manifest() {
+        use sha2::{Digest, Sha256};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/agent-identity-reads-v1");
+        let sums = include_bytes!("../tests/fixtures/agent-identity-reads-v1/SHA256SUMS");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(sums)),
+            "18c544afce7d40c8fc7e44dcbcee8ece5dac9a157c356a7c6002e34fa202fa62"
+        );
+        for line in std::str::from_utf8(sums).unwrap().lines() {
+            let (digest, name) = line.split_once("  ").unwrap();
             assert_eq!(
-                resolve_agent_lookup_reply(&unproven),
-                AgentLookup::Unavailable,
-                "{unproven} must not resolve as a known agent"
+                format!(
+                    "{:x}",
+                    Sha256::digest(std::fs::read(root.join(name)).unwrap())
+                ),
+                digest,
+                "{name}"
             );
         }
+    }
+
+    #[test]
+    fn malformed_entorhinal_replies_and_transport_fail_closed() {
+        let valid = entorhinal_reply("agent-1", "retired");
+        let mut bad = vec![
+            serde_json::json!({}),
+            serde_json::json!({"error":{"code":"unknown_agent"}}),
+        ];
+        for (key, value) in [
+            ("status", serde_json::json!("future")),
+            ("agent_id", serde_json::json!("other")),
+            ("gone", Value::Null),
+            ("gone", serde_json::json!({"at":1})),
+            ("gone", serde_json::json!({"reason":"deleted"})),
+            ("gone", serde_json::json!({"reason":"future","at":1})),
+            ("gone", serde_json::json!({"reason":"deleted","at":-1})),
+            ("gone", serde_json::json!({"reason":"deleted","at":1.5})),
+        ] {
+            let mut reply = valid.clone();
+            reply["result"][key] = value;
+            bad.push(reply);
+        }
+        for reply in bad {
+            assert_eq!(
+                resolve_agent_lookup_reply("agent-1", &reply),
+                AgentLookup::Unavailable,
+                "{reply}"
+            );
+        }
+        let peer = Arc::new(MockRoutePeer::default());
+        *peer.reply.lock().unwrap() = Err(PrefrontalRouteError::Transport);
         assert_eq!(
-            resolve_agent_lookup_reply(&serde_json::json!({"result": {"agent": {"id": "a"}}})),
-            AgentLookup::Known
-        );
-        assert_eq!(
-            resolve_agent_lookup_reply(&serde_json::json!({"unexpected": true})),
+            EntorhinalAgentRegistry::new(peer).lookup("agent-1"),
             AgentLookup::Unavailable
         );
     }

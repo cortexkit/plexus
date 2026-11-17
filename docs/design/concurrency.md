@@ -56,7 +56,7 @@ Agent identity is read from the daemon route's session stamp (`scope.rs`). There
 | Actor enrichment | 32 governed reads per poll cycle | `ACTOR_ENRICHMENT_MAX_CALLS_PER_CYCLE`, `crates/plexus-core/src/poller.rs` |
 | Ordered-timestamp pages | 5 per poll, then a coverage gap row | `ORDERED_TIMESTAMP_MAX_PAGES_PER_POLL`, `crates/plexus-core/src/poller.rs` |
 | Health probes | every 60 s, off the request path | `HEALTH_PROBE_INTERVAL`, `crates/plexus-module/src/lib.rs` |
-| Retired-agent sweep | hourly; one Prefrontal lookup per agent holding grants, stopping at the first unanswered lookup | `AGENT_RETIREMENT_SWEEP_INTERVAL_MS`, `crates/plexus-core/src/agent_retirement.rs` |
+| Retired-agent sweep | Entorhinal `agents` changes (coalesced to at most one per 60 s), plus hourly backstop; one Entorhinal lookup per agent holding grants or a GitHub handle, stopping at the first unanswered lookup | `AGENT_RETIREMENT_SWEEP_INTERVAL_MS`, `crates/plexus-core/src/agent_retirement.rs` |
 | Reconciliation sweep | At most 8 queued records per pass; retryable reads and completion-store failures back off | `GovernanceEngine::sweep_write_reconciliations`, `crates/plexus-core/src/reconciliation.rs` |
 | Retention prunes | at most 1,000 rows per call, per pass | `AUDIT_RETENTION_BATCH_ROWS`, `RESERVATION_RETENTION_BATCH_ROWS`, `crates/plexus-core/src/storage.rs` |
 
@@ -78,4 +78,4 @@ Runtime audit rows are immutable, and ordinary retention cannot delete rows with
 
 - **A tool call:** vault read (30 s) and vendor request (30 s) run one after the other, inside a 60 s reservation. So a governed call can take up to about 60 s plus approval time. A caller whose own timeout is shorter gets its reply dropped, and the call itself still completes and is audited. For writes, that's why an unanswered caller must treat the outcome as unknown, never as "not sent".
 - **Owned-task shutdown has a bounded grace period.** On EOF the module cancels background work and waits up to `TASK_SHUTDOWN_GRACE` (5 s), then aborts remaining tasks (`crates/plexus-module/src/lib.rs`). Sequential polls or blocking HTTP work may outlast that grace; aborting an async wrapper does not cancel an already-running blocking request. Cursor/event transactions and receipt leases provide crash safety, not a promise that all vendor work drains before exit. An unanswered write must be treated as outcome unknown, never automatically resent.
-- **Retired-agent sweep inside a pass:** at most one Prefrontal call timeout (30 s) per sweep, because it stops at the first unanswered lookup.
+- **Retired-agent sweep inside a pass:** at most one Entorhinal call timeout (30 s) per sweep, because it stops at the first unanswered lookup.

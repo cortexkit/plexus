@@ -1,7 +1,8 @@
 use super::*;
 use cortexkit_bus_inmemory::{InMemoryBus, InMemoryConfig};
+use plexus_core::PlexusStore;
 use plexus_core::{
-    agent_registry::PrefrontalAgentRegistry,
+    agent_registry::EntorhinalAgentRegistry,
     github_identity::{PrefrontalRouteError, PrefrontalRoutePeer},
 };
 use serde_json::{json, Value};
@@ -53,171 +54,34 @@ impl PrefrontalRoutePeer for Peer {
 }
 
 struct MemoryReader {
-    item: Option<AgentChangedItem>,
+    item: Option<ModuleEventItem>,
     acks: usize,
 }
 #[async_trait]
-impl AgentChangedReader for MemoryReader {
-    async fn next(&mut self) -> Result<Option<AgentChangedItem>, String> {
+impl ModuleEventReader for MemoryReader {
+    async fn next(&mut self) -> Result<Option<ModuleEventItem>, String> {
         Ok(self.item.take())
     }
     async fn ack(&mut self) -> Result<(), String> {
         self.acks += 1;
         Ok(())
     }
-    async fn nak(&mut self, _: Duration) -> Result<(), String> {
-        Ok(())
-    }
-}
-fn reader(body: Value) -> MemoryReader {
-    MemoryReader {
-        acks: 0,
-        item: Some(AgentChangedItem::Delivery(AgentChangedDelivery {
-            subject: AccountNames::derive("box_test")
-                .unwrap()
-                .event_subject("prefrontal-core", "agent_changed", 1)
-                .unwrap(),
-            msg_id: "fact".into(),
-            body: serde_json::to_vec(&body).unwrap(),
-            headers: BTreeMap::new(),
-            sequence: 1,
-        })),
-    }
 }
 
 #[tokio::test]
-async fn prefrontal_rename_agent_changed_accepts_only_exact_subjects() {
-    for (module, expected_calls) in [
-        ("prefrontal-core", 1),
-        ("prefrontal", 1),
-        ("prefrontal-evil", 0),
-        ("xprefrontal", 0),
+async fn handled_ignored_and_malformed_deliveries_ack() {
+    for item in [
+        ModuleEventItem::Handled,
+        ModuleEventItem::Ignored,
+        ModuleEventItem::Malformed,
     ] {
-        let (_scratch, state) = fixture();
-        let peer = Peer::new(Ok(json!({"agent":{"agent_id":"agent"}})));
-        let registry = Arc::new(PrefrontalAgentRegistry::new(peer.clone()));
-        let account = AccountNames::derive("box_test").unwrap();
-        let mut reader = reader(json!({"agent_id":"agent", "change":"retired", "seq":1}));
-        let Some(AgentChangedItem::Delivery(delivery)) = reader.item.as_mut() else {
-            panic!("delivery expected");
+        let mut reader = MemoryReader {
+            acks: 0,
+            item: Some(item),
         };
-        delivery.subject = account.event_subject(module, "agent_changed", 1).unwrap();
-        assert!(
-            read_agent_changed_once(&mut reader, state.store().clone(), registry, &account)
-                .await
-                .unwrap()
-        );
-        assert_eq!(reader.acks, 1);
-        assert_eq!(peer.calls.lock().unwrap().len(), expected_calls, "{module}");
-    }
-}
-
-#[tokio::test]
-async fn retired_event_resolves_once_and_only_well_formed_gone_revokes() {
-    for (reply, revoked, acked) in [
-        (json!({"gone":{"at":1,"reason":"deleted"}}), true, true),
-        (json!({"agent":{"agent_id":"agent"}}), false, true),
-        (json!({"error":{"code":"unknown_agent"}}), false, true),
-        (json!({"gone":{"reason":"deleted"}}), false, false),
-    ] {
-        let (_scratch, state) = fixture();
-        state
-            .store()
-            .insert_agent_grant_for_test(
-                &plexus_core::GrantInput {
-                    grant_id: "grant".into(),
-                    principal: "direct".into(),
-                    connection_id: "conn".into(),
-                    grantee_principal: "reserved:aft".into(),
-                    risk_ceiling: "write".into(),
-                    action_selectors: vec!["github.issue.comment".into()],
-                    authority_kind: "invoke".into(),
-                    expires_at: None,
-                },
-                "agent",
-            )
-            .unwrap();
-        let peer = Peer::new(Ok(reply));
-        let registry = Arc::new(PrefrontalAgentRegistry::new(peer.clone()));
-        let mut reader = reader(json!({"agent_id":"agent", "change":"retired", "seq":1}));
-        let complete = read_agent_changed_once(
-            &mut reader,
-            state.store().clone(),
-            registry,
-            &AccountNames::derive("box_test").unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(complete, acked);
-        assert_eq!(reader.acks, usize::from(acked));
-        assert_eq!(
-            *peer.calls.lock().unwrap(),
-            [("agent.resolve".into(), json!({"agent_id":"agent"}))]
-        );
-        assert_eq!(
-            state
-                .store()
-                .grants_held_by_agent("agent")
-                .unwrap()
-                .is_empty(),
-            revoked
-        );
-    }
-}
-
-#[tokio::test]
-async fn non_retired_unknown_and_malformed_events_ack_without_resolving() {
-    let (_scratch, state) = fixture();
-    let peer = Peer::new(Ok(json!({})));
-    let registry = Arc::new(PrefrontalAgentRegistry::new(peer.clone()));
-    for body in [
-        json!({"agent_id":"agent","change":"created","seq":1}),
-        json!({"agent_id":"agent","change":"merged","seq":1}),
-        json!({"agent_id":"agent","change":"residence_moved","seq":1}),
-        json!({"agent_id":"agent","change":"future","seq":1}),
-        json!({"change":"retired"}),
-    ] {
-        let mut reader = reader(body);
-        assert!(read_agent_changed_once(
-            &mut reader,
-            state.store().clone(),
-            registry.clone(),
-            &AccountNames::derive("box_test").unwrap()
-        )
-        .await
-        .unwrap());
+        assert!(read_module_event_once(&mut reader).await.unwrap());
         assert_eq!(reader.acks, 1);
     }
-    let mut reader = MemoryReader {
-        acks: 0,
-        item: Some(AgentChangedItem::Malformed),
-    };
-    read_agent_changed_once(
-        &mut reader,
-        state.store().clone(),
-        registry,
-        &AccountNames::derive("box_test").unwrap(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(reader.acks, 1);
-    assert!(peer.calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn unreachable_registry_leaves_delivery_unacked() {
-    let (_scratch, state) = fixture();
-    let peer = Peer::new(Err(PrefrontalRouteError::Transport));
-    let mut reader = reader(json!({"agent_id":"agent","change":"retired","seq":1}));
-    assert!(!read_agent_changed_once(
-        &mut reader,
-        state.store().clone(),
-        Arc::new(PrefrontalAgentRegistry::new(peer)),
-        &AccountNames::derive("box_test").unwrap()
-    )
-    .await
-    .unwrap());
-    assert_eq!(reader.acks, 0);
 }
 
 async fn until(predicate: impl Fn() -> bool) {
@@ -226,6 +90,197 @@ async fn until(predicate: impl Fn() -> bool) {
         assert!(start.elapsed() < Duration::from_secs(3), "wake did not run");
         tokio::task::yield_now().await;
     }
+}
+
+fn plant_agent_grant(store: &PlexusStore, id: &str) {
+    store
+        .insert_agent_grant_for_test(
+            &plexus_core::GrantInput {
+                grant_id: format!("grant-{id}"),
+                principal: "direct".into(),
+                connection_id: "conn".into(),
+                grantee_principal: "reserved:aft".into(),
+                risk_ceiling: "write".into(),
+                action_selectors: vec!["github.issue.comment".into()],
+                authority_kind: "invoke".into(),
+                expires_at: None,
+            },
+            id,
+        )
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn agents_snapshot_and_bursts_run_one_full_sweep_per_sixty_seconds() {
+    let (_scratch, state) = fixture();
+    for id in ["agent-a", "agent-z"] {
+        plant_agent_grant(state.store(), id);
+    }
+    let registry = Arc::new(
+        plexus_core::agent_registry::StubAgentRegistry::with_default_response(
+            plexus_core::AgentLookup::Known,
+        ),
+    );
+    let mut runtime = crate::runtime_for_test(state.store().clone());
+    runtime.agent_registry = registry.clone();
+    let state = Arc::new(ModuleState {
+        runtime,
+        health: Arc::new(crate::health::HealthState::new()),
+    });
+    let bus = InMemoryBus::new(InMemoryConfig::default());
+    bus.put(
+        "agents",
+        br#"{"generation":1,"incarnation":"first"}"#.to_vec(),
+    )
+    .await
+    .unwrap();
+    let mut watch = bus.watch("").await.unwrap();
+    let task = tokio::spawn(async move {
+        consume_changes(
+            &mut watch,
+            &state,
+            &mut OwnershipWake::default(),
+            &mut AgentWake::default(),
+        )
+        .await
+    });
+    until(|| registry.requests().len() == 2).await;
+    assert_eq!(registry.requests(), ["agent-a", "agent-z"]);
+    for generation in 2..20 {
+        bus.put(
+            "agents",
+            json!({"generation":generation,"incarnation":"first"})
+                .to_string()
+                .into_bytes(),
+        )
+        .await
+        .unwrap();
+    }
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(59)).await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(registry.requests().len(), 2);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    until(|| registry.requests().len() == 4).await;
+    assert_eq!(
+        registry.requests(),
+        ["agent-a", "agent-z", "agent-a", "agent-z"]
+    );
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn agents_reconnect_snapshot_keeps_runtime_throttle() {
+    let (_scratch, state) = fixture();
+    plant_agent_grant(state.store(), "agent");
+    let registry = Arc::new(
+        plexus_core::agent_registry::StubAgentRegistry::with_default_response(
+            plexus_core::AgentLookup::Known,
+        ),
+    );
+    let mut runtime = crate::runtime_for_test(state.store().clone());
+    runtime.agent_registry = registry.clone();
+    let state = Arc::new(ModuleState {
+        runtime,
+        health: Arc::new(crate::health::HealthState::new()),
+    });
+    let bus = InMemoryBus::new(InMemoryConfig::default());
+    bus.put(
+        "agents",
+        br#"{"generation":1,"incarnation":"first"}"#.to_vec(),
+    )
+    .await
+    .unwrap();
+    let start_watch = || {
+        let bus = bus.clone();
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut watch = bus.watch("").await.unwrap();
+            consume_changes(
+                &mut watch,
+                &state,
+                &mut OwnershipWake::default(),
+                &mut AgentWake::default(),
+            )
+            .await
+        })
+    };
+    let first = start_watch();
+    until(|| registry.requests().len() == 1).await;
+    first.abort();
+    let _ = first.await;
+    let reconnected = start_watch();
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(59)).await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        registry.requests().len(),
+        1,
+        "a reconnect snapshot bypassed the runtime's throttle"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    until(|| registry.requests().len() == 2).await;
+    reconnected.abort();
+    let _ = reconnected.await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn agents_wake_and_scheduler_share_one_retirement_resume_point() {
+    let (_scratch, state) = fixture();
+    for id in ["agent-a", "agent-z"] {
+        plant_agent_grant(state.store(), id);
+    }
+    let peer = Peer::new(Err(PrefrontalRouteError::Transport));
+    let mut runtime = crate::runtime_for_test(state.store().clone());
+    runtime.agent_registry = Arc::new(EntorhinalAgentRegistry::new(peer.clone()));
+    let state = Arc::new(ModuleState {
+        runtime,
+        health: Arc::new(crate::health::HealthState::new()),
+    });
+    let bus = InMemoryBus::new(InMemoryConfig::default());
+    let mut watch = bus.watch("").await.unwrap();
+    let wake_state = state.clone();
+    let task = tokio::spawn(async move {
+        consume_changes(
+            &mut watch,
+            &wake_state,
+            &mut OwnershipWake::default(),
+            &mut AgentWake::default(),
+        )
+        .await
+    });
+    bus.put("agents", vec![]).await.unwrap();
+    until(|| peer.calls.lock().unwrap().len() == 1).await;
+    let (stop, receiver) = tokio::sync::mpsc::channel(1);
+    let scheduler = crate::spawn_trigger_scheduler(state, receiver, 604_800_000);
+    until(|| peer.calls.lock().unwrap().len() == 2).await;
+    stop.send(()).await.unwrap();
+    scheduler.await.unwrap();
+    assert_eq!(
+        *peer.calls.lock().unwrap(),
+        [
+            ("agent.resolve".into(), json!({"agent_id":"agent-a"})),
+            ("agent.resolve".into(), json!({"agent_id":"agent-z"})),
+        ]
+    );
+    bus.put("agents", vec![]).await.unwrap();
+    tokio::time::advance(Duration::from_secs(60)).await;
+    until(|| peer.calls.lock().unwrap().len() == 3).await;
+    assert_eq!(
+        peer.calls.lock().unwrap()[2].1,
+        json!({"agent_id":"agent-a"})
+    );
+    task.abort();
+    let _ = task.await;
 }
 
 struct RolePeer {
@@ -273,7 +328,13 @@ async fn connector_home_put_reads_role_and_never_trusts_marker_state() {
     .unwrap();
     let mut watch = bus.watch("").await.unwrap();
     let task = tokio::spawn(async move {
-        consume_changes(&mut watch, &state, &mut OwnershipWake::default()).await
+        consume_changes(
+            &mut watch,
+            &state,
+            &mut OwnershipWake::default(),
+            &mut AgentWake::default(),
+        )
+        .await
     });
     until(|| peer.calls.load(Ordering::SeqCst) == 2).await;
     bus.put(
@@ -318,7 +379,13 @@ async fn registry_snapshot_and_bursts_schedule_at_most_one_pass_per_ten_seconds(
     .unwrap();
     let mut watch = bus.watch("").await.unwrap();
     let task = tokio::spawn(async move {
-        consume_changes(&mut watch, &state, &mut OwnershipWake::default()).await
+        consume_changes(
+            &mut watch,
+            &state,
+            &mut OwnershipWake::default(),
+            &mut AgentWake::default(),
+        )
+        .await
     });
     until(|| peer.calls.lock().unwrap().len() == 1).await;
     assert_eq!(peer.calls.lock().unwrap()[0].0, "enumerate");
@@ -403,7 +470,13 @@ async fn registry_wake_and_scheduler_share_one_ownership_resume_point() {
     let mut watch = bus.watch("").await.unwrap();
     let wake_state = state.clone();
     let wake = tokio::spawn(async move {
-        consume_changes(&mut watch, &wake_state, &mut OwnershipWake::default()).await
+        consume_changes(
+            &mut watch,
+            &wake_state,
+            &mut OwnershipWake::default(),
+            &mut AgentWake::default(),
+        )
+        .await
     });
     bus.put("registry", vec![]).await.unwrap();
     until(|| peer.calls.lock().unwrap().len() == 1).await;
@@ -473,34 +546,23 @@ async fn missing_bucket_keeps_task_alive_and_retries_with_bounded_backoff() {
 
 struct MissingDurable(Arc<AtomicUsize>);
 #[async_trait]
-impl AgentChangedReader for MissingDurable {
-    async fn next(&mut self) -> Result<Option<AgentChangedItem>, String> {
+impl ModuleEventReader for MissingDurable {
+    async fn next(&mut self) -> Result<Option<ModuleEventItem>, String> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Err("missing durable m_plexus".into())
     }
     async fn ack(&mut self) -> Result<(), String> {
         panic!("missing durable cannot be acked")
     }
-    async fn nak(&mut self, _: Duration) -> Result<(), String> {
-        panic!("missing durable cannot be nacked")
-    }
 }
 
 #[tokio::test(start_paused = true)]
 async fn missing_durable_retries_without_stopping_or_acking() {
-    let (_scratch, state) = fixture();
     let attempts = Arc::new(AtomicUsize::new(0));
     let (stop, receiver) = tokio::sync::mpsc::channel(1);
     let count = attempts.clone();
     let task = tokio::spawn(async move {
-        run_agent_changed_reader(
-            &mut MissingDurable(count),
-            state.store().clone(),
-            state.runtime.agent_registry.clone(),
-            &AccountNames::derive("box_test").unwrap(),
-            receiver,
-        )
-        .await;
+        run_module_event_reader(&mut MissingDurable(count), receiver).await;
     });
     until(|| attempts.load(Ordering::SeqCst) == 1).await;
     assert!(!task.is_finished());

@@ -239,8 +239,8 @@ pub use actor_attribution::{ActorAttribution, ActorUnknown, ActorUnknownClass, A
 #[cfg(any(test, feature = "test-support"))]
 pub use agent_registry::StubAgentRegistry;
 pub use agent_registry::{
-    resolve_agent_lookup_reply, AgentLookup, AgentRegistry, FailClosedAgentRegistry,
-    PrefrontalAgentRegistry, AGENT_RESOLVE_OPERATION,
+    resolve_agent_lookup_reply, AgentLookup, AgentRegistry, EntorhinalAgentRegistry,
+    FailClosedAgentRegistry, AGENT_RESOLVE_OPERATION,
 };
 pub use catalog::{CatalogError, CatalogReconciler, CatalogRefreshPolicy, Freshness};
 pub use consent_card::{

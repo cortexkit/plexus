@@ -265,8 +265,8 @@ where
     agent_registry: Option<Arc<dyn AgentRegistry>>,
     /// Pass clock reading of the last retired-agent sweep, if one has run.
     last_agent_sweep_ms: Mutex<Option<i64>>,
-    /// Where the next retired-agent sweep starts after one stopped early.
-    agent_sweep_resume: crate::agent_retirement::SweepResume,
+    /// Shared cursor and whole-pass lock for hourly and bus-woken sweeps.
+    agent_sweep_resume: Arc<crate::agent_retirement::SweepResume>,
     repository_registry: Option<Arc<dyn crate::repository_ownership::RepositoryRegistry>>,
     ownership_throttle: crate::repository_ownership::OwnershipThrottle,
     /// Shared with ownership wakes so all passes serialize and resume together.
@@ -373,6 +373,15 @@ where
     /// [`AGENT_RETIREMENT_SWEEP_INTERVAL_MS`] of pass time.
     pub fn with_agent_registry(mut self, registry: Arc<dyn AgentRegistry>) -> Self {
         self.agent_registry = Some(registry);
+        self
+    }
+
+    /// Share the retirement cursor and its whole-pass lock with bus wakes.
+    pub fn with_agent_sweep_resume(
+        mut self,
+        resume: Arc<crate::agent_retirement::SweepResume>,
+    ) -> Self {
+        self.agent_sweep_resume = resume;
         self
     }
 

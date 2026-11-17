@@ -133,14 +133,9 @@ impl LiveRig {
             stream
                 .create_consumer(async_nats::jetstream::consumer::pull::Config {
                     durable_name: Some(AccountNames::module_consumer_name("plexus").unwrap()),
-                    filter_subjects: vec![
-                        names
-                            .event_subject("prefrontal-core", "agent_changed", 1)
-                            .unwrap(),
-                        names
-                            .event_subject_with_reader("cingulate", "card_settled", 1, "plexus")
-                            .unwrap(),
-                    ],
+                    filter_subjects: vec![names
+                        .event_subject_with_reader("cingulate", "card_settled", 1, "plexus")
+                        .unwrap()],
                     ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
                     ..Default::default()
                 })
@@ -425,14 +420,16 @@ impl plexus_core::github_identity::PrefrontalRoutePeer for RegistryPeer {
         op: &str,
         params: Value,
     ) -> Result<Value, plexus_core::github_identity::PrefrontalRouteError> {
-        self.0.lock().unwrap().push((op.into(), params));
-        Ok(json!({"gone":{"at":1,"reason":"deleted"}}))
+        self.0.lock().unwrap().push((op.into(), params.clone()));
+        Ok(
+            json!({"result":{"agent_id":params["agent_id"],"status":"live","gone":null,"merged_into":null,"generation":1,"incarnation":"first"}}),
+        )
     }
 }
 
 fn state_with_registry(store: Arc<PlexusStore>, peer: Arc<RegistryPeer>) -> Arc<ModuleState> {
     let mut runtime = crate::runtime_for_test(store);
-    runtime.agent_registry = Arc::new(plexus_core::agent_registry::PrefrontalAgentRegistry::new(
+    runtime.agent_registry = Arc::new(plexus_core::agent_registry::EntorhinalAgentRegistry::new(
         peer,
     ));
     Arc::new(ModuleState {
@@ -442,43 +439,43 @@ fn state_with_registry(store: Arc<PlexusStore>, peer: Arc<RegistryPeer>) -> Arc<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn durable_agent_changed_reaches_retirement_check() {
+async fn entorhinal_agents_bucket_reaches_full_retirement_sweep() {
     let _serial = LIVE.lock().await;
     let rig = LiveRig::start(true).await;
     let session = rig.session().await;
     let (_scratch, store) = tests::test_store("live-retirement");
     let peer = Arc::new(RegistryPeer(Mutex::new(vec![])));
+    seed_pending_card(&store);
     let state = state_with_registry(store, peer.clone());
-    let mut reader = crate::bus_wakes::session_reader(
-        session.client.as_ref().unwrap().clone(),
-        state.clone(),
-        session.account.clone(),
-    );
-    rig.publish(
-        session
-            .account
-            .event_subject("prefrontal-core", "agent_changed", 1)
-            .unwrap(),
-        "retired-fact",
-        br#"{"agent_id":"retired-agent","change":"retired","seq":1}"#,
+    let bucket = rig
+        .admin
+        .create_key_value(async_nats::jetstream::kv::Config {
+            bucket: session
+                .account
+                .module_bucket_name("entorhinal", "changes")
+                .unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let _watch = crate::bus_wakes::spawn_change_watch(
+        state,
+        session.client.as_ref().unwrap().connection(),
+        &session.account,
     )
-    .await;
-    assert!(tokio::time::timeout(
-        LIMIT,
-        crate::bus_wakes::read_agent_changed_once(
-            reader.as_mut(),
-            state.store().clone(),
-            state.runtime.agent_registry.clone(),
-            &session.account
+    .unwrap();
+    bucket
+        .put(
+            "agents",
+            br#"{"generation":1,"incarnation":"first"}"#.as_slice().into(),
         )
-    )
-    .await
-    .unwrap()
-    .unwrap());
+        .await
+        .unwrap();
+    until(|| peer.0.lock().unwrap().len() == 1).await;
     let calls = peer.0.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "agent.resolve");
-    assert_eq!(calls[0].1, json!({"agent_id":"retired-agent"}));
+    assert_eq!(calls[0].1, json!({"agent_id":"agent"}));
 }
 
 fn seed_pending_card(store: &PlexusStore) {
@@ -526,11 +523,8 @@ async fn durable_card_pointer_schedules_one_pending_manifest_pass_only() {
     let (_scratch, store) = tests::test_store("live-card-pointer");
     seed_pending_card(&store);
     let state = state_with_registry(store, Arc::new(RegistryPeer(Mutex::new(vec![]))));
-    let mut reader = crate::bus_wakes::session_reader(
-        session.client.as_ref().unwrap().clone(),
-        state.clone(),
-        session.account.clone(),
-    );
+    let mut reader =
+        crate::bus_wakes::session_reader(session.client.as_ref().unwrap().clone(), state.clone());
     let body = include_bytes!("../tests/fixtures/card-settled-v1/plexus.plexus.body.json");
     let subject = include_str!("../tests/fixtures/card-settled-v1/plexus.plexus.subject.txt");
     let headers: Value = serde_json::from_str(include_str!(
@@ -548,12 +542,7 @@ async fn durable_card_pointer_schedules_one_pending_manifest_pass_only() {
         rig.publish(subject.into(), id, bytes).await;
         assert!(tokio::time::timeout(
             LIMIT,
-            crate::bus_wakes::read_agent_changed_once(
-                reader.as_mut(),
-                state.store().clone(),
-                state.runtime.agent_registry.clone(),
-                &session.account
-            )
+            crate::bus_wakes::read_module_event_once(reader.as_mut())
         )
         .await
         .unwrap()
@@ -582,12 +571,7 @@ async fn durable_card_pointer_schedules_one_pending_manifest_pass_only() {
     .await;
     assert!(tokio::time::timeout(
         LIMIT,
-        crate::bus_wakes::read_agent_changed_once(
-            reader.as_mut(),
-            state.store().clone(),
-            state.runtime.agent_registry.clone(),
-            &session.account
-        )
+        crate::bus_wakes::read_module_event_once(reader.as_mut())
     )
     .await
     .unwrap()
@@ -678,7 +662,7 @@ async fn claim_loss_destroys_shared_session_and_stops_all_paths() {
     let mut runtime = crate::runtime_for_test(store.clone());
     runtime.connector_home = Arc::new(crate::connector_home::ConnectorHome::new(home.clone()));
     runtime.connector_home.refresh().unwrap();
-    runtime.agent_registry = Arc::new(plexus_core::agent_registry::PrefrontalAgentRegistry::new(
+    runtime.agent_registry = Arc::new(plexus_core::agent_registry::EntorhinalAgentRegistry::new(
         peer.clone(),
     ));
     runtime.web_search = Arc::new(
@@ -700,14 +684,22 @@ async fn claim_loss_destroys_shared_session_and_stops_all_paths() {
     );
     until(|| client.lock().unwrap().is_some()).await;
     let names = AccountNames::derive("box_example").unwrap();
-    rig.publish(
-        names
-            .event_subject("prefrontal-core", "agent_changed", 1)
-            .unwrap(),
-        "before-loss",
-        br#"{"agent_id":"agent","change":"retired","seq":1}"#,
-    )
-    .await;
+    seed_pending_card(&store);
+    let bucket = rig
+        .admin
+        .create_key_value(async_nats::jetstream::kv::Config {
+            bucket: names.module_bucket_name("entorhinal", "changes").unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    bucket
+        .put(
+            "agents",
+            br#"{"generation":1,"incarnation":"first"}"#.as_slice().into(),
+        )
+        .await
+        .unwrap();
     until(|| peer.0.lock().unwrap().len() == 1).await;
     home.0.store(false, Ordering::SeqCst);
     state.runtime.connector_home.refresh().unwrap();
@@ -736,15 +728,13 @@ async fn claim_loss_destroys_shared_session_and_stops_all_paths() {
             1,
         )
         .unwrap();
-    seed_pending_card(&store);
-    rig.publish(
-        names
-            .event_subject("prefrontal-core", "agent_changed", 1)
-            .unwrap(),
-        "after-loss",
-        br#"{"agent_id":"agent","change":"retired","seq":2}"#,
-    )
-    .await;
+    bucket
+        .put(
+            "agents",
+            br#"{"generation":2,"incarnation":"first"}"#.as_slice().into(),
+        )
+        .await
+        .unwrap();
     rig.publish(
         names
             .event_subject_with_reader("cingulate", "card_settled", 1, "plexus")

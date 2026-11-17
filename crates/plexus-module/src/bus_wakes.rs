@@ -1,27 +1,22 @@
 //! Bus messages only wake authoritative reads. No body or key-value marker grants authority.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use cortexkit_bus_client::{BusClient, EventItem, EventReader};
 use cortexkit_bus_naming::AccountNames;
 use cortexkit_bus_nats::NatsConnection;
 use cortexkit_bus_trait::{BusResult, Register, RegisterUpdate, RegisterWatch, WatchEvent};
-use plexus_core::{agent_registry::AgentRegistry, diag, PlexusStore};
+use plexus_core::diag;
 use serde::Deserialize;
 
 use crate::ModuleState;
 
-pub struct AgentChangedDelivery {
-    pub subject: String,
-    pub msg_id: String,
-    pub body: Vec<u8>,
-    pub headers: BTreeMap<String, String>,
-    pub sequence: u64,
-}
-
-pub enum AgentChangedItem {
-    Delivery(AgentChangedDelivery),
+pub enum ModuleEventItem {
+    Ignored,
     Malformed,
     Handled,
 }
@@ -29,16 +24,14 @@ pub enum AgentChangedItem {
 /// The reader attaches only to an existing durable subscription. The bus
 /// service creates and configures that subscription.
 #[async_trait]
-pub trait AgentChangedReader: Send {
-    async fn next(&mut self) -> Result<Option<AgentChangedItem>, String>;
+pub trait ModuleEventReader: Send {
+    async fn next(&mut self) -> Result<Option<ModuleEventItem>, String>;
     async fn ack(&mut self) -> Result<(), String>;
-    async fn nak(&mut self, delay: Duration) -> Result<(), String>;
 }
 
 struct SessionEvents {
     client: Arc<BusClient>,
     state: Arc<ModuleState>,
-    account: AccountNames,
     reader: Option<EventReader>,
     pending: Option<EventItem>,
 }
@@ -47,20 +40,18 @@ struct SessionEvents {
 pub(crate) fn session_reader(
     client: Arc<BusClient>,
     state: Arc<ModuleState>,
-    account: AccountNames,
-) -> Box<dyn AgentChangedReader> {
+) -> Box<dyn ModuleEventReader> {
     Box::new(SessionEvents {
         client,
         state,
-        account,
         reader: None,
         pending: None,
     })
 }
 
 #[async_trait]
-impl AgentChangedReader for SessionEvents {
-    async fn next(&mut self) -> Result<Option<AgentChangedItem>, String> {
+impl ModuleEventReader for SessionEvents {
+    async fn next(&mut self) -> Result<Option<ModuleEventItem>, String> {
         if self.reader.is_none() {
             let durable =
                 AccountNames::module_consumer_name("plexus").map_err(|error| error.to_string())?;
@@ -86,31 +77,12 @@ impl AgentChangedReader for SessionEvents {
                     && delivery.subject.reader.as_deref() == Some("plexus") =>
             {
                 schedule_card_settled(&self.state, &delivery.body).await?;
-                AgentChangedItem::Handled
+                ModuleEventItem::Handled
             }
-            EventItem::Delivery(delivery) => AgentChangedItem::Delivery(AgentChangedDelivery {
-                subject: match delivery.subject.reader.as_deref() {
-                    Some(reader) => self.account.event_subject_with_reader(
-                        &delivery.subject.module,
-                        &delivery.subject.event,
-                        delivery.subject.version,
-                        reader,
-                    ),
-                    None => self.account.event_subject(
-                        &delivery.subject.module,
-                        &delivery.subject.event,
-                        delivery.subject.version,
-                    ),
-                }
-                .map_err(|error| error.to_string())?,
-                msg_id: delivery.msg_id.clone(),
-                body: delivery.body.to_vec(),
-                headers: delivery.headers().clone(),
-                sequence: delivery.stream_sequence,
-            }),
+            EventItem::Delivery(_) => ModuleEventItem::Ignored,
             EventItem::Malformed(_) => {
                 diag!(debug bus: "malformed event received");
-                AgentChangedItem::Malformed
+                ModuleEventItem::Malformed
             }
             _ => return Err("unknown_event_item".into()),
         };
@@ -126,13 +98,6 @@ impl AgentChangedReader for SessionEvents {
             _ => return Err("unknown_event_item".into()),
         }
         .map_err(|_| "event_ack_failed".into())
-    }
-
-    async fn nak(&mut self, delay: Duration) -> Result<(), String> {
-        if let Some(EventItem::Delivery(delivery)) = self.pending.take() {
-            delivery.nak(delay).await.map_err(|_| "event_nak_failed")?;
-        }
-        Ok(())
     }
 }
 
@@ -184,24 +149,15 @@ pub(crate) fn spawn_session_watches(
     let events = WakeTask(tokio::spawn({
         let client = client.clone();
         let state = state.clone();
-        let account = account.clone();
         async move {
             let mut reader = SessionEvents {
                 client,
                 state: state.clone(),
-                account: account.clone(),
                 reader: None,
                 pending: None,
             };
             let (_stop, rx) = tokio::sync::mpsc::channel(1);
-            run_agent_changed_reader(
-                &mut reader,
-                state.store().clone(),
-                state.runtime.agent_registry.clone(),
-                &account,
-                rx,
-            )
-            .await;
+            run_module_event_reader(&mut reader, rx).await;
         }
     }));
     Ok(WakeTask(tokio::spawn(async move {
@@ -220,11 +176,8 @@ pub(crate) fn spawn_session_watches(
 }
 
 /// A missing durable is a retryable reader failure, never module startup failure.
-pub async fn run_agent_changed_reader(
-    reader: &mut dyn AgentChangedReader,
-    store: Arc<PlexusStore>,
-    registry: Arc<dyn AgentRegistry>,
-    account: &AccountNames,
+pub async fn run_module_event_reader(
+    reader: &mut dyn ModuleEventReader,
     mut stop: tokio::sync::mpsc::Receiver<()>,
 ) {
     let mut failures = 0u32;
@@ -232,22 +185,19 @@ pub async fn run_agent_changed_reader(
     loop {
         let result = tokio::select! {
             _ = stop.recv() => return,
-            result = read_agent_changed_once(reader, store.clone(), registry.clone(), account) => result,
+            result = read_module_event_once(reader) => result,
         };
         match result {
             Ok(true) => {
                 failures = 0;
             }
-            result => {
+            _ => {
                 if !logged {
-                    diag!(info bus: "agent change reader deferred; hourly sweep remains active");
+                    diag!(info bus: "module event reader deferred");
                     logged = true;
                 }
                 failures = failures.saturating_add(1);
                 let delay = retry_delay(failures);
-                if matches!(result, Ok(false)) {
-                    let _ = reader.nak(delay).await;
-                }
                 tokio::select! {
                     _ = stop.recv() => return,
                     _ = tokio::time::sleep(delay) => {}
@@ -257,56 +207,10 @@ pub async fn run_agent_changed_reader(
     }
 }
 
-#[derive(Deserialize)]
-struct AgentChanged {
-    agent_id: String,
-    change: String,
-    seq: u64,
-}
-
-/// False leaves the current delivery unacked so the durable can retry it.
-pub async fn read_agent_changed_once(
-    reader: &mut dyn AgentChangedReader,
-    store: Arc<PlexusStore>,
-    registry: Arc<dyn AgentRegistry>,
-    account: &AccountNames,
-) -> Result<bool, String> {
-    let Some(item) = reader.next().await? else {
-        return Err("agent_changed_reader_ended".into());
-    };
-    if matches!(item, AgentChangedItem::Handled) {
-        reader.ack().await?;
-        return Ok(true);
-    }
-    let expected = plexus_core::github::prefrontal_module_ids()
-        .map(|module| account.event_subject(module, "agent_changed", 1))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    let agent = match item {
-        AgentChangedItem::Delivery(delivery) if expected.contains(&delivery.subject) => {
-            serde_json::from_slice::<AgentChanged>(&delivery.body)
-                .ok()
-                .filter(|event| !event.agent_id.is_empty())
-        }
-        _ => None,
-    };
-    if let Some(event) = agent.filter(|event| event.change == "retired") {
-        let _sequence = event.seq;
-        let complete = tokio::task::spawn_blocking(move || {
-            plexus_core::agent_retirement::check_retired_agent(
-                &store,
-                registry.as_ref(),
-                &event.agent_id,
-            )
-        })
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
-        if !complete {
-            return Ok(false);
-        }
-    } else {
-        diag!(debug bus: "agent change ignored: non-retired, unknown, or malformed delivery");
+/// Process one durable delivery, acknowledging it only after its wake succeeds.
+pub async fn read_module_event_once(reader: &mut dyn ModuleEventReader) -> Result<bool, String> {
+    if reader.next().await?.is_none() {
+        return Err("module_event_reader_ended".into());
     }
     reader.ack().await?;
     Ok(true)
@@ -358,11 +262,12 @@ async fn run_change_watch(state: Arc<ModuleState>, source: impl ChangesSource) {
     let mut failures = 0;
     let mut logged = false;
     let mut ownership = OwnershipWake::default();
+    let mut agents = AgentWake::default();
     loop {
         let result = async {
             let mut watch = source.watch().await?;
             failures = 0;
-            consume_changes(watch.as_mut(), &state, &mut ownership).await
+            consume_changes(watch.as_mut(), &state, &mut ownership, &mut agents).await
         }
         .await;
         if let Err(error) = result {
@@ -393,11 +298,50 @@ impl OwnershipWake {
     }
 }
 
+#[derive(Default)]
+struct AgentWake {
+    pending: bool,
+}
+
+/// A reconnect republishes Entorhinal's `changes` bucket snapshot, including
+/// `agents`. Keep the throttle outside the watcher task so reconnects cannot
+/// start extra retirement sweeps.
+#[derive(Default)]
+pub(crate) struct AgentSweepThrottle(Mutex<Option<tokio::time::Instant>>);
+
+impl AgentSweepThrottle {
+    fn delay(&self) -> Duration {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map(|last| {
+                (last + Duration::from_secs(60))
+                    .saturating_duration_since(tokio::time::Instant::now())
+            })
+            .unwrap_or(Duration::ZERO)
+    }
+
+    fn claim(&self) -> bool {
+        let mut last = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = tokio::time::Instant::now();
+        if last.is_some_and(|last| now.duration_since(last) < Duration::from_secs(60)) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
+}
+
 async fn consume_changes<W: RegisterWatch + ?Sized>(
     watch: &mut W,
     state: &Arc<ModuleState>,
     ownership: &mut OwnershipWake,
+    agents: &mut AgentWake,
 ) -> BusResult<()> {
+    let throttle = state.runtime.agent_sweep_throttle.clone();
     loop {
         tokio::select! {
             result = watch.next() => {
@@ -410,9 +354,18 @@ async fn consume_changes<W: RegisterWatch + ?Sized>(
                     match key.as_str() {
                         "role.connector_home" => refresh_home(state).await,
                         "registry" => ownership.pending = true,
+                        "agents" => agents.pending = true,
                         _ => {}
                     }
                 }
+            }
+            _ = tokio::time::sleep(throttle.delay()), if agents.pending => {
+                if !throttle.claim() { continue; }
+                agents.pending = false;
+                let state = state.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    plexus_core::agent_retirement::run_and_report(state.store(), state.runtime.agent_registry.as_ref(), &state.runtime.agent_sweep_resume);
+                }).await;
             }
             _ = tokio::time::sleep(ownership.delay()), if ownership.pending => {
                 ownership.pending = false;

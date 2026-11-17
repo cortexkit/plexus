@@ -204,7 +204,8 @@ pub(super) fn spawn_trigger_scheduler_every(
             .with_stop_flag(Arc::clone(&stopping))
             .with_relay_health(state.health.relay.clone())
             .with_ownership_resume(Arc::clone(&state.runtime.ownership_resume))
-            .with_agent_registry(Arc::clone(&state.runtime.agent_registry));
+            .with_agent_registry(Arc::clone(&state.runtime.agent_registry))
+            .with_agent_sweep_resume(Arc::clone(&state.runtime.agent_sweep_resume));
     let scheduler = match &state.runtime.repository_registry {
         Some(registry) => scheduler.with_repository_registry(Arc::clone(registry)),
         None => scheduler,

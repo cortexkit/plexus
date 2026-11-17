@@ -1438,7 +1438,7 @@ impl AuditRecord {
         }
     }
 
-    /// Record one grant removed because prefrontal reports its agent retired.
+    /// Record one grant removed because Entorhinal reports its agent retired.
     ///
     /// The actor is plexus itself: no operator asked for this, the scheduled
     /// retirement sweep did. The grant id goes in the summary because the audit

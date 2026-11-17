@@ -473,6 +473,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "cortexkit-agent-identity"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa1838c7c0e6d3d5a7c68d515f34b2a7efa5c909e8d3514a3600f84412145722"
+dependencies = [
+ "cortexkit-project-identity",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cortexkit-bus-client"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2065,6 +2076,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
+ "cortexkit-agent-identity",
  "cortexkit-log",
  "cortexkit-project-identity",
  "cortexkit-store",

@@ -1,14 +1,13 @@
-//! Revoke the grants of agents that prefrontal has retired.
+//! Revoke the grants of agents that Entorhinal's shared identity log has retired.
 //!
-//! Agent grants are keyed on prefrontal's agent id, and nothing else in plexus
-//! learns when prefrontal retires an agent. A bot write needs an authorized
+//! Agent grants are keyed on a fleet-wide agent id. A bot write needs an authorized
 //! delegating session stamp, but unreachable grants are still authority on
 //! record. This sweep removes them and closes retired agents' live bot paths.
 //!
 //! The sweep only ever narrows authority, and only on a definite answer. A
 //! retired verdict revokes; a live agent, an unknown id, an unreachable
 //! registry, or an unrecognised reply leaves every row as it was. An unknown id
-//! is prefrontal saying the id never existed, which is not the same claim as a
+//! may mean the local shared-log reader has not caught up, which is not a
 //! retirement, and an error is no claim at all.
 //!
 //! Handles are disabled and outstanding approvals denied after a definite
@@ -18,9 +17,7 @@ use crate::agent_registry::{AgentLookup, AgentRegistry};
 use crate::storage::{AuditRecord, PlexusStore};
 use cortexkit_store::StoreError;
 
-/// How often the scheduler runs the sweep. Retirement is rare and the rows it
-/// removes are already unreachable, so an hour of lag costs nothing while
-/// keeping registry traffic to one round per agent per hour.
+/// Hourly backstop for the coalesced Entorhinal `agents` change wake.
 pub const AGENT_RETIREMENT_SWEEP_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 /// Reason recorded on the audit row of every grant this sweep revokes.
@@ -122,17 +119,6 @@ fn sweep_retired_agents_with_budget(
     Ok(sweep)
 }
 
-/// Re-resolve one wake's agent through the registry. False means retry without ack.
-pub fn check_retired_agent(
-    store: &PlexusStore,
-    registry: &dyn AgentRegistry,
-    agent_id: &str,
-) -> Result<bool, StoreError> {
-    let mut sweep = RetirementSweep::default();
-    let complete = check_agent(store, registry, agent_id, &mut sweep)?;
-    Ok(complete && sweep.revocation_failures == 0)
-}
-
 fn check_agent(
     store: &PlexusStore,
     registry: &dyn AgentRegistry,
@@ -227,81 +213,155 @@ mod tests {
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
     use std::path::{Path, PathBuf};
 
-    struct ReplyRegistry(serde_json::Value);
-    impl AgentRegistry for ReplyRegistry {
-        fn lookup(&self, _: &str) -> AgentLookup {
-            crate::agent_registry::resolve_agent_lookup_reply(&self.0)
+    struct ReplyPeer(serde_json::Value);
+    impl crate::github_identity::PrefrontalRoutePeer for ReplyPeer {
+        fn call(
+            &self,
+            op: &str,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, crate::github_identity::PrefrontalRouteError> {
+            assert_eq!(op, "agent.resolve");
+            let id = params["agent_id"].as_str().unwrap();
+            Ok(if id == "survivor" {
+                crate::agent_registry::entorhinal_reply(id, "live")
+            } else {
+                self.0.clone()
+            })
         }
     }
 
-    #[test]
-    fn a_null_agent_with_a_deleted_gone_reply_preserves_grants() {
-        let (_scratch, store) = file_store("registry-both-present-null");
+    fn sweep_entorhinal_reply(reply: serde_json::Value, retired: bool, unresolved: bool) {
+        let (_scratch, store) = file_store("entorhinal-sweep");
         grant(&store, "direct", "conn", "g-agent", "agent-a");
-        let reply = serde_json::json!({"agent":null,"gone":{"reason":"deleted","at":1}});
-        let sweep = sweep_retired_agents(&store, &ReplyRegistry(reply)).unwrap();
+        grant(&store, "direct", "conn", "g-survivor", "survivor");
+        store
+            .put_github_handle(&GithubHandle {
+                app_handle_id: "app-a".into(),
+                agent_id: "agent-a".into(),
+                app_id: 1,
+                installation_id: None,
+                credential_reference: "github_app:app-a".into(),
+                credential_generation: 0,
+                status: "enabled".into(),
+                proven_at: None,
+                connection_principal: "direct".into(),
+                connection_id: "conn".into(),
+            })
+            .unwrap();
+        let registry = crate::agent_registry::EntorhinalAgentRegistry::new(std::sync::Arc::new(
+            ReplyPeer(reply),
+        ));
+        let sweep = sweep_retired_agents(&store, &registry).unwrap();
+        assert_eq!(sweep.grants_revoked, usize::from(retired));
+        assert_eq!(sweep.agents_unresolved > 0, unresolved);
         assert_eq!(
-            sweep.grants_revoked, 0,
-            "both-present reply must not revoke grants even when agent is null"
+            store.grants_held_by_agent("agent-a").unwrap().len(),
+            usize::from(!retired)
         );
-        assert_eq!(store.grants_held_by_agent("agent-a").unwrap().len(), 1);
+        assert_eq!(
+            store.github_handles_for_agent("agent-a").unwrap()[0].status,
+            if retired { "disabled" } else { "enabled" }
+        );
+        let survivor = store.grants_held_by_agent("survivor").unwrap();
+        assert_eq!(
+            survivor.len(),
+            1,
+            "a merge must neither transfer nor revoke the survivor's authority"
+        );
+        assert_eq!(survivor[0].grant_id, "g-survivor");
     }
 
     #[test]
-    fn only_well_formed_producer_retirement_replies_revoke_grants() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/agent-registry/replies.json"
-        ))
-        .unwrap();
-        let mut cases = Vec::new();
-        for pointer in ["/cases/2/reply", "/cases/3/reply", "/cases/4/reply"] {
-            cases.push((
-                fixture
-                    .pointer(pointer)
-                    .expect("producer reply path")
-                    .clone(),
-                pointer != "/cases/2/reply",
-            ));
+    fn entorhinal_retired_revokes_and_disables_bot() {
+        sweep_entorhinal_reply(
+            crate::agent_registry::entorhinal_reply("agent-a", "retired"),
+            true,
+            false,
+        );
+    }
+
+    #[test]
+    fn entorhinal_merged_revokes_without_transferring_authority() {
+        sweep_entorhinal_reply(
+            crate::agent_registry::entorhinal_reply("agent-a", "merged"),
+            true,
+            false,
+        );
+    }
+
+    #[test]
+    fn entorhinal_live_changes_nothing() {
+        sweep_entorhinal_reply(
+            crate::agent_registry::entorhinal_reply("agent-a", "live"),
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn entorhinal_unknown_changes_nothing() {
+        sweep_entorhinal_reply(
+            crate::agent_registry::entorhinal_reply("agent-a", "unknown"),
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn malformed_entorhinal_retirement_preserves_grants_and_bot() {
+        let reply = crate::agent_registry::entorhinal_reply("agent-a", "retired");
+        let mut missing = reply.clone();
+        missing["result"].as_object_mut().unwrap().remove("gone");
+        let mut wrong_echo = reply;
+        wrong_echo["result"]["agent_id"] = serde_json::json!("other");
+        for reply in [missing, wrong_echo] {
+            sweep_entorhinal_reply(reply, false, true);
         }
-        // The paired fixture replies are the deleted and merged answers above as
-        // the agent registry (the Prefrontal module) now sends them, with
-        // top-level `incarnation` and `generation` fields added. Those fields
-        // do not change how retirement is read: `gone.reason` still decides it,
-        // so both replies must still revoke the agent's grants.
-        for pointer in ["/pairs/2/reply", "/pairs/3/reply"] {
-            cases.push((
-                fixture
-                    .pointer(pointer)
-                    .expect("producer pair reply path")
-                    .clone(),
-                true,
-            ));
+    }
+
+    #[test]
+    fn shared_resume_serializes_entire_retirement_passes() {
+        struct BlockingRegistry {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
         }
-        for malformed in [
-            serde_json::json!({"gone": null}),
-            serde_json::json!({"gone": "deleted"}),
-            serde_json::json!({"gone": []}),
-            serde_json::json!({"gone": {"reason": "other", "at": 1}}),
-            serde_json::json!({"gone": {"reason": "deleted"}}),
-            serde_json::json!({"gone": {"reason": "deleted", "at": -1}}),
-            serde_json::json!({"gone": {"reason": "deleted", "at": 1.5}}),
-            serde_json::json!({"gone": {"reason": "merged", "at": 1}}),
-            serde_json::json!({"agent": {}, "gone": {"reason": "deleted", "at": 1}}),
-            serde_json::json!({}),
-        ] {
-            cases.push((malformed, false));
+        impl AgentRegistry for BlockingRegistry {
+            fn lookup(&self, _: &str) -> AgentLookup {
+                self.entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                AgentLookup::Unknown
+            }
         }
-        for (reply, retired) in cases {
-            let (_scratch, store) = file_store("registry-wire-sweep");
-            grant(&store, "direct", "conn", "g-agent", "agent-a");
-            let sweep = sweep_retired_agents(&store, &ReplyRegistry(reply.clone())).unwrap();
-            assert_eq!(sweep.grants_revoked, usize::from(retired), "{reply}");
-            assert_eq!(
-                store.grants_held_by_agent("agent-a").unwrap().len(),
-                usize::from(!retired),
-                "{reply}"
-            );
-        }
+        let (_scratch, store) = file_store("retirement-serialized");
+        grant(&store, "direct", "conn", "grant", "agent");
+        let store = std::sync::Arc::new(store);
+        let resume = std::sync::Arc::new(SweepResume::default());
+        let (entered, entering) = std::sync::mpsc::channel();
+        let (release, releasing) = std::sync::mpsc::channel();
+        let registry = std::sync::Arc::new(BlockingRegistry {
+            entered,
+            release: std::sync::Mutex::new(releasing),
+        });
+        let spawn = || {
+            let (store, resume, registry) = (store.clone(), resume.clone(), registry.clone());
+            std::thread::spawn(move || run_and_report(&store, registry.as_ref(), &resume))
+        };
+        let first = spawn();
+        entering
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        let second = spawn();
+        let overlapped = entering
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_ok();
+        release.send(()).unwrap();
+        release.send(()).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        assert!(
+            !overlapped,
+            "a second sweep entered the registry before the first pass released its lock"
+        );
     }
 
     /// A file-backed store, because the revocation journal only exists beside

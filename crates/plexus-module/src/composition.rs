@@ -11,8 +11,8 @@ use plexus_core::storage::github_store::GithubGovernanceSeams;
 use plexus_core::web_search::WebSearchService;
 use plexus_core::{
     AgentRegistry, CatalogReconciler, CatalogRefreshPolicy, CkcredCredentialSource, ConsentCards,
-    CredentialSource, FailClosedAgentRegistry, FailClosedCredentialSource, Freshness,
-    GovernanceEngine, McpRemoteTransport, PlexusStore, PrefrontalAgentRegistry, RestTransport,
+    CredentialSource, EntorhinalAgentRegistry, FailClosedAgentRegistry, FailClosedCredentialSource,
+    Freshness, GovernanceEngine, McpRemoteTransport, PlexusStore, RestTransport,
     SubcCkcredRoutePeer, SubcPrefrontalRoutePeer, Transport, TransportRequest, TransportResponse,
 };
 #[cfg(any(test, feature = "test-support"))]
@@ -89,8 +89,10 @@ pub struct ModuleRuntime {
     pub mcp_transport: Arc<McpRemoteTransport>,
     pub rest_transport: Arc<RestTransport>,
     /// Registry lookup runs when an operator sets an explicit delivery target
-    /// and in the scheduler's hourly sweep for retired agents' grants.
+    /// and in hourly and Entorhinal-woken sweeps for retired agents' grants.
     pub agent_registry: Arc<dyn AgentRegistry>,
+    pub agent_sweep_resume: Arc<plexus_core::agent_retirement::SweepResume>,
+    pub(crate) agent_sweep_throttle: Arc<crate::bus_wakes::AgentSweepThrottle>,
     pub flow_audiences: crate::flow_audience::FlowAudiences,
     pub repository_registry: Option<Arc<dyn plexus_core::repository_ownership::RepositoryRegistry>>,
     /// One cursor and whole-pass lock for hourly and bus-woken ownership checks.
@@ -186,6 +188,8 @@ impl ModuleRuntime {
             ),
             repository_registry: production_repository_registry(connection_file),
             ownership_resume: Default::default(),
+            agent_sweep_resume: Default::default(),
+            agent_sweep_throttle: Default::default(),
             manifest_binding_wake: Default::default(),
             github_handle_credentials,
             github_control_reader: None,
@@ -238,6 +242,8 @@ impl ModuleRuntime {
             flow_audiences: crate::flow_audience::FlowAudiences::global_fixture(),
             repository_registry: None,
             ownership_resume: Default::default(),
+            agent_sweep_resume: Default::default(),
+            agent_sweep_throttle: Default::default(),
             manifest_binding_wake: Default::default(),
             route_facts: Default::default(),
             github_handle_credentials: None,
@@ -290,6 +296,8 @@ impl ModuleRuntime {
             flow_audiences: crate::flow_audience::FlowAudiences::global_fixture(),
             repository_registry: None,
             ownership_resume: Default::default(),
+            agent_sweep_resume: Default::default(),
+            agent_sweep_throttle: Default::default(),
             github_handle_credentials: None,
             github_control_reader: None,
             endpoint_override,
@@ -494,22 +502,23 @@ fn production_repository_registry(
 }
 
 fn production_agent_registry(connection_file: &Path) -> Arc<dyn AgentRegistry> {
-    match production_prefrontal_peer(connection_file) {
-        Some(peer) => Arc::new(PrefrontalAgentRegistry::new(Arc::new(peer))),
+    match configured_peer(
+        SubcPrefrontalRoutePeer::connect(connection_file, "entorhinal", plexus_bind_identity()),
+        "agent registry",
+        "entorhinal",
+    ) {
+        Some(peer) => Arc::new(EntorhinalAgentRegistry::new(Arc::new(peer))),
         None => Arc::new(FailClosedAgentRegistry),
     }
 }
 
-/// The agent registry is managed through a route to the Prefrontal module,
-/// whose module id comes from `PLEXUS_PREFRONTAL_MODULE_ID`. When that id is
-/// unset or the route cannot be opened, this returns `None` and the caller
-/// uses a registry that answers every lookup as unavailable.
+/// Flow audience reads still use Prefrontal's configured management route.
 fn production_prefrontal_peer(connection_file: &Path) -> Option<SubcPrefrontalRoutePeer> {
     let module_id = prefrontal_route_module_id()?;
     let identity = plexus_bind_identity();
     configured_peer(
         SubcPrefrontalRoutePeer::connect(connection_file, module_id.as_str(), identity),
-        "agent registry",
+        "flow audience",
         &module_id,
     )
 }
