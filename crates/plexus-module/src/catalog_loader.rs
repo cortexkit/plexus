@@ -5,23 +5,21 @@ use super::*;
 pub(super) fn initialize_store(
     hello_ack: &ModuleHelloAckBody,
 ) -> Result<(PlexusStore, Option<PathBuf>), ModuleError> {
-    let value = hello_ack.storage.as_ref().ok_or_else(|| {
-        ModuleError::Message("subc HELLO_ACK omitted the storage descriptor".to_string())
-    })?;
-    let descriptor: StorageDescriptor = serde_json::from_value(value.clone())
-        .map_err(|error| ModuleError::Message(format!("invalid storage descriptor: {error}")))?;
+    let descriptor = storage_descriptor(hello_ack)?;
     let data_directory = engram_catalog::data_directory(&descriptor);
     let store = PlexusStore::open(&descriptor)
         .map_err(|error| ModuleError::Message(format!("open plexus store: {error}")))?;
     Ok((store, data_directory))
 }
 
-pub(super) fn ingest_catalog(store: &PlexusStore) -> Result<(), ModuleError> {
-    let directory = catalog_directory(
-        std::env::var_os("PLEXUS_CATALOG_DIR"),
-        cfg!(debug_assertions),
-    )?;
-    ingest_catalog_from(store, &directory)
+pub(super) fn storage_descriptor(
+    hello_ack: &ModuleHelloAckBody,
+) -> Result<StorageDescriptor, ModuleError> {
+    let value = hello_ack.storage.as_ref().ok_or_else(|| {
+        ModuleError::Message("subc HELLO_ACK omitted the storage descriptor".to_string())
+    })?;
+    serde_json::from_value(value.clone())
+        .map_err(|error| ModuleError::Message(format!("invalid storage descriptor: {error}")))
 }
 
 /// Resolve the catalog directory from the deployment environment.
@@ -150,13 +148,13 @@ pub(super) fn ingest_catalog_from(
     let paths = catalog_paths(directory)?;
     // The retirement pass below withdraws every stored manifest the directory
     // does not contain. A directory holding no manifests at all is a wrong or
-    // half-synced PLEXUS_CATALOG_DIR far more often than a deliberate
+    // half-synced catalog path far more often than a deliberate
     // withdrawal of every vendor, and following it would retire the whole
     // catalog on this boot. Refuse to boot instead.
     if paths.is_empty() {
         return Err(ModuleError::Message(format!(
             "catalog directory {} holds no .jsonc manifests; refusing to boot rather \
-             than retire every stored manifest (check PLEXUS_CATALOG_DIR)",
+             than retire every stored manifest (check catalog_dir or, on older daemons, PLEXUS_CATALOG_DIR)",
             directory.display()
         )));
     }

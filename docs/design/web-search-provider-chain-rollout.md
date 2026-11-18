@@ -116,8 +116,12 @@ full gate before release. This runbook does not record that gate as green.
 
 Use one operator shell, in the reviewed checkout. Supply actual absolute paths;
 none is a secret. `LIVE_BIN/ck-plexus` must be the supervisor's registered binary,
-not another copy on PATH. `LIVE_CATALOG` must equal its configured
-`PLEXUS_CATALOG_DIR`. Use signed/staged local artifacts produced by the established
+not another copy on PATH. `LIVE_CATALOG` must name the directory selected by the
+daemon-managed `catalog_dir` setting (by default, `catalog` under Plexus’s data
+directory). On a daemon without managed settings it must match
+`PLEXUS_CATALOG_DIR` instead. Pass `--catalog-dir "$LIVE_CATALOG"` to the staging
+script when using managed settings; its automatic lookup only reads the old
+environment entry. Use signed/staged local artifacts produced by the established
 release process (`scripts/release-binaries.sh`, `scripts/stage-binaries.sh`), not
 Linux build-server artifacts. Build/sign/stage before touching deployment.
 

@@ -88,8 +88,9 @@ pub(super) fn spawn(
     writer: mpsc::Sender<Frame>,
     control_replies: Arc<PendingControlReplies>,
     compose: impl FnOnce(Arc<PlexusStore>, &Path) -> ModuleRuntime + Send + 'static,
-    started: Instant,
+    boot: (Instant, PathBuf),
 ) -> Result<Startup, ModuleError> {
+    let (started, catalog_dir) = boot;
     let (sender, result) = oneshot::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker_cancelled = Arc::clone(&cancelled);
@@ -119,7 +120,7 @@ pub(super) fn spawn(
                 if let Some(data_directory) = data_directory {
                     engram_catalog::write_best_effort(&data_directory);
                 }
-                ingest_catalog(&store)?;
+                ingest_catalog_from(&store, &catalog_dir)?;
                 let store_elapsed = store_started.elapsed();
                 check_cancelled()?;
 

@@ -356,6 +356,12 @@ where
         self
     }
 
+    /// Use a new retention window from the next pass without resetting the
+    /// housekeeping cadence or in-progress sweep cursors.
+    pub fn set_audit_retention_window_ms(&mut self, window_ms: i64) {
+        self.audit_retention_window_ms = window_ms;
+    }
+
     /// Stop starting work when the owner sets this flag. Checks happen only
     /// between phases and whole subscription polls: an in-flight poll must
     /// finish recording its attempt and committing its result before stopping.

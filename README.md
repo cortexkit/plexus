@@ -105,13 +105,28 @@ standalone server. At startup it:
   a file descriptor, and refuses to start without it;
 - opens its SQLite store at the location the daemon assigns in the handshake.
 
-It reads this configuration from its environment:
+When the daemon supports managed settings, Plexus declares the user layer at
+`$XDG_CONFIG_HOME/cortexkit/plexus.jsonc` (normally `~/.config/cortexkit/plexus.jsonc`;
+the filename follows the registered module ID). In that mode its settings come
+from the daemon-delivered view:
+
+| Setting | Default | When it takes effect |
+|---|---|---|
+| `catalog_dir` | `catalog` | At module startup. Relative paths are resolved from the data directory assigned by the daemon; absolute paths are used as-is. |
+| `audit_retention_days` | `30` | On the next retention pass, without restarting. Must be a whole number greater than the store's 7-day floor. |
+
+Move any nondefault values into the managed user layer before switching. The
+managed view wins, even if its values are defaults: Plexus reads
+`PLEXUS_CATALOG_DIR` and `PLEXUS_AUDIT_RETENTION_DAYS` only when the daemon does
+not advertise managed settings, never after a refusal. On older daemons the
+release build still requires `PLEXUS_CATALOG_DIR`; debug builds fall back to
+this repository's `catalog/`.
+
+Plexus still reads the following from its environment:
 
 | Variable | Meaning |
 |---|---|
-| `PLEXUS_CATALOG_DIR` | Catalog directory. Required by release builds; debug builds fall back to this repository's `catalog/`. |
 | `SUBC_MODULE_ID` | Module id; defaults to `plexus`. |
-| `PLEXUS_AUDIT_RETENTION_DAYS` | Audit retention; defaults to 30 and must exceed the 7-day delete floor. |
 | `PLEXUS_CKCRED_MODULE_ID` | Module id of the vault's credentials route. Without it, only credential-free vendors can be called. |
 | `PLEXUS_MCP_STDIO_MODULE_ID` | Module id of the local MCP adapter, for vendors served by a local MCP server. Optional. |
 | `PLEXUS_PREFRONTAL_MODULE_ID` | Module id of the Prefrontal route that serves the agent registry. Without it, agent lookups answer as unavailable. |

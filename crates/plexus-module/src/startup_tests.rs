@@ -236,7 +236,6 @@ fn config() -> ModuleConfig {
         registration_channel: false,
         module_id: DEFAULT_MODULE_ID.into(),
         connection_file_path: PathBuf::from("unused-startup-fixture-connection"),
-        audit_retention_window_ms: DEFAULT_AUDIT_RETENTION_DAYS * AUDIT_MILLIS_PER_DAY,
     }
 }
 
@@ -623,4 +622,191 @@ async fn stop_notice_during_warmup_exits_without_waiting_for_startup() {
         "cancelled startup cleanup",
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_settings_are_reviewed_while_warming_and_applied_before_readiness() {
+    use subc_client_rs::config::*;
+
+    let data = Scratch::directory("managed-startup");
+    let catalog = data.join("catalog");
+    std::fs::create_dir(&catalog).unwrap();
+    std::fs::write(
+        catalog.join("deepwiki.jsonc"),
+        include_bytes!("../../../catalog/deepwiki.jsonc"),
+    )
+    .unwrap();
+    let descriptor = StorageDescriptor {
+        module_id: DEFAULT_MODULE_ID.into(),
+        storage_namespace: "managed-startup".into(),
+        isolation: cortexkit_store_types::Isolation::Module,
+        backend: cortexkit_store_types::StorageBackend::Sqlite {
+            path: data
+                .join("plexus.db")
+                .into_os_string()
+                .into_string()
+                .unwrap(),
+        },
+    };
+    let (mut input, mut reader) = tokio::io::duplex(8192);
+    let (writer, mut responses) = mpsc::channel(16);
+    let module = tokio::spawn(async move {
+        module_loop_with_composition(
+            &mut reader,
+            writer,
+            &config(),
+            Arc::new(health::HealthState::new()),
+            Arc::new(RouteBindings::new()),
+            |store, _| {
+                let manifests = store.list_manifest_summaries("direct").unwrap();
+                assert_eq!(manifests.len(), 1);
+                assert_eq!(manifests[0].key, "deepwiki");
+                runtime_for_test(store)
+            },
+        )
+        .await
+    });
+    let hello: ModuleHelloBody =
+        serde_json::from_slice(&reply(&mut responses, HELLO_CORRELATION).await.body).unwrap();
+    assert!(hello
+        .control_ops
+        .as_ref()
+        .unwrap()
+        .iter()
+        .any(|op| op == CONFIG_REVIEW_OP));
+    let ack = ModuleHelloAckBody {
+        negotiated_ver: PROTOCOL_VERSION,
+        subc_ops: vec!["catalog.update".into()],
+        subc_capabilities: vec![CONFIG_GATE_CAPABILITY.into()],
+        machine_id: None,
+        storage: Some(serde_json::to_value(descriptor).unwrap()),
+    };
+    write_frame(
+        &mut input,
+        &frame(
+            FrameType::HelloAck,
+            0,
+            HELLO_CORRELATION,
+            serde_json::to_value(ack).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    let control = |frame: &Frame, op| {
+        assert_eq!(frame.header.ty, FrameType::Request);
+        assert_eq!(frame.header.channel, 0);
+        let body: Value = serde_json::from_slice(&frame.body).unwrap();
+        assert_eq!(body["op"], op);
+        body
+    };
+    let declare = recv_within(responses.recv(), RESPONSE_DEADLINE, "config declaration").await;
+    let declaration = control(&declare, CONFIG_DECLARE_OP);
+    write_frame(
+        &mut input,
+        &frame(
+            FrameType::Response,
+            0,
+            declare.header.corr,
+            json!({"op":CONFIG_DECLARE_OP}),
+        ),
+    )
+    .await
+    .unwrap();
+    let get = recv_within(responses.recv(), RESPONSE_DEADLINE, "initial config fetch").await;
+    control(&get, CONFIG_GET_OP);
+
+    let review = ConfigReviewRequest::new(
+        0,
+        vec![ConfigLayerSnapshot::file(
+            DEFAULT_MODULE_ID,
+            ConfigLayer::User,
+            declaration["user_file"].as_str().unwrap(),
+            Some(br#"{"audit_retention_days":6}"#.to_vec()),
+        )],
+        None,
+    );
+    write_frame(
+        &mut input,
+        &frame(
+            FrameType::Request,
+            0,
+            77,
+            serde_json::to_value(review).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    let response = reply(&mut responses, 77).await;
+    assert_eq!(response.header.ty, FrameType::Response);
+    let refused: ConfigReviewReply = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(refused.refusals[0].paths, ["/audit_retention_days"]);
+
+    for (generation, get, catalog_dir, expected_result) in [
+        (1, Some(get), "catalog", "ack"),
+        (2, None, "catalog", "ack"),
+        (3, None, "other-catalog", "nack"),
+    ] {
+        let get = if let Some(get) = get {
+            get
+        } else {
+            let hint = ConfigChanged::new(generation, vec![]);
+            write_frame(
+                &mut input,
+                &frame(FrameType::Push, 0, 0, serde_json::to_value(hint).unwrap()),
+            )
+            .await
+            .unwrap();
+            let get = recv_within(
+                responses.recv(),
+                RESPONSE_DEADLINE,
+                "refreshed config fetch",
+            )
+            .await;
+            control(&get, CONFIG_GET_OP);
+            get
+        };
+        let mut view = ConfigView::new(
+            generation,
+            json!({"catalog_dir":catalog_dir,"audit_retention_days": 10 + generation}),
+            Default::default(),
+            vec![],
+            ConfigStatus::Pending,
+        );
+        view.attempt = Some(generation + 50);
+        let delivery = serde_json::to_value(ConfigGetReply::new(None, Some(view))).unwrap();
+        write_frame(
+            &mut input,
+            &frame(FrameType::Response, 0, get.header.corr, delivery),
+        )
+        .await
+        .unwrap();
+        if generation == 1 {
+            let ready = ready_update(&mut responses, &hello).await;
+            ready_ack(&mut input, &ready).await;
+        }
+        let applied = recv_within(responses.recv(), RESPONSE_DEADLINE, "apply result").await;
+        let body = control(&applied, CONFIG_APPLIED_OP);
+        assert_eq!(body["result"], expected_result);
+        assert_eq!(body["generation"], generation);
+        assert_eq!(body["attempt"], generation + 50);
+        write_frame(
+            &mut input,
+            &frame(
+                FrameType::Response,
+                0,
+                applied.header.corr,
+                json!({"op":CONFIG_APPLIED_OP}),
+            ),
+        )
+        .await
+        .unwrap();
+    }
+
+    write_frame(&mut input, &stop_notice()).await.unwrap();
+    tokio::time::timeout(RESPONSE_DEADLINE, module)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_writer_closed(&mut responses).await;
 }

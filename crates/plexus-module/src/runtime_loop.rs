@@ -1,8 +1,8 @@
 //! Module entry, daemon handshake, frame-reading loop and egress writer.
 
 use super::*;
+use settings::{AuditRetention, BootSettings, ConfigConnection, LiveSettings};
 
-pub(super) const AUDIT_RETENTION_DAYS_ENV: &str = "PLEXUS_AUDIT_RETENTION_DAYS";
 pub(super) const HELLO_CORRELATION: u64 = 1;
 const EGRESS_BUFFER: usize = 64;
 /// Refresh the diagnostic heartbeat age even while the dispatcher is idle.
@@ -11,7 +11,6 @@ const IDLE_HEARTBEAT_WAKE: std::time::Duration = std::time::Duration::from_milli
 pub(super) struct ModuleConfig {
     pub(super) connection_file_path: PathBuf,
     pub(super) module_id: String,
-    pub(super) audit_retention_window_ms: i64,
     pub(super) registration_channel: bool,
 }
 
@@ -22,52 +21,12 @@ impl ModuleConfig {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODULE_ID.to_string());
-        let audit_retention_window_ms =
-            audit_retention_window_ms(std::env::var_os(AUDIT_RETENTION_DAYS_ENV))?;
         Ok(Self {
             connection_file_path,
             module_id,
-            audit_retention_window_ms,
             registration_channel: false,
         })
     }
-}
-
-/// Resolve the audit retention policy from deployment configuration.
-///
-/// Absence defaults to 30 days, unlike an absent `PLEXUS_CATALOG_DIR` below.
-/// The catalog's old fallback pointed into a developer working tree, so serving
-/// from a guessed path was less safe than refusing startup. Retention is a
-/// deployment-independent safety policy: 30 days is safe until an operator
-/// states a different window, while a present but invalid value is an intention
-/// the module cannot honor and therefore remains a boot refusal.
-pub(super) fn audit_retention_window_ms(configured: Option<OsString>) -> Result<i64, ModuleError> {
-    let days = match configured {
-        None => DEFAULT_AUDIT_RETENTION_DAYS,
-        Some(value) => {
-            let text = value.to_str().ok_or_else(|| {
-                ModuleError::Message(format!(
-                    "{AUDIT_RETENTION_DAYS_ENV} is not valid Unicode and cannot be parsed as days"
-                ))
-            })?;
-            text.parse::<i64>().map_err(|_| {
-                ModuleError::Message(format!(
-                    "{AUDIT_RETENTION_DAYS_ENV} value {text:?} cannot be parsed as whole days"
-                ))
-            })?
-        }
-    };
-    if days <= AUDIT_DELETE_FLOOR_DAYS {
-        return Err(ModuleError::Message(format!(
-            "{AUDIT_RETENTION_DAYS_ENV} must be greater than the audit delete floor \
-             (configured window: {days} days; floor: {AUDIT_DELETE_FLOOR_DAYS} days)"
-        )));
-    }
-    days.checked_mul(AUDIT_MILLIS_PER_DAY).ok_or_else(|| {
-        ModuleError::Message(format!(
-            "{AUDIT_RETENTION_DAYS_ENV} value {days} days is too large"
-        ))
-    })
 }
 
 /// The build identity `ck-plexus --version` prints: crate version, the commit
@@ -261,26 +220,64 @@ where
     } else {
         None
     };
-    let startup = startup::spawn(
-        hello_ack,
-        config.connection_file_path.clone(),
-        Arc::clone(&health),
+    let managed = ConfigConnection::from_hello(
+        &hello_ack,
+        &config.module_id,
         writer.clone(),
         Arc::clone(&control_replies),
-        compose,
-        startup_started,
     )?;
+    let managed = managed.as_ref();
     let ready_writer = writer.clone();
     let ready_replies = Arc::clone(&control_replies);
+    let startup_health = Arc::clone(&health);
     let startup = async move {
-        startup::finish(
-            startup.await?,
-            &ready_writer,
-            negotiated_ver,
-            provides,
-            ready_replies,
-        )
-        .await
+        let (
+            BootSettings {
+                catalog_dir,
+                audit_window_ms,
+            },
+            pending_report,
+        ) = match managed {
+            Some(managed) => managed.initial().await?,
+            None => (settings::config_files()?, None),
+        };
+        let initialized = async {
+            let initialized = startup::spawn(
+                hello_ack,
+                config.connection_file_path.clone(),
+                startup_health,
+                ready_writer.clone(),
+                Arc::clone(&ready_replies),
+                compose,
+                (startup_started, catalog_dir.clone()),
+            )?
+            .await?;
+            startup::finish(
+                initialized,
+                &ready_writer,
+                negotiated_ver,
+                provides,
+                ready_replies,
+            )
+            .await
+        }
+        .await;
+        match initialized {
+            Ok(initialized) => Ok((
+                initialized,
+                Some(LiveSettings {
+                    catalog_dir,
+                    audit_retention: AuditRetention::new(audit_window_ms),
+                    pending_report,
+                }),
+            )),
+            Err(error) => {
+                if let (Some(managed), Some(report)) = (managed, pending_report) {
+                    managed.nack_startup(report).await;
+                }
+                Err(error)
+            }
+        }
     };
     dispatch_loop_starting(
         reader,
@@ -289,7 +286,10 @@ where
         route_bindings,
         control_replies,
         startup,
-        Some(config),
+        Some(DispatchSettings {
+            connection_file: &config.connection_file_path,
+            managed,
+        }),
     )
     .await
 }
@@ -313,10 +313,15 @@ where
         Arc::clone(&state.health),
         route_bindings,
         control_replies,
-        std::future::ready(Ok(startup::Initialized::existing(state))),
+        std::future::ready(Ok((startup::Initialized::existing(state), None))),
         None,
     )
     .await
+}
+
+struct DispatchSettings<'a> {
+    connection_file: &'a Path,
+    managed: Option<&'a ConfigConnection>,
 }
 
 async fn dispatch_loop_starting<R>(
@@ -325,8 +330,10 @@ async fn dispatch_loop_starting<R>(
     health: Arc<health::HealthState>,
     route_bindings: Arc<RouteBindings>,
     control_replies: Arc<PendingControlReplies>,
-    startup: impl std::future::Future<Output = Result<startup::Initialized, ModuleError>>,
-    config: Option<&ModuleConfig>,
+    startup: impl std::future::Future<
+        Output = Result<(startup::Initialized, Option<LiveSettings>), ModuleError>,
+    >,
+    settings: Option<DispatchSettings<'_>>,
 ) -> Result<(), ModuleError>
 where
     R: AsyncRead + Unpin,
@@ -334,6 +341,9 @@ where
     let dispatch_entered = std::time::Instant::now();
     let _clear_on_exit = ClearBindingsOnClose(route_bindings.clone());
     let mut startup = std::pin::pin!(startup);
+    let managed = settings.as_ref().and_then(|settings| settings.managed);
+    let mut reviews = tokio::task::JoinSet::new();
+    let mut watch = None;
     let mut state = None;
     let mut background = None;
     let result = async {
@@ -353,15 +363,27 @@ where
             tokio::select! {
                 biased;
                 result = &mut startup, if state.is_none() => {
-                    let initialized = result?;
+                    let (initialized, live) = result?;
                     initialized.log_timings(dispatch_entered);
                     // The registered connection's startup future includes the
                     // readiness ACK. Until then health and stray requests use
                     // the same local warming gate, even after initialization.
-                    if let Some(config) = config {
-                        background = Some(spawn_background_tasks(Arc::clone(&initialized.state), config));
+                    if let (Some(settings), Some(live)) = (&settings, live) {
+                        background = Some(spawn_background_tasks(
+                            Arc::clone(&initialized.state), settings.connection_file, live.audit_retention.clone(),
+                        ));
+                        watch = managed.map(|managed| Box::pin(managed.watch(live)));
                     }
                     state = Some(initialized.state);
+                }
+                () = async {
+                    match watch.as_mut() {
+                        Some(watch) => watch.await,
+                        None => std::future::pending().await,
+                    }
+                } => { watch = None; }
+                Some(result) = reviews.join_next(), if !reviews.is_empty() => {
+                    result.map_err(|error| ModuleError::Message(error.to_string()))??;
                 }
                 result = &mut read => {
                     let Some(frame) =
@@ -386,6 +408,9 @@ where
             }
             continue;
         }
+        if managed.is_some_and(|managed| managed.handle_frame(&frame, &mut reviews)) {
+            continue;
+        }
         let keep_reading = match &state {
             Some(state) => handle_frame(frame, &writer, state, &route_bindings).await?,
             None => startup::handle_warming_frame(frame, &writer, &health).await?,
@@ -395,6 +420,7 @@ where
         }
       }
     }.await;
+    drop(reviews);
     if let Some(background) = background {
         background.stop().await;
     }
@@ -465,6 +491,7 @@ pub(super) async fn send_hello(
         control_ops: Some(vec![
             "route.bind".to_string(),
             MODULE_CONTROL_OP_HEALTH_CHECK.to_string(),
+            subc_client_rs::config::CONFIG_REVIEW_OP.to_string(),
         ]),
         launch_nonce: launch_nonce.map(|nonce| nonce.value().to_string()),
     };

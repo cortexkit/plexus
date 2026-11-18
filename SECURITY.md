@@ -109,7 +109,7 @@ Each governed call writes an audit row for the decision and one for the
 dispatch, correlated by request id, in the module's SQLite store. Audit rows
 cannot be updated (a trigger refuses it) and can be deleted only once they are
 older than seven days during ordinary operation; retention defaults to 30 days
-(`PLEXUS_AUDIT_RETENTION_DAYS`). On Unix the store and its write-ahead log are
+(`audit_retention_days`, or `PLEXUS_AUDIT_RETENTION_DAYS` on older daemons). On Unix the store and its write-ahead log are
 set to owner-only permissions (mode `0600`) when opened. A grant revocation is
 first appended to an owner-only journal beside the database, so restoring an
 older store cannot bring the grant back.

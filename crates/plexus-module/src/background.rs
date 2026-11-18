@@ -51,7 +51,8 @@ impl BackgroundTasks {
 
 pub(super) fn spawn_background_tasks(
     state: Arc<ModuleState>,
-    config: &ModuleConfig,
+    connection_file: &Path,
+    audit_retention: settings::AuditRetention,
 ) -> BackgroundTasks {
     // Drive trigger polling on a dedicated task rather than from the dispatch
     // loop below (see `spawn_trigger_scheduler`). The shutdown sender is held
@@ -102,17 +103,14 @@ pub(super) fn spawn_background_tasks(
         }
     });
     let (scheduler_shutdown, scheduler_stop) = mpsc::channel::<()>(1);
-    let scheduler_task = spawn_trigger_scheduler(
-        Arc::clone(&state),
-        scheduler_stop,
-        config.audit_retention_window_ms,
-    );
+    let scheduler_task =
+        spawn_trigger_scheduler(Arc::clone(&state), scheduler_stop, audit_retention);
 
     let (outbox_shutdown, outbox_stop) = mpsc::channel::<()>(1);
     let outbox_task = crate::bus::spawn_outbox_drain(
         Arc::clone(&state),
         outbox_stop,
-        crate::bus::session_factory(Some(config.connection_file_path.clone())),
+        crate::bus::session_factory(Some(connection_file.to_path_buf())),
     );
 
     let (relay_shutdown, relay_stop) = mpsc::channel::<()>(1);
@@ -184,9 +182,9 @@ pub(super) fn connector_gate_transition(gate: &Value) -> (Value, Value, Value) {
 pub(super) fn spawn_trigger_scheduler(
     state: Arc<ModuleState>,
     stop: mpsc::Receiver<()>,
-    audit_retention_window_ms: i64,
+    audit_retention: impl Into<settings::AuditRetention>,
 ) -> tokio::task::JoinHandle<()> {
-    spawn_trigger_scheduler_every(SCHEDULER_TICK, state, stop, audit_retention_window_ms)
+    spawn_trigger_scheduler_every(SCHEDULER_TICK, state, stop, audit_retention)
 }
 
 /// `spawn_trigger_scheduler` with its tick interval named. The module always
@@ -196,17 +194,18 @@ pub(super) fn spawn_trigger_scheduler_every(
     tick_interval: std::time::Duration,
     state: Arc<ModuleState>,
     mut stop: mpsc::Receiver<()>,
-    audit_retention_window_ms: i64,
+    audit_retention: impl Into<settings::AuditRetention>,
 ) -> tokio::task::JoinHandle<()> {
+    let audit_retention = audit_retention.into();
     let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let scheduler =
-        plexus_core::Scheduler::new(state.runtime.engine.clone(), audit_retention_window_ms)
+        plexus_core::Scheduler::new(state.runtime.engine.clone(), audit_retention.window_ms())
             .with_stop_flag(Arc::clone(&stopping))
             .with_relay_health(state.health.relay.clone())
             .with_ownership_resume(Arc::clone(&state.runtime.ownership_resume))
             .with_agent_registry(Arc::clone(&state.runtime.agent_registry))
             .with_agent_sweep_resume(Arc::clone(&state.runtime.agent_sweep_resume));
-    let scheduler = match &state.runtime.repository_registry {
+    let mut scheduler = match &state.runtime.repository_registry {
         Some(registry) => scheduler.with_repository_registry(Arc::clone(registry)),
         None => scheduler,
     };
@@ -292,6 +291,7 @@ pub(super) fn spawn_trigger_scheduler_every(
                         // attribute its cost to vendor latency, which is the one
                         // thing this measurement exists to isolate.
                         let started = std::time::Instant::now();
+                        scheduler.set_audit_retention_window_ms(audit_retention.window_ms());
                         let report = scheduler.run_pass_report(&principals, now);
                         state.health.stamp_scheduler_selection_failures(report.selection_failures);
                         let (attempted, completed) = report.poll_counts();

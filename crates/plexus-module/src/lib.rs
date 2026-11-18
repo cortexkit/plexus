@@ -32,6 +32,7 @@ mod permissions;
 mod replies;
 mod routes;
 mod runtime_loop;
+mod settings;
 mod tool_dispatch;
 
 use background::*;
@@ -45,6 +46,7 @@ use management::*;
 use replies::*;
 pub use routes::RouteBindings;
 use routes::*;
+#[cfg(test)]
 use runtime_loop::*;
 pub use runtime_loop::{printed_manifest, run_entry, version_line};
 use tool_dispatch::*;
@@ -137,6 +139,8 @@ use plexus_core::{
 use plexus_core::{MockTransport, StubCredentialSource};
 use scope_reader::{DaemonScopeReader, PendingControlReplies};
 use serde_json::{json, Value};
+#[cfg(test)]
+use settings::{audit_retention_window_ms, AUDIT_RETENTION_DAYS_ENV};
 use subc_protocol::call_mode::{derive_call_mode, CallMode};
 use subc_protocol::session::{
     ModuleControlRequest, ModuleControlResponse, MODULE_CONTROL_OP_HEALTH_CHECK,
