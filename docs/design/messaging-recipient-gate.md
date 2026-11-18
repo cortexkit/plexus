@@ -37,7 +37,7 @@ existing entries, while older stores start with an empty list.
 Consent cards for recipient actions show the complete secret-filtered argument
 preview, including every recipient and all message text. Ordinary actions keep
 their existing bounded preview. The pinned elicitation requester contract has no
-string-length limit; the actual limit is subc-protocol 0.29.0's 64 MiB frame body.
+string-length limit; the actual limit is the 64 MiB frame body in subc-protocol 0.37.5.
 Before parking a send, Plexus checks the serialized `method`/`params` envelope,
 including JSON escaping and metadata. Oversized cards refuse with
 `approval_preview_too_long`, action, byte length and byte limit; they are never

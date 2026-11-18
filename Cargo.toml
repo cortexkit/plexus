@@ -25,9 +25,9 @@ tracing = "0.1"
 # 0.20.25, which requires protocol 0.25 and control 0.18, and the lock then held
 # two copies of each wire crate: a type from one does not match the same type
 # from the other, and the in-process test daemon would speak a different
-# protocol from the module it tests. These pins share protocol 0.37.2 and the
+# protocol from the module it tests. These pins share protocol 0.37.5 and the
 # registration-channel claim types. Review this whole block when it moves.
-subc-protocol = "=0.37.2"
+subc-protocol = "=0.37.5"
 subc-os = "=0.1.39"
 subc-transport = "=0.18.0"
 subc-control = "=0.41.0"

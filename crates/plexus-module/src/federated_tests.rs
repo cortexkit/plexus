@@ -88,14 +88,18 @@ async fn bind_accepted(
     scope: ScopeStamp,
     mode: CallMode,
 ) -> Arc<RouteBindings> {
+    bind_wire_accepted(state, bind_body(reserved("callosum"), Some(scope), mode)).await
+}
+
+async fn bind_wire_accepted(state: &Arc<ModuleState>, body: Value) -> Arc<RouteBindings> {
     let routes = Arc::new(RouteBindings::new());
-    let reply = bind(
-        state,
-        &routes,
-        bind_body(reserved("callosum"), Some(scope), mode),
-    )
-    .await;
-    assert_eq!(reply.header.ty, FrameType::Response, "{:?}", reply.body);
+    let reply = bind(state, &routes, body).await;
+    assert_eq!(
+        reply.header.ty,
+        FrameType::Response,
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
     assert!(routes.binding(17, 3).unwrap().is_some());
     routes
 }
@@ -565,6 +569,13 @@ async fn noncomputer_peer_is_refused() {
 }
 
 #[tokio::test]
+async fn app_peer_decodes_but_is_refused_at_bind() {
+    let mut body = bind_body(reserved("callosum"), Some(stamp()), CallMode::Classic);
+    body["scope"]["attributes"]["federated"]["peer_class"] = json!("app");
+    assert_bind_denied(body, true).await;
+}
+
+#[tokio::test]
 async fn unknown_remote_claim_is_denied_at_bind_never_claimless() {
     let mut body = bind_body(reserved("callosum"), Some(stamp()), CallMode::Classic);
     body["scope"]["attributes"]["federated"]["remote_claim"] =
@@ -620,6 +631,49 @@ fn assert_frame_denied(body: &Value, frame: Frame) {
         3,
         "{body}: {actual}"
     );
+}
+
+#[tokio::test]
+async fn new_federated_stamp_members_decode_without_changing_tool_admission() {
+    let state = metadata_state();
+    let catalog = json!({"name":"catalog","arguments":{"op":"apps"}});
+    for (claim, new_claim_key, new_claim_value) in [
+        (json!({"kind":"run", "agent_id":"agent"}), "run_id", "run-1"),
+        (
+            json!({
+                "kind":"flow", "flow_id":"flow", "flow_version":1,
+                "flow_install_id":"install", "flow_code_hash":"b".repeat(64)
+            }),
+            "agent_id",
+            "flow-owner",
+        ),
+    ] {
+        let mut legacy = bind_body(reserved("callosum"), Some(stamp()), CallMode::Classic);
+        legacy["scope"]["attributes"]["federated"]["remote_claim"] = claim;
+        let mut extended = legacy.clone();
+        // Put the additions on the wire so the bind handler must decode them.
+        let facts = &mut extended["scope"]["attributes"]["federated"];
+        facts["origin_principal"] = json!({"kind":"reserved", "module_id":"aft"});
+        facts["peer_box_id"] = json!("0123456789abcdef0123456789abcdef");
+        facts["project"] = json!({
+            "project_id":"project", "root_key":{"kind":"remote", "key":"owner/repo"}
+        });
+        facts["remote_claim"][new_claim_key] = json!(new_claim_value);
+
+        let legacy = bind_wire_accepted(&state, legacy).await;
+        let extended = bind_wire_accepted(&state, extended).await;
+        let expected = reply(call(&state, &legacy, catalog.clone()).await);
+        assert_item_keys(&expected, "apps", &["key", "name", "tier"], 1);
+        let actual = reply(call(&state, &extended, catalog.clone()).await);
+        assert_eq!(actual, expected, "claim member: {new_claim_key}");
+
+        for routes in [&legacy, &extended] {
+            for name in ["github", "github_read", "github_react"] {
+                let body = json!({"name":name, "arguments":{}});
+                assert_frame_denied(&body, call(&state, routes, body.clone()).await);
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
