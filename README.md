@@ -127,8 +127,6 @@ Plexus still reads the following from its environment:
 | Variable | Meaning |
 |---|---|
 | `SUBC_MODULE_ID` | Module id; defaults to `plexus`. |
-| `PLEXUS_MCP_STDIO_MODULE_ID` | Module id of the local MCP adapter, for vendors served by a local MCP server. Optional. |
-| `PLEXUS_PROJECT_ROOT` | Project root plexus names when it binds routes to other modules; defaults to `/`. |
 
 The daemon's configuration (`subc.jsonc`) carries these in the module's `env`
 block. The module entry itself is subconscious's format and is documented in
