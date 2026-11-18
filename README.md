@@ -118,7 +118,8 @@ from the daemon-delivered view:
 Move any nondefault values into the managed user layer before switching. The
 managed view wins, even if its values are defaults: Plexus reads
 `PLEXUS_CATALOG_DIR` and `PLEXUS_AUDIT_RETENTION_DAYS` only when the daemon does
-not advertise managed settings, never after a refusal. On older daemons the
+not advertise managed settings, never after the daemon refuses the managed
+settings view. On older daemons the
 release build still requires `PLEXUS_CATALOG_DIR`; debug builds fall back to
 this repository's `catalog/`.
 

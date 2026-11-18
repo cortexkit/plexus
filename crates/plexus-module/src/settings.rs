@@ -1,4 +1,5 @@
-//! Plexus settings and the config-gate exchange on its registered connection.
+//! Plexus settings, and the exchange with the daemon that declares, reviews and
+//! applies them over Plexus's registered connection.
 
 use super::*;
 use serde::{Deserialize, Serialize};
@@ -410,8 +411,9 @@ impl ConfigConnection {
             Ok(()) => None,
             Err(error) => {
                 plexus_core::diag!(warn wire: "reporting managed settings: {error}");
-                // If the daemon's approval record is still being anchored,
-                // the SDK permits retrying the same report after another hint.
+                // `anchor_pending` means the daemon hasn't finished recording
+                // this view's approval yet. The SDK allows sending the same
+                // report again on the next change notice, so keep it for then.
                 matches!(&error, ConfigError::Refused(body) if body.code == "anchor_pending")
                     .then_some(report)
             }
