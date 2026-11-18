@@ -1,13 +1,15 @@
 //! An in-process routing provider for tests. It answers `role.describe` as a
 //! router that serves search, chooses the first route of its own ranking that
 //! the select offers, and records every call it receives so a test can read
-//! the exact params plexus sent.
+//! the exact params and scope plexus sent.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+
+use crate::scope::CallScope;
 
 use super::{Discovery, RouteRef, RoutingCallError, RoutingPeer};
 
@@ -28,9 +30,15 @@ pub struct FakeRouter {
     ranking: Vec<RouteRef>,
     mode: Mutex<FakeMode>,
     describe: Mutex<Value>,
-    calls: Mutex<Vec<(String, Value)>>,
+    calls: Mutex<Vec<RecordedCall>>,
     decisions: AtomicUsize,
     discovery: Mutex<Option<Discovery>>,
+}
+
+struct RecordedCall {
+    method: String,
+    params: Value,
+    scope: Option<CallScope>,
 }
 
 impl FakeRouter {
@@ -84,8 +92,19 @@ impl FakeRouter {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(called, _)| called == method)
-            .map(|(_, params)| params.clone())
+            .filter(|call| call.method == method)
+            .map(|call| call.params.clone())
+            .collect()
+    }
+
+    /// The scope carried by each call of `method`, oldest first.
+    pub fn scopes(&self, method: &str) -> Vec<Option<CallScope>> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.method == method)
+            .map(|call| call.scope.clone())
             .collect()
     }
 
@@ -95,7 +114,7 @@ impl FakeRouter {
             .lock()
             .unwrap()
             .iter()
-            .map(|(method, _)| method.clone())
+            .map(|call| call.method.clone())
             .collect()
     }
 
@@ -148,13 +167,14 @@ impl RoutingPeer for FakeRouter {
         &self,
         method: &str,
         params: Value,
-        _scope: Option<&crate::scope::CallScope>,
+        scope: Option<&CallScope>,
         _timeout: Duration,
     ) -> Result<Value, RoutingCallError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push((method.to_owned(), params.clone()));
+        self.calls.lock().unwrap().push(RecordedCall {
+            method: method.to_owned(),
+            params: params.clone(),
+            scope: scope.cloned(),
+        });
         let mode = self.mode.lock().unwrap().clone();
         if mode == FakeMode::Unreachable {
             return Err(RoutingCallError::Unreachable(

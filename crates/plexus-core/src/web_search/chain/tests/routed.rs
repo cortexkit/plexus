@@ -252,6 +252,40 @@ fn hit() -> MockResponse {
 }
 
 #[test]
+fn local_search_carries_session_scope_on_select_and_report() {
+    let (engine, transport) = super::super::super::tests::granted_exa_engine("routed-scope");
+    transport.set_response(hit());
+    let router = router(&["exa"]);
+    let service = routed_service(&router, &Arc::new(AtomicI64::new(NOW)));
+    let scope = CallScope {
+        owner: "direct".into(),
+        scope_ref: "head".into(),
+        scope_epoch: 1,
+        kind: None,
+        parent: None,
+        parent_state: None,
+        agent_id: None,
+        flow_id: Some("flow".into()),
+        delegates: false,
+        owner_authorized: true,
+    };
+    let args = json!({"query":"weather report"});
+    let response = service
+        .search_scoped(
+            &engine,
+            "direct",
+            args.as_object().unwrap(),
+            Some(&scope),
+            None,
+        )
+        .unwrap();
+    assert_eq!(response.backend, "exa");
+    for method in ["route.select", "route.report"] {
+        assert_eq!(router.scopes(method), [Some(scope.clone())], "{method}");
+    }
+}
+
+#[test]
 fn allowance_left_offers_routes_with_searches_left_and_drops_spent_ones() {
     let (engine, transport) = super::super::super::tests::granted_exa_engine("routed-allowance");
     add_connection(&engine, "tavily", "tavily", Some("direct"));

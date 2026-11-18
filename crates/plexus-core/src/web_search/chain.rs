@@ -536,8 +536,14 @@ impl WebSearchService {
                 }
             }
         };
-        // Selects and reports go out under the search's own scope stamp.
-        let route_scope = audit.search.scope.clone();
+        // Routing uses the local search scope to resolve the project. Plexus
+        // cannot carry a federated caller's scope to the routing provider, and
+        // federated routing does not need it, so use Plexus's own identity.
+        let route_scope = if audit.federated.is_some() {
+            None
+        } else {
+            audit.search.scope.clone()
+        };
         let selects = eligible.len();
         for _ in 0..selects {
             let Some(peer) = peer.as_deref() else { break };

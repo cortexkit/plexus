@@ -1,6 +1,7 @@
 use super::*;
 use crate::consent_card::{ConsentCards, ElicitationCallError, ElicitationRoute};
 use crate::scope::CallScope;
+use crate::web_search::routing::{fake::FakeRouter, RouteRef};
 use std::time::Instant;
 
 #[derive(Default)]
@@ -135,6 +136,19 @@ fn state(f: &Fixture, index: usize) -> String {
         |r| r.get(0),
     )
     .unwrap()
+}
+
+#[test]
+fn federated_search_leaves_select_and_report_unscoped() {
+    let mut f = Fixture::new(Tool::OrderedWeb);
+    f.allow();
+    let router = Arc::new(FakeRouter::ranked(vec![RouteRef::new("exa", "search")]));
+    f.web = f.web.with_router(router.clone());
+
+    assert_eq!(search(&f, &caller(), &args(), true), Ok(false));
+    for method in ["route.select", "route.report"] {
+        assert_eq!(router.scopes(method), [None], "{method}");
+    }
 }
 
 #[test]
