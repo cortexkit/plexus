@@ -1786,7 +1786,8 @@ async fn start_live_daemon_with_federation(
                     "HOME": home,
                     "XDG_DATA_HOME": home.join(".local/share"),
                     "PLEXUS_CATALOG_DIR": catalog,
-                    "PLEXUS_CKCRED_MODULE_ID": "test-vault"
+                    // A stale override must not divert Plexus from claustrum.
+                    "PLEXUS_CKCRED_MODULE_ID": "not-the-vault"
                 },
                 // Wire debug lines log each route bind and each tool frame
                 // plexus starts to handle. A failing test dumps the fleet
@@ -1801,7 +1802,7 @@ async fn start_live_daemon_with_federation(
                 "env": {"TEST_VAULT_CONNECTION": connection_file_path, "TEST_ROLE_SERVICE": "1"},
                 "reserved": true
             },
-            "test-vault": {
+            "claustrum": {
                 "program": "/bin/sh",
                 "args": [vault_launcher],
                 "env": {"TEST_VAULT_CONNECTION": connection_file_path},
@@ -1937,9 +1938,9 @@ async fn send_control_request_within(
 }
 
 /// The fixture modules every live daemon starts beside plexus, and that plexus
-/// calls: `entorhinal` answers its connector-home role reads and `test-vault` its
+/// calls: `entorhinal` answers its connector-home role reads and `claustrum` its
 /// credential reads.
-const FIXTURE_MODULE_IDS: [&str; 2] = ["entorhinal", "test-vault"];
+const FIXTURE_MODULE_IDS: [&str; 2] = ["entorhinal", "claustrum"];
 
 /// Wait until plexus is registered AND serving, and the fixture modules it
 /// calls are registered. Returns plexus's `catalog.list` entry.
@@ -2747,7 +2748,7 @@ async fn descriptor_nonce_reaches_hello_provenance_and_a_later_vault_read() {
     let connection_file = daemon.connection_file_path.clone();
     // Exa authenticates with an API key, so before issuing its ticket plexus
     // reads the named credential from the vault to prove it exists. That read
-    // is a route open from plexus to the test vault.
+    // must reach claustrum even though the daemon supplies a stale vault override.
     let output = tokio::task::spawn_blocking(move || {
         bounded::child_output(
             std::process::Command::new(binary)
@@ -2770,7 +2771,7 @@ async fn descriptor_nonce_reaches_hello_provenance_and_a_later_vault_read() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success() && stdout.contains("ticket_id:"),
-        "the vault read after HELLO must succeed: status={} stdout={stdout:?} stderr={:?}",
+        "the vault read after HELLO must reach claustrum despite a stale override: status={} stdout={stdout:?} stderr={:?}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
@@ -3060,7 +3061,7 @@ async fn vault_route_fixture() {
     .expect("vault fixture connection file");
     let mut stream = connect_client(&connection).await;
     let roles = std::env::var_os("TEST_ROLE_SERVICE").is_some();
-    let mut module_manifest = manifest::build(if roles { "entorhinal" } else { "test-vault" });
+    let mut module_manifest = manifest::build(if roles { "entorhinal" } else { "claustrum" });
     module_manifest
         .provides
         .retain(|role| matches!(role, ProviderRole::ManagementSurface { .. }));

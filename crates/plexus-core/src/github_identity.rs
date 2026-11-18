@@ -2,7 +2,10 @@
 //! selected from Plexus's stored agent-to-GitHub-App bindings, not from remote
 //! identity replies.
 
-use std::sync::Arc;
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use serde_json::Value;
 
@@ -32,6 +35,7 @@ pub struct SubcPrefrontalRoutePeer {
     /// The deadline for one whole call; the subc client's default when unset.
     call_timeout: Option<std::time::Duration>,
     call_options: Option<subc_client_rs::CallOptions>,
+    core_module: Mutex<Option<&'static str>>,
 }
 
 /// How a [`SubcPrefrontalRoutePeer::call_module`] call failed.
@@ -50,16 +54,13 @@ pub enum ModuleCallError {
 }
 
 /// How one call over [`SubcPrefrontalRoutePeer`] failed.
+#[derive(Debug)]
 enum RouteCallFailure {
     NotSent,
     OutcomeUnknown,
     Transport,
-    /// Prefrontal answered with an error frame carrying a code.
-    Module {
-        code: String,
-        message: String,
-        detail: Option<Value>,
-    },
+    OpenRefused(subc_protocol::ErrorBody),
+    Module(subc_protocol::ErrorBody),
 }
 
 impl Drop for SubcPrefrontalRoutePeer {
@@ -75,9 +76,7 @@ impl Drop for SubcPrefrontalRoutePeer {
 }
 
 impl SubcPrefrontalRoutePeer {
-    /// Connect to prefrontal's management surface. `module_id` is supplied by
-    /// Plexus configuration so a prefrontal rename does not require this crate
-    /// to hardcode or release a replacement identifier.
+    /// Connect to a named module's management surface.
     pub fn connect(
         connection_file: &std::path::Path,
         module_id: impl Into<String>,
@@ -133,6 +132,7 @@ impl SubcPrefrontalRoutePeer {
             identity,
             call_timeout: None,
             call_options: None,
+            core_module: Mutex::new(None),
         })
     }
 
@@ -159,23 +159,39 @@ impl SubcPrefrontalRoutePeer {
         operation: &str,
         params: Value,
     ) -> Result<Value, subc_protocol::ErrorBody> {
-        self.call_value(operation, params)
-            .map_err(|failure| match failure {
-                RouteCallFailure::Module {
-                    code,
-                    message,
-                    detail,
-                } => subc_protocol::ErrorBody {
-                    code,
-                    message,
-                    detail,
+        self.call_value(operation, params).map_err(service_error)
+    }
+
+    /// Call Core under its reserved module id, allowing the old id during the
+    /// rename. Only a daemon refusal to open the route can trigger another try.
+    pub fn call_core_service(
+        &self,
+        operation: &str,
+        params: Value,
+    ) -> Result<Value, subc_protocol::ErrorBody> {
+        let timeout = self.call_timeout.unwrap_or_else(|| {
+            self.call_options
+                .as_ref()
+                .map(|options| options.timeout)
+                .unwrap_or_else(|| subc_client_rs::CallOptions::default().timeout)
+        });
+        let started = Instant::now();
+        call_preferred_core(&self.core_module, |module_id| {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(RouteCallFailure::NotSent);
+            }
+            self.call_value_at(
+                subc_protocol::RouteTarget::ManagementSurface {
+                    module_id: module_id.into(),
                 },
-                _ => subc_protocol::ErrorBody {
-                    code: "unavailable".into(),
-                    message: "route unavailable or timed out".into(),
-                    detail: None,
-                },
-            })
+                operation,
+                params.clone(),
+                None,
+                Some(remaining),
+            )
+        })
+        .map_err(service_error)
     }
 
     fn call_value(&self, operation: &str, params: Value) -> Result<Value, RouteCallFailure> {
@@ -192,9 +208,8 @@ impl SubcPrefrontalRoutePeer {
         self.call_value_at(self.target.clone(), operation, params, scope, timeout)
     }
 
-    /// Open a consumer connection with no fixed peer, for callers that find
-    /// their peer module at call time and name it on every
-    /// [`Self::call_module`].
+    /// Open a consumer connection with no fixed peer, for callers using
+    /// [`Self::call_module`] or [`Self::call_core_service`].
     pub fn connect_unbound(
         connection_file: &std::path::Path,
         identity: subc_protocol::BindIdentity,
@@ -236,15 +251,13 @@ impl SubcPrefrontalRoutePeer {
             Some(timeout),
         )
         .map_err(|failure| match failure {
-            RouteCallFailure::Module {
-                code,
-                message,
-                detail,
-            } => ModuleCallError::Refused {
-                code,
-                message,
-                detail,
-            },
+            RouteCallFailure::OpenRefused(body) | RouteCallFailure::Module(body) => {
+                ModuleCallError::Refused {
+                    code: body.code,
+                    message: body.message,
+                    detail: body.detail,
+                }
+            }
             _ => ModuleCallError::NoAnswer,
         })
     }
@@ -318,19 +331,11 @@ impl SubcPrefrontalRoutePeer {
                 };
                 Ok(answer.map_err(|error| {
                     if let Some(body) = error.route_open_refusal() {
-                        return RouteCallFailure::Module {
-                            code: body.code.clone(),
-                            message: body.message.clone(),
-                            detail: body.detail.clone(),
-                        };
+                        return RouteCallFailure::OpenRefused(body.clone());
                     }
                     match error {
                         subc_client_rs::CallError::NotSent(_) => RouteCallFailure::NotSent,
-                        subc_client_rs::CallError::Module(body) => RouteCallFailure::Module {
-                            code: body.code,
-                            message: body.message,
-                            detail: body.detail,
-                        },
+                        subc_client_rs::CallError::Module(body) => RouteCallFailure::Module(body),
                         _ => RouteCallFailure::OutcomeUnknown,
                     }
                 }))
@@ -341,12 +346,65 @@ impl SubcPrefrontalRoutePeer {
     }
 }
 
+fn call_preferred_core(
+    cache: &Mutex<Option<&'static str>>,
+    mut call: impl FnMut(&'static str) -> Result<Value, RouteCallFailure>,
+) -> Result<Value, RouteCallFailure> {
+    let cached = *cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut chosen = cached;
+    let mut result = Err(RouteCallFailure::NotSent);
+    let candidates = cached
+        .into_iter()
+        .chain(crate::github::prefrontal_module_ids().filter(|id| Some(*id) != cached));
+    for id in candidates {
+        result = call(id);
+        match &result {
+            Err(RouteCallFailure::OpenRefused(body))
+                if matches!(body.code.as_str(), "unknown_module" | "target_unavailable") =>
+            {
+                chosen = None;
+            }
+            Ok(_) | Err(RouteCallFailure::Module(_)) => {
+                chosen = Some(id);
+                break;
+            }
+            _ => break,
+        }
+    }
+    if chosen != cached {
+        // Do not hold the cache lock across I/O or overwrite a different
+        // choice another lookup made while this request was in flight.
+        let mut current = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *current == cached {
+            *current = chosen;
+        }
+    }
+    result
+}
+
+fn service_error(failure: RouteCallFailure) -> subc_protocol::ErrorBody {
+    match failure {
+        RouteCallFailure::OpenRefused(body) | RouteCallFailure::Module(body) => body,
+        _ => subc_protocol::ErrorBody {
+            code: "unavailable".into(),
+            message: "route unavailable or timed out".into(),
+            detail: None,
+        },
+    }
+}
+
 fn route_error(failure: RouteCallFailure) -> PrefrontalRouteError {
     match failure {
         RouteCallFailure::NotSent => PrefrontalRouteError::NotSent,
         RouteCallFailure::Transport => PrefrontalRouteError::Transport,
         RouteCallFailure::OutcomeUnknown => PrefrontalRouteError::OutcomeUnknown,
-        RouteCallFailure::Module { .. } => PrefrontalRouteError::Refused,
+        RouteCallFailure::OpenRefused(_) | RouteCallFailure::Module(_) => {
+            PrefrontalRouteError::Refused
+        }
     }
 }
 
@@ -393,8 +451,11 @@ fn elicitation_result(
     use crate::consent_card::ElicitationCallError;
     match result {
         Ok(mut reply) => Ok(reply.get_mut("result").map(Value::take).unwrap_or(reply)),
-        Err(RouteCallFailure::Module { code, message, .. }) => {
-            Err(ElicitationCallError::Refused { code, message })
+        Err(RouteCallFailure::OpenRefused(body) | RouteCallFailure::Module(body)) => {
+            Err(ElicitationCallError::Refused {
+                code: body.code,
+                message: body.message,
+            })
         }
         Err(RouteCallFailure::NotSent) => Err(ElicitationCallError::NotSent),
         Err(RouteCallFailure::OutcomeUnknown) => Err(ElicitationCallError::OutcomeUnknown),
@@ -440,6 +501,75 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn refusal(code: &str) -> subc_protocol::ErrorBody {
+        subc_protocol::ErrorBody {
+            code: code.into(),
+            message: "refused".into(),
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn core_route_prefers_prefrontal() {
+        let cache = Mutex::new(None);
+        let reply = call_preferred_core(&cache, |id| Ok(serde_json::json!(id))).unwrap();
+        assert_eq!(reply, "prefrontal");
+    }
+
+    #[test]
+    fn core_route_keeps_legacy_until_the_cached_route_stops_opening() {
+        let cache = Mutex::new(None);
+        let mut attempts = Vec::new();
+        let reply = call_preferred_core(&cache, |id| {
+            attempts.push(id);
+            if id == "prefrontal" {
+                Err(RouteCallFailure::OpenRefused(refusal("unknown_module")))
+            } else {
+                Ok(serde_json::json!(id))
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, ["prefrontal", "prefrontal-core"]);
+        assert_eq!(reply, "prefrontal-core");
+
+        let reply = call_preferred_core(&cache, |id| Ok(serde_json::json!(id))).unwrap();
+        assert_eq!(reply, "prefrontal-core", "do not reprobe a live route");
+
+        attempts.clear();
+        let reply = call_preferred_core(&cache, |id| {
+            attempts.push(id);
+            if id == "prefrontal-core" {
+                Err(RouteCallFailure::OpenRefused(refusal("target_unavailable")))
+            } else {
+                Ok(serde_json::json!(id))
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, ["prefrontal-core", "prefrontal"]);
+        assert_eq!(reply, "prefrontal");
+        assert_eq!(*cache.lock().unwrap(), Some("prefrontal"));
+    }
+
+    #[test]
+    fn core_route_does_not_retry_module_errors_timeouts_or_other_open_refusals() {
+        let cache = Mutex::new(Some("prefrontal-core"));
+        for failure in [
+            RouteCallFailure::Module(refusal("unknown_module")),
+            RouteCallFailure::OutcomeUnknown,
+            RouteCallFailure::OpenRefused(refusal("denied")),
+        ] {
+            let mut failure = Some(failure);
+            assert!(call_preferred_core(&cache, |id| {
+                assert_eq!(id, "prefrontal-core");
+                Err(failure.take().expect("only one route attempt"))
+            })
+            .is_err());
+            assert_eq!(*cache.lock().unwrap(), Some("prefrontal-core"));
+        }
+    }
+
     #[test]
     #[ignore = "manual route-call scheduling measurement"]
     fn measure_route_hop() {
@@ -468,11 +598,11 @@ mod tests {
 
     #[test]
     fn module_route_refusal_is_not_an_unknown_outcome() {
-        let error = route_error(RouteCallFailure::Module {
+        let error = route_error(RouteCallFailure::Module(subc_protocol::ErrorBody {
             code: "denied".into(),
             message: "refused".into(),
             detail: None,
-        });
+        }));
         assert_eq!(
             format!("{error:?}"),
             "Refused",
@@ -480,7 +610,6 @@ mod tests {
         );
     }
 
-    use super::*;
     /// A route wait may be reached from a plain thread, a multi-thread Tokio
     /// worker or a current-thread runtime; it completes in each and never
     /// panics.

@@ -15,6 +15,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::fingerprint;
 
+/// The supervised module that owns the credential vault.
+pub const CLAUSTRUM_MODULE_ID: &str = "claustrum";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermanentCredentialError {
     NotFound,

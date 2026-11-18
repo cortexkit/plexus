@@ -31,8 +31,9 @@ pub fn is_prefrontal(principal: &str) -> bool {
     PREFRONTAL_PRINCIPALS.contains(&principal)
 }
 
+/// The reserved module ids, in dial order: the new name before the legacy one.
 pub fn prefrontal_module_ids() -> impl Iterator<Item = &'static str> {
-    PREFRONTAL_PRINCIPALS.into_iter().map(|principal| {
+    PREFRONTAL_PRINCIPALS.into_iter().rev().map(|principal| {
         principal
             .strip_prefix("reserved:")
             .expect("reserved module")

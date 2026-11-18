@@ -127,17 +127,20 @@ Plexus still reads the following from its environment:
 | Variable | Meaning |
 |---|---|
 | `SUBC_MODULE_ID` | Module id; defaults to `plexus`. |
-| `PLEXUS_CKCRED_MODULE_ID` | Module id of the vault's credentials route. Without it, only credential-free vendors can be called. |
 | `PLEXUS_MCP_STDIO_MODULE_ID` | Module id of the local MCP adapter, for vendors served by a local MCP server. Optional. |
-| `PLEXUS_PREFRONTAL_MODULE_ID` | Module id of the Prefrontal route that serves the agent registry. Without it, agent lookups answer as unavailable. |
 | `PLEXUS_PROJECT_ROOT` | Project root plexus names when it binds routes to other modules; defaults to `/`. |
-
-Approval cards are filed with the module named `cingulate`. If that route
-cannot be opened, plexus logs it and starts without approval cards.
 
 The daemon's configuration (`subc.jsonc`) carries these in the module's `env`
 block. The module entry itself is subconscious's format and is documented in
 that repository; plexus does not yet document a complete entry.
+
+Plexus resolves credentials through the `claustrum` vault. For flow audiences,
+it tries `prefrontal` first and falls back to `prefrontal-core` if the daemon
+says the preferred module is unknown or unavailable. It keeps using the
+selected module until that route stops opening.
+
+Approval cards are filed with the module named `cingulate`. If that route
+cannot be opened, plexus logs it and starts without approval cards.
 
 With the module running, `ck-plexus-admin` is the operator client. It connects
 as a direct client of the same daemon, issues binding tickets, and mints grants

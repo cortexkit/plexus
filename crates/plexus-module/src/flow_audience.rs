@@ -188,10 +188,10 @@ impl FlowAudiences {
             .as_ref()
             .ok_or_else(|| unavailable("prefrontal route not configured"))?;
         // Like agent.resolve, this lookup acts as Plexus itself without borrowing
-        // the flow's scope. call_service preserves ERROR-frame refusal details,
+        // the flow's scope. The route peer preserves ERROR-frame refusal details,
         // including the approved versions whose audiences conflict.
         let reply = peer
-            .call_service("flow.audience", json!({"flow_id":flow_id}))
+            .call_core_service("flow.audience", json!({"flow_id":flow_id}))
             .unwrap_or_else(|error| json!({"error":error}));
         let answer = parse(flow_id, reply)?;
         let mut cache = self

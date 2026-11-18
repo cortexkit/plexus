@@ -23,6 +23,7 @@ use plexus_conformance::{
     record_route_connect, run_fixture_with_options, ConnectorFixture, RunOptions, TracingRoutePeer,
     TransportTarget, WireTraceSink,
 };
+use plexus_core::credentials::CLAUSTRUM_MODULE_ID;
 use plexus_core::{CkcredCredentialSource, CredentialSource, SubcCkcredRoutePeer};
 use serde_json::json;
 use subc_protocol::BindIdentity;
@@ -362,10 +363,8 @@ fn read_token_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
 }
 
 /// Build the real vault-backed credential source for a live run, optionally
-/// wrapped in a wire-trace decorator. Mirrors the production composition: the
-/// route module id comes from `PLEXUS_CKCRED_MODULE_ID` and the bind identity
-/// from `PLEXUS_PROJECT_ROOT`; a missing route fails fast rather than falling
-/// back to a stub.
+/// wrapped in a wire-trace decorator. Live runs use the same supervised vault
+/// as Plexus and never fall back to stub credentials.
 fn build_live_credential_source(
     subc_connection: &Option<PathBuf>,
     wire_trace: Option<&Path>,
@@ -373,19 +372,11 @@ fn build_live_credential_source(
     let connection_file = subc_connection.clone().ok_or_else(|| {
         "live mode requires --subc-connection <path> to the subc route".to_string()
     })?;
-    let module_id = env::var("PLEXUS_CKCRED_MODULE_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            "live mode requires PLEXUS_CKCRED_MODULE_ID to be set (the CKCRED route module id)"
-                .to_string()
-        })?;
     let identity = BindIdentity::new("plexus", "conformance");
 
     let connect_started = Instant::now();
     let connect_result =
-        SubcCkcredRoutePeer::connect(&connection_file, module_id.clone(), identity);
+        SubcCkcredRoutePeer::connect(&connection_file, CLAUSTRUM_MODULE_ID, identity);
     let connect_latency_ms =
         u64::try_from(connect_started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -401,7 +392,7 @@ fn build_live_credential_source(
                         &sink,
                         json!({
                             "connection_file": connection_file.display().to_string(),
-                            "module_id": module_id,
+                            "module_id": CLAUSTRUM_MODULE_ID,
                         }),
                         "ok",
                         connect_latency_ms,
@@ -413,7 +404,7 @@ fn build_live_credential_source(
                         &sink,
                         json!({
                             "connection_file": connection_file.display().to_string(),
-                            "module_id": module_id,
+                            "module_id": CLAUSTRUM_MODULE_ID,
                         }),
                         &format!("error: {error:?}"),
                         connect_latency_ms,
@@ -439,7 +430,7 @@ fn print_usage() {
   plexus-conformance drift --manifest <path> --token-file <path>\n  plexus-conformance list\n\n\
 drift compares each reviewed manifest's declared actions against the tools its\nvendor actually serves. Exit 0 clean, 1 drift found, 2 the check could not run\n— an UNCHECKED vendor is never counted as clean.\n\n\
 Options:\n  --fixture <name>          fixture to run (required)\n  --output <path|->       write evidence JSON (file or explicit stdout; summary only by default)\n  --live                  run against the reviewed manifest endpoint (requires --credential-id)\n  --endpoint <url>        explicit endpoint; with credentials, HTTPS on the manifest host only\n  --credential-id <id>    vault reference (for example apikey:exa), not a secret or file path\n  --subc-connection <path> subc route connection file for the CKCRED route (live mode)\n  --wire-trace <path>     write a redacted CKCRED wire trace (0600, JSON lines; live mode)\n  --schema-out <path>     write the vendor's observed tool schemas (0600); the input for\n                          writing a manifest poll shape, which must never be guessed\n                          from vendor API docs\n  --token-file <path>     raw vendor token for drift discovery. REQUIRES --manifest:\n                          a token belongs to ONE vendor, and a catalog-wide sweep\n                          would send it to every endpoint in the catalog\n\n\
-Live mode also reads PLEXUS_CKCRED_MODULE_ID (route module id) and optionally\nPLEXUS_PROJECT_ROOT from the environment."
+Live mode resolves vault references through the claustrum module."
     );
 }
 

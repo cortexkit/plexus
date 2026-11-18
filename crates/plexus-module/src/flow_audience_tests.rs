@@ -83,9 +83,8 @@ impl Core {
         })
         .await
         .unwrap_or_else(|_| panic!("core fixture startup failed: {:?}", scratch.path()));
-        let peer = SubcPrefrontalRoutePeer::connect(
+        let peer = SubcPrefrontalRoutePeer::connect_unbound(
             &connection,
-            "prefrontal-core",
             subc_protocol::BindIdentity::new("plexus", "module"),
         )
         .unwrap()

@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use plexus_core::credentials::CLAUSTRUM_MODULE_ID;
 use plexus_core::github::credential::{HandleCredentialPreparer, HandleCredentialProvider};
 use plexus_core::storage::github_store::GithubGovernanceSeams;
 use plexus_core::web_search::WebSearchService;
@@ -417,12 +418,11 @@ fn with_freshness_check(
 fn production_handle_credential_provider(
     connection_file: &Path,
 ) -> Option<Arc<dyn HandleCredentialProvider>> {
-    let module_id = credentials_route_module_id()?;
     let identity = plexus_bind_identity();
     let peer = configured_peer(
-        SubcCkcredRoutePeer::connect(connection_file, module_id.as_str(), identity),
+        SubcCkcredRoutePeer::connect(connection_file, CLAUSTRUM_MODULE_ID, identity),
         "handle credential",
-        &module_id,
+        CLAUSTRUM_MODULE_ID,
     )?;
     let source = CkcredCredentialSource::new(Arc::new(peer));
     Some(Arc::new(HandleCredentialPreparer::new(
@@ -434,13 +434,9 @@ fn production_handle_credential_provider(
 fn production_gmail_backend(
     connection_file: &Path,
 ) -> Option<Arc<plexus_core::gmail::GmailBackend>> {
-    let module = credentials_route_module_id()?;
-    let peer = plexus_core::credentials::SubcCkcredRoutePeer::connect(
-        connection_file,
-        &module,
-        plexus_bind_identity(),
-    )
-    .ok()?;
+    let peer =
+        SubcCkcredRoutePeer::connect(connection_file, CLAUSTRUM_MODULE_ID, plexus_bind_identity())
+            .ok()?;
     let vault = Arc::new(plexus_core::gmail::vault::Vault::new(Arc::new(peer)));
     Some(Arc::new(plexus_core::gmail::GmailBackend::new(
         vault.clone(),
@@ -455,14 +451,11 @@ fn production_credential_source(
     Arc<dyn CredentialSource>,
     Option<Arc<dyn plexus_core::credentials::CkcredRoutePeer>>,
 ) {
-    let Some(module_id) = credentials_route_module_id() else {
-        return (Arc::new(FailClosedCredentialSource), None);
-    };
     let identity = plexus_bind_identity();
     match configured_peer(
-        SubcCkcredRoutePeer::connect(connection_file, module_id.as_str(), identity),
+        SubcCkcredRoutePeer::connect(connection_file, CLAUSTRUM_MODULE_ID, identity),
         "credential source",
-        &module_id,
+        CLAUSTRUM_MODULE_ID,
     ) {
         Some(peer) => {
             let peer = Arc::new(peer);
@@ -473,15 +466,6 @@ fn production_credential_source(
         }
         None => (Arc::new(FailClosedCredentialSource), None),
     }
-}
-
-/// A credentials route is present only when the operator or daemon configures
-/// one. Absence is fail-closed, not an implicit stub.
-fn credentials_route_module_id() -> Option<String> {
-    std::env::var("PLEXUS_CKCRED_MODULE_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn production_repository_registry(
@@ -512,14 +496,11 @@ fn production_agent_registry(connection_file: &Path) -> Arc<dyn AgentRegistry> {
     }
 }
 
-/// Flow audience reads still use Prefrontal's configured management route.
 fn production_prefrontal_peer(connection_file: &Path) -> Option<SubcPrefrontalRoutePeer> {
-    let module_id = prefrontal_route_module_id()?;
-    let identity = plexus_bind_identity();
     configured_peer(
-        SubcPrefrontalRoutePeer::connect(connection_file, module_id.as_str(), identity),
+        SubcPrefrontalRoutePeer::connect_unbound(connection_file, plexus_bind_identity()),
         "flow audience",
-        &module_id,
+        "prefrontal",
     )
 }
 
@@ -542,16 +523,6 @@ fn production_consent_cards(connection_file: &Path) -> Option<Arc<ConsentCards>>
     )?
     .with_call_timeout(CONSENT_CARD_CALL_TIMEOUT);
     Some(Arc::new(ConsentCards::new(Arc::new(peer))))
-}
-
-/// Prefrontal's module id is deployment configuration rather than a Plexus
-/// constant, so changing that supervised module's id does not require a Plexus
-/// release.
-fn prefrontal_route_module_id() -> Option<String> {
-    std::env::var("PLEXUS_PREFRONTAL_MODULE_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]
