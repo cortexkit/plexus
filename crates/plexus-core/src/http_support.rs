@@ -428,6 +428,14 @@ pub(crate) fn response_throttle(status: u16, headers: &HeaderMap) -> Option<Dura
     }
 }
 
+/// A 503 can follow an executed request. Keep its backoff without suggesting
+/// that retrying the request is safe.
+pub(crate) fn unavailable_with_backoff(delay: Duration) -> TransportResponse {
+    let mut response = TransportResponse::unknown_with_error("http_503");
+    response.retry_after_ms = Some(duration_ms(delay));
+    response
+}
+
 pub(crate) fn throttled_response(transport: &str, delay: Duration) -> TransportResponse {
     TransportResponse {
         transmission: TransmissionState::Sent,

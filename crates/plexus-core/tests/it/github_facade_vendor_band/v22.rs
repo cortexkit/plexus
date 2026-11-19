@@ -36,6 +36,7 @@ impl Run {
         let (scratch, store, _, _, scope) = setup(
             "v22",
             &[
+                ("add_issue_comment", "write"),
                 ("github.issue_comment.get", "read"),
                 ("update_issue_comment", "write"),
                 ("github.pull_request.get", "read"),
@@ -136,6 +137,30 @@ impl Run {
             })
             .collect()
     }
+}
+
+#[test]
+fn comment_503_with_retry_after_replays_unknown_without_posting_again() {
+    let run = Run::with_headers(
+        vec![(503, json!({"message":"temporarily unavailable"}))],
+        "Retry-After: 60\r\n",
+    );
+    let request = request(
+        "issue comment",
+        json!({"number":"42"}),
+        json!({"body":"hello"}),
+    );
+    let first = run.call(&request);
+    assert_eq!(first["result"]["status"], "outcome_unknown", "{first}");
+    assert_eq!(run.call(&request)["result"], first["result"]);
+    assert_eq!(
+        run.wire(),
+        [(
+            "POST /repos/org/repo/issues/42/comments HTTP/1.1".into(),
+            json!({"body":"hello"})
+        )]
+    );
+    run.server.join().unwrap();
 }
 
 /// Every request carries the envelope the real gh shim stamps on each

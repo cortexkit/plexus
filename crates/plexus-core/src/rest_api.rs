@@ -1236,10 +1236,20 @@ fn classify_response_with_privacy(
 ) -> TransportResponse {
     let status = response.status().as_u16();
     let retry_after = response_throttle(status, response.headers());
-    if let Some(delay) = retry_after.filter(|_| signals.is_empty()) {
+    let write_unavailable = status == 503 && *method != reqwest::Method::GET;
+    let with_backoff = |delay| {
+        if write_unavailable {
+            crate::http_support::unavailable_with_backoff(delay)
+        } else {
+            crate::http_support::throttled_response("REST", delay)
+        }
+    };
+    if let Some(delay) = retry_after.filter(|_| signals.is_empty() || write_unavailable) {
         *throttle_until = throttle_deadline(clock.now(), delay);
         eprintln!(warn transport: "REST vendor throttle: status={status} retry_after_ms={}", duration_ms(delay));
-        return crate::http_support::throttled_response("REST", delay);
+        if signals.is_empty() {
+            return with_backoff(delay);
+        }
     }
     let headers = response.headers().clone();
     let permissions = accepted_github_permissions(response.headers());
@@ -1260,6 +1270,11 @@ fn classify_response_with_privacy(
                 eprintln!(warn transport: "REST private endpoint response body failed: {failure:?}");
             } else {
                 eprintln!(warn transport: "REST response body failed on {} {}: {:?}: {cause}", method, path.split('?').next().unwrap_or(path), failure);
+            }
+            if let Some(delay) = retry_after.filter(|_| write_unavailable) {
+                return with_backoff(delay).with_error_signal(crate::error_signals::evaluate(
+                    signals, status, &headers, None,
+                ));
             }
             return match failure {
                 HttpAttemptFailure::Timeout => timeout_response(),
@@ -1286,9 +1301,11 @@ fn classify_response_with_privacy(
         None
     };
     if let Some(delay) = retry_after {
-        *throttle_until = throttle_deadline(clock.now(), delay);
-        eprintln!(warn transport: "REST vendor throttle: status={status} retry_after_ms={}", duration_ms(delay));
-        return crate::http_support::throttled_response("REST", delay).with_error_signal(signal);
+        if !write_unavailable {
+            *throttle_until = throttle_deadline(clock.now(), delay);
+            eprintln!(warn transport: "REST vendor throttle: status={status} retry_after_ms={}", duration_ms(delay));
+        }
+        return with_backoff(delay).with_error_signal(signal);
     }
     if !(200..300).contains(&status) && !private_endpoint {
         log_rest_error(method, path, status, &text, permissions.as_deref());

@@ -88,7 +88,6 @@ fn mcp_throttles_and_gateway_statuses_keep_their_safe_posture() {
     for (status, headers, throttled) in [
         (403, "X-RateLimit-Remaining: 0\r\n", true),
         (429, "", true),
-        (503, "Retry-After: 60\r\n", true),
         (502, "", false),
     ] {
         let (endpoint, server) =
@@ -116,6 +115,31 @@ fn mcp_throttles_and_gateway_statuses_keep_their_safe_posture() {
             assert_eq!(answer.error_code.as_deref(), Some("http_502"));
         }
     }
+}
+
+#[test]
+fn mcp_tool_503_retains_backoff_without_making_the_write_retryable() {
+    let (endpoint, server) =
+        crate::test_http::FixedRequestServer::start(3, "gateway-backoff", |index, wire| {
+            let message = rpc(wire);
+            match index {
+                0 => reply(200, "", json!({"id":message["id"],"result":{}})),
+                1 => reply(202, "", Value::Null),
+                _ => reply(503, "Retry-After: 60\r\n", Value::Null),
+            }
+        });
+    let transport = McpRemoteTransport::new(McpRemoteConfig::new(endpoint));
+    let answer = transport.dispatch(request(), &ResolvedCredential::anonymous());
+    assert_eq!(answer.transmission, TransmissionState::OutcomeUnknown);
+    assert_eq!(answer.retryability, Retryability::Terminal);
+    assert_eq!(answer.error_code.as_deref(), Some("http_503"));
+    assert_eq!(answer.retry_after_ms, Some(60_000));
+    let next = transport.dispatch(request(), &ResolvedCredential::anonymous());
+    assert_eq!(
+        (next.transmission, next.retryability),
+        (TransmissionState::NotSent, Retryability::Throttle)
+    );
+    server.join().unwrap();
 }
 
 #[test]

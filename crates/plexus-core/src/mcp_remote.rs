@@ -72,6 +72,7 @@ pub enum McpRemoteError {
     UnsupportedProtocol,
     AuthRejected,
     Throttled(Duration),
+    UnavailableWithBackoff(Duration),
     /// An earlier response's throttle has longer to run than a request may
     /// wait for it, so this request was not sent.
     ThrottleInEffect(Duration),
@@ -108,6 +109,11 @@ impl fmt::Display for McpRemoteError {
                 formatter,
                 "MCP vendor throttled the request (retry after {}s)",
                 retry_after.as_secs()
+            ),
+            Self::UnavailableWithBackoff(delay) => write!(
+                formatter,
+                "MCP vendor unavailable (HTTP 503; backoff {}ms)",
+                duration_ms(*delay)
             ),
             Self::ThrottleInEffect(remaining) => write!(
                 formatter,
@@ -778,7 +784,7 @@ impl McpRemoteTransport {
                 continue;
             }
             let signal = reply.error_signal;
-            return classify_reply(reply, state)
+            return classify_reply(reply, state, before_call)
                 .map(|value| (value, signal))
                 .map_err(|error| {
                     let error = McpCallError::Remote(error);
@@ -1096,6 +1102,9 @@ fn call_error_response(error: McpCallError) -> TransportResponse {
                 TransportResponse::vendor_error("mcp_unsupported_protocol_version")
             }
             McpRemoteError::Throttled(delay) => throttled_response(delay),
+            McpRemoteError::UnavailableWithBackoff(delay) => {
+                crate::http_support::unavailable_with_backoff(delay)
+            }
             McpRemoteError::ThrottleInEffect(remaining) => throttle_refusal("MCP", remaining),
             McpRemoteError::ResponseTooLarge => {
                 TransportResponse::unknown_with_error("response_too_large")
@@ -1299,12 +1308,23 @@ fn decode_response(
     } else {
         4096
     };
-    let body = read_body_bounded(response, limit).map_err(
-        |BodyReadFailure { failure, cause }| {
+    let body = match read_body_bounded(response, limit) {
+        Ok(body) => body,
+        Err(BodyReadFailure { failure, cause }) => {
             eprintln!(warn transport: "MCP response body failed: status={status} path={path}: {failure:?}: {cause}");
-            AttemptError::Http(failure)
-        },
-    )?;
+            if status == 503 && retry_after.is_some() {
+                return Ok(HttpReply {
+                    error_signal: crate::error_signals::evaluate(signals, status, &headers, None),
+                    status,
+                    retry_after,
+                    body: Value::Null,
+                    session_id,
+                    sent_session: false,
+                });
+            }
+            return Err(AttemptError::Http(failure));
+        }
+    };
     if body.truncated && success {
         eprintln!(warn transport: "MCP response exceeded {MAX_RESPONSE_BODY_BYTES} bytes: status={status} path={path}");
         return Err(AttemptError::Local(McpRemoteError::ResponseTooLarge));
@@ -1532,9 +1552,16 @@ fn read_matching_sse_response(
     }
 }
 
-fn classify_reply(reply: HttpReply, state: &mut ConnectionEntry) -> Result<Value, McpRemoteError> {
+fn classify_reply(
+    reply: HttpReply,
+    state: &mut ConnectionEntry,
+    before_call: bool,
+) -> Result<Value, McpRemoteError> {
     if let Some(delay) = reply.retry_after {
         state.throttle_until = throttle_deadline(state.clock.now(), delay);
+        if reply.status == 503 && !before_call {
+            return Err(McpRemoteError::UnavailableWithBackoff(delay));
+        }
         return Err(McpRemoteError::Throttled(delay));
     }
     if !(200..300).contains(&reply.status) {
