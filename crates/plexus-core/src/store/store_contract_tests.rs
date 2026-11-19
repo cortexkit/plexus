@@ -1100,6 +1100,7 @@ fn reconciliation_backoff_grows_from_five_seconds_to_sixty() {
         action: "write".into(),
         args: json!({}),
         occurred_at_ms: now,
+        acting_agent: None,
     };
     store.enqueue_write_reconciliation(&record, None).unwrap();
     for delay in [
@@ -1329,6 +1330,7 @@ fn direct_reconciliation_finish_updates_intent_and_reenqueue_reuses_result() {
         action: "write".into(),
         args: json!({}),
         occurred_at_ms: now,
+        acting_agent: None,
     };
     store
         .finish_write_reconciliation_with_intent(
