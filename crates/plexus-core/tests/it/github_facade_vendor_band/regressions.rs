@@ -249,7 +249,7 @@ fn pre_read_unknown_after_an_earlier_write_retains_partial_send_reporting() {
     let retry = run.call("partial", "retry", "retry-worker", 1);
     assert_eq!(
         retry["result"],
-        json!({"status":"refused", "refusal_code":"outcome_unknown", "retry_same_nonce":false, "legs_sent":["edit_issue"]})
+        json!({"status":"refused", "refusal_code":"pre_dispatch_read_incomplete{reason: transport_unknown}", "retry_same_nonce":true, "legs_sent":["edit_issue"]})
     );
     assert_eq!(
         run.transport
@@ -260,6 +260,26 @@ fn pre_read_unknown_after_an_earlier_write_retains_partial_send_reporting() {
         1
     );
     assert!(retry["result"]["transmission"].is_null());
+    run.transport.set_response_for_method(
+        "github.issue.get",
+        "",
+        MockResponse::Success(json!({"id":42,"user":{"login":"app-fixture[bot]","type":"Bot"}})),
+    );
+    run.transport.set_response_for_method(
+        "add_issue_labels",
+        "",
+        MockResponse::Success(json!([{"name":"triaged"}])),
+    );
+    let before = run.transport.requests().len();
+    let resumed = run.call("partial", "resumed", "resumed-worker", 2);
+    assert_eq!(resumed["result"]["status"], "completed", "{resumed}");
+    assert_eq!(
+        run.transport.requests()[before..]
+            .iter()
+            .map(|r| r.action.as_str())
+            .collect::<Vec<_>>(),
+        ["github.issue.get", "add_issue_labels"]
+    );
 }
 
 #[test]

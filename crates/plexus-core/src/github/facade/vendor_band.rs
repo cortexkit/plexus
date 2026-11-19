@@ -857,17 +857,16 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         refuse(store, &row, reply, nonce, claim_owner, gate, failure)
     };
     let fail_read = |reply: &mut gates::GateReply, gate, mut failure: taxonomy::Failure| {
-        // Reads run again when a partial receipt resumes. Only an unattempted
-        // receipt can promise that no write was sent; retain partial progress
-        // and the original failure classification on resumed requests.
+        // When a retry resumes unfinished writes, ownership reads run again.
+        // A failed read sent no new write, but earlier legs may be durable.
         let not_sent = row
             .effects
             .iter()
             .all(|effect| effect.dispatch_attempted_at.is_none() && effect.outcome.is_none());
-        if not_sent {
-            if failure.code == "outcome_unknown" {
-                failure.code = "pre_dispatch_read_incomplete{reason: transport_unknown}".into();
-            }
+        if failure.code == "outcome_unknown" {
+            failure.code = "pre_dispatch_read_incomplete{reason: transport_unknown}".into();
+            failure.retryable = true;
+        } else if not_sent {
             failure.retryable = true;
         }
         let mut value = fail(reply, gate, failure);
