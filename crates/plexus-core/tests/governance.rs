@@ -3572,11 +3572,15 @@ fn a_write_on_an_app_without_a_system_manifest_is_refused_not_dispatched() {
     assert_eq!(read.severity, Severity::S2);
 }
 
-/// Connection ids are unique only per owner. When two owners each have a
-/// connection called `mail`, a recipient one owner allowlisted must not let the
-/// other owner's send skip the ask-first that an unlisted recipient gets.
+/// Connection ids are unique only per owner, but transports are registered by
+/// bare id. When two owners each have an active connection called `mail`,
+/// neither may send: the transport could deliver one owner's call through the
+/// other's endpoint. So one owner's recipient allowlist can never authorize the
+/// other's send either. The store test
+/// `owners_sharing_a_connection_id_never_share_a_recipient_list` pins that the
+/// lists themselves stay per owner.
 #[test]
-fn one_owners_recipient_entry_does_not_authorize_another_owners_send() {
+fn owners_sharing_a_connection_id_cannot_send_through_it() {
     let (_path, store) = test_store("recipient-owners");
     let manifest = ingest_value(json!({
         "schema_version":1,"key":"messaging_fixture","name":"Messaging fixture",
@@ -3638,15 +3642,16 @@ fn one_owners_recipient_entry_does_not_authorize_another_owners_send() {
             json!({"to":"alice@example.com","text":"hello"}),
         ))
     };
-    assert!(
-        send("owner-a").is_ok(),
-        "positive control: the owner that listed the recipient sends under allow"
-    );
-    let other = send("owner-b");
-    assert!(
-        matches!(other, Err(Denial::ActionRequestCreated { .. })),
-        "owner-b never listed the recipient, so its send must ask first: {other:?}"
-    );
+    for owner in ["owner-a", "owner-b"] {
+        let refused = send(owner);
+        assert!(
+            matches!(
+                refused,
+                Err(Denial::Connection(ConnectionDenial::Unhealthy))
+            ),
+            "{owner}'s connection id is shared with another owner, so it must not send: {refused:?}"
+        );
+    }
 }
 
 fn mock_manifest() -> plexus_core::IngestedManifest {
