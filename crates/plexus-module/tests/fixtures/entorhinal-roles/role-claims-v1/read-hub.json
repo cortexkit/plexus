@@ -1,0 +1,4 @@
+[
+  {"op":"role.read","request":{"role":"dreamer.global"},"reply":{"result":{"epoch":1,"held_here":false,"holder":"0123456789abcdef0123456789abcdef","holder_name":null,"known":true,"role":"dreamer.global","source":"hub","stale":false}}},
+  {"op":"role.read","request":{"role":"dreamer.workspace_02"},"reply":{"result":{"epoch":5,"held_here":false,"holder":"engram:11111111111111111111111111111111","holder_name":null,"known":true,"role":"dreamer.workspace_02","source":"hub","stale":false}}}
+]

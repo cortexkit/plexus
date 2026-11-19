@@ -1,0 +1,4 @@
+[
+  {"op":"role.fence","request":{"role":"dreamer.global"},"reply":{"result":{"epoch":1,"held_here":false,"holder":"0123456789abcdef0123456789abcdef","role":"dreamer.global","stale":false,"subject":"role.dreamer.global","version":3}}},
+  {"op":"role.fence","request":{"role":"dreamer.workspace_02"},"reply":{"result":{"epoch":5,"held_here":false,"holder":"engram:11111111111111111111111111111111","role":"dreamer.workspace_02","stale":false,"subject":"role.dreamer.workspace_02","version":4}}}
+]

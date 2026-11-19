@@ -492,11 +492,16 @@ fn entorhinal_vector_cases(value: &Value) -> Vec<(String, Value, Result<Value, E
         .collect()
 }
 
+fn entorhinal_role_vectors(file: &str) -> Value {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/entorhinal-roles/role-claims-v1")
+        .join(file);
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
 #[test]
 fn entorhinal_role_vectors_through_real_reader() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/entorhinal-roles/role-claims-v1/records.json");
-    let value: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let value = entorhinal_role_vectors("records.json");
     // Plexus's own expectations for each role.read answer: the state it leads to
     // from a fresh start, and whether plexus may then serve outside effects.
     let reads = [
@@ -571,4 +576,92 @@ fn entorhinal_role_vectors_through_real_reader() {
     for name in takes {
         assert!(seen.contains(name), "missing Entorhinal case: {name}");
     }
+}
+
+#[test]
+fn entorhinal_hub_reads_through_real_reader() {
+    let vectors = entorhinal_role_vectors("read-hub.json");
+    let records = vectors.as_array().unwrap();
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(record["op"], "role.read");
+        let mut not_held = connector_home::role_reply(record["reply"].clone()).unwrap();
+        assert_eq!(not_held["role"], record["request"]["role"]);
+        // The samples are for dreamer roles. Retarget to connector_home, then
+        // vary only held_here and stale to exercise the admission transitions.
+        not_held["role"] = json!(connector_home::ROLE);
+        let mut held = not_held.clone();
+        held["held_here"] = json!(true);
+        let mut stale_held = held.clone();
+        stale_held["stale"] = json!(true);
+        let mut stale_not_held = not_held.clone();
+        stale_not_held["stale"] = json!(true);
+
+        let steps = [
+            (stale_held.clone(), "unknown", false, true),
+            (not_held.clone(), "not_held", false, false),
+            (stale_held, "not_held", false, true),
+            (held, "held", true, false),
+            (stale_not_held, "held", true, true),
+            (not_held, "not_held", false, false),
+        ];
+        let peer = Double::new(steps.iter().map(|(reply, ..)| Ok(reply.clone())).collect());
+        let home = Arc::new(ConnectorHome::new(peer));
+        let (_scratch, state) = fixture(home.clone());
+        for (reply, expected_state, may_serve, preserve_snapshot) in steps {
+            let before = home.status();
+            assert_eq!(home.refresh().unwrap(), reply);
+            assert_eq!(home.held(), may_serve, "{reply}");
+            let health = serde_json::to_value(connector_home_health(&state)).unwrap();
+            let claim = &health["metrics"]["connectorHome"];
+            assert_eq!(claim["state"], expected_state, "{reply}");
+            if preserve_snapshot {
+                assert_eq!(claim, &before, "stale read changed the snapshot: {reply}");
+            } else {
+                assert_eq!(claim["source"], "hub", "{reply}");
+                assert_eq!(claim["epoch"], reply["epoch"], "{reply}");
+            }
+        }
+    }
+}
+
+#[test]
+fn entorhinal_handback_request_does_not_admit_effects() {
+    let vectors = entorhinal_role_vectors("handback-requested.json");
+    let records = vectors.as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record["op"], "role.take");
+    let handback = connector_home::role_reply(record["reply"].clone()).unwrap();
+    assert_eq!(handback["handback_requested"], true);
+    assert_eq!(handback["held_here"], false);
+
+    // Plexus never takes the role; the operator does that with `ck roles take`.
+    // Deliver the take reply in place of a read to check that it cannot grant admission.
+    let peer = Double::new(vec![
+        Ok(role_answer(true, false, false)),
+        Ok(handback),
+        held(),
+    ]);
+    let home = Arc::new(ConnectorHome::new(peer.clone()));
+    let (_scratch, state) = fixture(home.clone());
+    let decisions = home.decisions();
+    home.refresh().unwrap();
+    let before = home.status();
+    assert_eq!(before["state"], "not_held");
+    assert_eq!(home.refresh().unwrap_err().code, "peer_protocol_error");
+    assert_eq!(home.status(), before);
+    assert!(!home.held());
+    assert!(!decisions.has_changed().unwrap());
+    let reply = call_tool(&state, "invoke", "call");
+    assert_eq!(reply["error"]["code"], "connector_home_not_held");
+    assert_eq!(reply["error"]["transmission"], "not_sent");
+
+    home.refresh().unwrap();
+    assert!(decisions.has_changed().unwrap());
+    assert!(*decisions.borrow());
+    assert_eq!(
+        *peer.calls.lock().unwrap(),
+        vec![("role.read".into(), json!({"role":connector_home::ROLE})); 3]
+    );
 }
