@@ -1270,6 +1270,7 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         // A request sent under a scope re-reads that scope, uncached, before
         // every write it has not sent yet, so a session revoked mid-request
         // sends nothing more. Pre-dispatch reads are not re-checked.
+        let mut run_deadline_ms = None;
         if let Some(scope) = reply.scope.clone() {
             let answer = engine.describe_scope(&scope.owner, &scope.scope_ref);
             if let Err(code) = crate::scope::recheck_call_scope(&scope, answer.as_ref()) {
@@ -1308,6 +1309,7 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                         &responses,
                     );
                 }
+                run_deadline_ms = answer.ok().and_then(|described| described.expires_at_ms);
             }
         }
         let response_args = args.clone();
@@ -1330,7 +1332,8 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             Ok(reservation) => reservation,
             Err(denial) => return fail(reply, "G10", taxonomy::denied(&denial, "G10")),
         };
-        let dispatch = engine.revalidate_and_dispatch(&reservation);
+        let dispatch =
+            engine.revalidate_and_dispatch_with_run_deadline(&reservation, run_deadline_ms);
         if matches!(
             dispatch.outcome,
             crate::governance::TransportOutcome::NotSent { .. }
@@ -1348,6 +1351,21 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 "clear unsent dispatch",
                 &agent,
                 nonce,
+            );
+        }
+        if run_deadline_ms.is_some()
+            && matches!(&dispatch.outcome, crate::governance::TransportOutcome::NotSent { code, .. } if code == crate::scope::SCOPE_ENDED)
+        {
+            return stop_for_scope(
+                store,
+                reply,
+                &agent,
+                nonce,
+                claim_owner,
+                now,
+                crate::scope::SCOPE_ENDED,
+                "run",
+                &responses,
             );
         }
         match taxonomy::dispatched(dispatch) {

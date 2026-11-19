@@ -1864,6 +1864,14 @@ where
     }
 
     pub fn revalidate_and_dispatch(&self, reservation: &Reservation) -> DispatchOutcome {
+        self.revalidate_and_dispatch_with_run_deadline(reservation, None)
+    }
+
+    pub(crate) fn revalidate_and_dispatch_with_run_deadline(
+        &self,
+        reservation: &Reservation,
+        run_deadline_ms: Option<u64>,
+    ) -> DispatchOutcome {
         if let Some(Denial::ConnectorHomeNotHeld { state }) = self.connector_home_denial() {
             // Nothing is sent, so release the reservation (an approval behind
             // it stays usable), record the refusal, and tell the decision
@@ -2123,6 +2131,14 @@ where
         if let Some(outcome) = self.revalidate_receipt_authority(reservation, &connection) {
             self.abandon_marked_transmit(reservation);
             return outcome;
+        }
+        // Preparing an installation token may outlast the run's deadline.
+        // Reuse the run deadline from the daemon's earlier description.
+        if run_deadline_ms.is_some_and(|deadline| {
+            u64::try_from(self.now_ms()).map_or(true, |now| now >= deadline)
+        }) {
+            self.abandon_marked_transmit(reservation);
+            return self.deny_before_transmit(reservation, crate::scope::SCOPE_ENDED.into());
         }
         let response = if connection.app_key == "gmail" && reservation.action == "gmail.send" {
             match (&self.gmail, gmail) {

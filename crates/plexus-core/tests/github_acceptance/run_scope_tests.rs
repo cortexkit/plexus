@@ -146,6 +146,68 @@ fn run_ended_after_ownership_read_stops_first_write() {
 }
 
 #[test]
+fn run_expiring_during_second_credential_preparation_stops_second_write() {
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+
+    struct AdvanceOnSecondPrepare {
+        clock: Arc<AtomicI64>,
+        prepares: AtomicUsize,
+        deadline: i64,
+    }
+    impl HandleCredentialProvider for AdvanceOnSecondPrepare {
+        fn prepare(&self, _: &str, _: i64, _: &str) -> Result<ResolvedCredential, &'static str> {
+            if self.prepares.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.clock.store(self.deadline, Ordering::SeqCst);
+            }
+            Ok(ResolvedCredential::anonymous())
+        }
+        fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
+    }
+
+    let now = plexus_core::now_ms();
+    let deadline = now + 60_000;
+    let clock = Arc::new(AtomicI64::new(now));
+    let mut f = Fixture::with_provider(
+        &[("add_issue_comment", "write"), ("close_issue", "write")],
+        |_| {
+            Arc::new(AdvanceOnSecondPrepare {
+                clock: clock.clone(),
+                prepares: AtomicUsize::new(0),
+                deadline,
+            })
+        },
+    );
+    let reader = install(&mut f);
+    f.engine = f
+        .engine
+        .clone()
+        .with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    reader.run.lock().unwrap().as_mut().unwrap().expires_at_ms = Some(deadline as u64);
+    let close =
+        json!({"verb":"issue close", "repository":"org/repo", "number":"42", "comment":"done"});
+    let nonce = "expires-after-credential-start";
+    let reply = send(&f, &close, nonce, Some(&run()));
+    assert_eq!(
+        reply["result"],
+        json!({"status":"refused", "refusal_code":"scope_ended", "scope_role":"run", "legs_sent":["add_issue_comment"], "retry_same_nonce":false})
+    );
+    assert_eq!(f.github.actions(), ["add_issue_comment"]);
+    assert_eq!(reader.asked.lock().unwrap().len(), 4);
+    let row = f
+        .store
+        .github_receipt("agent-fixture", nonce)
+        .unwrap()
+        .unwrap();
+    assert!(row.effects[0].outcome.is_some());
+    assert_eq!(row.effects[1].dispatch_attempted_at, None);
+    assert_eq!(row.effects[1].request_id, None);
+    assert_eq!(
+        send(&f, &close, nonce, Some(&run()))["result"],
+        reply["result"]
+    );
+}
+
+#[test]
 fn run_scope_described_before_each_unsent_leg() {
     let mut f = Fixture::new(&[("add_issue_comment", "write"), ("close_issue", "write")]);
     let reader = install(&mut f);
