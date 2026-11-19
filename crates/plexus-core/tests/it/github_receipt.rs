@@ -127,6 +127,56 @@ fn claim_is_atomic_and_rejects_mismatched_nonce_and_live_lease() {
 }
 
 #[test]
+fn fenced_facade_claim_reports_live_attempt_as_in_flight() {
+    use plexus_core::github::facade::{gates::Handle, request_map};
+    use plexus_core::github::resolver::{Binding, ResolvedRepositories};
+    let (_file, store) = fixture();
+    let request = json!({"action":"issue comment","repository":"org/repo","target":{"number":"42"},"body":{"body":"hello"}});
+    let mapped = request_map::map(
+        &request,
+        &ResolvedRepositories {
+            repositories: vec!["org/repo".into()],
+            binding: Binding {
+                app_handle_id: "app".into(),
+                connection_id: "connection".into(),
+            },
+        },
+        "org/repo",
+    )
+    .unwrap();
+    let handle = Handle {
+        app_handle_id: "app".into(),
+        agent_id: "agent".into(),
+        connection_principal: "operator".into(),
+        connection_id: "connection".into(),
+        credential_reference: "github_app:app".into(),
+        status: "enabled".into(),
+        proven: true,
+    };
+    let claim = |owner, now| {
+        store
+            .claim_github_facade(
+                "agent",
+                "nonce",
+                &mapped,
+                &handle,
+                owner,
+                &json!({}),
+                &effects(),
+                false,
+                now,
+                120,
+            )
+            .unwrap()
+    };
+    assert!(matches!(claim("first", 1000), Claim::Owned(_)));
+    assert!(store
+        .mark_github_dispatch("agent", "nonce", "first", 0, 1001, "test-request")
+        .unwrap());
+    assert_eq!(claim("second", 1002), Claim::InFlight);
+}
+
+#[test]
 fn claim_lease_covers_first_request_for_at_least_sixty_seconds() {
     let (_file, store) = fixture();
     let first = store

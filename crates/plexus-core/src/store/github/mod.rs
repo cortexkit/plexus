@@ -1517,11 +1517,11 @@ impl PlexusStore {
                     return Ok(Claim::Replay(load(conn)?.expect("completed receipt")));
                 }
                 if ["completed", "refused"].contains(&row.state.as_str()) { return Ok(Claim::Replay(row.clone())); }
-                if row.state == "outcome_unknown" || has_uncertain_effect(row) {
-                    return Ok(Claim::Unknown(row.clone()));
-                }
                 if row.state == "pending" && row.claim_lease_expires_at.is_some_and(|expiry| expiry > now) {
                     return Ok(Claim::InFlight);
+                }
+                if row.state == "outcome_unknown" || has_uncertain_effect(row) {
+                    return Ok(Claim::Unknown(row.clone()));
                 }
                 if row.state == "pending_approval" {
                     let (status, expires_at): (String, i64) = conn.query_row(
