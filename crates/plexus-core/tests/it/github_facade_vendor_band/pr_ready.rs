@@ -200,6 +200,45 @@ fn pr_ready_fixture_waits_for_credential_preparation_before_each_http_leg() {
 }
 
 #[test]
+fn connector_home_loss_during_bot_token_preparation_skips_the_write_leg() {
+    struct LoseHomeOnWrite(Arc<AtomicUsize>);
+    impl HandleCredentialProvider for LoseHomeOnWrite {
+        fn prepare(
+            &self,
+            handle: &str,
+            generation: i64,
+            reference: &str,
+        ) -> Result<ResolvedCredential, &'static str> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            BotToken.prepare(handle, generation, reference)
+        }
+        fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut run = ReadyRun::with_token(
+        "pr-ready-home-loss",
+        vec![pull(true), mutation(false, false)],
+        Arc::new(LoseHomeOnWrite(calls.clone())),
+    );
+    run.engine = run
+        .engine
+        .clone()
+        .with_connector_home_guard(Arc::new(move || {
+            (calls.load(Ordering::SeqCst) >= 2).then(|| json!({"state":"not_held"}))
+        }));
+
+    let reply = run.call_raw(&request(false), "lose-home");
+
+    let received = run.sent.lock().unwrap();
+    assert_eq!(
+        received.len(),
+        1,
+        "only the prerequisite read may send: {reply}"
+    );
+    assert!(received[0].starts_with("GET /repos/org/repo/pulls/7 HTTP/1.1\r\n"));
+}
+
+#[test]
 fn pr_ready_and_undo_send_only_reviewed_query_and_node_variables_and_replay() {
     for undo in [false, true] {
         let run = ReadyRun::new("pr-ready-wire", vec![pull(!undo), mutation(undo, undo)]);

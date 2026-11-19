@@ -227,6 +227,34 @@ where
         outcome
     }
 
+    pub(super) fn check_dispatch_home(
+        &self,
+        reservation: &Reservation,
+        marked_transmit: bool,
+    ) -> Option<DispatchOutcome> {
+        let Denial::ConnectorHomeNotHeld { state } = self.connector_home_denial()? else {
+            return None;
+        };
+        if marked_transmit {
+            self.abandon_marked_transmit(reservation);
+        }
+        self.abandon_unsent_reservation(reservation);
+        let code = "connector_home_not_held";
+        self.audit_dispatch_denial(reservation, code);
+        Some(self.maybe_report_decision_outcome(
+            reservation,
+            DispatchOutcome::not_sent(
+                reservation,
+                code.into(),
+                format!("connector home not held: {state}"),
+                Retryability::Terminal,
+            ),
+            OutcomeTerminal::Refused {
+                reason: code.into(),
+            },
+        ))
+    }
+
     pub(super) fn deny_before_transmit(
         &self,
         reservation: &Reservation,
