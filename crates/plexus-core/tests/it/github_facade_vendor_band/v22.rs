@@ -366,6 +366,35 @@ fn every_v22_kind_sends_exactly_its_reviewed_requests_and_replays() {
 }
 
 #[test]
+fn dissolved_stack_replays_after_final_receipt_update_fails() {
+    let run = Run::new(vec![stack(), Value::Null]);
+    let db = Connection::open(run._scratch.path()).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_finish BEFORE UPDATE OF state ON github_bot_receipt WHEN NEW.state='completed' BEGIN SELECT RAISE(FAIL,'unavailable'); END;").unwrap();
+    let request = request(
+        "api:POST:/repos/*/*/stacks/*/unstack",
+        json!({"stack_number":"3"}),
+        json!({}),
+    );
+    let first = run.call(&request);
+    assert_eq!(
+        first["result"],
+        json!({"status":"completed","result":{"dissolved":true}})
+    );
+    assert_eq!(
+        run.store
+            .github_receipt("agent-fixture", "v22-nonce")
+            .unwrap()
+            .unwrap()
+            .state,
+        "pending"
+    );
+    db.execute_batch("DROP TRIGGER fail_finish").unwrap();
+    assert_eq!(run.call(&request)["result"], first["result"]);
+    assert_eq!(run.wire().len(), 2);
+    run.server.join().unwrap();
+}
+
+#[test]
 fn every_v22_kind_refuses_extra_body_fields_by_name_without_contact() {
     for (mut request, _, _, _) in cases() {
         request["body"]["unexpected"] = json!("never sent");

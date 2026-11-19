@@ -1410,6 +1410,10 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 };
                 let durable_value = if mapped.request_kind == "issue_edit" {
                     json!({"__plexus_response":value,"__plexus_issue_read":issue_read})
+                } else if mapped.request_kind == "stack_unstack" && value.is_null() {
+                    // An empty response means the stack dissolved, not that
+                    // the effect was left unfinished.
+                    json!({"__plexus_response":null})
                 } else {
                     value.clone()
                 };
