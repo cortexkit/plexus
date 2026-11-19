@@ -600,8 +600,16 @@ fn write_response(
     value: Value,
     args: &Value,
 ) -> Result<Value, String> {
+    if queue_kind(kind) || thread_kind(kind) {
+        if let Err(code) = graphql_errors(kind, action, login, repository, &value) {
+            return Err(if value.get("data").is_some_and(|data| !data.is_null()) {
+                "outcome_unknown".into()
+            } else {
+                code
+            });
+        }
+    }
     if queue_kind(kind) {
-        graphql_errors(kind, action, login, repository, &value)?;
         let mutation = if kind == "pr_enqueue" {
             "enqueuePullRequest"
         } else {
@@ -625,7 +633,6 @@ fn write_response(
         return pr_state_response(kind, action, login, repository, value);
     }
     if thread_kind(kind) {
-        graphql_errors(kind, action, login, repository, &value)?;
         let mutation = if kind == "resolve_thread" {
             "resolveReviewThread"
         } else {

@@ -294,6 +294,21 @@ fn merge_queue_incomplete_read_never_mutates_and_ambiguous_write_is_unknown() {
 }
 
 #[test]
+fn merge_queue_mutation_data_with_errors_replays_unknown() {
+    for enqueue in [true, false] {
+        let mut response = mutation(enqueue);
+        response["errors"] = json!([{"message":"partial reply"}]);
+        let run = Run::new(vec![read(pr(!enqueue)), response]);
+        let request = request(enqueue);
+        let first = run.call(&request);
+        assert_eq!(first["result"]["status"], "outcome_unknown", "{first}");
+        assert_eq!(run.call(&request)["result"], first["result"]);
+        assert_eq!(run.wire().len(), 2);
+        run.server.join().unwrap();
+    }
+}
+
+#[test]
 fn merge_queue_unbound_repository_never_contacts_github() {
     for enqueue in [true, false] {
         let run = Run::new(vec![]);

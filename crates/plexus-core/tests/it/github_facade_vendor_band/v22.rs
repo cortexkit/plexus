@@ -769,6 +769,32 @@ fn v22_graphql_mutation_errors_are_sanitized_and_bad_preview_replies_are_unknown
 }
 
 #[test]
+fn review_thread_mutation_data_with_errors_replays_unknown() {
+    for (action, mutation, resolved) in [
+        ("graphql resolvereviewthread", "resolveReviewThread", true),
+        (
+            "graphql unresolvereviewthread",
+            "unresolveReviewThread",
+            false,
+        ),
+    ] {
+        let mut responses = vec![thread_read("org/repo")];
+        if resolved {
+            responses.push(pr(7));
+        }
+        responses.push(json!({"data":{mutation:{"thread":{"id":THREAD,"isResolved":resolved}}},"errors":[{"message":"partial reply"}]}));
+        let expected_requests = responses.len();
+        let run = Run::new(responses);
+        let request = request(action, json!({"thread_id":THREAD}), json!({}));
+        let first = run.call(&request);
+        assert_eq!(first["result"]["status"], "outcome_unknown", "{first}");
+        assert_eq!(run.call(&request)["result"], first["result"]);
+        assert_eq!(run.wire().len(), expected_requests);
+        run.server.join().unwrap();
+    }
+}
+
+#[test]
 fn v22_preview_requires_documented_status_and_body_pairs() {
     for (action, target, body, read, status, response) in [
         (
