@@ -275,6 +275,18 @@ impl PlexusStore {
         counted_store::count_calls(work)
     }
 
+    /// Run SQL against the store's own connection, for tests outside the
+    /// storage module that must set up or inspect rows no API exposes.
+    #[cfg(test)]
+    pub(crate) fn sql_for_test<T>(
+        &self,
+        work: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+    ) -> T {
+        self.inner
+            .with_conn_fenced(|conn| work(conn))
+            .expect("test SQL")
+    }
+
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, StoreError> {
         let grant_journal = grant_journal_path(descriptor);
         let federated_journal = grant_journal

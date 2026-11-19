@@ -656,6 +656,33 @@ impl PlexusStore {
         })
     }
 
+    /// Put approvals that a retry batch selected but did not reach back at the
+    /// front of the rotation. Selection stamps every row it returns as checked;
+    /// a row the pass ran out of time for was not checked, and keeping its
+    /// stamp would let the rows tried first be chosen ahead of it again.
+    pub(crate) fn release_untried_scoped_approvals(
+        &self,
+        rows: &[(String, String)],
+    ) -> Result<(), StoreError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.inner.with_conn_fenced(|conn| {
+            let mut update = conn.prepare_cached(
+                "UPDATE action_requests SET scope_checked_at_ms=0
+                 WHERE principal=?1 AND request_id=?2 AND status='approved' AND scope_outcome=?3",
+            )?;
+            for (principal, request_id) in rows {
+                update.execute(rusqlite::params![
+                    principal,
+                    request_id,
+                    crate::scope::APPROVED_WAITING
+                ])?;
+            }
+            Ok(())
+        })
+    }
+
     /// Record that a scoped approval is held unsent, waiting for its scope to
     /// be confirmed. Only an approval still `approved` is marked.
     pub(crate) fn hold_scoped_approval(

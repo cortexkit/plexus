@@ -2274,6 +2274,19 @@ where
     /// retired, and one past its own expiry is refused `scope_unverifiable`.
     /// Returns how many were tried.
     pub fn retry_waiting_approvals(&self, limit: usize) -> usize {
+        self.retry_waiting_approvals_until(limit, None)
+    }
+
+    /// As [`Self::retry_waiting_approvals`], but start no retry once
+    /// `deadline` has passed. Each retry can wait on a daemon read, so a batch
+    /// of unanswered scopes must not use up the scheduler pass that follows.
+    /// Approvals selected but not reached go back to the front of the
+    /// rotation, so the next pass tries them first.
+    pub(crate) fn retry_waiting_approvals_until(
+        &self,
+        limit: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> usize {
         let waiting = match self.store.waiting_scoped_approvals(limit) {
             Ok(waiting) => waiting,
             Err(error) => {
@@ -2281,8 +2294,23 @@ where
                 return 0;
             }
         };
-        let tried = waiting.len();
-        for request in waiting {
+        let mut tried = 0;
+        let mut waiting = std::collections::VecDeque::from(waiting);
+        while let Some(request) = waiting.pop_front() {
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                let untried: Vec<(String, String)> = std::iter::once(request)
+                    .chain(waiting.drain(..))
+                    .map(|request| (request.principal, request.request_id))
+                    .collect();
+                if let Err(error) = self.store.release_untried_scoped_approvals(&untried) {
+                    eprintln!(error governance:
+                        "could not return {} untried waiting approval(s) to the front of the retry order: {error}",
+                        untried.len()
+                    );
+                }
+                break;
+            }
+            tried += 1;
             let principal = request.principal.clone();
             let request_id = request.request_id.clone();
             if request.expires_at <= self.now_ms() {
