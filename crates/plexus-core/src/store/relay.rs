@@ -405,6 +405,7 @@ impl PlexusStore {
         let mut committed_new = false;
         let mut due_watches = 0;
         let mut marker_reason = "pr_comment_reread";
+        let mut late_ci = None;
         self.inner.with_conn_fenced(|conn| {
             let current = cursor(conn, source)?.ok_or_else(protocol_error)?;
             if current.stream_id != stream { return Err(protocol_error()); }
@@ -431,7 +432,7 @@ impl PlexusStore {
                     }
                 }
                 None => {
-                    if let Err(reason) = admit(conn, event, received, &self.ci_runs, &mut due_watches)? {
+                    if let Err(reason) = admit(conn, event, received, &self.ci_runs, &mut due_watches, &mut late_ci)? {
                         event_outbox::increment(conn, reason.counter(), 1)?;
                         // Malformed payloads need immediate visibility; identity changes already emit a storage warning.
                         if matches!(reason, DropReason::InvalidPayload) {
@@ -449,6 +450,15 @@ impl PlexusStore {
             conn.execute("UPDATE relay_cursor SET committed_seq=?1 WHERE source=?2 AND stream_id=?3", (event.seq, source, stream))?;
             Ok(())
         })?;
+        if let Some(LateCiDelivery {
+            repo,
+            kind,
+            id,
+            late_ms,
+        }) = late_ci
+        {
+            diag!(info relay: "CI webhook dropped as already delivered by polling: repo={repo} kind={kind} github_id={id} late_ms={late_ms}");
+        }
         log_marker_due(marker_reason, due_watches);
         if committed_new && event.stub.is_none() && event.event == "workflow_run" {
             self.ci_runs.remember(event, received);
@@ -688,12 +698,66 @@ fn relay_project(
     Ok(issue_project.unwrap_or_else(|| target.project.clone()))
 }
 
+struct LateCiDelivery {
+    repo: String,
+    kind: &'static str,
+    id: u64,
+    late_ms: i64,
+}
+
+fn late_ci_delivery(
+    conn: &rusqlite::Connection,
+    event_id: &str,
+    event_key: &str,
+    item_kind: &str,
+    payload: &Value,
+    received: i64,
+    repo: String,
+) -> Option<LateCiDelivery> {
+    let kind = match item_kind {
+        "ci_job" => "job",
+        "ci_run" => "run",
+        _ => return None,
+    };
+    // A subscription match does not make webhook text safe to log. Allow only
+    // repository owner/name characters, not URLs or line breaks.
+    let (owner, name) = repo.split_once('/')?;
+    if ![owner, name].iter().all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    }) {
+        return None;
+    }
+    let id = payload["id"].as_u64()?;
+    let attempt = payload["run_attempt"].as_u64()?;
+    // The poller uses a kind/id/attempt ID; the relay uses a delivery GUID.
+    // This diagnostic lookup must not stop the cursor from committing.
+    let created_at_ms: i64 = conn
+        .query_row(
+            "SELECT created_at_ms FROM trigger_events
+             WHERE event_id=?1 AND event_key=?2 AND vendor_event_id=?3 AND delivery_id IS NULL",
+            (event_id, event_key, format!("{kind}:{id}:{attempt}")),
+            |row| row.get(0),
+        )
+        .ok()?;
+    Some(LateCiDelivery {
+        repo,
+        kind,
+        id,
+        // A queued relay delivery may have reached the relay before the poll.
+        late_ms: received.saturating_sub(created_at_ms),
+    })
+}
+
 fn admit(
     conn: &rusqlite::Connection,
     event: &Event,
     received: i64,
     ci_runs: &CiRunCache,
     due_watches: &mut usize,
+    late_ci: &mut Option<LateCiDelivery>,
 ) -> rusqlite::Result<Result<(), DropReason>> {
     let Some((repo, repo_id)) = repository(&event.body) else {
         return Ok(Err(DropReason::InvalidPayload));
@@ -832,6 +896,7 @@ fn admit(
     // sender is lost. Polling behaves the same way, because a duplicate insert
     // never rewrites a stored row.
     let mut inserted_any = false;
+    let mut duplicate_event_id = None;
     let mut delivery_id = Some(event.delivery_id.as_str());
     for target in &targets {
         let headers = EventHeaders {
@@ -867,7 +932,12 @@ fn admit(
                 },
             },
         )?;
-        inserted_any |= !matches!(inserted, TriggerEventInsertOutcome::Duplicate { .. });
+        match inserted {
+            TriggerEventInsertOutcome::Duplicate { event_id, .. } => {
+                duplicate_event_id = Some(event_id);
+            }
+            _ => inserted_any = true,
+        }
     }
     inserted_any |= insert_review_notice(conn, event, &repo, repo_id, received, &targets)?;
     // Failed poll resolutions leave a cache row with a null id. Seed that row too,
@@ -877,6 +947,8 @@ fn admit(
             last_attempt_at_ms=excluded.last_attempt_at_ms,resolved_at_ms=excluded.resolved_at_ms
         WHERE github_repo_id_cache.repo_id IS NULL", (&repo, repo_id, received))?;
     Ok(if !inserted_any {
+        *late_ci = duplicate_event_id
+            .and_then(|id| late_ci_delivery(conn, &id, &key, item_kind, payload, received, repo));
         Err(DropReason::AlreadyDelivered)
     } else {
         Ok(())

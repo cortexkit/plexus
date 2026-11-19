@@ -3409,6 +3409,135 @@ async fn relay_invalid_payload_is_info_and_identity_change_is_warn() {
 }
 
 #[tokio::test]
+async fn relay_logs_ci_completions_only_when_polling_stored_them_first() {
+    const TEST: &str =
+        "relay::tests::relay_logs_ci_completions_only_when_polling_stored_them_first";
+    const LABEL: &str = "relay-late-ci-log";
+    const MESSAGE: &str = "CI webhook dropped as already delivered by polling:";
+    if std::env::var_os("PLEXUS_LOG_STDERR_CHILD").is_none() {
+        let scratch = prepare_relay_log_fixture(LABEL);
+        let exe = std::env::current_exe().unwrap();
+        let binary = cortexkit_test_support::ckdev_binary(exe.to_str().unwrap());
+        let output = crate::bounded::child_output(
+            std::process::Command::new(&binary)
+                .args(["--exact", TEST, "--nocapture"])
+                .env("PLEXUS_LOG_STDERR_CHILD", "1")
+                .env(PREPARED_RELAY_LOG_STORE, scratch.path()),
+            Duration::from_secs(30),
+            "late CI diagnostic child",
+        )
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        crate::test_support::assert_exactly_one_test_passed(TEST, &output);
+        let lines: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.contains(MESSAGE))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "one line per poll-first completion: {stderr}"
+        );
+        for (line, kind) in lines.into_iter().zip(["job", "run"]) {
+            diagnostic_logging::assert_diagnostic(
+                line,
+                cortexkit_log::ParsedLevel::Info,
+                "plexus.relay",
+                &format!("{MESSAGE} repo=org/repo kind={kind} github_id=7 late_ms=12345"),
+            );
+        }
+        return;
+    }
+
+    diagnostic_logging::init_child();
+    let (_scratch, store, path) = relay_log_fixture(LABEL);
+    let sub = kind_watch(&store, "list_workflow_runs");
+    let mut frames = vec![hello()];
+    for (kind, event, event_name) in [
+        ("job", "workflow_job", "github_ci_job_completed"),
+        ("run", "workflow_run", "github_ci_run_completed"),
+    ] {
+        let mut frame = kind_frame(event);
+        let key = plexus_core::derive_event_key(
+            event_name,
+            &json!({"repo_id":101,"job_id":7,"run_id":7,"run_attempt":2,"conclusion":"success"}),
+        )
+        .unwrap();
+        let vendor_id = format!("{kind}:7:2");
+        let mut payload = frame["body"][event].clone();
+        payload["name"] = json!("poll copy");
+        store
+            .commit_keyed_poll_success(
+                "direct",
+                "conn-github-actions",
+                &sub,
+                &json!({"scanned_through_ms":20}),
+                &[plexus_core::KeyedPollEventInput {
+                    event: plexus_core::PollEventInput {
+                        vendor_event_id: &vendor_id,
+                        payload: &payload,
+                        observed_at_ms: 1,
+                        item_kind: Some(&format!("ci_{kind}")),
+                        activity_at_ms: Some(2),
+                        actor: &plexus_core::ActorAttribution::NotEnriched,
+                    },
+                    identity: Some(plexus_core::KeyedEventIdentity {
+                        event_key: &key,
+                        event_name,
+                        repo_id: 101,
+                        change: None,
+                        headers: &plexus_core::EventHeaders {
+                            repo: "org/repo".into(),
+                            project: None,
+                            branch: None,
+                            conclusion: Some("success".into()),
+                            pr: None,
+                        },
+                    }),
+                    delivery_id: None,
+                    envelope_context: Default::default(),
+                }],
+                now_ms(),
+                &[],
+            )
+            .unwrap();
+        let created_at_ms: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT created_at_ms FROM trigger_events WHERE vendor_event_id=?1",
+                [&vendor_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let received_at = chrono::DateTime::from_timestamp_millis(created_at_ms + 12_345)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        frame["received_at"] = json!(received_at);
+        for id in [7, 8, 8] {
+            let seq = frames.len();
+            frame["seq"] = json!(seq);
+            frame["delivery_id"] = json!(format!("delivery-{seq}"));
+            frame["body"][event]["id"] = json!(id);
+            frames.push(frame.to_string());
+        }
+    }
+    let status = Status::default();
+    replay_using_status(store, frames, true, None, &status).await;
+    assert_eq!(count(&path, "trigger_events"), 4);
+    assert_eq!(count(&path, "event_outbox"), 4);
+    let snapshot = status.0.lock().unwrap();
+    assert_eq!(snapshot.activity.stored, 2);
+    assert_eq!(
+        snapshot.activity.dropped,
+        BTreeMap::from([
+            (("AlreadyDelivered".into(), "workflow_job".into()), 2),
+            (("AlreadyDelivered".into(), "workflow_run".into()), 2),
+        ])
+    );
+}
+
+#[tokio::test]
 async fn relay_drops_are_debug_and_hourly_summary_counts_committed_activity() {
     const TEST: &str =
         "relay::tests::relay_drops_are_debug_and_hourly_summary_counts_committed_activity";
