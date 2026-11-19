@@ -228,6 +228,11 @@ fn trim_credential_word(word: &str) -> &str {
 
 fn prefixed_credential_span(text: &str) -> Option<(usize, usize)> {
     for (start, _) in text.char_indices() {
+        // A prefix can follow a URL or assignment delimiter, but not the
+        // letters of an ordinary word such as "task-scheduler".
+        if start != 0 && text.as_bytes()[start - 1].is_ascii_alphanumeric() {
+            continue;
+        }
         let tail = &text[start..];
         for prefix in SECRET_TEXT_PREFIXES {
             if let Some(suffix) = tail.strip_prefix(prefix) {
