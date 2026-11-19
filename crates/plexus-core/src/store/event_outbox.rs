@@ -17,6 +17,14 @@ pub(crate) const SORTED_HEAD_REPLAY_WINDOW_MS: i64 = 60_000;
 const REPO_RETRY_MS: i64 = 3_600_000;
 const REPO_REFRESH_MS: i64 = 24 * REPO_RETRY_MS;
 
+// A terminal failure is not a publication, but it no longer needs the outbox
+// to keep its body for a retry. Another version of the same notice still might.
+const PENDING_NOTICE: &str = "(
+    (o.published_at_ms IS NULL AND NOT EXISTS (
+        SELECT 1 FROM event_outbox_failures f WHERE f.event_key=o.event_key AND f.version=1))
+    OR (o.envelope_v2 IS NOT NULL AND o.published_v2_at_ms IS NULL AND NOT EXISTS (
+        SELECT 1 FROM event_outbox_failures f WHERE f.event_key=o.event_key AND f.version=2)))";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventHeaders {
     pub repo: String,
@@ -738,7 +746,7 @@ impl PlexusStore {
             };
             Ok(OutboxHealth {
                 depth: conn.query_row(
-                    "SELECT COUNT(*) FROM event_outbox WHERE published_at_ms IS NULL OR (envelope_v2 IS NOT NULL AND published_v2_at_ms IS NULL)",
+                    &format!("SELECT COUNT(*) FROM event_outbox o WHERE {PENDING_NOTICE}"),
                     [],
                     |r| r.get(0),
                 )?,
@@ -962,7 +970,7 @@ pub(super) fn prune_events(
             FROM trigger_events e LEFT JOIN event_outbox o ON o.event_id=e.event_id
             LEFT JOIN trigger_subscriptions s ON s.subscription_id=e.subscription_id
             WHERE e.principal=?1 AND e.subscription_id=?2 AND e.created_at_ms {comparison} ?5
-            AND NOT COALESCE((o.event_id IS NOT NULL AND (o.published_at_ms IS NULL OR (o.envelope_v2 IS NOT NULL AND o.published_v2_at_ms IS NULL)))
+             AND NOT COALESCE((o.event_id IS NOT NULL AND {PENDING_NOTICE})
             OR max(e.created_at_ms,COALESCE(o.published_at_ms,e.created_at_ms),COALESCE(o.published_v2_at_ms,e.created_at_ms))>?3
             OR (s.status <> 'retired' AND e.activity_at_ms IS NOT NULL AND ((s.cursor_kind='ordered_timestamp' AND e.activity_at_ms>=json_extract(s.cursor_state,'$.watermark_ms')-?4)
                 OR (s.cursor_kind='sorted_head' AND e.activity_at_ms>=json_extract(s.cursor_state,'$.watermark_ms')-?7))),0)
@@ -1717,6 +1725,56 @@ mod tests {
         assert_eq!(removed, 1, "finish one watch but do not start the second");
         assert_eq!(count(&store, "trigger_events"), 1);
         assert_eq!(count(&store, "event_outbox"), 1);
+    }
+
+    #[test]
+    fn terminal_outbox_versions_do_not_count_as_pending_or_block_retention() {
+        use OutboxVersion::{V1, V2};
+        for failed in [V1, V2] {
+            let store = store();
+            let now = now_ms();
+            old_row(&store, "ci_runs", 0, None);
+            store
+                .inner
+                .with_conn_fenced(|conn| {
+                    conn.execute("UPDATE event_outbox SET envelope_v2='{}'", [])
+                })
+                .unwrap();
+            store
+                .mark_outbox_unpublishable(KEY, failed, "notice_invalid", now)
+                .unwrap();
+            assert_eq!(
+                store.event_outbox_health().unwrap().depth,
+                1,
+                "the other version is still pending"
+            );
+            assert_eq!(
+                store
+                    .prune_all_events(30 * AUDIT_MILLIS_PER_DAY, 1000, now)
+                    .unwrap(),
+                0
+            );
+
+            let other = if failed == V1 { V2 } else { V1 };
+            assert_eq!(
+                store
+                    .mark_events_published(&[KEY], other, now - 8 * AUDIT_MILLIS_PER_DAY)
+                    .unwrap(),
+                1
+            );
+
+            let depth = store.event_outbox_health().unwrap().depth;
+            let removed = store
+                .prune_all_events(30 * AUDIT_MILLIS_PER_DAY, 1000, now)
+                .unwrap();
+            assert_eq!(
+                (depth, removed),
+                (0, 1),
+                "v{} is terminal, not pending",
+                failed as u8
+            );
+            assert_eq!(count(&store, "event_outbox_failures"), 0);
+        }
     }
 
     #[test]
