@@ -20,12 +20,24 @@ const AGENT: &str = "agent-a";
 #[derive(Default)]
 struct ScriptedReader {
     answer: Mutex<Option<Result<ScopeDescription, ScopeReadError>>>,
+    /// When set, replaces `answer` after the next read is answered.
+    next: Mutex<Option<Result<ScopeDescription, ScopeReadError>>>,
     reads: Mutex<usize>,
 }
 
 impl ScriptedReader {
     fn answer(&self, answer: Result<ScopeDescription, ScopeReadError>) {
         *self.answer.lock().unwrap() = Some(answer);
+    }
+
+    /// Answer `first` once, then `then` for every later read.
+    fn answer_once_then(
+        &self,
+        first: Result<ScopeDescription, ScopeReadError>,
+        then: Result<ScopeDescription, ScopeReadError>,
+    ) {
+        self.answer(first);
+        *self.next.lock().unwrap() = Some(then);
     }
 
     fn reads(&self) -> usize {
@@ -37,11 +49,14 @@ impl ScopeReader for ScriptedReader {
     fn describe(&self, owner: &str, scope_ref: &str) -> Result<ScopeDescription, ScopeReadError> {
         assert_eq!((owner, scope_ref), ("reserved:prefrontal-core", "head-1"));
         *self.reads.lock().unwrap() += 1;
-        self.answer
-            .lock()
-            .unwrap()
+        let mut answer = self.answer.lock().unwrap();
+        let current = answer
             .clone()
-            .expect("the test scripted an answer before the approval ran")
+            .expect("the test scripted an answer before the approval ran");
+        if let Some(next) = self.next.lock().unwrap().take() {
+            *answer = Some(next);
+        }
+        current
     }
 }
 
@@ -297,6 +312,49 @@ fn an_approval_whose_scope_ended_refuses_scope_ended_and_sends_nothing() {
                 && row.outcome.as_deref() == Some("not_sent")),
         "the refusal is audited by name: {audit:?}"
     );
+}
+
+/// The scope can end after the first execution-time check, while the
+/// credential is being prepared. The read repeated just before the claim
+/// refuses it by the same name, and nothing reaches the vendor.
+#[test]
+fn a_scope_that_ends_after_the_first_check_is_refused_before_the_claim() {
+    for (label, later, code) in [
+        ("late-end", Ok(ended()), "scope_ended"),
+        (
+            "late-withdraw",
+            Ok(live(scope(false))),
+            "delegation_withdrawn",
+        ),
+        (
+            "late-unanswered",
+            Err(ScopeReadError("daemon connection closed".into())),
+            "approved_waiting",
+        ),
+    ] {
+        let fixture = fixture(label);
+        let request_id = fixture.park(Some(scope(true)));
+        fixture
+            .reader
+            .answer_once_then(Ok(live(scope(true))), later);
+        let outcome = fixture
+            .engine
+            .approve_request("direct", &request_id, "direct")
+            .expect("decided");
+        assert_eq!(Fixture::not_sent_code(&outcome), code, "{label}");
+        assert_eq!(fixture.sent(), 0, "{label}: nothing reaches the vendor");
+        assert_eq!(fixture.reader.reads(), 2, "{label}");
+        let request = fixture.request(&request_id);
+        if code == "approved_waiting" {
+            assert_eq!(request.status, "approved", "{label}: the approval is kept");
+        } else {
+            assert_eq!(
+                request.scope_outcome.as_deref(),
+                Some(format!("not_run:{code}").as_str()),
+                "{label}"
+            );
+        }
+    }
 }
 
 /// The same scope at a new epoch is a new session under a reused ref: the old

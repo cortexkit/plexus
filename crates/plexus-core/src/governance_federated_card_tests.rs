@@ -448,8 +448,8 @@ fn per_call_answer_is_not_consumed_on_non_live_base() {
         sent(&engine, req(None));
         assert_eq!(
             reader.calls.load(Ordering::SeqCst),
-            2,
-            "each use makes its own describe"
+            3,
+            "each use makes its own describe, and a dispatched use reads again before its claim"
         );
     }
 }

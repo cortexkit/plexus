@@ -1965,6 +1965,16 @@ where
         } else {
             None
         };
+        // Credential preparation can block on the vault or a token exchange.
+        // An approval's scope or a paired computer's pairing that ends during
+        // that wait must stop the send, so read it again now, before the claim
+        // consumes the approval. No store transaction is open here, so the
+        // daemon read does not hold the store writer.
+        if prepared.is_some() {
+            if let Some(outcome) = self.recheck_live_authority(reservation) {
+                return outcome;
+            }
+        }
         let claimed = if claimable {
             match self.store.claim_reservation(
                 &reservation_record(reservation),
