@@ -2737,6 +2737,41 @@ fn relay_polling_scheduler_slows_issue_pr_ci_but_not_releases() {
 }
 
 #[test]
+fn relay_polling_keeps_normal_cadence_without_a_same_project_counterpart() {
+    let (scratch, store, issue) = fixture("relay-slow-unpaired");
+    let status = Arc::new(Status::default());
+    status.set(State::Connected);
+    age_relay(&status, 3600);
+    let scheduler = relay_scheduler(&store, status);
+    let now = now_ms();
+    sql(
+        &scratch,
+        &format!(
+            "UPDATE trigger_subscriptions SET last_polled_at_ms={}",
+            now - 310_000
+        ),
+    );
+    let principals = ["direct".into()];
+    assert!(
+        scheduler.due_now(&principals, now).is_empty(),
+        "paired watches slow down"
+    );
+
+    sql(&scratch, "UPDATE trigger_subscriptions SET project_id='different-project' WHERE subscription_id='pr-watch'");
+
+    let due: std::collections::BTreeSet<_> = scheduler
+        .due_now(&principals, now)
+        .into_iter()
+        .map(|watch| watch.subscription_id)
+        .collect();
+    assert_eq!(
+        due,
+        [issue, "pr-watch".into()].into_iter().collect(),
+        "neither watch can receive relay events after the pair is split"
+    );
+}
+
+#[test]
 fn relay_polling_ci_spacing_keeps_the_shared_quota_floor() {
     let (scratch, store, _) = fixture("relay-ci-quota-floor");
     let ci = kind_watch(&store, "list_workflow_runs");

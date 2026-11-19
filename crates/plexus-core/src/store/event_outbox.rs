@@ -2040,6 +2040,10 @@ mod tests {
             let now = now_ms();
             store.inner.with_conn_fenced(|conn| {
                 conn.execute("UPDATE trigger_subscriptions SET connection_id='github',last_polled_at_ms=?1", [now - 300_000])?;
+                conn.execute("INSERT INTO trigger_subscriptions
+                    (subscription_id,principal,connection_id,action,cadence_s,cursor_kind,schema_hash,status,created_at_ms,fixed_args,last_polled_at_ms)
+                    VALUES ('counterpart','direct','github','list_pull_requests',300,'sorted_head','hash','active',1,
+                    '{\"owner\":\"OWNER\",\"repo\":\"Repo\"}',?1)", [now - 300_000])?;
                 Ok(())
             }).unwrap();
             let engine = crate::GovernanceEngine::new(
@@ -2059,7 +2063,7 @@ mod tests {
             println!("idle relay scheduler watches={watches} store_calls={calls}");
             assert_eq!(
                 calls, 5,
-                "fixed reconciliation/approval work, due selection and one connection snapshot must not grow per watch"
+                "fixed reconciliation/approval work, due selection and one pairing snapshot must not grow per watch"
             );
         }
     }

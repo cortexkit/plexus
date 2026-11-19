@@ -175,6 +175,7 @@ pub struct PollingCadences<'a> {
     relay_slow: bool,
     ci_quota_cadence_s: Option<i64>,
     github_connections: HashMap<String, HashSet<String>>,
+    relay_paired_subscriptions: HashMap<String, HashSet<String>>,
 }
 
 impl<'a> PollingCadences<'a> {
@@ -184,6 +185,7 @@ impl<'a> PollingCadences<'a> {
             relay_slow,
             ci_quota_cadence_s: None,
             github_connections: HashMap::new(),
+            relay_paired_subscriptions: HashMap::new(),
         }
     }
 
@@ -201,6 +203,25 @@ impl<'a> PollingCadences<'a> {
             0
         };
         let github_slow = if self.relay_slow {
+            if matches!(
+                subscription.action.as_str(),
+                "list_issues" | "list_pull_requests"
+            ) {
+                let paired = self.relay_paired_subscriptions
+                    .entry(subscription.principal.clone())
+                    .or_insert_with(|| {
+                        self.store.relay_paired_subscription_ids(&subscription.principal)
+                            .unwrap_or_else(|error| {
+                                eprintln!(warn scheduler: "relay cadence pairing read failed: {error}");
+                                HashSet::new()
+                            })
+                    });
+                return effective_cadence_s(
+                    subscription,
+                    ci_floor,
+                    paired.contains(&subscription.subscription_id),
+                );
+            }
             if !self
                 .github_connections
                 .contains_key(&subscription.principal)

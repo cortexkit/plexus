@@ -506,24 +506,43 @@ fn watch(conn: &rusqlite::Connection, repo: &str, action: &str) -> rusqlite::Res
             principal:r.get(0)?, connection:r.get(1)?, subscription:r.get(2)?, project:r.get(3)? })).optional()
 }
 
-fn paired_watches(conn: &Connection, repo: &str, action: &str) -> rusqlite::Result<Vec<Watch>> {
-    let counterpart = if action == "list_issues" {
-        "list_pull_requests"
-    } else {
-        "list_issues"
-    };
-    conn.prepare("SELECT s.principal,s.connection_id,s.subscription_id,s.project_id
+// The relay delivers to an issue or pull-request watch only when both active
+// GitHub watches share a repository, principal and project. The scheduler uses
+// the same eligibility to decide which watches can poll less frequently.
+const PAIRED_WATCHES: &str = "
         FROM trigger_subscriptions s JOIN connections c ON c.principal=s.principal AND c.connection_id=s.connection_id
-        WHERE s.status='active' AND c.status='active' AND c.app_key='github' AND s.action=?2
-        AND lower(json_extract(s.fixed_args,'$.owner') || '/' || json_extract(s.fixed_args,'$.repo'))=lower(?1)
+        WHERE s.status='active' AND c.status='active' AND c.app_key='github'
+        AND s.action IN ('list_issues','list_pull_requests')
         AND EXISTS (SELECT 1 FROM trigger_subscriptions p JOIN connections pc
             ON pc.principal=p.principal AND pc.connection_id=p.connection_id
             WHERE p.principal=s.principal AND p.project_id IS s.project_id AND p.status='active'
-            AND pc.status='active' AND pc.app_key='github' AND p.action=?3
-            AND lower(json_extract(p.fixed_args,'$.owner') || '/' || json_extract(p.fixed_args,'$.repo'))=lower(?1))
-        ORDER BY s.subscription_id")?
-        .query_map((repo, action, counterpart), |r| Ok(Watch {
+            AND pc.status='active' AND pc.app_key='github'
+            AND p.action=CASE s.action WHEN 'list_issues' THEN 'list_pull_requests' ELSE 'list_issues' END
+            AND lower(json_extract(p.fixed_args,'$.owner') || '/' || json_extract(p.fixed_args,'$.repo'))
+                = lower(json_extract(s.fixed_args,'$.owner') || '/' || json_extract(s.fixed_args,'$.repo')))";
+
+fn paired_watches(conn: &Connection, repo: &str, action: &str) -> rusqlite::Result<Vec<Watch>> {
+    conn.prepare(&format!("SELECT s.principal,s.connection_id,s.subscription_id,s.project_id
+        {PAIRED_WATCHES} AND s.action=?2
+        AND lower(json_extract(s.fixed_args,'$.owner') || '/' || json_extract(s.fixed_args,'$.repo'))=lower(?1)
+        ORDER BY s.subscription_id"))?
+        .query_map((repo, action), |r| Ok(Watch {
             principal:r.get(0)?, connection:r.get(1)?, subscription:r.get(2)?, project:r.get(3)? }))?.collect()
+}
+
+impl PlexusStore {
+    pub(crate) fn relay_paired_subscription_ids(
+        &self,
+        principal: &str,
+    ) -> Result<std::collections::HashSet<String>, StoreError> {
+        self.inner.with_read(|conn| {
+            conn.prepare(&format!(
+                "SELECT s.subscription_id {PAIRED_WATCHES} AND s.principal=?1"
+            ))?
+            .query_map([principal], |row| row.get(0))?
+            .collect()
+        })
+    }
 }
 
 /// The watch action whose polled inserts can prove the relay missed a delivery.
