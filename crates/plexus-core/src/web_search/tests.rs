@@ -649,3 +649,43 @@ fn credential_shaped_query_words_are_not_stored() {
         .unwrap()
         .contains(token));
 }
+
+#[test]
+fn embedded_credential_spans_are_redacted_in_search_audit() {
+    let (engine, transport, path) = granted_exa_engine_with_path("web-embedded-credentials");
+    let service =
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+            .with_stored_order_router_for_test();
+    transport.set_response(crate::MockResponse::Success(json!({"results": []})));
+    let canary = format!("{}{}", "ghp_", "w".repeat(36));
+    let query = format!(
+        "https://example.invalid/{canary}/help?token={canary}&mode=read token=\"{canary}\""
+    );
+    let args = json!({"query":query});
+    for caller in ["direct", "ungranted"] {
+        let result = service.search(&engine, caller, args.as_object().unwrap());
+        assert_eq!(result.is_ok(), caller == "direct");
+    }
+    let db = rusqlite::Connection::open(&*path).unwrap();
+    let rows = db
+        .prepare("SELECT query_text, args_redaction_summary, decision FROM audit_journal WHERE gate = 'web_search' ORDER BY journal_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for ((text, summary, decision), expected) in rows.into_iter().zip(["allow", "deny"]) {
+        assert_eq!(decision, expected);
+        assert!(
+            !text.contains(&canary),
+            "web search audit retained a credential span"
+        );
+        assert_eq!(text, "https://example.invalid/[redacted]/help?token=[redacted]&mode=read token=\"[redacted]\"");
+        let summary: Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(summary["query_redacted"], true);
+    }
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].args["query"].as_str() == Some(query.as_str()));
+}
