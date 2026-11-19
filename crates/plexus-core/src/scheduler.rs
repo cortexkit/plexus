@@ -699,6 +699,8 @@ where
                     let cycle = self
                         .poller
                         .poll_loaded(&principal, &subscription, Some(deadline));
+                    let lost_home = matches!(&cycle, PollCycle::Deferred { reason }
+                        if reason == crate::poller::CONNECTOR_HOME_NOT_HELD);
                     // A miss discovered by this poll releases the remaining
                     // watches from the slow floor in this same pass, without SQL.
                     if let Some(relay) = &self.relay_health {
@@ -710,6 +712,12 @@ where
                         subscription_id: subscription.subscription_id,
                         cycle,
                     });
+                    if lost_home {
+                        return PassReport {
+                            outcomes,
+                            selection_failures,
+                        };
+                    }
                 }
             }
         }
@@ -1281,6 +1289,56 @@ mod tests {
             .subscription("direct", subscription_id)
             .expect("read subscription")
             .expect("subscription exists")
+    }
+
+    #[test]
+    fn connector_home_loss_defers_the_watch_and_ends_the_pass() {
+        let (store, transport, engine) = scheduler_engine(json!({"items":[]}));
+        let mut ids = [subscribe(&store, 30), subscribe(&store, 30)];
+        ids.sort();
+        let initial = stored(&store, &ids[0]);
+        let engine =
+            engine.with_connector_home_guard(Arc::new(|| Some(json!({"state":"not_held"}))));
+        let scheduler = Scheduler::new(engine, 86_400_000);
+
+        let report = scheduler.run_pass_report(&principals(), now_ms());
+
+        let attempted = stored(&store, &ids[0]);
+        assert_eq!(
+            attempted.status, "active",
+            "loss of home must not suspend a watch"
+        );
+        assert_eq!(attempted.cursor_state, initial.cursor_state);
+        assert!(store.list_events("direct", None, None).unwrap().is_empty());
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].subscription_id, ids[0]);
+        assert_eq!(
+            report.outcomes[0].cycle,
+            PollCycle::Deferred {
+                reason: "connector_home_not_held".into()
+            }
+        );
+        assert!(stored(&store, &ids[1]).last_polled_at_ms.is_none());
+        assert!(transport.requests().is_empty());
+    }
+
+    #[test]
+    fn connector_home_suspension_can_be_resumed() {
+        let (store, _, _) = scheduler_engine(json!({"items":[]}));
+        let id = subscribe(&store, 30);
+        let initial = stored(&store, &id);
+        assert!(store
+            .suspend("direct", &id, "connector_home_not_held")
+            .unwrap());
+
+        let resumed = store
+            .resume("direct", &id)
+            .unwrap()
+            .expect("connector-home suspension is resumable");
+
+        assert_eq!(resumed.status, "active");
+        assert_eq!(resumed.cursor_state, initial.cursor_state);
+        assert!(resumed.suspended_reason.is_none());
     }
 
     #[test]
