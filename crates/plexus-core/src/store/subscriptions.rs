@@ -1351,6 +1351,7 @@ impl PlexusStore {
             }
             let resumable = subscription.suspended_reason.as_deref().is_some_and(|reason| {
                 reason == CIRCUIT_BREAKER_SUSPENSION_REASON
+                    || reason == crate::poller::CONNECTOR_HOME_NOT_HELD
                     || reason == "response_shape_invalid"
                     || reason.starts_with("response_shape_invalid:")
             });

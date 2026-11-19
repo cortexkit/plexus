@@ -2,6 +2,9 @@
 
 use super::*;
 
+const DUE_PENDING: &str = "next_attempt_at_ms<=:now";
+const EXPIRED_RESULTS: &str = "status!='pending' AND updated_at_ms < :cutoff";
+
 impl PlexusStore {
     /// Persist screened arguments only until the next terminal read-back. One day
     /// is a hard retention ceiling independent of mutable manifest timeouts.
@@ -47,14 +50,29 @@ impl PlexusStore {
         })
     }
 
+    pub(crate) fn write_reconciliation_work(
+        &self,
+        now: i64,
+        retention_window_ms: i64,
+    ) -> Result<(bool, bool), StoreError> {
+        self.inner.with_read(|conn| {
+            conn.prepare_cached(&format!("SELECT
+                EXISTS(SELECT 1 FROM pending_write_reconciliations WHERE {DUE_PENDING}),
+                EXISTS(SELECT 1 FROM write_reconciliation_results WHERE {EXPIRED_RESULTS})"))?
+                .query_row(rusqlite::named_params!{":now":now, ":cutoff":now.saturating_sub(retention_window_ms)}, |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+        })
+    }
+
     pub(crate) fn pending_write_reconciliations_at(
         &self,
         now: i64,
     ) -> Result<Vec<crate::reconciliation::PendingWriteReconciliation>, StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            let mut stmt = conn.prepare("SELECT principal,request_id,record_json,expires_at_ms FROM pending_write_reconciliations WHERE next_attempt_at_ms<=?1 ORDER BY expires_at_ms,principal,request_id LIMIT ?2")?;
+            let mut stmt = conn.prepare(&format!("SELECT principal,request_id,record_json,expires_at_ms FROM pending_write_reconciliations WHERE {DUE_PENDING} ORDER BY expires_at_ms,principal,request_id LIMIT :limit"))?;
             let rows = stmt
-                .query_map((now, RECONCILIATION_BATCH_ROWS), |row| {
+                .query_map(rusqlite::named_params!{":now":now, ":limit":RECONCILIATION_BATCH_ROWS}, |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -166,8 +184,75 @@ impl PlexusStore {
         now: i64,
         retention_window_ms: i64,
     ) -> Result<usize, StoreError> {
-        self.inner.with_conn_fenced(|conn| conn.execute("DELETE FROM write_reconciliation_results WHERE (principal,request_id) IN
-            (SELECT principal,request_id FROM write_reconciliation_results WHERE status!='pending' AND updated_at_ms < ?1 ORDER BY updated_at_ms LIMIT ?2)",
-            (now.saturating_sub(retention_window_ms), RECONCILIATION_BATCH_ROWS)))
+        self.inner.with_conn_fenced(|conn| conn.execute(&format!("DELETE FROM write_reconciliation_results WHERE (principal,request_id) IN
+            (SELECT principal,request_id FROM write_reconciliation_results WHERE {EXPIRED_RESULTS} ORDER BY updated_at_ms LIMIT :limit)"),
+            rusqlite::named_params!{":cutoff":now.saturating_sub(retention_window_ms), ":limit":RECONCILIATION_BATCH_ROWS}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn quiet_reconciliation_tick_takes_one_read_and_no_fenced_calls() {
+        let store = Arc::new(
+            PlexusStore::open(&StorageDescriptor {
+                module_id: "plexus".into(),
+                storage_namespace: "quiet-reconciliation-tick".into(),
+                isolation: cortexkit_store_types::Isolation::Module,
+                backend: StorageBackend::Sqlite {
+                    path: crate::test_scratch::store_path(),
+                },
+            })
+            .unwrap(),
+        );
+        let engine = crate::GovernanceEngine::new(
+            store.clone(),
+            Arc::new(crate::StubCredentialSource::default()),
+            Arc::new(crate::MockTransport::default()),
+        );
+        let now = now_ms();
+
+        let (total, fenced) = counted_store::count_calls_by_kind(|| {
+            assert_eq!(
+                engine
+                    .sweep_write_reconciliations(now, AUDIT_MILLIS_PER_DAY)
+                    .unwrap(),
+                0
+            );
+        });
+
+        assert_eq!((total, fenced), (1, 0), "store calls (total, fenced)");
+
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "INSERT INTO write_reconciliation_results
+                (principal,request_id,acting_principal,connection_id,action,status,updated_at_ms)
+                VALUES ('direct','fresh','direct','connection','write','confirmed',?1),
+                       ('direct','old','direct','connection','write','confirmed',?2)",
+                    (now, now - AUDIT_MILLIS_PER_DAY - 1),
+                )
+            })
+            .unwrap();
+        let (total, fenced) = counted_store::count_calls_by_kind(|| {
+            assert_eq!(
+                engine
+                    .sweep_write_reconciliations(now, AUDIT_MILLIS_PER_DAY)
+                    .unwrap(),
+                0
+            );
+        });
+        assert_eq!(
+            (total, fenced),
+            (2, 1),
+            "only result pruning needs the writer"
+        );
+        let (remaining, _) = store.list_write_reconciliations("direct").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].request_id, "fresh");
     }
 }

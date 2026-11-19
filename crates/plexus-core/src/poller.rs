@@ -1396,6 +1396,8 @@ pub(crate) fn strategy_for(
     }
 }
 
+pub(crate) const CONNECTOR_HOME_NOT_HELD: &str = "connector_home_not_held";
+
 /// The terminal state of one poll cycle. Callers (and tests) assert on this and
 /// on the stored subscription state; the two together prove each guard.
 #[derive(Debug, Clone, PartialEq)]
@@ -1403,8 +1405,8 @@ pub enum PollCycle {
     /// The vendor read completed and its events were committed atomically with
     /// the cursor advance.
     Completed { inserted: usize, duplicates: usize },
-    /// Quota admission refused before any dispatch or attempt stamp. The watch
-    /// remains due, with its cursor and vendor-failure streak untouched.
+    /// Quota, the pass budget, or loss of this machine's connector-home role
+    /// stopped the poll without advancing its cursor or growing its failure streak.
     Deferred { reason: String },
     /// The vendor returned a definitive failure (5xx, timeout, throttle). The
     /// vendor-failure streak was incremented; the cursor is untouched.
@@ -2534,10 +2536,17 @@ where
                     code: failure.code(),
                 }
             }
+            GovernedReadFailure::Denied(Denial::ConnectorHomeNotHeld { .. }) => {
+                PollCycle::Deferred {
+                    reason: CONNECTOR_HOME_NOT_HELD.into(),
+                }
+            }
             GovernedReadFailure::Denied(ref denial) => {
                 self.suspend(principal, subscription_id, denial.reason_code())
             }
-            GovernedReadFailure::NotSent { ref code, .. } if code == "poll_pass_budget" => {
+            GovernedReadFailure::NotSent { ref code, .. }
+                if matches!(code.as_str(), "poll_pass_budget" | CONNECTOR_HOME_NOT_HELD) =>
+            {
                 PollCycle::Deferred {
                     reason: code.clone(),
                 }

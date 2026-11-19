@@ -3498,6 +3498,45 @@ fn a_connector_home_trip_at_dispatch_abandons_and_audits_the_reservation() {
     assert!(engine.transport().requests().is_empty());
 }
 
+#[test]
+fn connector_home_loss_during_vault_read_keeps_approval_unconsumed() {
+    use std::sync::atomic::AtomicBool;
+
+    struct LoseHome(Arc<AtomicBool>);
+    impl CredentialSource for LoseHome {
+        fn get_by_id(&self, _: &str) -> Result<ResolvedCredential, CredentialError> {
+            self.0.store(false, Ordering::SeqCst);
+            Ok(ResolvedCredential::new(b"vendor-token".to_vec(), None, 1))
+        }
+    }
+
+    let (_path, seed_engine) = seed("lose-home-during-credential-resolution");
+    let action = "approved_write";
+    let args = json!({"team": "core"});
+    let id = park_and_approve(&seed_engine, action, &args);
+    let held = Arc::new(AtomicBool::new(true));
+    let engine = GovernanceEngine::new(
+        Arc::clone(seed_engine.store()),
+        Arc::new(LoseHome(held.clone())),
+        Arc::clone(seed_engine.transport()),
+    )
+    .with_connector_home_guard(Arc::new(move || {
+        (!held.load(Ordering::SeqCst)).then(|| json!({"state":"not_held"}))
+    }));
+    let reservation = engine
+        .authorize(AuthorizationRequest::new("direct", "conn-1", action, args).approved_from(&id))
+        .expect("reserve while home is held");
+
+    let outcome = engine.revalidate_and_dispatch(&reservation);
+
+    assert!(
+        matches!(&outcome.outcome, TransportOutcome::NotSent { code, .. } if code == "connector_home_not_held"),
+        "{outcome:?}"
+    );
+    assert!(engine.transport().requests().is_empty());
+    assert_eq!(approval_status(&seed_engine, &id), "approved");
+}
+
 /// An app whose reviewed tier cannot be established (no system manifest) is
 /// gated at the strongest tier, never the weakest. A write on it needs the
 /// decision plane, so with none configured it is refused and nothing is sent.

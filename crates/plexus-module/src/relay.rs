@@ -113,6 +113,8 @@ struct Snapshot {
     logged_slow: bool,
     reconcile_pending: bool,
     activity: Activity,
+    #[cfg(test)]
+    after_event_commit: Option<Box<dyn FnOnce() + Send>>,
 }
 
 #[derive(Default)]
@@ -138,6 +140,8 @@ impl Default for Status {
                 logged_slow: false,
                 reconcile_pending: false,
                 activity: Activity::default(),
+                #[cfg(test)]
+                after_event_commit: None,
             }),
             tokio::sync::Notify::new(),
         )
@@ -703,6 +707,15 @@ async fn consume<S: AsyncRead + AsyncWrite + Unpin>(
                         status.committed(outcome, event_type);
                         if overflow {
                             status.reset_clock("overflow");
+                        }
+                        #[cfg(test)]
+                        if let Some(after_commit) =
+                            status.0.lock().unwrap().after_event_commit.take()
+                        {
+                            after_commit();
+                        }
+                        if !home.held() {
+                            return Failure::NotHome;
                         }
                         // No ack can leave the socket until the fenced store transaction has committed.
                         if socket

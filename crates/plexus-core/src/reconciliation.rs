@@ -510,7 +510,14 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
         now_ms: i64,
         result_retention_window_ms: i64,
     ) -> Result<usize, cortexkit_store::StoreError> {
-        let pending = self.store().pending_write_reconciliations_at(now_ms)?;
+        let (due, expired_results) = self
+            .store()
+            .write_reconciliation_work(now_ms, result_retention_window_ms)?;
+        let pending = if due {
+            self.store().pending_write_reconciliations_at(now_ms)?
+        } else {
+            Vec::new()
+        };
         let count = pending.len().min(8);
         // Bound vendor work so a backlog cannot consume a whole poll pass.
         for pending in pending.into_iter().take(8) {
@@ -533,8 +540,10 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
                 }
             }
         }
-        self.store()
-            .prune_write_reconciliation_results(now_ms, result_retention_window_ms)?;
+        if expired_results {
+            self.store()
+                .prune_write_reconciliation_results(now_ms, result_retention_window_ms)?;
+        }
         Ok(count)
     }
 }

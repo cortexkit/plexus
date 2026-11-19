@@ -1872,30 +1872,8 @@ where
         reservation: &Reservation,
         run_deadline_ms: Option<u64>,
     ) -> DispatchOutcome {
-        if let Some(Denial::ConnectorHomeNotHeld { state }) = self.connector_home_denial() {
-            // Nothing is sent, so release the reservation (an approval behind
-            // it stays usable), record the refusal, and tell the decision
-            // plane the decision it authorized will not run.
-            self.abandon_unsent_reservation(reservation);
-            self.audit_dispatch_denial(reservation, "connector_home_not_held");
-            return self.maybe_report_decision_outcome(
-                reservation,
-                DispatchOutcome {
-                    retry_after_ms: None,
-                    error_signal: None,
-                    reservation_id: reservation.reservation_id.clone(),
-                    reconciliation: None,
-                    transmission: TransmissionState::NotSent,
-                    retryability: Retryability::Terminal,
-                    outcome: TransportOutcome::NotSent {
-                        code: "connector_home_not_held".into(),
-                        message: format!("connector home not held: {state}"),
-                    },
-                },
-                OutcomeTerminal::Refused {
-                    reason: "connector_home_not_held".to_string(),
-                },
-            );
+        if let Some(outcome) = self.check_dispatch_home(reservation, false) {
+            return outcome;
         }
         // Decision-authorized path: recompute grant_hash over args about to dispatch.
         if let (Some(decision_id), Some(expected_grant_hash)) =
@@ -1974,6 +1952,11 @@ where
             None
         };
         let claimed = if claimable {
+            // The vault or Gmail preparation can outlast this machine's hold
+            // on connector home. Recheck before the claim consumes approval.
+            if let Some(outcome) = self.check_dispatch_home(reservation, false) {
+                return outcome;
+            }
             match self.store.claim_reservation(
                 &reservation_record(reservation),
                 &reservation.request_id,
@@ -2131,6 +2114,14 @@ where
         if let Some(outcome) = self.revalidate_receipt_authority(reservation, &connection) {
             self.abandon_marked_transmit(reservation);
             return outcome;
+        }
+        // GitHub bot writes prepare their installation token after marking
+        // the write receipt, without consuming an approval. Clear that mark
+        // if this machine lost connector home before sending.
+        if reservation.receipt.is_some() && handle_authority.is_some() {
+            if let Some(outcome) = self.check_dispatch_home(reservation, true) {
+                return outcome;
+            }
         }
         // Preparing an installation token may outlast the run's deadline.
         // Reuse the run deadline from the daemon's earlier description.

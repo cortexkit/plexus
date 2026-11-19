@@ -1127,6 +1127,40 @@ async fn ack_only_after_commit_and_crash_redelivers() {
 }
 
 #[tokio::test]
+async fn losing_home_after_relay_commit_closes_without_acknowledging() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let (scratch, store, _) = fixture("relay-commit-home-loss");
+    let claim = Arc::new(Claim {
+        held: true.into(),
+        reads: 0.into(),
+    });
+    let home = Arc::new(ConnectorHome::new(claim.clone()));
+    home.refresh().unwrap();
+    let status = Status::default();
+    let refresh = home.clone();
+    status.0.lock().unwrap().after_event_commit = Some(Box::new(move || {
+        claim.held.store(false, SeqCst);
+        refresh.refresh().unwrap();
+    }));
+    let (socket, mut peer) = memory_sockets().await;
+    peer.send(Message::Text(hello().into())).await.unwrap();
+    peer.send(Message::Text(full_event().into())).await.unwrap();
+
+    let failure = bounded(consume(socket, store.clone(), &status, &home)).await;
+    assert!(matches!(failure, Failure::NotHome));
+    assert!(
+        !matches!(bounded(peer.next()).await, Some(Ok(Message::Text(_)))),
+        "the old home must not ack"
+    );
+    assert_eq!(
+        store.relay_cursor(SOURCE).unwrap().unwrap().committed_seq,
+        1
+    );
+    assert_eq!(count(&scratch, "event_outbox"), 1);
+}
+
+#[tokio::test]
 async fn webhook_and_polled_copy_share_one_outbox_row() {
     for poll_first in [true, false] {
         let (scratch, store, sub) = fixture("relay-dedup");
@@ -2699,6 +2733,41 @@ fn relay_polling_scheduler_slows_issue_pr_ci_but_not_releases() {
         scheduler.due_now(&principals, now).len(),
         3,
         "other providers must keep their cadence"
+    );
+}
+
+#[test]
+fn relay_polling_keeps_normal_cadence_without_a_same_project_counterpart() {
+    let (scratch, store, issue) = fixture("relay-slow-unpaired");
+    let status = Arc::new(Status::default());
+    status.set(State::Connected);
+    age_relay(&status, 3600);
+    let scheduler = relay_scheduler(&store, status);
+    let now = now_ms();
+    sql(
+        &scratch,
+        &format!(
+            "UPDATE trigger_subscriptions SET last_polled_at_ms={}",
+            now - 310_000
+        ),
+    );
+    let principals = ["direct".into()];
+    assert!(
+        scheduler.due_now(&principals, now).is_empty(),
+        "paired watches slow down"
+    );
+
+    sql(&scratch, "UPDATE trigger_subscriptions SET project_id='different-project' WHERE subscription_id='pr-watch'");
+
+    let due: std::collections::BTreeSet<_> = scheduler
+        .due_now(&principals, now)
+        .into_iter()
+        .map(|watch| watch.subscription_id)
+        .collect();
+    assert_eq!(
+        due,
+        [issue, "pr-watch".into()].into_iter().collect(),
+        "neither watch can receive relay events after the pair is split"
     );
 }
 
