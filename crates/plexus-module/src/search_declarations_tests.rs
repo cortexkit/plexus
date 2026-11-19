@@ -131,3 +131,36 @@ fn an_error_reply_is_a_failed_update() {
         .unwrap_err()
         .contains("invalid_request"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quiet_scheduler_ticks_do_not_reread_connections_for_declarations() {
+    let (store, _scratch) = store("quiet-search-declarations");
+    let (writer, outbound) = mpsc::channel::<Frame>(4);
+    let pending = Arc::new(PendingControlReplies::default());
+    let responder = daemon(outbound, pending.clone());
+    let declarations = Arc::new(SearchDeclarations::new(
+        writer,
+        subc_protocol::PROTOCOL_VERSION,
+        pending,
+    ));
+    let mut runtime = crate::runtime_for_test(store);
+    runtime.search_declarations = Some(declarations.clone());
+    let state = Arc::new(crate::ModuleState {
+        runtime,
+        health: Arc::new(crate::health::HealthState::new()),
+    });
+    let (shutdown, stop) = mpsc::channel(1);
+    let task = crate::test_support::spawn_test_scheduler(state.clone(), stop);
+    // The helper observes pass starts, so the next start proves the previous pass finished.
+    let ticked = crate::test_support::scheduler_passes(&state.health, 61).await;
+    drop(shutdown);
+    crate::background::stop_task("test scheduler", task, Duration::from_secs(5)).await;
+    assert!(ticked, "the scheduler must complete at least sixty passes");
+    assert_eq!(
+        declarations.connection_list_reads.load(Ordering::Relaxed),
+        1
+    );
+    drop(state);
+    drop(declarations);
+    assert_eq!(responder.join().unwrap().len(), 1);
+}

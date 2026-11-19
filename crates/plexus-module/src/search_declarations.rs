@@ -3,8 +3,8 @@
 //!
 //! Routing only chooses among search routes a module declares in its daemon
 //! catalog entry. HELLO declares every route in the provider table, because
-//! the store cannot be read before HELLO. After readiness, and on every
-//! scheduler pass after that, plexus works out which routed providers have a
+//! the store cannot be read before HELLO. After readiness, and on each
+//! minute's housekeeping pass after that, plexus works out which providers have a
 //! live connection and, when that set differs from what it last declared,
 //! replaces its declaration with `catalog.update_role_declarations` on its
 //! own daemon connection. Routing rereads the catalog about every 30 seconds,
@@ -39,6 +39,8 @@ pub struct SearchDeclarations {
     /// What health reports, kept apart from `declared` so a health answer
     /// never waits behind an update in flight.
     status: Mutex<DeclarationStatus>,
+    #[cfg(test)]
+    connection_list_reads: std::sync::atomic::AtomicUsize,
 }
 
 /// The routes the daemon catalog carries for plexus, and when plexus last
@@ -75,6 +77,8 @@ impl SearchDeclarations {
             declared: Mutex::new(DeclarationStatus::at_hello().routes),
             unrouted_logged: Mutex::new(BTreeSet::new()),
             status: Mutex::new(DeclarationStatus::at_hello()),
+            #[cfg(test)]
+            connection_list_reads: Default::default(),
         }
     }
 
@@ -90,6 +94,9 @@ impl SearchDeclarations {
     /// `principals`. Sends nothing when it already matches. A failed update
     /// is logged and retried on the next call.
     pub fn reconcile(&self, store: &PlexusStore, principals: &[String], search: &WebSearchService) {
+        #[cfg(test)]
+        self.connection_list_reads
+            .fetch_add(principals.len(), std::sync::atomic::Ordering::Relaxed);
         let (live, unrouted) = match routing::live_routes(store, principals) {
             Ok(found) => found,
             Err(error) => {
