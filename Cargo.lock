@@ -2123,7 +2123,7 @@ dependencies = [
  "chrono",
  "cortexkit-bus-client",
  "cortexkit-bus-inmemory",
- "cortexkit-bus-naming 0.4.0",
+ "cortexkit-bus-naming 0.5.5",
  "cortexkit-bus-nats",
  "cortexkit-bus-testkit",
  "cortexkit-bus-trait",
