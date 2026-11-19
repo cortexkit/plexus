@@ -680,6 +680,16 @@ impl PlexusStore {
         max_rows: usize,
         now: i64,
     ) -> Result<usize, StoreError> {
+        self.prune_all_events_until(max_age_ms, max_rows, now, || false)
+    }
+
+    pub(crate) fn prune_all_events_until(
+        &self,
+        max_age_ms: i64,
+        max_rows: usize,
+        now: i64,
+        stop_requested: impl Fn() -> bool,
+    ) -> Result<usize, StoreError> {
         // Hold the sweep cursor through commit: a failed transaction must not
         // advance past markers that still need repair.
         let mut orphan_after = self.orphan_sweep_after.lock().unwrap();
@@ -704,6 +714,9 @@ impl PlexusStore {
         })?;
         let mut removed = 0;
         for (principal, subscription) in watches {
+            if stop_requested() {
+                break;
+            }
             removed += self.inner.with_conn_fenced(|conn| {
                 prune_events(conn, &principal, &subscription, max_age_ms, max_rows, now)
             })?;
@@ -1680,6 +1693,30 @@ mod tests {
         assert_eq!(store.prune_all_events(0, 0, now).unwrap(), 0);
         assert_eq!(count(&store, "event_outbox"), 0);
         assert_eq!(store.event_outbox_health().unwrap().orphaned_markers, 1001);
+    }
+
+    #[test]
+    fn stop_between_watches_leaves_later_retention_transactions_unstarted() {
+        let store = store();
+        subscription(&store, "a", "ci_runs");
+        subscription(&store, "b", "ci_runs");
+        bulk_ci(&store, 2, 40 * AUDIT_MILLIS_PER_DAY, 0);
+        store.inner.with_conn_fenced(|conn| {
+            conn.execute("UPDATE trigger_events SET subscription_id='b', connection_id='b' WHERE event_id='row-0001'", [])
+        }).unwrap();
+        let checks = std::cell::Cell::new(0);
+
+        let removed = store
+            .prune_all_events_until(30 * AUDIT_MILLIS_PER_DAY, 1000, now_ms(), || {
+                let checked = checks.get();
+                checks.set(checked + 1);
+                checked > 0
+            })
+            .unwrap();
+
+        assert_eq!(removed, 1, "finish one watch but do not start the second");
+        assert_eq!(count(&store, "trigger_events"), 1);
+        assert_eq!(count(&store, "event_outbox"), 1);
     }
 
     #[test]

@@ -386,7 +386,7 @@ pub(super) fn spawn_trigger_scheduler_every(
                             .health
                             .stamp_scheduler_pass_duration(attempted, elapsed_ms);
                         if health_probe_due && !stopping.load(std::sync::atomic::Ordering::Relaxed) {
-                              run_health_probes_for(&state, &principals);
+                              run_health_probes_for(&state, &principals, || stopping.load(std::sync::atomic::Ordering::Relaxed));
                         }
                         if health_probe_due && !stopping.load(std::sync::atomic::Ordering::Relaxed) {
                               refresh_store_health(&state, &principals);
@@ -566,7 +566,11 @@ fn effective_ci_cadence_from_store(
     stored_cadence
 }
 
-pub(super) fn run_health_probes_for(state: &ModuleState, principals: &[String]) {
+pub(super) fn run_health_probes_for(
+    state: &ModuleState,
+    principals: &[String],
+    stop_requested: impl Fn() -> bool,
+) {
     let mut total = 0_u64;
     let mut degraded = 0_u64;
     for principal in principals {
@@ -599,6 +603,9 @@ pub(super) fn run_health_probes_for(state: &ModuleState, principals: &[String]) 
             // further status, so none is probed for recovery.
             if summary.status != "active" && summary.status != "degraded" {
                 continue;
+            }
+            if stop_requested() {
+                return;
             }
             total += 1;
             if summary.status == "degraded" {

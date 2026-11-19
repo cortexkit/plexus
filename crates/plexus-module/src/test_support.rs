@@ -275,7 +275,7 @@ pub(crate) fn facade_tool_reply(
 
 /// One health-probe pass over every principal the scheduler would probe.
 pub(crate) fn run_health_probes(state: &crate::ModuleState) {
-    crate::run_health_probes_for(state, &crate::health_probe_principals(state));
+    crate::run_health_probes_for(state, &crate::health_probe_principals(state), || false);
 }
 
 /// `with_call_tool_result_with_repo` for a reply that names no repository.

@@ -1,5 +1,51 @@
 use super::*;
 
+#[test]
+fn stop_between_probes_leaves_later_connections_unprobed() {
+    let store = Arc::new(crate::test_support::open_memory_store("probe-stop"));
+    let source = include_str!("../../../catalog/exa_rest.jsonc");
+    let normalized = subc_jsonc::jsonc_to_json(source).unwrap();
+    let manifest = plexus_core::ingest_value(serde_json::from_str(&normalized).unwrap()).unwrap();
+    store.upsert_manifest("system", &manifest).unwrap();
+    for id in ["first", "second"] {
+        store
+            .insert_connection("direct", id, &manifest.manifest.key, "pending", &json!({}))
+            .unwrap();
+        let ticket = store
+            .create_binding_ticket("direct", id, b"test:probe-stop-handle")
+            .unwrap();
+        store
+            .connect_with_ticket("direct", &ticket.ticket_id)
+            .unwrap()
+            .unwrap();
+        store
+            .set_connection_health("direct", id, "degraded", &json!({}))
+            .unwrap();
+    }
+    let state = ModuleState {
+        health: Arc::new(health::HealthState::new()),
+        runtime: runtime_for_test(Arc::clone(&store)),
+    };
+    let checks = std::cell::Cell::new(0);
+
+    run_health_probes_for(&state, &["direct".into()], || {
+        let checked = checks.get();
+        checks.set(checked + 1);
+        checked > 0
+    });
+
+    let rows = store.list_connections("direct").unwrap();
+    assert_eq!(
+        rows.iter().filter(|row| row.status == "active").count(),
+        1,
+        "finish one probe but do not start a second"
+    );
+    assert_eq!(
+        rows.iter().filter(|row| row.status == "degraded").count(),
+        1
+    );
+}
+
 /// The spawned scheduler must probe DEGRADED connections, not only active ones.
 ///
 /// This is the call-site half of the recovery fix. `clear_connection_degraded`

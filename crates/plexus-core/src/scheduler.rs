@@ -531,10 +531,11 @@ where
             if let Err(error) = self.store.prune_route_facts(now_ms) {
                 eprintln!(warn scheduler: "route fact retention failed: {error}");
             }
-            match self.store.prune_all_events(
+            match self.store.prune_all_events_until(
                 crate::poller::UNACKED_MAX_AGE_MS,
                 crate::poller::UNACKED_MAX_ROWS,
                 now_ms,
+                || self.stop_requested(),
             ) {
                 Ok(removed) if removed > 0 => {
                     eprintln!(info scheduler: "event retention pruned {removed} row(s)");
