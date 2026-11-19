@@ -52,17 +52,15 @@ impl Bucket {
     /// Refill for the time elapsed since the last update, capped at
     /// `capacity`. A capacity lowered by the operator takes effect at once.
     ///
-    /// The clock is the wall clock, which can step backwards (an NTP
-    /// correction, a manual change). A backward step refills nothing, and the
-    /// bucket re-anchors at the new time so refill resumes from there. Keeping
-    /// the later timestamp instead would freeze refill until real time caught
-    /// up with it, refusing every search for the length of the step.
+    /// A timestamp older than the last charge refills nothing. A delayed
+    /// caller can supply an old timestamp even if the wall clock never moved;
+    /// re-anchoring would let the next caller refill time already counted.
     fn refill(&mut self, capacity: u32, now_ms: i64) {
         self.capacity = capacity;
         let elapsed = now_ms.saturating_sub(self.updated_ms).max(0) as f64;
         let rate = f64::from(capacity) / WINDOW_MS;
         self.tokens = (self.tokens + elapsed * rate).min(f64::from(capacity));
-        self.updated_ms = now_ms;
+        self.updated_ms = self.updated_ms.max(now_ms);
     }
 
     /// Milliseconds until one whole token is available; zero when it is now.
@@ -268,7 +266,22 @@ mod tests {
     }
 
     #[test]
-    fn a_backward_clock_step_does_not_freeze_refill() {
+    fn a_delayed_refusal_cannot_refill_the_same_interval_twice() {
+        let limiter = RateLimiter::default();
+        let who = caller("direct", None);
+        let limits = limits(1, 1);
+        assert_eq!(limiter.try_acquire("exa", &who, limits, 0), Ok(()));
+        assert_eq!(limiter.try_acquire("exa", &who, limits, 60_000), Ok(()));
+        assert!(limiter.try_acquire("exa", &who, limits, 0).is_err());
+        assert_eq!(
+            limiter.try_acquire("exa", &who, limits, 60_000),
+            Err(60_000)
+        );
+        assert_eq!(limiter.try_acquire("exa", &who, limits, 120_000), Ok(()));
+    }
+
+    #[test]
+    fn a_backward_clock_step_cannot_refill_already_counted_time() {
         let limiter = RateLimiter::default();
         let one = caller("direct", None);
         let later = 10_000_000;
@@ -282,14 +295,15 @@ mod tests {
         assert!(limiter
             .try_acquire("exa", &one, limits(3, 100), stepped_back)
             .is_err());
-        // A third of a minute after the step one token has refilled, as it
-        // would have without the step.
-        assert!(
-            limiter
-                .try_acquire("exa", &one, limits(3, 100), stepped_back + 20_000)
-                .is_ok(),
-            "refill must resume from the stepped-back time"
-        );
+        assert!(limiter
+            .try_acquire("exa", &one, limits(3, 100), stepped_back + 20_000)
+            .is_err());
+        assert!(limiter
+            .try_acquire("exa", &one, limits(3, 100), later)
+            .is_err());
+        assert!(limiter
+            .try_acquire("exa", &one, limits(3, 100), later + 20_000)
+            .is_ok());
     }
 
     #[test]
