@@ -1127,6 +1127,40 @@ async fn ack_only_after_commit_and_crash_redelivers() {
 }
 
 #[tokio::test]
+async fn losing_home_after_relay_commit_closes_without_acknowledging() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let (scratch, store, _) = fixture("relay-commit-home-loss");
+    let claim = Arc::new(Claim {
+        held: true.into(),
+        reads: 0.into(),
+    });
+    let home = Arc::new(ConnectorHome::new(claim.clone()));
+    home.refresh().unwrap();
+    let status = Status::default();
+    let refresh = home.clone();
+    status.0.lock().unwrap().after_event_commit = Some(Box::new(move || {
+        claim.held.store(false, SeqCst);
+        refresh.refresh().unwrap();
+    }));
+    let (socket, mut peer) = memory_sockets().await;
+    peer.send(Message::Text(hello().into())).await.unwrap();
+    peer.send(Message::Text(full_event().into())).await.unwrap();
+
+    let failure = bounded(consume(socket, store.clone(), &status, &home)).await;
+    assert!(matches!(failure, Failure::NotHome));
+    assert!(
+        !matches!(bounded(peer.next()).await, Some(Ok(Message::Text(_)))),
+        "the old home must not ack"
+    );
+    assert_eq!(
+        store.relay_cursor(SOURCE).unwrap().unwrap().committed_seq,
+        1
+    );
+    assert_eq!(count(&scratch, "event_outbox"), 1);
+}
+
+#[tokio::test]
 async fn webhook_and_polled_copy_share_one_outbox_row() {
     for poll_first in [true, false] {
         let (scratch, store, sub) = fixture("relay-dedup");
