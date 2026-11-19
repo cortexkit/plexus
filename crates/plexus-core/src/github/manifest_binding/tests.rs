@@ -403,6 +403,7 @@ impl BindingCards for Cards {
 
 struct Credentials {
     calls: AtomicUsize,
+    fail_handle: Option<String>,
 }
 impl HandleCredentialProvider for Credentials {
     fn prepare(
@@ -414,6 +415,9 @@ impl HandleCredentialProvider for Credentials {
         assert_eq!(reference, format!("github_app:{id}"));
         assert_eq!(generation, 1);
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_handle.as_deref() == Some(id) {
+            return Err("fixture_credential_unavailable");
+        }
         Ok(ResolvedCredential::new(
             b"installation-token".to_vec(),
             None,
@@ -515,6 +519,7 @@ impl Fixture {
             cards: Cards::new(),
             credentials: Credentials {
                 calls: AtomicUsize::new(0),
+                fail_handle: None,
             },
             reader: Reader::new(),
             held,
@@ -1300,7 +1305,7 @@ fn bind_rechecks_installation_and_transaction_rolls_back_on_stale_progress() {
     f.notice();
     *f.vault.status.lock().unwrap() = sample("active_status.ready");
     *f.reader.pages.borrow_mut() = vec![listing(&[])];
-    assert!(f.pass().follow_ready(NOW).is_err());
+    f.pass().follow_ready(NOW).unwrap();
     assert!(!f.bound());
     let stale = f.record();
     f.store
@@ -1320,6 +1325,49 @@ fn bind_rechecks_installation_and_transaction_rolls_back_on_stale_progress() {
         .unwrap()
         .iter()
         .any(|a| a.reason_code == "github_manifest_bound"));
+}
+
+#[test]
+fn an_installation_or_bind_failure_does_not_block_later_ready_records() {
+    for installation_failure in [true, false] {
+        let mut f = Fixture::new();
+        f.discover();
+        f.notice();
+        let ready = f.record();
+        let mut earlier = handle();
+        earlier.app_handle_id = "aaa".into();
+        earlier.agent_id = "agent_5555555555555555".into();
+        earlier.credential_reference = "github_app:aaa".into();
+        earlier.connection_id = "earlier-handle-connection".into();
+        f.store
+            .insert_connection(
+                "direct",
+                &earlier.connection_id,
+                "github_rest",
+                "active",
+                &json!({}),
+            )
+            .unwrap();
+        f.store.put_github_handle(&earlier).unwrap();
+        let mut blocked = BindingRecord::observed(&earlier, "octo-owner/absent");
+        blocked.state = "awaiting_active".into();
+        blocked.manifest_version = ready.manifest_version;
+        blocked.manifest_sha256 = ready.manifest_sha256;
+        assert!(f
+            .store
+            .save_github_manifest_binding(&blocked, None)
+            .unwrap());
+        if installation_failure {
+            f.credentials.fail_handle = Some(earlier.app_handle_id.clone());
+        }
+        *f.vault.status.lock().unwrap() = sample("active_status.ready");
+        f.pass().follow_ready(NOW).unwrap();
+        assert!(f.bound());
+        assert_eq!(
+            f.record_for(&earlier, "octo-owner/absent").state,
+            "awaiting_active"
+        );
+    }
 }
 
 #[test]

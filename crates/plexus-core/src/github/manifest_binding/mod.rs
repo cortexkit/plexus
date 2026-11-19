@@ -86,6 +86,34 @@ pub struct ApprovalPass<'a> {
     pub progress: &'a mut Progress,
 }
 
+enum InstallationFailure {
+    ConnectorHome,
+    Store,
+    Repository(String),
+}
+
+impl InstallationFailure {
+    fn code(&self) -> &str {
+        match self {
+            Self::ConnectorHome => "connector_home_not_held",
+            Self::Store => "store_error",
+            Self::Repository(code) => code,
+        }
+    }
+}
+
+impl From<String> for InstallationFailure {
+    fn from(code: String) -> Self {
+        Self::Repository(code)
+    }
+}
+
+impl From<&str> for InstallationFailure {
+    fn from(code: &str) -> Self {
+        Self::Repository(code.into())
+    }
+}
+
 impl ApprovalPass<'_> {
     fn admitted(&self) -> bool {
         !self.progress.stopped && (self.held)()
@@ -175,9 +203,9 @@ impl ApprovalPass<'_> {
         &mut self,
         handle: &GithubHandle,
         now: i64,
-    ) -> Result<Option<Vec<String>>, String> {
+    ) -> Result<Option<Vec<String>>, InstallationFailure> {
         if !self.admitted() {
-            return Err("connector_home_not_held".into());
+            return Err(InstallationFailure::ConnectorHome);
         }
         let token = self.credentials.prepare(
             &handle.app_handle_id,
@@ -188,12 +216,12 @@ impl ApprovalPass<'_> {
         let mut total = None;
         for page in 1..=10 {
             if !self.admitted() {
-                return Err("connector_home_not_held".into());
+                return Err(InstallationFailure::ConnectorHome);
             }
             if !matches!(
                 self.store
                     .reserve_github_bot_read(&handle.app_handle_id, 1, now)
-                    .map_err(|_| "store_error")?,
+                    .map_err(|_| InstallationFailure::Store)?,
                 BotReadAdmission::Reserved
             ) {
                 return Err("bot_read_budget_exhausted".into());
@@ -277,8 +305,9 @@ impl ApprovalPass<'_> {
             let installation = match self.installation(&handle, now) {
                 Ok(Some(repositories)) => repositories,
                 Ok(None) => continue,
-                Err(code) => {
-                    self.log_once(format!("{}:{code}", handle.app_handle_id), &code);
+                Err(error) => {
+                    let code = error.code();
+                    self.log_once(format!("{}:{code}", handle.app_handle_id), code);
                     continue;
                 }
             };
@@ -575,6 +604,9 @@ impl ApprovalPass<'_> {
             .github_manifest_bindings()
             .map_err(|_| "store_error")?
         {
+            if !self.admitted() {
+                break;
+            }
             if !record.present || record.state != "awaiting_active" {
                 continue;
             }
@@ -594,15 +626,37 @@ impl ApprovalPass<'_> {
             };
             match self.call::<ActiveStatus>("manifest.active_status", json!({"version":version})) {
                 Ok(status) if status.ready_for(version, hash) => {
-                    let Some(installation) = self.installation(handle, now)? else {
-                        continue;
+                    let installation = match self.installation(handle, now) {
+                        Ok(Some(installation)) => installation,
+                        Ok(None) => continue,
+                        Err(InstallationFailure::Repository(code)) if self.admitted() => {
+                            self.log_once(
+                                format!(
+                                    "ready-installation:{}:{}:{code}",
+                                    record.app_handle_id, record.repository
+                                ),
+                                &code,
+                            );
+                            continue;
+                        }
+                        Err(error) => return Err(error.code().into()),
                     };
                     if !self.admitted() {
                         break;
                     }
-                    self.store
+                    if let Err(code) = self
+                        .store
                         .bind_github_manifest_repository(&record, installation)
-                        .map_err(|_| "store_error")??;
+                        .map_err(|_| "store_error")?
+                    {
+                        self.log_once(
+                            format!(
+                                "ready-bind:{}:{}:{code}",
+                                record.app_handle_id, record.repository
+                            ),
+                            &code,
+                        );
+                    }
                 }
                 Ok(_) => {}
                 Err(failure) => self.failure(failure, None, now)?,
