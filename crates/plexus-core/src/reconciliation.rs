@@ -481,6 +481,9 @@ pub(crate) struct PendingWriteReconciliation {
     pub expires_at_ms: i64,
 }
 
+/// Most unknown-write records one sweep reads back or settles.
+pub(crate) const RECONCILIATIONS_PER_SWEEP: usize = 8;
+
 impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T> {
     pub(crate) fn queue_unknown_write(
         &self,
@@ -568,10 +571,13 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
         now_ms: i64,
         result_retention_window_ms: i64,
     ) -> Result<usize, cortexkit_store::StoreError> {
-        let pending = self.store().pending_write_reconciliations_at(now_ms)?;
-        let count = pending.len().min(8);
-        // Bound vendor work so a backlog cannot consume a whole poll pass.
-        for pending in pending.into_iter().take(8) {
+        // Bound vendor work so a backlog cannot consume a whole poll pass, and
+        // load only the records this tick will process.
+        let pending = self
+            .store()
+            .pending_write_reconciliations_at(now_ms, RECONCILIATIONS_PER_SWEEP)?;
+        let count = pending.len();
+        for pending in pending {
             let result = if now_ms >= pending.expires_at_ms {
                 self.finish_reconcile(
                     &pending.record,
