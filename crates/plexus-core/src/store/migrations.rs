@@ -1160,8 +1160,9 @@ CREATE INDEX route_fact_outbox_age ON route_fact_outbox(created_at_ms, msg_id);
     },
     // Keep the old identity's grants for rollback binaries without bumping
     // grant or connection generations or writing audit/revocation records.
-    // At rollout the live journal had no prefrontal revocations, so migrating
-    // before journal replay cannot clone an already-revoked old grant.
+    // Opening a restored older database runs this before journal replay, so
+    // `PlexusStore::open` revokes the copies of grants the journal had already
+    // revoked.
     // Deterministic copy ids let later journal entries remove those same
     // copies after a backup restore.
     Migration {
@@ -1192,6 +1193,37 @@ WHERE old.grantee_principal = 'reserved:prefrontal-core'
         AND new.authority_kind = old.authority_kind
         AND new.action_selectors = old.action_selectors
   );
+"#;
+
+/// The id `PREFRONTAL_GRANT_BACKFILL` would give its copy of one grant, named
+/// by owner (?1) and grant id (?2). No row means the backfill would copy
+/// nothing for that grant: it is absent or not held by the legacy identity, a
+/// matching renamed grant already exists, or another row already holds the
+/// copy's id. These conditions repeat the backfill's own, so this answer is
+/// exact only when read before the backfill runs.
+pub(crate) const PREFRONTAL_GRANT_COPY_ID: &str = r#"
+SELECT candidate.copy_id FROM (
+    SELECT old.principal AS principal,
+           CASE WHEN old.grant_id GLOB 'github-import:*:prefrontal'
+                THEN substr(old.grant_id, 1, length(old.grant_id) - length('prefrontal')) || 'reserved-prefrontal'
+                ELSE old.grant_id || '-reserved-prefrontal' END AS copy_id
+    FROM grants old
+    WHERE old.principal = ?1
+      AND old.grant_id = ?2
+      AND old.grantee_principal = 'reserved:prefrontal-core'
+      AND NOT EXISTS (
+          SELECT 1 FROM grants new
+          WHERE new.principal = old.principal
+            AND new.connection_id = old.connection_id
+            AND new.grantee_principal = 'reserved:prefrontal'
+            AND new.authority_kind = old.authority_kind
+            AND new.action_selectors = old.action_selectors
+      )
+) candidate
+WHERE NOT EXISTS (
+    SELECT 1 FROM grants taken
+    WHERE taken.principal = candidate.principal AND taken.grant_id = candidate.copy_id
+);
 "#;
 
 /// The backfill half of migration 48, shared with the store import so a store
