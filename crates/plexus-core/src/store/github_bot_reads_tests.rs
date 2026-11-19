@@ -1,5 +1,25 @@
 use super::*;
 
+thread_local! {
+    pub(super) static ORDERED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[test]
+fn admitted_reads_do_not_materialize_ordered_ledger_rows() {
+    let store = store("bot-read-admitted-work");
+    let now = 10_000;
+    assert_eq!(
+        store.reserve_github_bot_read("bot", 1, now).unwrap(),
+        BotReadAdmission::Reserved
+    );
+    ORDERED_ROWS.with(|rows| rows.set(0));
+    assert_eq!(
+        store.reserve_github_bot_read("bot", 1, now + 1).unwrap(),
+        BotReadAdmission::Reserved
+    );
+    assert_eq!(ORDERED_ROWS.with(std::cell::Cell::get), 0);
+}
+
 /// A fresh scratch-backed store with a test-specific namespace.
 fn store(namespace: &str) -> PlexusStore {
     PlexusStore::open(&cortexkit_store_types::StorageDescriptor {

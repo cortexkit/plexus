@@ -45,6 +45,12 @@ pub struct BotRateLimit {
     pub reset_at_ms: i64,
 }
 
+fn ordered_ledger_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, i64)> {
+    #[cfg(test)]
+    tests::ORDERED_ROWS.with(|rows| rows.set(rows.get() + 1));
+    Ok((row.get(0)?, row.get(1)?))
+}
+
 impl PlexusStore {
     /// Reserve `units` read requests for `app_handle_id` at `now`, or say how
     /// long to wait. One unit is one HTTP request: each page, and the storage
@@ -80,23 +86,25 @@ impl PlexusStore {
                     });
                 }
             }
-            let mut statement = conn.prepare(
-                "SELECT reserved_at_ms, units FROM github_bot_read_ledger
-                 WHERE app_handle_id = ?1 AND reserved_at_ms > ?2
-                 ORDER BY reserved_at_ms",
+            let used: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(units), 0) FROM github_bot_read_ledger
+                 WHERE app_handle_id = ?1 AND reserved_at_ms > ?2",
+                (app_handle_id, window_start),
+                |row| row.get(0),
             )?;
-            let entries: Vec<(i64, i64)> = statement
-                .query_map((app_handle_id, window_start), |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            let used: i64 = entries.iter().map(|(_, units)| units).sum();
             if used + units > BOT_READ_HOURLY_CAP {
                 // The earliest moment enough old entries leave the window for
                 // this reservation to fit.
+                let mut statement = conn.prepare(
+                    "SELECT reserved_at_ms, units FROM github_bot_read_ledger
+                     WHERE app_handle_id = ?1 AND reserved_at_ms > ?2
+                     ORDER BY reserved_at_ms",
+                )?;
+                let entries = statement.query_map((app_handle_id, window_start), ordered_ledger_entry)?;
                 let mut freed = 0;
                 let mut retry_at = now + BOT_READ_WINDOW_MS;
-                for (reserved_at, entry_units) in &entries {
+                for entry in entries {
+                    let (reserved_at, entry_units) = entry?;
                     freed += entry_units;
                     if used - freed + units <= BOT_READ_HOURLY_CAP {
                         retry_at = reserved_at + BOT_READ_WINDOW_MS;
