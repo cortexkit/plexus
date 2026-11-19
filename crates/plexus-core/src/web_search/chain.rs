@@ -8,7 +8,8 @@ use crate::storage::web_search_store::{
 };
 use crate::transport::TransmissionState;
 use std::sync::atomic::Ordering as AtomicOrdering;
-use std::time::Duration;
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 mod outcome;
 
@@ -16,6 +17,30 @@ mod outcome;
 pub const WEB_SEARCH_CHAIN_DEADLINE: Duration = Duration::from_secs(120);
 /// One vault read (30 s), vendor request (30 s), and maximum throttle wait (5 s).
 pub const WEB_SEARCH_ATTEMPT_BOUND: Duration = Duration::from_secs(65);
+const DESCRIBE_RETRY_MS: i64 = 5_000;
+
+#[derive(Default)]
+pub(super) struct RoutingDescribe {
+    state: Mutex<DescribeState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct DescribeState {
+    cached: Option<(i64, routing::DescribeFacts)>,
+    failed: Option<(i64, String)>,
+    refreshing: bool,
+}
+
+struct DescribeRefresh<'a>(&'a RoutingDescribe);
+
+impl Drop for DescribeRefresh<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.refreshing = false;
+        self.0.ready.notify_all();
+    }
+}
 
 /// The closed vocabulary shared by chain refusals and skip auditing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -268,33 +293,64 @@ impl WebSearchService {
         peer: &dyn RoutingPeer,
         timeout: Duration,
     ) -> Result<routing::DescribeFacts, String> {
+        let deadline = Instant::now() + timeout;
+        let describe = &self.routing_describe;
+        let mut state = describe.state.lock().unwrap_or_else(|err| err.into_inner());
+        let (remaining, stale) = loop {
+            let now = (self.clock)();
+            let stale = state.cached.map(|(_, facts)| facts);
+            if let Some((_, facts)) = state.cached.filter(|(until, _)| *until > now) {
+                return Ok(facts);
+            }
+            if let Some((_, why)) = state.failed.as_ref().filter(|(until, _)| *until > now) {
+                return stale.ok_or_else(|| why.clone());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return stale.ok_or_else(|| "timed out waiting for routing description".into());
+            }
+            if !state.refreshing {
+                state.refreshing = true;
+                break (remaining, stale);
+            }
+            if let Some(facts) = stale {
+                return Ok(facts);
+            }
+            (state, _) = describe
+                .ready
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|err| err.into_inner());
+        };
+        drop(state);
+        let _refresh = DescribeRefresh(describe);
+        let reply = peer.call("role.describe", json!({}), None, remaining);
+        let reachable = !matches!(reply, Err(routing::RoutingCallError::Unreachable(_)));
+        let result = routing::read_describe_reply(reply);
         let now = (self.clock)();
-        let mut cached = self
-            .routing_describe
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some((until, facts)) = *cached {
-            if until > now {
-                return Ok(facts);
+        let mut state = describe.state.lock().unwrap_or_else(|err| err.into_inner());
+        match result {
+            Ok(facts) => {
+                state.cached = Some((now.saturating_add(routing::DESCRIBE_TTL_MS), facts));
+                state.failed = None;
+                Ok(facts)
+            }
+            Err(why) => {
+                if reachable {
+                    state.cached = None;
+                }
+                state.failed = Some((now.saturating_add(DESCRIBE_RETRY_MS), why.clone()));
+                stale.filter(|_| !reachable).ok_or(why)
             }
         }
-        let reply = peer.call("role.describe", json!({}), None, timeout);
-        if matches!(reply, Err(routing::RoutingCallError::Unreachable(_))) {
-            if let Some((_, facts)) = *cached {
-                return Ok(facts);
-            }
-        }
-        let facts = routing::read_describe_reply(reply)?;
-        *cached = Some((now.saturating_add(routing::DESCRIBE_TTL_MS), facts));
-        Ok(facts)
     }
 
     fn expire_routing_facts(&self) {
-        let mut cached = self
+        let mut state = self
             .routing_describe
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some((until, _)) = cached.as_mut() {
+        if let Some((until, _)) = state.cached.as_mut() {
             *until = i64::MIN;
         }
     }

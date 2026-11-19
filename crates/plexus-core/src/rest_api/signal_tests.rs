@@ -8,6 +8,16 @@ fn dispatch(
     headers: &str,
     body: &str,
 ) -> TransportResponse {
+    dispatch_with_content_length(manifest, status, headers, body, body.len())
+}
+
+fn dispatch_with_content_length(
+    manifest: &crate::manifest::AppManifest,
+    status: u16,
+    headers: &str,
+    body: &str,
+    content_length: usize,
+) -> TransportResponse {
     let headers = headers.to_owned();
     let body = body.to_owned();
     let (endpoint, server) = crate::test_http::FixedRequestServer::start_with_deadline(
@@ -15,7 +25,7 @@ fn dispatch(
         "rest-signals",
         Duration::from_secs(30),
         move |_, _| {
-            format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())
+            format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{headers}Content-Length: {content_length}\r\nConnection: close\r\n\r\n{body}")
         },
     );
     let mut config = RestConfig::from_manifest(manifest);
@@ -61,6 +71,23 @@ fn brave_monthly_header_distinguishes_quota_from_short_throttle() {
         );
         assert!(result.response.is_none());
     }
+}
+
+#[test]
+fn brave_throttle_and_quota_header_survive_an_incomplete_body() {
+    let brave = ingest_value(catalog_fixture("brave_rest.jsonc"))
+        .unwrap()
+        .manifest;
+    let reply = dispatch_with_content_length(
+        &brave,
+        429,
+        "X-RateLimit-Remaining: 1, 0\r\nRetry-After: 30\r\n",
+        "{",
+        100,
+    );
+    assert_eq!(reply.error_signal, Some(ErrorSignal::QuotaExhausted));
+    assert_eq!(reply.retry_after_ms, Some(30_000));
+    assert_eq!(reply.error_code.as_deref(), Some("throttled"));
 }
 
 #[test]

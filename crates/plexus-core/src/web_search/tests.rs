@@ -649,3 +649,70 @@ fn credential_shaped_query_words_are_not_stored() {
         .unwrap()
         .contains(token));
 }
+
+#[test]
+fn embedded_credential_spans_are_redacted_in_search_audit() {
+    let (engine, transport, path) = granted_exa_engine_with_path("web-embedded-credentials");
+    let service =
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+            .with_stored_order_router_for_test();
+    transport.set_response(crate::MockResponse::Success(json!({"results": []})));
+    let canary = format!("{}{}", "ghp_", "w".repeat(36));
+    let query = format!(
+        "https://example.invalid/{canary}/help?token={canary}&mode=read token=\"{canary}\" ref_{canary}"
+    );
+    let args = json!({"query":query});
+    for caller in ["direct", "ungranted"] {
+        let result = service.search(&engine, caller, args.as_object().unwrap());
+        assert_eq!(result.is_ok(), caller == "direct");
+    }
+    let db = rusqlite::Connection::open(&*path).unwrap();
+    let rows = db
+        .prepare("SELECT query_text, args_redaction_summary, decision FROM audit_journal WHERE gate = 'web_search' ORDER BY journal_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for ((text, summary, decision), expected) in rows.into_iter().zip(["allow", "deny"]) {
+        assert_eq!(decision, expected);
+        assert!(
+            !text.contains(&canary),
+            "web search audit retained a credential span"
+        );
+        assert_eq!(text, "https://example.invalid/[redacted]/help?token=[redacted]&mode=read token=\"[redacted]\" ref_[redacted]");
+        let summary: Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(summary["query_redacted"], true);
+    }
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].args["query"].as_str() == Some(query.as_str()));
+}
+
+#[test]
+fn ordinary_hyphenated_words_are_not_redacted_in_search_audit() {
+    let (engine, transport, path) = granted_exa_engine_with_path("web-ordinary-hyphenated-words");
+    let service =
+        WebSearchService::with_clock(Arc::new(ExaRestBackend), Arc::new(|| 1_790_000_000_000))
+            .with_stored_order_router_for_test();
+    transport.set_response(crate::MockResponse::Success(json!({"results": []})));
+    let query = "risk-assessment-matrix task-scheduler-config desk-reservation-system disk-utilization-metrics";
+    let args = json!({"query": query});
+    service
+        .search(&engine, "direct", args.as_object().unwrap())
+        .unwrap();
+
+    let db = rusqlite::Connection::open(&*path).unwrap();
+    let (stored, summary): (String, String) = db
+        .query_row(
+            "SELECT query_text, args_redaction_summary FROM audit_journal WHERE gate = 'web_search'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, query);
+    let summary: Value = serde_json::from_str(&summary).unwrap();
+    // An absent redaction flag is the journal's existing representation of false.
+    assert!(!summary["query_redacted"].as_bool().unwrap_or(false));
+}

@@ -254,6 +254,45 @@ impl PlexusStore {
         })
     }
 
+    /// Registration is keyed by bare id. Pending connections count because
+    /// connect-time discovery registers a transport before activation.
+    pub(crate) fn other_transport_owner(
+        &self,
+        principal: &str,
+        connection_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.inner.with_read(|conn| {
+            conn.query_row(
+                "SELECT principal FROM connections
+                 WHERE connection_id = ?2 AND principal <> ?1
+                   AND status IN ('pending', 'active', 'degraded') LIMIT 1",
+                (principal, connection_id),
+                |row| row.get(0),
+            )
+            .optional()
+        })
+    }
+
+    pub(crate) fn connection_for_dispatch(
+        &self,
+        principal: &str,
+        connection_id: &str,
+    ) -> Result<Option<(ConnectionRecord, bool)>, StoreError> {
+        self.inner.with_read(|conn| {
+            conn.query_row(
+                "SELECT connection_id, principal, app_key, status, resource_filters,
+                        health_state, generation, credential_binding IS NOT NULL, instance_url,
+                        EXISTS(SELECT 1 FROM connections
+                               WHERE connection_id = ?2 AND principal <> ?1
+                                 AND status IN ('pending', 'active', 'degraded'))
+                 FROM connections WHERE principal = ?1 AND connection_id = ?2",
+                (principal, connection_id),
+                |row| Ok((map_connection_row(row)?, row.get(9)?)),
+            )
+            .optional()
+        })
+    }
+
     /// Resolve an invoke-visible connection without conferring invoke authority.
     ///
     /// Owned rows remain the fast path. A caller that owns no such row may see an

@@ -669,3 +669,45 @@ fn credential_shaped_query_words_are_not_stored() {
         "no search row may hold the token"
     );
 }
+
+#[test]
+fn embedded_credential_spans_are_redacted_in_search_audit() {
+    let f = Fixture::new();
+    f.grant("direct");
+    let canary = format!("{}{}", "ghp_", "a".repeat(36));
+    let query = format!("https://example.invalid/{canary}/check?token={canary}&mode=read");
+    let args = json!({"query": query, "path": format!("token={canary}")});
+    for caller in ["direct", "ungranted"] {
+        let result =
+            f.service
+                .search_scoped(&f.engine, caller, args.as_object().unwrap(), None, None);
+        assert_eq!(result.is_ok(), caller == "direct");
+    }
+    let db = rusqlite::Connection::open(f.path.path()).unwrap();
+    let rows = db
+        .prepare("SELECT query_text, args_redaction_summary, decision FROM audit_journal WHERE gate = 'code_search' ORDER BY journal_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for ((text, summary, decision), expected) in rows.into_iter().zip(["allow", "deny"]) {
+        assert_eq!(decision, expected);
+        assert!(
+            !text.contains(&canary),
+            "code search audit retained a credential span"
+        );
+        assert_eq!(
+            text,
+            "https://example.invalid/[redacted]/check?token=[redacted]&mode=read"
+        );
+        let summary: Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(summary["query_redacted"], true);
+        assert_eq!(summary["filters_redacted"], true);
+        assert_eq!(summary["filters"]["path"], "token=[redacted]");
+    }
+    let requests = f.transport.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].args["query"].as_str() == Some(query.as_str()));
+}

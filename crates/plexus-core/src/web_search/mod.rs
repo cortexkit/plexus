@@ -248,7 +248,7 @@ pub struct WebSearchService {
     router: Option<Arc<dyn routing::RoutingPeer>>,
     /// The last `role.describe` answer that served search, with the clock
     /// time until which it is trusted.
-    routing_describe: std::sync::Mutex<Option<(i64, routing::DescribeFacts)>>,
+    routing_describe: chain::RoutingDescribe,
     route_fact_publisher: Option<Arc<dyn routing::RouteFactPublisher>>,
     /// When plexus last added a route to its routing declaration, on this
     /// service's clock; see [`routing::DECLARATION_GRACE_MS`].

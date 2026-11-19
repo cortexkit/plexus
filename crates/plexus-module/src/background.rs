@@ -391,10 +391,9 @@ pub(super) fn spawn_trigger_scheduler_every(
                         if health_probe_due && !stopping.load(std::sync::atomic::Ordering::Relaxed) {
                               refresh_store_health(&state, &principals);
                         }
-                        // Every pass, so a provider connected or removed since
-                        // the last one reaches routing's declaration promptly.
-                        // Nothing is sent while the declaration already matches.
-                        if !stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                        // Rebuilding the declaration reads every owner's connections.
+                        // Do it on the housekeeping tick, not every poll tick.
+                        if sweep_due && !stopping.load(std::sync::atomic::Ordering::Relaxed) {
                             if let Some(declarations) = &state.runtime.search_declarations {
                                 declarations.reconcile(state.store(), &principals, &state.runtime.web_search);
                             }

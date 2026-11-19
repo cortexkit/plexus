@@ -125,6 +125,40 @@ fn internal_calls_refuse_recursive_credential_material() {
 }
 
 #[test]
+fn shared_transport_id_refuses_before_authorization_or_dispatch_reads_the_vault() {
+    let engine = ordinary_test_engine();
+    let reservation = engine.authorize(ordinary_request()).unwrap();
+    engine
+        .store()
+        .insert_connection(
+            "older-owner",
+            "connection",
+            "mock",
+            "active",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+    engine.credential_source().set_default_response(
+        crate::credentials::StubCredentialResponse::Error(
+            crate::credentials::CredentialError::Permanent(
+                crate::credentials::PermanentCredentialError::NotFound,
+            ),
+        ),
+    );
+
+    assert_eq!(
+        engine.authorize(ordinary_request()),
+        Err(Denial::Connection(ConnectionDenial::Unhealthy))
+    );
+    let dispatch = engine.revalidate_and_dispatch(&reservation);
+    assert_eq!(dispatch.transmission, TransmissionState::NotSent);
+    assert!(
+        matches!(dispatch.outcome, TransportOutcome::NotSent { code, .. } if code == "aborted_stale_authorization")
+    );
+    assert!(engine.transport().requests().is_empty());
+}
+
+#[test]
 fn decision_and_dispatch_audit_use_effective_severity() {
     let engine = ordinary_test_engine();
     let reservation = engine.authorize(ordinary_request()).unwrap();

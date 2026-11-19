@@ -192,6 +192,99 @@ fn missing_publisher_and_failed_insert_keep_reports_call_only() {
 }
 
 #[test]
+fn failed_routing_describe_is_shared_until_retry_is_due() {
+    let router = router(&["exa"]);
+    router.set_mode(FakeMode::Unreachable);
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let service = routed_service(&router, &clock);
+    for at in [NOW, NOW + 4_999] {
+        clock.store(at, Ordering::SeqCst);
+        assert!(service
+            .routing_facts(router.as_ref(), Duration::from_secs(1))
+            .is_err());
+    }
+    assert_eq!(
+        router.params("role.describe").len(),
+        1,
+        "the second call must reuse the failed refresh"
+    );
+    router.set_mode(FakeMode::Serve);
+    clock.store(NOW + 5_000, Ordering::SeqCst);
+    assert!(service
+        .routing_facts(router.as_ref(), Duration::from_secs(1))
+        .is_ok());
+    assert_eq!(router.params("role.describe").len(), 2);
+}
+
+#[test]
+fn in_flight_describe_does_not_block_stale_reads_or_overrun_a_cold_wait() {
+    use std::sync::mpsc;
+    use std::sync::Mutex;
+
+    struct GatedDescribe {
+        started: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl routing::RoutingPeer for GatedDescribe {
+        fn call(
+            &self,
+            method: &str,
+            _: Value,
+            _: Option<&crate::scope::CallScope>,
+            _: Duration,
+        ) -> Result<Value, routing::RoutingCallError> {
+            assert_eq!(method, "role.describe");
+            self.started.send(()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap();
+            Ok(json!({"result": FakeRouter::serving_search_describe()}))
+        }
+    }
+
+    for seed_stale in [false, true] {
+        let router = router(&["exa"]);
+        let clock = Arc::new(AtomicI64::new(NOW));
+        let service = routed_service(&router, &clock);
+        if seed_stale {
+            service
+                .routing_facts(router.as_ref(), Duration::from_secs(1))
+                .unwrap();
+            clock.store(NOW + routing::DESCRIBE_TTL_MS, Ordering::SeqCst);
+        }
+        let (started, arrived) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let gated = GatedDescribe {
+            started,
+            release: Mutex::new(released),
+        };
+        std::thread::scope(|threads| {
+            let refresh = threads.spawn(|| service.routing_facts(&gated, Duration::from_secs(3)));
+            arrived.recv_timeout(Duration::from_secs(2)).unwrap();
+            let (done, answer) = mpsc::channel();
+            let service = &service;
+            let gated = &gated;
+            threads.spawn(move || {
+                let result = service.routing_facts(gated, Duration::from_millis(30));
+                let _ = done.send(result);
+            });
+            let concurrent = answer.recv_timeout(Duration::from_secs(2));
+            release.send(()).unwrap();
+            assert!(refresh.join().unwrap().is_ok());
+            let concurrent = concurrent.expect("a concurrent search must not wait for the peer");
+            assert_eq!(concurrent.is_ok(), seed_stale);
+            assert!(
+                arrived.try_recv().is_err(),
+                "only one refresh should enter the peer"
+            );
+        });
+    }
+}
+
+#[test]
 fn unreachable_describe_preserves_last_stream_advertisement() {
     let router = router(&["exa"]);
     let mut describe = FakeRouter::serving_search_describe();

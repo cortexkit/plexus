@@ -185,10 +185,9 @@ fn key_words(key: &str) -> Vec<String> {
     words
 }
 
-/// `text` with each whitespace-separated word that has the shape of a known
-/// credential format replaced by `[redacted]`, and whether any was. The
-/// whitespace between words is kept as it was. Used where free text a caller
-/// wrote is stored, such as a search query in the audit journal.
+/// Redact credential-shaped words before storing caller text. Also redact
+/// credentials with recognized prefixes inside larger words, without losing
+/// surrounding text such as the field names and delimiters in a pasted URL.
 pub(crate) fn redact_secret_shaped_words(text: &str) -> (String, bool) {
     let mut redacted = String::with_capacity(text.len());
     let mut any = false;
@@ -201,39 +200,86 @@ pub(crate) fn redact_secret_shaped_words(text: &str) -> (String, bool) {
         rest = &rest[word_start..];
         let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
         let word = &rest[..word_end];
-        if looks_like_secret(word) {
-            redacted.push_str("[redacted]");
-            any = true;
-        } else {
-            redacted.push_str(word);
-        }
+        any |= redact_word(word, &mut redacted);
         rest = &rest[word_end..];
     }
     (redacted, any)
 }
 
-/// True when `word` has the shape of a known credential format.
-fn looks_like_secret(word: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "ckh_",
-        "ghp_",
-        "gho_",
-        "ghu_",
-        "ghs_",
-        "ghr_",
-        "github_pat_",
-        "sk-",
-        "sk_live_",
-        "xoxb-",
-        "xoxp-",
-    ];
-    let word = word.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';'));
-    if PREFIXES
-        .iter()
-        .any(|prefix| word.len() > prefix.len() + 8 && word.starts_with(prefix))
+const SECRET_TEXT_PREFIXES: &[&str] = &[
+    "ckh_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "sk-",
+    "sk_live_",
+    "xoxb-",
+    "xoxp-",
+];
+
+const MIN_PREFIX_SUFFIX_BYTES: usize = 9;
+
+fn trim_credential_word(word: &str) -> &str {
+    word.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ',' | ';'))
+}
+
+fn prefixed_credential_span(text: &str) -> Option<(usize, usize)> {
+    for (start, _) in text.char_indices() {
+        // A prefix can follow a URL or assignment delimiter, but not the
+        // letters of an ordinary word such as "task-scheduler".
+        if start != 0 && text.as_bytes()[start - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        let tail = &text[start..];
+        for prefix in SECRET_TEXT_PREFIXES {
+            if let Some(suffix) = tail.strip_prefix(prefix) {
+                let length = suffix
+                    .bytes()
+                    .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                    .count();
+                if length >= MIN_PREFIX_SUFFIX_BYTES {
+                    return Some((start, start + prefix.len() + length));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn redact_word(mut word: &str, redacted: &mut String) -> bool {
+    let trimmed = trim_credential_word(word);
+    let mut span = prefixed_credential_span(word);
+    if looks_like_unprefixed_secret(trimmed)
+        || span.is_some_and(|(start, end)| &word[start..end] == trimmed)
     {
+        redacted.push_str("[redacted]");
         return true;
     }
+
+    let mut any = false;
+    while let Some((start, end)) = span {
+        redacted.push_str(&word[..start]);
+        redacted.push_str("[redacted]");
+        word = &word[end..];
+        span = prefixed_credential_span(word);
+        any = true;
+    }
+    redacted.push_str(word);
+    any
+}
+
+/// True when `word` has the shape of a known credential format.
+fn looks_like_secret(word: &str) -> bool {
+    let word = trim_credential_word(word);
+    SECRET_TEXT_PREFIXES.iter().any(|prefix| {
+        word.len() >= prefix.len() + MIN_PREFIX_SUFFIX_BYTES && word.starts_with(prefix)
+    }) || looks_like_unprefixed_secret(word)
+}
+
+fn looks_like_unprefixed_secret(word: &str) -> bool {
     // AWS access key id: AKIA followed by 16 upper-case letters or digits.
     if word.len() == 20
         && word.starts_with("AKIA")

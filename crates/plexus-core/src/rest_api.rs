@@ -1271,10 +1271,13 @@ fn classify_response_with_privacy(
             } else {
                 eprintln!(warn transport: "REST response body failed on {} {}: {:?}: {cause}", method, path.split('?').next().unwrap_or(path), failure);
             }
-            if let Some(delay) = retry_after.filter(|_| write_unavailable) {
-                return with_backoff(delay).with_error_signal(crate::error_signals::evaluate(
-                    signals, status, &headers, None,
-                ));
+            if let Some(delay) = retry_after {
+                // A failed body does not undo a throttle established by the
+                // headers. Only rules that can match without a body apply. A
+                // write that got 503 stays outcome-unknown, keeping the backoff.
+                *throttle_until = throttle_deadline(clock.now(), delay);
+                let signal = crate::error_signals::evaluate(signals, status, &headers, None);
+                return with_backoff(delay).with_error_signal(signal);
             }
             return match failure {
                 HttpAttemptFailure::Timeout => timeout_response(),
