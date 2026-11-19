@@ -82,9 +82,15 @@ where
         };
         let connection = match self
             .store
-            .connection(&reservation.principal, &reservation.connection_id)
+            .connection_for_dispatch(&reservation.principal, &reservation.connection_id)
         {
-            Ok(Some(connection)) => connection,
+            Ok(Some((connection, false))) => connection,
+            Ok(Some((_, true))) => {
+                return Err(Box::new(self.deny_before_transmit(
+                    reservation,
+                    "aborted_stale_authorization".into(),
+                )));
+            }
             Ok(None) => return Err(refuse(CredentialDenial::Missing)),
             Err(error) => {
                 // A failed read is not a missing credential: the connection

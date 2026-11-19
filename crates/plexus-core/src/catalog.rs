@@ -45,6 +45,9 @@ pub enum Freshness {
 
 const DEFAULT_CATALOG_TTL: Duration = Duration::from_secs(crate::manifest::DEFAULT_CATALOG_TTL_S);
 const S3_WRITE_CEILING: Duration = Duration::from_secs(60 * 60);
+// Reconcilers can share transport maps. Serialize the collision check and
+// registry updates, but never hold this lock during credential or vendor I/O.
+static TRANSPORT_REGISTRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CatalogError {
@@ -170,7 +173,10 @@ impl CatalogReconciler {
         manifest: &AppManifest,
         credential: &ResolvedCredential,
     ) -> Result<Vec<DiscoveredAction>, CatalogError> {
-        let discovered = match self.transport.discover(connection, credential) {
+        self.register_checked(principal, &connection.connection_id, || {
+            self.transport.register_connection(connection.clone());
+        })?;
+        let discovered = match self.transport.discover_registered(connection, credential) {
             Ok(discovered) => discovered,
             Err(error) => {
                 self.mark_degraded(principal, connection);
@@ -447,7 +453,9 @@ impl CatalogReconciler {
                         .with_bindings(manifest.credential_bindings.clone())
                         .with_app_key(manifest.key.clone());
                 }
-                self.transport.register_connection(mcp_connection.clone());
+                self.register_checked(principal, connection_id, || {
+                    self.transport.register_connection(mcp_connection.clone());
+                })?;
                 PreparedConnection::Mcp(mcp_connection)
             }
             TransportKind::RestApi => {
@@ -466,8 +474,10 @@ impl CatalogReconciler {
                     // reviewed manifest.
                     rest_connection.config.base_url = endpoint.to_string();
                 }
-                self.rest_transport
-                    .register_connection(rest_connection.clone());
+                self.register_checked(principal, connection_id, || {
+                    self.rest_transport
+                        .register_connection(rest_connection.clone());
+                })?;
                 PreparedConnection::Rest(rest_connection)
             }
             _ => {
@@ -478,6 +488,29 @@ impl CatalogReconciler {
             }
         };
         Ok((manifest, prepared))
+    }
+
+    fn register_checked(
+        &self,
+        principal: &str,
+        connection_id: &str,
+        register: impl FnOnce(),
+    ) -> Result<(), CatalogError> {
+        let _registration = TRANSPORT_REGISTRATION.lock().map_err(|_| {
+            CatalogError::Store("transport registration lock is unavailable".into())
+        })?;
+        let Some(other) = self.store.other_transport_owner(principal, connection_id)? else {
+            register();
+            return Ok(());
+        };
+        self.transport.unregister_connection(connection_id);
+        self.rest_transport.unregister_connection(connection_id);
+        crate::diag!(error transport:
+            "connection id {connection_id:?} cannot be registered for owners {principal:?} and {other:?}"
+        );
+        Err(CatalogError::Store(
+            "connection transport is ambiguous".into(),
+        ))
     }
 
     fn refresh_prepared(
@@ -508,7 +541,9 @@ impl CatalogReconciler {
         connection: &RestConnection,
         manifest: &AppManifest,
     ) -> Result<Vec<DiscoveredAction>, CatalogError> {
-        self.rest_transport.register_connection(connection.clone());
+        self.register_checked(principal, &connection.connection_id, || {
+            self.rest_transport.register_connection(connection.clone());
+        })?;
         let discovered = discovered_from_manifest(manifest);
         if let Err(error) =
             self.reconcile_actions(principal, &connection.connection_id, manifest, &discovered)
@@ -1806,6 +1841,46 @@ mod tests {
             "a revoked connection must NOT be registered: an operator stopped it"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn boot_transport_registration_rejects_ids_shared_by_two_owners() {
+        let (store, _path) = rest_test_store();
+        let mcp = Arc::new(McpRemoteTransport::default());
+        let reconciler = CatalogReconciler::new(store.clone(), mcp.clone(), Default::default());
+        let manifest = ingest_value(serde_json::to_value(rest_manifest()).unwrap()).unwrap();
+        store.upsert_manifest(CATALOG_PRINCIPAL, &manifest).unwrap();
+        let id = "shared-transport-id";
+        store
+            .insert_connection(
+                "direct",
+                id,
+                &manifest.manifest.key,
+                "active",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        reconciler
+            .register_connection_transport("direct", id, None)
+            .unwrap();
+        assert!(reconciler.rest_transport().has_connection(id));
+        store
+            .insert_connection(
+                "older-owner",
+                id,
+                &manifest.manifest.key,
+                "active",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        assert!(reconciler
+            .register_connection_transport("older-owner", id, None)
+            .is_err());
+        assert!(!reconciler.rest_transport().has_connection(id));
+        assert!(!mcp.has_connection(id));
+        assert!(reconciler
+            .register_connection_transport("direct", id, None)
+            .is_err());
     }
 
     #[test]

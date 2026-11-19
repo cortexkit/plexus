@@ -567,6 +567,14 @@ impl McpRemoteTransport {
         credential: &ResolvedCredential,
     ) -> Result<Vec<DiscoveredAction>, McpRemoteError> {
         self.register_connection(connection.clone());
+        self.discover_registered(connection, credential)
+    }
+
+    pub(crate) fn discover_registered(
+        &self,
+        connection: &McpConnection,
+        credential: &ResolvedCredential,
+    ) -> Result<Vec<DiscoveredAction>, McpRemoteError> {
         let config = connection.config.clone();
         let entry = self.entry_for(&connection.connection_id, &config)?;
         #[cfg(test)]

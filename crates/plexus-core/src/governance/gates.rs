@@ -219,7 +219,17 @@ where
             }
             Err(_) => return Err(Denial::StoreFailure),
         };
-        if let Some(reason) = connection_denial(&connection) {
+        let mut refusal = connection_denial(&connection);
+        if refusal.is_none()
+            && self
+                .store
+                .other_transport_owner(&connection.principal, &connection.connection_id)
+                .map_err(|_| Denial::StoreFailure)?
+                .is_some()
+        {
+            refusal = Some(ConnectionDenial::Unhealthy);
+        }
+        if let Some(reason) = refusal {
             let denial = Denial::Connection(reason);
             self.audit_denial(&request, &args_hash, Some(&connection), None, None, &denial);
             return Err(denial);
