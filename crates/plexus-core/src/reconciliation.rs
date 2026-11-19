@@ -24,11 +24,11 @@ pub struct OutcomeUnknownRecord {
     pub action: String,
     pub args: Value,
     pub occurred_at_ms: i64,
-    /// Set when the write acted as an agent under a delegating daemon scope,
-    /// so it needed that agent's grant as well as the module's. The read-back
-    /// is judged as the same agent and needs that agent's current grant.
-    /// Records written before this field existed, or by a call that did not
-    /// act as an agent, carry none.
+    /// Set when the write acted for an agent: its session scope delegated the
+    /// agent's authority, so the call needed the agent's grant as well as the
+    /// calling module's grant. The read-back is judged as that same agent and
+    /// needs the agent's current grant. Records written before this field
+    /// existed, or by a call that did not act for an agent, carry none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acting_agent: Option<ActingAgentScope>,
 }
@@ -572,7 +572,7 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
         result_retention_window_ms: i64,
     ) -> Result<usize, cortexkit_store::StoreError> {
         // A quiet tick checks read-only first and takes the fenced path only
-        // when a record is due. Bound vendor work so a backlog cannot consume
+        // when a record is due. Bound read-back calls so a backlog cannot consume
         // a whole poll pass, and load only the records this tick will process.
         let (due, expired_results) = self
             .store()

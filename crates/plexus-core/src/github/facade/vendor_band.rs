@@ -864,8 +864,10 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         refuse(store, &row, reply, nonce, claim_owner, gate, failure)
     };
     let fail_read = |reply: &mut gates::GateReply, gate, mut failure: taxonomy::Failure| {
-        // When a retry resumes unfinished writes, ownership reads run again.
-        // A failed read sent no new write, but earlier legs may be durable.
+        // A retry that resumes unfinished writes first re-reads GitHub to
+        // confirm the bot still owns the issue, comment or pull request. That
+        // failed read sent no new write, though earlier writes in this request
+        // may already have landed.
         let not_sent = row
             .effects
             .iter()

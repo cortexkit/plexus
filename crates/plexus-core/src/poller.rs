@@ -1405,8 +1405,9 @@ pub enum PollCycle {
     /// The vendor read completed and its events were committed atomically with
     /// the cursor advance.
     Completed { inserted: usize, duplicates: usize },
-    /// Quota, the pass budget, or loss of this machine's connector-home role
-    /// stopped the poll without advancing its cursor or growing its failure streak.
+    /// Quota, the pass budget, or this machine losing the connector-home role
+    /// (only that machine may poll vendors) stopped the poll without advancing
+    /// its cursor or growing its failure streak. The watch stays due.
     Deferred { reason: String },
     /// The vendor returned a definitive failure (5xx, timeout, throttle). The
     /// vendor-failure streak was incremented; the cursor is untouched.

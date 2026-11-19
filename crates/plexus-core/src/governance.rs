@@ -1962,8 +1962,10 @@ where
             }
         }
         let claimed = if claimable {
-            // The vault or Gmail preparation can outlast this machine's hold
-            // on connector home. Recheck before the claim consumes approval.
+            // Only the machine that holds the connector-home role (the one
+            // computer allowed to act on vendors) may send. Vault or Gmail
+            // preparation can outlast that hold, so check again before the
+            // claim consumes the approval.
             if let Some(outcome) = self.check_dispatch_home(reservation, false) {
                 return outcome;
             }
@@ -2126,15 +2128,16 @@ where
             return outcome;
         }
         // GitHub bot writes prepare their installation token after marking
-        // the write receipt, without consuming an approval. Clear that mark
-        // if this machine lost connector home before sending.
+        // the write receipt, without consuming an approval. If this machine
+        // lost the connector-home role meanwhile, clear that mark and send
+        // nothing.
         if reservation.receipt.is_some() && handle_authority.is_some() {
             if let Some(outcome) = self.check_dispatch_home(reservation, true) {
                 return outcome;
             }
         }
-        // Preparing an installation token may outlast the run's deadline.
-        // Reuse the run deadline from the daemon's earlier description.
+        // Preparing an installation token may outlast the caller's run. The
+        // run's expiry was read when the write was admitted; check it again.
         if run_deadline_ms.is_some_and(|deadline| {
             u64::try_from(self.now_ms()).map_or(true, |now| now >= deadline)
         }) {

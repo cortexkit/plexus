@@ -45,8 +45,9 @@ pub enum Freshness {
 
 const DEFAULT_CATALOG_TTL: Duration = Duration::from_secs(crate::manifest::DEFAULT_CATALOG_TTL_S);
 const S3_WRITE_CEILING: Duration = Duration::from_secs(60 * 60);
-// Reconcilers can share transport maps. Serialize the collision check and
-// registry updates, but never hold this lock during credential or vendor I/O.
+// Startup registration and catalog refreshes can update the same transport
+// maps. Serialize the owner-collision check and registry updates, but never
+// hold this lock during credential or vendor I/O.
 static TRANSPORT_REGISTRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, PartialEq, Eq)]
