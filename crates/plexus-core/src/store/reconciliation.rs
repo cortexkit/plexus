@@ -65,25 +65,27 @@ impl PlexusStore {
         })
     }
 
+    /// Due records in expiry order, decoded only until `limit` valid ones are
+    /// found, so a backlog does not decode payloads the caller will not reach
+    /// this tick. A record that does not decode is settled ambiguous and
+    /// removed as it is passed; those removals are bounded by the row limit
+    /// of the scan, not by `limit`.
     pub(crate) fn pending_write_reconciliations_at(
         &self,
         now: i64,
+        limit: usize,
     ) -> Result<Vec<crate::reconciliation::PendingWriteReconciliation>, StoreError> {
         self.inner.with_conn_fenced(|conn| {
             let mut stmt = conn.prepare(&format!("SELECT principal,request_id,record_json,expires_at_ms FROM pending_write_reconciliations WHERE {DUE_PENDING} ORDER BY expires_at_ms,principal,request_id LIMIT :limit"))?;
-            let rows = stmt
-                .query_map(rusqlite::named_params!{":now":now, ":limit":RECONCILIATION_BATCH_ROWS}, |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(stmt);
-            let mut pending = Vec::with_capacity(rows.len());
-            for (principal, request_id, encoded, expires_at_ms) in rows {
+            let mut rows = stmt.query(rusqlite::named_params!{":now":now, ":limit":RECONCILIATION_BATCH_ROWS})?;
+            let mut pending = Vec::with_capacity(limit.min(RECONCILIATION_BATCH_ROWS as usize));
+            let mut undecodable = Vec::new();
+            while pending.len() < limit {
+                let Some(row) = rows.next()? else {
+                    break;
+                };
+                let (principal, request_id, encoded, expires_at_ms): (String, String, String, i64) =
+                    (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
                 match serde_json::from_str(&encoded) {
                     Ok(record) => pending.push(crate::reconciliation::PendingWriteReconciliation {
                         record,
@@ -91,15 +93,20 @@ impl PlexusStore {
                     }),
                     Err(error) => {
                         crate::diag!(warn storage: "write reconciliation record does not decode; settling it as ambiguous: principal={principal:?} request_id={request_id:?}: class={:?} line={} column={}",error.classify(),error.line(),error.column());
-                        conn.execute("UPDATE write_reconciliation_results SET status='ambiguous', reason='record_undecodable', updated_at_ms=?3
-                            WHERE principal=?1 AND request_id=?2", rusqlite::params![principal, request_id, now_ms()])?;
-                        conn.execute("UPDATE action_requests SET reconciliation_status='ambiguous' WHERE principal=?1 AND request_id IN
-                            (SELECT intent_id FROM pending_write_reconciliations WHERE principal=?1 AND request_id=?2)",
-                            rusqlite::params![principal, request_id])?;
-                        conn.execute("DELETE FROM pending_write_reconciliations WHERE principal=?1 AND request_id=?2",
-                            rusqlite::params![principal, request_id])?;
+                        undecodable.push((principal, request_id));
                     }
                 }
+            }
+            drop(rows);
+            drop(stmt);
+            for (principal, request_id) in undecodable {
+                conn.execute("UPDATE write_reconciliation_results SET status='ambiguous', reason='record_undecodable', updated_at_ms=?3
+                    WHERE principal=?1 AND request_id=?2", rusqlite::params![principal, request_id, now_ms()])?;
+                conn.execute("UPDATE action_requests SET reconciliation_status='ambiguous' WHERE principal=?1 AND request_id IN
+                    (SELECT intent_id FROM pending_write_reconciliations WHERE principal=?1 AND request_id=?2)",
+                    rusqlite::params![principal, request_id])?;
+                conn.execute("DELETE FROM pending_write_reconciliations WHERE principal=?1 AND request_id=?2",
+                    rusqlite::params![principal, request_id])?;
             }
             Ok(pending)
         })

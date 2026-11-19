@@ -102,18 +102,15 @@ fn standing_read_allow_serves_without_policy_or_card_and_pins_audit() {
         assert_eq!(outcome.transmission, TransmissionState::Sent, "{outcome:?}");
     }
     assert_eq!(engine.transport().requests().len(), 2);
+    // Each call reads the pairing when it is authorized and again just
+    // before its claim.
+    let base = (
+        "reserved:callosum".to_string(),
+        format!("fed-base:{}:pairing", "a".repeat(32)),
+    );
     assert_eq!(
         reader.calls.lock().unwrap().as_slice(),
-        &[
-            (
-                "reserved:callosum".into(),
-                format!("fed-base:{}:pairing", "a".repeat(32))
-            ),
-            (
-                "reserved:callosum".into(),
-                format!("fed-base:{}:pairing", "a".repeat(32))
-            ),
-        ]
+        vec![base; 4].as_slice()
     );
     let audits: i64 = db.query_row("SELECT count(*) FROM audit_journal WHERE agent_id IS NULL
         AND peer_fingerprint=?1 AND pairing_id='pairing' AND peer_class='computer'
@@ -506,6 +503,51 @@ fn revoke_during_held_describe_commits_without_waiting_and_never_admits() {
     assert_eq!(result.unwrap_err().reason_code(), "consent_unavailable");
     assert_eq!(count(&db, "federated_rows"), 0);
     assert_eq!(count(&db, "reservations"), 0);
+}
+
+#[test]
+fn pairing_that_ends_after_authorization_is_refused_before_the_claim() {
+    for (status, synced, code) in [
+        (ScopeStatus::Ended, true, "federated_pairing_ended"),
+        (ScopeStatus::NotLive, true, "federated_pairing_ended"),
+        (
+            ScopeStatus::NotLive,
+            false,
+            "federated_liveness_unavailable",
+        ),
+    ] {
+        let (engine, db) = fixture();
+        seed(&db, None, "read", "allow");
+        let engine = engine.with_scope_reader(reader(ScopeStatus::Live, true, true));
+        let reservation = engine.authorize(request(None)).unwrap();
+        // The pairing ends after authorization's liveness read, for example
+        // while the credential is being prepared for this call.
+        let later = reader(status, synced, true);
+        let engine = engine.with_scope_reader(later.clone());
+        let outcome = engine.revalidate_and_dispatch(&reservation);
+        assert_eq!(outcome.transmission, TransmissionState::NotSent, "{code}");
+        assert!(
+            matches!(outcome.outcome, TransportOutcome::NotSent { code: ref sent, .. } if sent == code),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            outcome.retryability == Retryability::AutoRetryable,
+            code == "federated_liveness_unavailable"
+        );
+        assert_eq!(later.calls.lock().unwrap().len(), 1);
+        no_card(&engine, &db);
+        let status: String = db
+            .query_row(
+                "SELECT status FROM reservations WHERE reservation_id=?1",
+                [&reservation.reservation_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "invalidated",
+            "the reservation is abandoned unclaimed"
+        );
+    }
 }
 
 #[test]

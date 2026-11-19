@@ -216,6 +216,124 @@ fn prefrontal_rename_revoked_copies_stay_revoked_after_pre63_restore() {
     }
 }
 
+fn seed_v62_restore(label: &str) -> (crate::test_scratch::Scratch, StorageDescriptor) {
+    let directory = crate::test_scratch::Scratch::directory(label);
+    let descriptor = StorageDescriptor {
+        module_id: "plexus".into(),
+        storage_namespace: label.into(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: directory.join("store.db").to_string_lossy().into_owned(),
+        },
+    };
+    let source = cortexkit_store::open_sqlite(&descriptor).unwrap();
+    let boundary = MIGRATIONS.iter().position(|m| m.version == 63).unwrap();
+    source.migrate("plexus", &MIGRATIONS[..boundary]).unwrap();
+    source.with_conn_fenced(|conn| seed(conn)).unwrap();
+    (directory, descriptor)
+}
+
+fn journal_legacy_revocation(directory: &crate::test_scratch::Scratch) {
+    let path = directory.join(crate::grant_journal::NAME);
+    crate::grant_journal::ensure(&path).unwrap();
+    crate::grant_journal::append(
+        &path,
+        &crate::grant_journal::Revocation {
+            principal: "direct".into(),
+            grant_id: "github-import:bot:prefrontal".into(),
+            revoked_at_ms: 123,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn prefrontal_rename_open_v62_restore_revokes_new_alias_of_revoked_original() {
+    let (directory, descriptor) = seed_v62_restore("prefrontal-v62-revocation");
+    journal_legacy_revocation(&directory);
+    let _store = PlexusStore::open(&descriptor).unwrap();
+    let conn = rusqlite::Connection::open(directory.join("store.db")).unwrap();
+    let rows = grants(&conn).unwrap();
+    assert!(
+        rows.iter().all(|row| row["connection_id"] != "bot"
+            || !matches!(
+                row["grantee_principal"].as_str(),
+                Some("reserved:prefrontal-core" | "reserved:prefrontal")
+            )),
+        "revoked rename authority returned: {rows:?}"
+    );
+    let snapshots: Vec<(String, String, i64)> = conn
+        .prepare("SELECT grant_id, grantee_principal, revoked_at_ms FROM grant_revocations ORDER BY grant_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        snapshots,
+        [
+            (
+                "github-import:bot:prefrontal".into(),
+                "reserved:prefrontal-core".into(),
+                123
+            ),
+            (
+                "github-import:bot:reserved-prefrontal".into(),
+                "reserved:prefrontal".into(),
+                123
+            ),
+        ]
+    );
+    let audits: i64 = conn
+        .query_row("SELECT count(*) FROM audit_journal", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(audits, 0);
+}
+
+#[test]
+fn prefrontal_rename_open_v62_restore_keeps_renamed_grant_that_predates_migration() {
+    let (directory, descriptor) = seed_v62_restore("prefrontal-v62-twin");
+    let path = directory.join(crate::grant_journal::NAME);
+    crate::grant_journal::ensure(&path).unwrap();
+    crate::grant_journal::append(
+        &path,
+        &crate::grant_journal::Revocation {
+            principal: "direct".into(),
+            grant_id: "github-import:existing:prefrontal".into(),
+            revoked_at_ms: 456,
+        },
+    )
+    .unwrap();
+    let _store = PlexusStore::open(&descriptor).unwrap();
+    let rows = grants(&rusqlite::Connection::open(directory.join("store.db")).unwrap()).unwrap();
+    // Migration 63 made no copy of the revoked grant, because a renamed grant
+    // for the same authority already existed; that grant is not a copy and stays.
+    assert!(!rows
+        .iter()
+        .any(|row| row["grant_id"] == "github-import:existing:prefrontal"));
+    assert!(rows.iter().any(|row| row["grant_id"] == "keep-existing"));
+    assert!(rows
+        .iter()
+        .any(|row| row["grant_id"] == "github-import:bot:reserved-prefrontal"));
+}
+
+#[test]
+fn prefrontal_rename_open_v63_replays_legacy_revocation_without_touching_twin() {
+    let (directory, descriptor) = seed_v62_restore("prefrontal-v63-revocation");
+    drop(PlexusStore::open(&descriptor).unwrap());
+    journal_legacy_revocation(&directory);
+    let _store = PlexusStore::open(&descriptor).unwrap();
+    let conn = rusqlite::Connection::open(directory.join("store.db")).unwrap();
+    let rows = grants(&conn).unwrap();
+    assert!(!rows
+        .iter()
+        .any(|row| row["grant_id"] == "github-import:bot:prefrontal"));
+    assert!(rows.iter().any(
+        |row| row["grant_id"] == "github-import:bot:reserved-prefrontal"
+            && row["grantee_principal"] == "reserved:prefrontal"
+    ));
+}
+
 #[test]
 fn prefrontal_rename_migration_63_forward_rollback_reforward_serves_grants() {
     let inner = cortexkit_store::open_sqlite(&descriptor("prefrontal-rollback")).unwrap();

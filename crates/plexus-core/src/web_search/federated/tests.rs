@@ -249,8 +249,8 @@ fn standing_search_rows_serve_without_local_grants_or_cards() {
         assert_eq!(f.engine.transport().requests().len(), 1);
         assert_eq!(
             *f.reader.calls.lock().unwrap(),
-            2,
-            "cache admission and dispatch authorize describe independently"
+            3,
+            "cache admission and dispatch authorize describe independently, and dispatch reads the pairing again before its claim"
         );
         assert_eq!(f.db.query_row("SELECT principal,connection_id,grant_id IS NULL AND agent_grant_id IS NULL FROM reservations", [], |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,bool>(2)?))).unwrap(),("direct".into(),"backing".into(),true));
         f.assert_no_cards();

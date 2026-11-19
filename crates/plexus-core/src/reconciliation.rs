@@ -24,6 +24,51 @@ pub struct OutcomeUnknownRecord {
     pub action: String,
     pub args: Value,
     pub occurred_at_ms: i64,
+    /// Set when the write acted as an agent under a delegating daemon scope,
+    /// so it needed that agent's grant as well as the module's. The read-back
+    /// is judged as the same agent and needs that agent's current grant.
+    /// Records written before this field existed, or by a call that did not
+    /// act as an agent, carry none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_agent: Option<ActingAgentScope>,
+}
+
+/// The delegating scope a write acted under as its agent: the scope's
+/// identity, recorded on the read-back's audit rows, and the agent whose grant
+/// the read-back requires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActingAgentScope {
+    pub owner: String,
+    pub scope_ref: String,
+    pub scope_epoch: u64,
+    pub agent_id: String,
+}
+
+impl ActingAgentScope {
+    fn of(scope: &crate::scope::CallScope) -> Option<Self> {
+        Some(Self {
+            owner: scope.owner.clone(),
+            scope_ref: scope.scope_ref.clone(),
+            scope_epoch: scope.scope_epoch,
+            agent_id: scope.acting_agent()?.to_owned(),
+        })
+    }
+
+    /// A scope that makes an ordinary invoke act as this agent.
+    fn to_call_scope(&self) -> crate::scope::CallScope {
+        crate::scope::CallScope {
+            owner: self.owner.clone(),
+            scope_ref: self.scope_ref.clone(),
+            scope_epoch: self.scope_epoch,
+            kind: None,
+            parent: None,
+            parent_state: None,
+            agent_id: Some(self.agent_id.clone()),
+            flow_id: None,
+            delegates: true,
+            owner_authorized: true,
+        }
+    }
 }
 
 /// Declared reconciliation class loaded from the catalog/manifest.
@@ -165,13 +210,20 @@ where
             );
         }
         let read_args = correlation_args(&record.args, &class.correlation_fields);
-        let authorization = AuthorizationRequest::new(
+        let mut authorization = AuthorizationRequest::new(
             record.acting_principal.clone(),
             record.connection_id.clone(),
             class.read_back_action.clone(),
             read_args,
         )
         .with_actor(record.actor.clone());
+        // A write that acted as an agent is read back as that agent, so the
+        // read needs the agent's current grant, not only the module's.
+        if let Some(acting) = &record.acting_agent {
+            authorization = authorization
+                .with_attributed_agent(acting.agent_id.clone())
+                .with_scope(acting.to_call_scope());
+        }
 
         let reservation = match self.authorize(authorization) {
             Ok(reservation) => reservation,
@@ -429,6 +481,9 @@ pub(crate) struct PendingWriteReconciliation {
     pub expires_at_ms: i64,
 }
 
+/// Most unknown-write records one sweep reads back or settles.
+pub(crate) const RECONCILIATIONS_PER_SWEEP: usize = 8;
+
 impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T> {
     pub(crate) fn queue_unknown_write(
         &self,
@@ -443,6 +498,12 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
             action: reservation.action.clone(),
             args: reservation.args.clone(),
             occurred_at_ms: crate::storage::now_ms(),
+            // Only a write whose reservation recorded an agent grant acted as an agent.
+            acting_agent: reservation
+                .agent_grant
+                .as_ref()
+                .and(reservation.scope.as_ref())
+                .and_then(ActingAgentScope::of),
         };
         let lookup =
             self.store()
@@ -510,17 +571,20 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> GovernanceEngine<C, T>
         now_ms: i64,
         result_retention_window_ms: i64,
     ) -> Result<usize, cortexkit_store::StoreError> {
+        // A quiet tick checks read-only first and takes the fenced path only
+        // when a record is due. Bound vendor work so a backlog cannot consume
+        // a whole poll pass, and load only the records this tick will process.
         let (due, expired_results) = self
             .store()
             .write_reconciliation_work(now_ms, result_retention_window_ms)?;
         let pending = if due {
-            self.store().pending_write_reconciliations_at(now_ms)?
+            self.store()
+                .pending_write_reconciliations_at(now_ms, RECONCILIATIONS_PER_SWEEP)?
         } else {
             Vec::new()
         };
-        let count = pending.len().min(8);
-        // Bound vendor work so a backlog cannot consume a whole poll pass.
-        for pending in pending.into_iter().take(8) {
+        let count = pending.len();
+        for pending in pending {
             let result = if now_ms >= pending.expires_at_ms {
                 self.finish_reconcile(
                     &pending.record,

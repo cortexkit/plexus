@@ -3383,6 +3383,7 @@ fn reconciliation_audit_failure_is_loud_and_preserves_result() {
             action: "write_item".into(),
             args: json!({}),
             occurred_at_ms: now_ms(),
+            acting_agent: None,
         });
         assert_eq!(
             result,

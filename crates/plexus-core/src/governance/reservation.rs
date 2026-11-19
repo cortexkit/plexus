@@ -154,6 +154,44 @@ where
         ))
     }
 
+    /// Read an approval's scope, and a paired computer's pairing, from the
+    /// daemon once more after credential preparation and before the claim.
+    /// Either can end while preparation waits on the vault or a token
+    /// exchange. Ordinary local calls carry neither and are not re-read.
+    /// `None` lets the claim proceed; otherwise nothing is sent, the
+    /// reservation is abandoned and no approval is consumed.
+    pub(super) fn recheck_live_authority(
+        &self,
+        reservation: &Reservation,
+    ) -> Option<DispatchOutcome> {
+        if let Some(bound) = reservation.approval_scope.as_ref() {
+            if let Some(outcome) = self.recheck_approval_scope(reservation, bound) {
+                return Some(outcome);
+            }
+        }
+        let caller = reservation.federated_caller.as_ref()?;
+        let denial = self.federated_live(caller).err()?;
+        let code = denial.reason_code();
+        self.abandon_unsent_reservation(reservation);
+        self.audit_dispatch_denial(reservation, code);
+        Some(self.maybe_report_decision_outcome(
+            reservation,
+            DispatchOutcome::not_sent(
+                reservation,
+                code.to_string(),
+                "the paired computer's pairing is not confirmed live".to_string(),
+                if denial.clears_by_waiting() {
+                    Retryability::AutoRetryable
+                } else {
+                    Retryability::Terminal
+                },
+            ),
+            OutcomeTerminal::Refused {
+                reason: code.to_string(),
+            },
+        ))
+    }
+
     pub(super) fn revalidate_receipt_authority(
         &self,
         reservation: &Reservation,

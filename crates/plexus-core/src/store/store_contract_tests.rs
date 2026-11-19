@@ -1100,6 +1100,7 @@ fn reconciliation_backoff_grows_from_five_seconds_to_sixty() {
         action: "write".into(),
         args: json!({}),
         occurred_at_ms: now,
+        acting_agent: None,
     };
     store.enqueue_write_reconciliation(&record, None).unwrap();
     for delay in [
@@ -1108,20 +1109,82 @@ fn reconciliation_backoff_grows_from_five_seconds_to_sixty() {
         store.backoff_write_reconciliation(&record, now).unwrap();
         assert!(
             store
-                .pending_write_reconciliations_at(now + delay - 1)
+                .pending_write_reconciliations_at(now + delay - 1, 8)
                 .unwrap()
                 .is_empty(),
             "reconciliation must honor its persisted backoff"
         );
         assert_eq!(
             store
-                .pending_write_reconciliations_at(now + delay)
+                .pending_write_reconciliations_at(now + delay, 8)
                 .unwrap()
                 .len(),
             1
         );
     }
 }
+#[test]
+fn reconciliation_selection_decodes_only_the_records_a_sweep_processes() {
+    let store = fixture();
+    let now = now_ms();
+    let insert = |request_id: String, record_json: String, expires_at_ms: i64| {
+        store
+            .inner
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "INSERT INTO pending_write_reconciliations(principal,request_id,record_json,expires_at_ms) VALUES ('owner',?1,?2,?3)",
+                    rusqlite::params![request_id, record_json, expires_at_ms],
+                )
+            })
+            .unwrap();
+    };
+    // Three undecodable records come first in expiry order, then twenty valid ones.
+    for index in 0..3 {
+        insert(format!("bad-{index}"), "not json".into(), now + index);
+    }
+    for index in 0..20 {
+        let record = crate::reconciliation::OutcomeUnknownRecord {
+            request_id: format!("good-{index:02}"),
+            principal: "owner".into(),
+            acting_principal: "caller".into(),
+            actor: "caller".into(),
+            connection_id: "connection".into(),
+            action: "write".into(),
+            args: json!({}),
+            occurred_at_ms: now,
+            acting_agent: None,
+        };
+        insert(
+            record.request_id.clone(),
+            serde_json::to_string(&record).unwrap(),
+            now + 100 + index,
+        );
+    }
+    let pending = store.pending_write_reconciliations_at(now, 8).unwrap();
+    let ids: Vec<&str> = pending
+        .iter()
+        .map(|pending| pending.record.request_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        (0..8)
+            .map(|index| format!("good-{index:02}"))
+            .collect::<Vec<_>>(),
+        "exactly the valid records one sweep processes, in expiry order"
+    );
+    let remaining: i64 = store
+        .inner
+        .with_read(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM pending_write_reconciliations WHERE request_id LIKE 'bad-%'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(remaining, 0, "undecodable records passed are settled");
+}
+
 #[test]
 fn reconciliation_retry_delay_is_pinned_for_its_first_ten_attempt_counts() {
     let steps: Vec<i64> = (0..10)
@@ -1273,7 +1336,7 @@ fn reconciliation_warning_never_renders_sensitive_record_fragments() {
         let store = fixture();
         store.inner.with_conn_fenced(|conn|conn.execute("INSERT INTO pending_write_reconciliations(principal,request_id,record_json,expires_at_ms) VALUES ('owner','unknown',?1,?2)",rusqlite::params![BAD_RECORD,now_ms()+60000])).unwrap();
         assert!(store
-            .pending_write_reconciliations_at(now_ms())
+            .pending_write_reconciliations_at(now_ms(), 8)
             .unwrap()
             .is_empty());
         let count: i64 = store
@@ -1329,6 +1392,7 @@ fn direct_reconciliation_finish_updates_intent_and_reenqueue_reuses_result() {
         action: "write".into(),
         args: json!({}),
         occurred_at_ms: now,
+        acting_agent: None,
     };
     store
         .finish_write_reconciliation_with_intent(

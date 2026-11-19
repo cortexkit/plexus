@@ -419,6 +419,91 @@ fn delegated_caller_revoked_grant_denied_without_read_back() {
         .is_empty());
 }
 
+/// A write made as an agent under a delegating scope needed the agent's grant.
+/// Its read-back is judged as the same agent: without the agent's grant for
+/// the read-back action, the record settles `denied` and nothing is read.
+#[test]
+fn agent_acting_write_reads_back_only_under_the_agents_grant() {
+    for agent_may_read in [false, true] {
+        let f = fixture(true);
+        let selectors = if agent_may_read {
+            vec!["create".to_string(), "search".to_string()]
+        } else {
+            vec!["create".to_string()]
+        };
+        f.engine
+            .store()
+            .insert_grant(&grant("module", "reserved:aft"))
+            .unwrap();
+        f.engine
+            .store()
+            .insert_grant(&GrantInput {
+                action_selectors: selectors,
+                ..grant("agent", "reserved:aft")
+            })
+            .unwrap();
+        db(&f)
+            .execute(
+                "UPDATE grants SET agent_id='agent-a' WHERE grant_id='agent'",
+                [],
+            )
+            .unwrap();
+        f.engine
+            .transport()
+            .set_response(MockResponse::OutcomeUnknown);
+        let scope = plexus_core::scope::CallScope {
+            owner: "reserved:prefrontal-core".into(),
+            scope_ref: "head-1".into(),
+            scope_epoch: 3,
+            kind: Some("head".into()),
+            parent: None,
+            parent_state: None,
+            agent_id: Some("agent-a".into()),
+            delegates: true,
+            owner_authorized: true,
+            flow_id: None,
+        };
+        let reservation = f
+            .engine
+            .authorize(
+                AuthorizationRequest::new(
+                    "reserved:aft",
+                    "conn",
+                    "create",
+                    json!({"title":"unique"}),
+                )
+                .with_attributed_agent("agent-a")
+                .with_scope(scope),
+            )
+            .unwrap();
+        assert!(
+            reservation.agent_grant.is_some(),
+            "the write acted as the agent"
+        );
+        f.engine.revalidate_and_dispatch(&reservation);
+        assert_eq!(pending(&f), 1);
+        f.engine
+            .transport()
+            .set_response(MockResponse::Success(json!({"title":"unique"})));
+        tick(&f);
+        if agent_may_read {
+            assert_eq!(status(&f).0, "confirmed");
+            assert_eq!(f.engine.transport().requests().len(), 2);
+        } else {
+            // The agent's grant exists but does not select the read-back
+            // action; the module grant alone ("*") would have allowed it.
+            assert_eq!(
+                status(&f),
+                (
+                    "denied".to_string(),
+                    Some("grant_action_selector".to_string())
+                )
+            );
+            assert_settled(&f, "denied", 1);
+        }
+    }
+}
+
 #[test]
 fn read_only_refusals_are_terminal() {
     for self_target in [false, true] {
@@ -459,6 +544,7 @@ fn persistence_screens_secret_arguments() {
         action: "create".into(),
         args: json!({"nested":[{"access_token":"canary"}]}),
         occurred_at_ms: plexus_core::storage::now_ms(),
+        acting_agent: None,
     };
     assert!(f
         .engine

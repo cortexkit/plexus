@@ -103,6 +103,7 @@ const APP_RETIRED_PREDICATE: &str = app_retired_predicate!();
 mod migrations_store;
 pub use migrations_store::MIGRATIONS;
 pub(crate) use migrations_store::PREFRONTAL_GRANT_BACKFILL;
+use migrations_store::PREFRONTAL_GRANT_COPY_ID;
 pub(crate) use migrations_store::RECIPIENT_ALLOWLIST_PRINCIPAL_BACKFILL;
 
 #[path = "store/types.rs"]
@@ -274,6 +275,18 @@ impl PlexusStore {
         counted_store::count_calls(work)
     }
 
+    /// Run SQL against the store's own connection, for tests outside the
+    /// storage module that must set up or inspect rows no API exposes.
+    #[cfg(test)]
+    pub(crate) fn sql_for_test<T>(
+        &self,
+        work: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+    ) -> T {
+        self.inner
+            .with_conn_fenced(|conn| work(conn))
+            .expect("test SQL")
+    }
+
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, StoreError> {
         let grant_journal = grant_journal_path(descriptor);
         let federated_journal = grant_journal
@@ -298,6 +311,39 @@ impl PlexusStore {
         }
         if let Some(path) = &federated_journal {
             crate::grant_journal::ensure(path).map_err(|e| StoreError::Backend(e.to_string()))?;
+        }
+        // Migration 63 copies every legacy prefrontal grant to the renamed
+        // identity. When this open applies it to a restored older database, a
+        // grant the journal has since revoked is still present and gets copied,
+        // and replay below removes only the exact revoked id. Before migration
+        // 63 runs, find the copies it will make of journal-revoked grants, so
+        // replay revokes them too. A store already past 63 is left alone: its
+        // renamed grants stand on their own and are revoked by their own ids.
+        let mut revoked_copies = Vec::new();
+        if revocations != 0 {
+            let rename = MIGRATIONS
+                .iter()
+                .position(|migration| migration.version == 63)
+                .expect("the chain carries migration 63");
+            if store.migrate("plexus", &MIGRATIONS[..rename])?.recorded < 63 {
+                let path = grant_journal.as_deref().expect("journal was scanned");
+                revoked_copies = store.with_read(|conn| {
+                    let mut copy_id = conn.prepare(PREFRONTAL_GRANT_COPY_ID)?;
+                    let mut copies = Vec::new();
+                    crate::grant_journal::scan(path, |entry| {
+                        let id: Option<String> = copy_id
+                            .query_row((&entry.principal, &entry.grant_id), |row| row.get(0))
+                            .optional()
+                            .map_err(|e| e.to_string())?;
+                        if let Some(grant_id) = id {
+                            copies.push(crate::grant_journal::Revocation { grant_id, ..entry });
+                        }
+                        Ok(())
+                    })
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+                    Ok(copies)
+                })?;
+            }
         }
         let outcome = store.migrate("plexus", MIGRATIONS)?;
         if outcome.store_ahead() {
@@ -333,6 +379,12 @@ impl PlexusStore {
                     },
                 )
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+                // Revoke each copy as replay revokes any journal entry: the
+                // deleted row is kept in grant_revocations, and no audit row
+                // is written.
+                for copy in &revoked_copies {
+                    crate::grant_journal::apply(conn, copy)?;
+                }
                 Ok(())
             })?;
         }

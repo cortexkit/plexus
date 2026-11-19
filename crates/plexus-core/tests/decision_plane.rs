@@ -401,6 +401,7 @@ fn reconciliation_confirmed_not_found_ambiguous_and_denied_on_revoke() {
         action: "destroy_item".to_string(),
         args: write_args(),
         occurred_at_ms: plexus_core::now_ms(),
+        acting_agent: None,
     };
 
     // A reservation and its approval intent have distinct ids; persist their
@@ -817,6 +818,7 @@ fn reconciliation_record(action: &str) -> OutcomeUnknownRecord {
         action: action.to_string(),
         args: write_args(),
         occurred_at_ms: plexus_core::now_ms(),
+        acting_agent: None,
     }
 }
 

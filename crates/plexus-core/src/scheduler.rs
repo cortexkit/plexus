@@ -102,6 +102,10 @@ const CIRCUIT_BREAKER_FAILURES: i64 = 5;
 /// Most approvals waiting on a daemon scope that one pass retries. Each retry
 /// is one `scope.describe` round trip; the rest wait for the next pass.
 const WAITING_APPROVAL_RETRIES_PER_PASS: usize = 16;
+/// The share of a pass's budget that approval retries may use before watches
+/// run. One unanswered daemon read can take five seconds, so without this a
+/// batch of them could use up the whole pass.
+const WAITING_APPROVAL_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 const POLL_PASS_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 /// Event retention scans every watch's history plus a full orphan sweep, so
@@ -297,6 +301,7 @@ where
     credential_repair_waits: Mutex<std::collections::HashMap<String, i64>>,
     relay_health: Option<Arc<dyn RelayPollingHealth>>,
     pass_budget: std::time::Duration,
+    approval_retry_budget: std::time::Duration,
     stop: Arc<AtomicBool>,
     resume_after: Mutex<Option<(String, String)>>,
     last_housekeeping: Mutex<Option<std::time::Instant>>,
@@ -364,6 +369,7 @@ where
             credential_repair_waits: Mutex::new(Default::default()),
             relay_health: None,
             pass_budget: POLL_PASS_BUDGET,
+            approval_retry_budget: WAITING_APPROVAL_RETRY_BUDGET,
             stop: Arc::new(AtomicBool::new(false)),
             resume_after: Mutex::new(None),
             last_housekeeping: Mutex::new(None),
@@ -634,10 +640,14 @@ where
         // Approvals held unsent because their daemon scope could not be
         // confirmed (typically the owner has not re-synced since a daemon
         // restart). Each retry asks the daemon once; the bound keeps one pass
-        // from queuing many daemon round trips.
-        let retried = self
-            .engine
-            .retry_waiting_approvals(WAITING_APPROVAL_RETRIES_PER_PASS);
+        // from queuing many daemon round trips, and the time budget leaves the
+        // rest of the pass to due watches.
+        let approvals_deadline =
+            deadline.min(std::time::Instant::now() + self.approval_retry_budget);
+        let retried = self.engine.retry_waiting_approvals_until(
+            WAITING_APPROVAL_RETRIES_PER_PASS,
+            Some(approvals_deadline),
+        );
         if retried > 0 {
             eprintln!(debug scheduler: "retried {retried} approval(s) waiting on a scope");
         }
@@ -1014,6 +1024,85 @@ mod tests {
             "the deferred watch must go before the previous slow watch"
         );
         assert!(ids.contains(&second[0].subscription_id));
+    }
+
+    #[test]
+    fn unanswered_approval_retries_leave_the_pass_to_due_watches() {
+        struct SlowScope(std::sync::atomic::AtomicUsize);
+        impl crate::scope::ScopeReader for SlowScope {
+            fn describe(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<crate::scope::ScopeDescription, crate::scope::ScopeReadError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                Err(crate::scope::ScopeReadError("no answer".into()))
+            }
+        }
+        let (store, _, engine) = scheduler_engine(json!({"items":[]}));
+        subscribe(&store, 30);
+        let reader = Arc::new(SlowScope(Default::default()));
+        let mut scheduler = Scheduler::new(engine.with_scope_reader(reader.clone()), 86_400_000);
+        scheduler.run_pass(&[], now_ms());
+        let scope = crate::scope::CallScope {
+            owner: "reserved:prefrontal-core".into(),
+            scope_ref: "head-1".into(),
+            scope_epoch: 1,
+            kind: None,
+            parent: None,
+            parent_state: None,
+            agent_id: None,
+            flow_id: None,
+            delegates: false,
+            owner_authorized: true,
+        };
+        for index in 0..WAITING_APPROVAL_RETRIES_PER_PASS {
+            let id = store
+                .create_action_request(
+                    "direct",
+                    "connection",
+                    "read_action",
+                    &json!({"n": index}),
+                    "hash-read",
+                    "direct",
+                    now_ms() + 600_000,
+                    Some(&scope),
+                    None,
+                )
+                .unwrap();
+            store.sql_for_test(|conn| {
+                conn.execute(
+                    "UPDATE action_requests SET status='approved',scope_outcome=?2 WHERE request_id=?1",
+                    rusqlite::params![id, crate::scope::APPROVED_WAITING],
+                )
+            });
+        }
+        // Sixteen 60 ms reads take longer than the whole pass budget.
+        scheduler.pass_budget = std::time::Duration::from_millis(400);
+        scheduler.approval_retry_budget = std::time::Duration::from_millis(100);
+        let polled = scheduler.run_pass(&principals(), now_ms());
+        assert_eq!(polled.len(), 1, "the due watch still runs");
+        let tried = reader.0.load(Ordering::SeqCst);
+        assert!(
+            (1..WAITING_APPROVAL_RETRIES_PER_PASS).contains(&tried),
+            "retries stop at their budget: {tried}"
+        );
+        let released: Vec<String> = store.sql_for_test(|conn| {
+            conn.prepare("SELECT request_id FROM action_requests WHERE scope_checked_at_ms=0")?
+                .query_map([], |row| row.get(0))?
+                .collect()
+        });
+        assert_eq!(
+            released.len(),
+            WAITING_APPROVAL_RETRIES_PER_PASS - tried,
+            "approvals the pass did not reach are released, the rest stay stamped"
+        );
+        let next = store.waiting_scoped_approvals(1).unwrap();
+        assert!(
+            released.contains(&next[0].request_id),
+            "the next selection starts with an approval the pass did not reach"
+        );
     }
 
     #[test]
