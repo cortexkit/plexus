@@ -951,6 +951,25 @@ fn card_conflict_occupies_the_slot_without_reproposing_or_refiling() {
 }
 
 #[test]
+fn expired_card_conflict_releases_the_slot_to_the_next_repository() {
+    let mut f = Fixture::new();
+    let next = "octo-owner/z-repo";
+    f.repositories(&[REPO, next]);
+    let mut conflict = f.seed_waiting(&handle(), REPO, 0);
+    conflict.state = "card_conflict".into();
+    conflict.card_id = None;
+    conflict.expires_at_ms = Some(NOW);
+    assert!(f
+        .store
+        .save_github_manifest_binding(&conflict, None)
+        .unwrap());
+    f.discover();
+    assert_eq!(f.record_for(&handle(), REPO).state, "expired");
+    assert_eq!(f.record_for(&handle(), next).state, "pending");
+    assert_eq!(f.vault.calls.lock().unwrap()[0].1["repo"], next);
+}
+
+#[test]
 fn card_conflict_with_a_saved_card_settles_before_the_slot_decision() {
     for answer in [CardState::Declined, CardState::Expired] {
         let mut f = Fixture::new();

@@ -247,6 +247,21 @@ impl ApprovalPass<'_> {
         if !self.admitted() {
             return Ok(());
         }
+        // A conflict may have no local card to check for expiry. Retire it
+        // before selecting a waiter, even if its installation cannot be read.
+        for mut record in self
+            .store
+            .github_manifest_bindings()
+            .map_err(|_| "store_error")?
+        {
+            if record.present
+                && record.state == "card_conflict"
+                && record.expires_at_ms.is_some_and(|expiry| expiry <= now)
+            {
+                record.state = "expired".into();
+                self.save(&mut record, Some("github_manifest_expired"))?;
+            }
+        }
         let available = matches!(
             self.cards.manifest_binding_card(CardRequest::Available),
             Ok(CardReply::Available)
