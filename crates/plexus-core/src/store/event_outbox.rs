@@ -2120,7 +2120,7 @@ mod tests {
             });
             println!("idle relay scheduler watches={watches} store_calls={calls}");
             assert_eq!(
-                calls, 5,
+                calls, 4,
                 "fixed reconciliation/approval work, due selection and one pairing snapshot must not grow per watch"
             );
         }

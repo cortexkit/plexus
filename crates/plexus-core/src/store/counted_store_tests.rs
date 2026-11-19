@@ -4,7 +4,7 @@ use super::{Connection, StorageDescriptor, StoreError};
 use std::cell::Cell;
 
 thread_local! {
-    static CALLS: Cell<Option<usize>> = const { Cell::new(None) };
+    static CALLS: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
 }
 
 // Count all store-boundary reads and transactions, not just selected
@@ -18,10 +18,10 @@ impl std::ops::Deref for SqliteStore {
     }
 }
 
-fn record() {
+fn record(fenced: bool) {
     CALLS.with(|calls| {
-        if let Some(count) = calls.get() {
-            calls.set(Some(count + 1));
+        if let Some((total, fenced_total)) = calls.get() {
+            calls.set(Some((total + 1, fenced_total + usize::from(fenced))));
         }
     });
 }
@@ -31,7 +31,7 @@ impl SqliteStore {
         &self,
         f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, StoreError> {
-        record();
+        record(false);
         self.0.with_read(f)
     }
 
@@ -39,7 +39,7 @@ impl SqliteStore {
         &self,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<T>,
     ) -> Result<T, StoreError> {
-        record();
+        record(true);
         self.0.with_conn_fenced(f)
     }
 
@@ -48,7 +48,7 @@ impl SqliteStore {
         &self,
         f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> Result<T, StoreError> {
-        record();
+        record(false);
         self.0.with_conn(f)
     }
 }
@@ -58,6 +58,10 @@ pub(super) fn open_sqlite(descriptor: &StorageDescriptor) -> Result<SqliteStore,
 }
 
 pub(super) fn count_calls(work: impl FnOnce()) -> usize {
+    count_calls_by_kind(work).0
+}
+
+pub(super) fn count_calls_by_kind(work: impl FnOnce()) -> (usize, usize) {
     struct Guard;
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -65,7 +69,7 @@ pub(super) fn count_calls(work: impl FnOnce()) -> usize {
         }
     }
     let _guard = Guard;
-    CALLS.with(|calls| calls.set(Some(0)));
+    CALLS.with(|calls| calls.set(Some((0, 0))));
     work();
     CALLS.with(|calls| calls.get().unwrap())
 }
