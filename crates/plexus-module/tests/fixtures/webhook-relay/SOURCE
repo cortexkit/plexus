@@ -2,3 +2,11 @@ source: https://github.com/cortexkit/cortexkit-cloud
 commit: 908eba9f442e3cf1a95772bfae81808816074a4c
 path: test-vectors/webhook-relay/ and docs/designs/webhook-relay-spec.md (lines 242-422, in WIRE-CONTRACT.md)
 Deployed: hooks.cortexkit.io version aa3aa417 runs this commit.
+
+github-apps additions:
+  tag: relay-github-apps-vectors-v1
+  commit: 2855911fddc09ba0d160152373f2ae469b603eb4
+  path: test-vectors/webhook-relay/
+  sha256:
+    github-apps-frames.jsonl: 5a767e4d65b61b4c9d74a99aea3858ed9e977beee6653da5071090612455b582
+    github-apps-routes.jsonl: 1d3b9497c16c562812d0c646f2edb26d1628422bf6ea185ad85273f6cd9f3952

@@ -1,0 +1,9 @@
+{"name":"create","request":{"method":"POST","path":"/v1/relay/github-apps/slots"},"status":201,"body":"{\"slot\":\"<slot>\",\"webhook_url\":\"https://hooks.cortexkit.io/v1/github/apps/<slot>/webhook\",\"expires_at\":\"2030-10-08T10:00:00.000Z\"}"}
+{"name":"pending","request":{"method":"GET","path":"/v1/relay/github-apps/status"},"status":200,"body":"{\"slots\":[{\"slot\":\"<slot>\",\"app_id\":null,\"state\":\"pending\",\"last_delivery_at\":null}]}"}
+{"name":"complete","request":{"method":"PUT","path":"/v1/relay/github-apps/slots/<slot>"},"status":200,"body":"{\"ok\":true}"}
+{"name":"app-mismatch","request":{"method":"PUT","path":"/v1/relay/github-apps/slots/<slot>"},"status":409,"body":"{\"error\":\"app_mismatch\"}"}
+{"name":"delivery","request":{"method":"POST","path":"/v1/github/apps/<slot>/webhook"},"status":200,"body":"{\"seq\":1,\"duplicate\":false}"}
+{"name":"installation-less delivery","request":{"method":"POST","path":"/v1/github/apps/<slot>/webhook"},"status":200,"body":"{\"seq\":2,\"duplicate\":false}"}
+{"name":"active","request":{"method":"GET","path":"/v1/relay/github-apps/status"},"status":200,"body":"{\"slots\":[{\"slot\":\"<slot>\",\"app_id\":\"42\",\"state\":\"active\",\"last_delivery_at\":\"2030-10-08T09:00:00.000Z\"}]}"}
+{"name":"delete","request":{"method":"DELETE","path":"/v1/relay/github-apps/slots/<slot>"},"status":204,"body":""}
+{"name":"deleted webhook","request":{"method":"POST","path":"/v1/github/apps/<slot>/webhook"},"status":404,"body":"{\"error\":\"not_found\"}"}

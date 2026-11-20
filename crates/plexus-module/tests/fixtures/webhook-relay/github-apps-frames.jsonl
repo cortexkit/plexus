@@ -1,0 +1,3 @@
+{"name":"app hello","frame":{"type":"hello","v":1,"source":"github-apps","account_id":"<account_id>","stream_id":"<stream_id>","next_seq":1,"oldest_seq":1,"last_acked_seq":0},"expect":"emitted"}
+{"name":"app event","frame":{"type":"event","seq":1,"delivery_id":"00000000-0000-0000-0000-000000000031","event":"issues","action":"opened","installation_id":7,"app_id":"42","received_at":"<received_at>","stub":null,"body":{"action":"opened","installation":{"id":7}}},"expect":"emitted"}
+{"name":"app event without installation","frame":{"type":"event","seq":2,"delivery_id":"00000000-0000-0000-0000-000000000032","event":"issues","action":"created","installation_id":null,"app_id":"42","received_at":"<received_at>","stub":null,"body":{"action":"created"}},"expect":"emitted"}
