@@ -8,6 +8,34 @@ use std::sync::{
     Mutex,
 };
 
+#[test]
+fn scoped_app_metadata_requires_the_record_slug_and_canonical_string() {
+    let reply = json!({"result":{"credentials":[
+        {"id":"github_app:manual","github_app":{"app_id":"42","slug":"manual"}},
+        {"id":"github_app:vault","github_app":{"app_id":"43","slug":"vault","created_by":"vault","created_at_ms":5}},
+        {"id":"github_app:wrong-slug","github_app":{"app_id":"44","slug":"manual"}},
+        {"id":"github_app:integer","github_app":{"app_id":45,"slug":"integer"}},
+        {"id":"github_app:leading-zero","github_app":{"app_id":"046","slug":"leading-zero"}},
+        {"id":"github_app:old"},
+        {"id":"other:manual","github_app":{"app_id":"47","slug":"manual"}}
+    ]}});
+    assert_eq!(
+        listed_app_ids(&reply),
+        Some(BTreeMap::from([
+            ("github_app:manual".into(), 42),
+            ("github_app:vault".into(), 43),
+        ]))
+    );
+    assert_eq!(
+        listed_app_ids(&json!({"result":{"credentials":[]}})),
+        Some(BTreeMap::new())
+    );
+    assert_eq!(
+        listed_app_ids(&json!({"error":{"code":"unknown_method"}})),
+        None
+    );
+}
+
 fn vault_case(name: &str) -> Value {
     let bytes = include_bytes!("../../plexus-core/tests/fixtures/vault-wire/list-scoped-v2.json");
     assert_eq!(

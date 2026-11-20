@@ -2,7 +2,10 @@
 use crate::{connector_home::ConnectorHome, ModuleState};
 use futures_util::{SinkExt, StreamExt};
 use plexus_core::{
-    storage::relay::{CommitOutcome, Event, Hello, Stub},
+    storage::relay::{
+        canonical_app_id, AppRelayMetadata, CommitOutcome, CoverageReset, Event, Hello, Stub,
+        GITHUB_APPS_SOURCE,
+    },
     CredentialSource, PlexusStore,
 };
 use serde::Deserialize;
@@ -34,6 +37,8 @@ pub const URL: &str = "wss://hooks.cortexkit.io/v1/relay/github/ws";
 pub const STATUS_OP: &str = "relay.status";
 const SOURCE: &str = "github";
 const CREDENTIAL: &str = "relay:github";
+const APPS_URL: &str = "wss://hooks.cortexkit.io/v1/relay/github-apps/ws";
+const APPS_CREDENTIAL: &str = "relay:github-apps";
 const CREDENTIAL_RECHECK: Duration = Duration::from_secs(300);
 /// How soon to try again after the connector home was not held. The home is
 /// re-read every 30 seconds by the module's claim task (and again by `dial`),
@@ -99,17 +104,57 @@ impl State {
         }
     }
 }
-struct Snapshot {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Github,
+    Apps,
+}
+
+impl Source {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Github => SOURCE,
+            Self::Apps => GITHUB_APPS_SOURCE,
+        }
+    }
+
+    fn credential(self) -> &'static str {
+        match self {
+            Self::Github => CREDENTIAL,
+            Self::Apps => APPS_CREDENTIAL,
+        }
+    }
+}
+
+struct SourceSnapshot {
     state: State,
     last_event_at: Option<String>,
     superseded: bool,
     connected_since: Option<Instant>,
+    stream_id: Option<String>,
+    disconnected_at: Option<Instant>,
+}
+
+impl Default for SourceSnapshot {
+    fn default() -> Self {
+        Self {
+            state: State::NoCredential,
+            last_event_at: None,
+            superseded: false,
+            connected_since: None,
+            stream_id: None,
+            disconnected_at: None,
+        }
+    }
+}
+
+struct Snapshot {
+    github: SourceSnapshot,
+    apps: SourceSnapshot,
     healthy_since: Option<Instant>,
     last_delivery: Option<Instant>,
     missed_events: u64,
     last_clock_reset: &'static str,
-    stream_id: Option<String>,
-    disconnected_at: Option<Instant>,
     logged_slow: bool,
     reconcile_pending: bool,
     activity: Activity,
@@ -117,26 +162,66 @@ struct Snapshot {
     after_event_commit: Option<Box<dyn FnOnce() + Send>>,
 }
 
+impl Snapshot {
+    fn source(&self, source: Source) -> &SourceSnapshot {
+        match source {
+            Source::Github => &self.github,
+            Source::Apps => &self.apps,
+        }
+    }
+
+    fn source_mut(&mut self, source: Source) -> &mut SourceSnapshot {
+        match source {
+            Source::Github => &mut self.github,
+            Source::Apps => &mut self.apps,
+        }
+    }
+
+    fn sources(&self) -> [&SourceSnapshot; 2] {
+        [&self.github, &self.apps]
+    }
+
+    fn connected_since(&self) -> Option<Instant> {
+        self.sources()
+            .into_iter()
+            .filter_map(|source| source.connected_since)
+            .max()
+    }
+}
+
+// The single-source polling tests exercise the GitHub socket directly.
+#[cfg(test)]
+impl std::ops::Deref for Snapshot {
+    type Target = SourceSnapshot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.github
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for Snapshot {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.github
+    }
+}
+
 #[derive(Default)]
 struct Activity {
     stored: u64,
     dropped: BTreeMap<(String, String), u64>,
 }
-pub struct Status(Mutex<Snapshot>, tokio::sync::Notify);
+pub struct Status(Mutex<Snapshot>, tokio::sync::Notify, Arc<AppRelayMetadata>);
 impl Default for Status {
     fn default() -> Self {
         Self(
             Mutex::new(Snapshot {
-                state: State::NoCredential,
-                last_event_at: None,
-                superseded: false,
-                connected_since: None,
+                github: SourceSnapshot::default(),
+                apps: SourceSnapshot::default(),
                 healthy_since: None,
                 last_delivery: None,
                 missed_events: 0,
                 last_clock_reset: "process_started",
-                stream_id: None,
-                disconnected_at: None,
                 logged_slow: false,
                 reconcile_pending: false,
                 activity: Activity::default(),
@@ -144,13 +229,19 @@ impl Default for Status {
                 after_event_commit: None,
             }),
             tokio::sync::Notify::new(),
+            Arc::default(),
         )
     }
 }
 impl Status {
+    #[cfg(test)]
     fn committed(&self, outcome: CommitOutcome, event: String) {
+        self.source_committed(Source::Github, outcome, event);
+    }
+
+    fn source_committed(&self, source: Source, outcome: CommitOutcome, event: String) {
         let mut status = self.0.lock().unwrap();
-        Self::delivered_at(&mut status, Instant::now());
+        Self::source_delivered_at(&mut status, source, Instant::now());
         match outcome {
             CommitOutcome::Stored => status.activity.stored += 1,
             CommitOutcome::Dropped(reason) => {
@@ -165,11 +256,18 @@ impl Status {
         self.1.notify_one();
     }
 
+    #[cfg(test)]
     fn delivered_at(status: &mut Snapshot, now: Instant) {
+        Self::source_delivered_at(status, Source::Github, now);
+    }
+
+    fn source_delivered_at(status: &mut Snapshot, source: Source, now: Instant) {
         Self::observe(status, now);
         // Dropped and cursor-only frames prove the delivery pipe works too.
-        if status.state == State::Connected {
-            status.healthy_since.get_or_insert(now);
+        if status.source(source).state == State::Connected {
+            if Self::covers_polling(status, now) {
+                status.healthy_since.get_or_insert(now);
+            }
             status.last_delivery = Some(now);
         }
         Self::observe(status, now);
@@ -188,88 +286,115 @@ impl Status {
         eprintln!(info relay: "relay activity summary: stored={} dropped={}", activity.stored, json!(dropped));
     }
 
+    #[cfg(test)]
     fn set(&self, state: State) {
-        self.transition(state, None);
+        self.transition(Source::Github, state, None);
     }
+    #[cfg(test)]
     fn rejected(&self, cause: RejectionCause) {
-        self.transition(State::CredentialRejected, Some(cause));
+        self.transition(Source::Github, State::CredentialRejected, Some(cause));
     }
-    fn transition(&self, state: State, cause: Option<RejectionCause>) {
+    fn transition(&self, source: Source, state: State, cause: Option<RejectionCause>) {
         let changed = {
             let mut status = self.0.lock().unwrap();
             let now = Instant::now();
             Self::observe(&mut status, now);
-            let changed = status.state != state;
+            let changed = status.source(source).state != state;
             if changed {
                 if state == State::Connected {
-                    status.connected_since = Some(now);
-                    status.disconnected_at = None;
-                } else if state == State::Reconnecting && Self::slow_at(&status, now) {
+                    status.source_mut(source).connected_since = Some(now);
+                    status.source_mut(source).disconnected_at = None;
+                } else if state == State::Reconnecting
+                    && status.source(source).state == State::Connected
+                    && Self::slow_at(&status, now)
+                {
                     // Cursor replay can bridge a short transport outage without a full poll.
-                    status.disconnected_at = Some(now);
-                    status.connected_since = None;
+                    status.source_mut(source).disconnected_at = Some(now);
+                    status.source_mut(source).connected_since = None;
                 } else {
+                    let prior = status.source(source);
                     let reconcile =
-                        status.state == State::Connected || status.disconnected_at.is_some();
+                        prior.state == State::Connected || prior.disconnected_at.is_some();
                     Self::fall_back(&mut status, state.name(), reconcile);
-                    status.connected_since = None;
+                    status.source_mut(source).connected_since = None;
                 }
             }
-            status.state = state;
+            let current = status.source_mut(source);
+            current.state = state;
             if state != State::Reconnecting {
-                status.superseded = false;
+                current.superseded = false;
             }
             Self::observe(&mut status, now);
             changed
         };
         self.1.notify_one();
         if changed {
-            log_transition(state, cause);
+            log_transition(source, state, cause);
         }
     }
+    #[cfg(test)]
     fn superseded(&self) {
+        self.source_superseded(Source::Github);
+    }
+    fn source_superseded(&self, source: Source) {
         let changed = {
             let mut status = self.0.lock().unwrap();
             Self::observe(&mut status, Instant::now());
-            let changed = status.state != State::Reconnecting;
-            let reconcile = status.state == State::Connected || status.disconnected_at.is_some();
+            let prior = status.source(source);
+            let changed = prior.state != State::Reconnecting;
+            let reconcile = prior.state == State::Connected || prior.disconnected_at.is_some();
             Self::fall_back(&mut status, "superseded", reconcile);
-            status.state = State::Reconnecting;
-            status.superseded = true;
-            status.connected_since = None;
+            let current = status.source_mut(source);
+            current.state = State::Reconnecting;
+            current.superseded = true;
+            current.connected_since = None;
             Self::observe(&mut status, Instant::now());
             changed
         };
         self.1.notify_one();
         if changed {
-            log_transition(State::Reconnecting, None);
+            log_transition(source, State::Reconnecting, None);
         }
     }
-    fn event(&self, received: String) {
-        self.0.lock().unwrap().last_event_at = Some(received);
+    fn event(&self, source: Source, received: String) {
+        self.0.lock().unwrap().source_mut(source).last_event_at = Some(received);
     }
+    #[cfg(test)]
     fn reset_clock(&self, reason: &'static str) {
+        self.reset_source_clock(Source::Github, reason);
+    }
+    fn reset_source_clock(&self, source: Source, reason: &'static str) {
         let mut status = self.0.lock().unwrap();
         Self::observe(&mut status, Instant::now());
-        Self::fall_back(&mut status, reason, false);
+        status.healthy_since = None;
+        status.last_clock_reset = reason;
+        // A marker reconciles its own coverage, not a concurrent outage on the other stream.
+        status.source_mut(source).disconnected_at = None;
         Self::observe(&mut status, Instant::now());
         self.1.notify_one();
     }
-    fn connected(&self, stream: String, reset: Option<plexus_core::storage::relay::CoverageReset>) {
+    #[cfg(test)]
+    fn connected(&self, stream: String, reset: Option<CoverageReset>) {
         self.connected_at(stream, reset, Instant::now());
     }
-    fn connected_at(
+    #[cfg(test)]
+    fn connected_at(&self, stream: String, reset: Option<CoverageReset>, now: Instant) {
+        self.source_connected_at(Source::Github, stream, reset, now);
+    }
+    fn source_connected_at(
         &self,
+        source: Source,
         stream: String,
-        reset: Option<plexus_core::storage::relay::CoverageReset>,
+        reset: Option<CoverageReset>,
         now: Instant,
     ) {
         let mut status = self.0.lock().unwrap();
         Self::observe(&mut status, now);
-        let disconnected = status.disconnected_at;
+        let prior = status.source(source);
+        let disconnected = prior.disconnected_at;
         let clean_resume = disconnected
             .is_some_and(|since| now.saturating_duration_since(since) <= CLEAN_RECONNECT_WINDOW)
-            && status.stream_id.as_ref() == Some(&stream)
+            && prior.stream_id.as_ref() == Some(&stream)
             && reset.is_none();
         if clean_resume {
             eprintln!(info relay: "GitHub polling kept relay_slow: reason=clean_resume disconnect_ms={} stream_unchanged=true reset=none", now.saturating_duration_since(disconnected.unwrap()).as_millis());
@@ -281,34 +406,37 @@ impl Status {
                 status.reconcile_pending = false;
             }
         }
-        let changed = status.state != State::Connected;
-        status.connected_since = if changed {
+        let current = status.source_mut(source);
+        let changed = current.state != State::Connected;
+        current.connected_since = if changed {
             Some(now)
         } else {
-            status.connected_since
+            current.connected_since
         };
-        status.state = State::Connected;
-        status.stream_id = Some(stream);
-        status.disconnected_at = None;
-        status.superseded = false;
+        current.state = State::Connected;
+        current.stream_id = Some(stream);
+        current.disconnected_at = None;
+        current.superseded = false;
         Self::observe(&mut status, now);
         drop(status);
         self.1.notify_one();
         if changed {
-            log_transition(State::Connected, None);
+            log_transition(source, State::Connected, None);
         }
     }
     fn fall_back(status: &mut Snapshot, reason: &'static str, reconcile: bool) {
         status.healthy_since = None;
-        status.disconnected_at = None;
+        status.github.disconnected_at = None;
+        status.apps.disconnected_at = None;
         status.last_clock_reset = reason;
         status.reconcile_pending |= reconcile;
     }
     fn observe(status: &mut Snapshot, now: Instant) -> bool {
-        if status
-            .disconnected_at
-            .is_some_and(|since| now.saturating_duration_since(since) > CLEAN_RECONNECT_WINDOW)
-        {
+        if status.sources().into_iter().any(|source| {
+            source
+                .disconnected_at
+                .is_some_and(|since| now.saturating_duration_since(since) > CLEAN_RECONNECT_WINDOW)
+        }) {
             Self::fall_back(status, "reconnect_timeout", true);
         }
         if status.healthy_since.is_some()
@@ -327,22 +455,24 @@ impl Status {
     }
     fn polling_deadline(&self) -> Option<Instant> {
         let status = self.0.lock().unwrap();
-        if let Some(since) = status.disconnected_at {
-            Some(since + CLEAN_RECONNECT_WINDOW + Duration::from_nanos(1))
-        } else if status.state == State::Connected && status.healthy_since.is_some() {
-            let expires = status
-                .last_delivery
-                .map(|last| last + DELIVERY_SILENCE_LIMIT);
-            if status.logged_slow {
-                expires
-            } else {
-                status
-                    .healthy_since
-                    .map(|since| (since + HEALTHY_RELAY_WINDOW).min(expires.unwrap()))
-            }
-        } else {
-            None
-        }
+        let reconnect = status
+            .sources()
+            .into_iter()
+            .filter_map(|source| source.disconnected_at)
+            .min()
+            .map(|since| since + CLEAN_RECONNECT_WINDOW + Duration::from_nanos(1));
+        let delivery = status
+            .healthy_since
+            .zip(status.last_delivery)
+            .map(|(since, last)| {
+                let expires = last + DELIVERY_SILENCE_LIMIT;
+                if status.logged_slow {
+                    expires
+                } else {
+                    (since + HEALTHY_RELAY_WINDOW).min(expires)
+                }
+            });
+        reconnect.into_iter().chain(delivery).min()
     }
     fn take_reconcile(&self) -> bool {
         let mut status = self.0.lock().unwrap();
@@ -350,16 +480,27 @@ impl Status {
         std::mem::take(&mut status.reconcile_pending)
     }
     fn slow_at(status: &Snapshot, now: Instant) -> bool {
-        (status.state == State::Connected
-            || status.disconnected_at.is_some_and(|since| {
-                now.saturating_duration_since(since) <= CLEAN_RECONNECT_WINDOW
-            }))
+        Self::covers_polling(status, now)
             && status
                 .healthy_since
                 .is_some_and(|since| now.saturating_duration_since(since) >= HEALTHY_RELAY_WINDOW)
             && status
                 .last_delivery
                 .is_some_and(|last| now.saturating_duration_since(last) < DELIVERY_SILENCE_LIMIT)
+    }
+    fn covers_polling(status: &Snapshot, now: Instant) -> bool {
+        let mut provisioned = status
+            .sources()
+            .into_iter()
+            .filter(|source| source.state != State::NoCredential)
+            .peekable();
+        provisioned.peek().is_some()
+            && provisioned.all(|source| {
+                source.state == State::Connected
+                    || source.disconnected_at.is_some_and(|since| {
+                        now.saturating_duration_since(since) <= CLEAN_RECONNECT_WINDOW
+                    })
+            })
     }
     pub(crate) fn polling_status(&self) -> Value {
         let mut s = self.0.lock().unwrap();
@@ -368,10 +509,10 @@ impl Status {
         self.1.notify_one();
         json!({
             "mode": if slow { "relay_slow" } else { "normal" },
-            "relay_state": s.state.name(),
-            "connected_for_ms": s.connected_since.map(|since| now.saturating_duration_since(since).as_millis()),
+            "relay_state": s.github.state.name(),
+            "connected_for_ms": s.connected_since().map(|since| now.saturating_duration_since(since).as_millis()),
             "healthy_for_ms": s.healthy_since.map(|since| now.saturating_duration_since(since).as_millis()),
-            "delivering": s.state == State::Connected && s.healthy_since.is_some(),
+            "delivering": Self::covers_polling(&s, now) && s.connected_since().is_some() && s.healthy_since.is_some(),
             "last_delivery_age_ms": s.last_delivery.map(|last| now.saturating_duration_since(last).as_millis()),
             "missed_events": s.missed_events,
             "last_clock_reset": s.last_clock_reset,
@@ -380,30 +521,60 @@ impl Status {
     pub fn status(&self) -> Value {
         let mut s = self.0.lock().unwrap();
         Self::observe(&mut s, Instant::now());
-        json!({"sources":[{"source":SOURCE,"state":s.state.name(),"last_event_at":s.last_event_at,"message":Self::message(&s)}]})
+        let mut sources = vec![Self::source_status(&s, Source::Github)];
+        if s.apps.state != State::NoCredential {
+            sources.push(Self::source_status(&s, Source::Apps));
+        }
+        json!({"sources":sources})
     }
-    fn message(s: &Snapshot) -> Option<&'static str> {
-        if s.superseded {
+    fn source_status(s: &Snapshot, source: Source) -> Value {
+        let state = s.source(source);
+        json!({"source":source.name(),"state":state.state.name(),"last_event_at":state.last_event_at,"message":Self::message(s, source)})
+    }
+    pub(crate) fn apps_state(&self) -> &'static str {
+        match self.state(Source::Apps) {
+            State::NoCredential => "disabled",
+            state => state.name(),
+        }
+    }
+    pub(crate) fn observe_app_ids(
+        &self,
+        store: &PlexusStore,
+        ids: BTreeMap<String, i64>,
+    ) -> Result<(), cortexkit_store::StoreError> {
+        store.observe_relay_app_ids(&self.2, ids)
+    }
+    fn state(&self, source: Source) -> State {
+        self.0.lock().unwrap().source(source).state
+    }
+    fn message(s: &Snapshot, source: Source) -> Option<&'static str> {
+        let status = s.source(source);
+        if status.superseded {
             Some(SUPERSEDED_MESSAGE)
-        } else if s.state == State::Connected
+        } else if status.state == State::Connected
             && s.last_clock_reset == "relay_missed_events"
             && s.healthy_since.is_none()
         {
             Some("The GitHub relay is connected but not delivering events; normal polling is active.")
         } else {
-            s.state.message()
+            status.state.message()
         }
     }
     pub(crate) fn degraded_message(&self) -> Option<&'static str> {
         let mut snapshot = self.0.lock().unwrap();
         Self::observe(&mut snapshot, Instant::now());
-        if snapshot.superseded {
-            return Some(SUPERSEDED_MESSAGE);
-        }
-        let s = snapshot.state;
-        (s == State::Connected || matches!(s, State::CredentialRejected | State::SourceNotServed))
-            .then(|| Self::message(&snapshot))
-            .flatten()
+        [Source::Github, Source::Apps]
+            .into_iter()
+            .find_map(|source| {
+                let current = snapshot.source(source);
+                (current.superseded
+                    || matches!(
+                        current.state,
+                        State::Connected | State::CredentialRejected | State::SourceNotServed
+                    ))
+                .then(|| Self::message(&snapshot, source))
+                .flatten()
+            })
     }
 }
 
@@ -434,10 +605,7 @@ impl Status {
     ) {
         let mut status = self.0.lock().unwrap();
         Self::observe(&mut status, now);
-        let Some(connected) = status
-            .connected_since
-            .filter(|_| status.state == State::Connected)
-        else {
+        let Some(connected) = status.connected_since() else {
             return;
         };
         let connected_ms = now
@@ -478,7 +646,22 @@ impl RejectionCause {
     }
 }
 
-fn log_transition(state: State, cause: Option<RejectionCause>) {
+fn log_transition(source: Source, state: State, cause: Option<RejectionCause>) {
+    if source == Source::Apps {
+        match (state, cause) {
+            (State::NoCredential, _) => {}
+            (State::Connected, _) => {
+                plexus_core::diag!(info relay: "relay github-apps state changed: connected")
+            }
+            (_, Some(cause)) => {
+                plexus_core::diag!(warn relay: "relay github-apps state changed: {} cause={}", state.name(), cause.name())
+            }
+            (_, None) => {
+                plexus_core::diag!(warn relay: "relay github-apps state changed: {}", state.name())
+            }
+        }
+        return;
+    }
     match (state, cause) {
         (State::Connected, _) => {
             eprintln!(info relay: "relay state changed: {}", state.name());
@@ -492,9 +675,69 @@ fn log_transition(state: State, cause: Option<RejectionCause>) {
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum Frame {
+enum WireFrame<E> {
     Hello(Hello),
-    Event(Event),
+    Event(E),
+}
+
+#[derive(Deserialize)]
+struct AppEvent {
+    #[serde(default)]
+    app_id: Value,
+    #[serde(flatten)]
+    event: Event<Option<i64>>,
+}
+
+enum Delivery {
+    Github(Event),
+    Apps(AppEvent),
+}
+
+impl Delivery {
+    fn fields(&self) -> (u64, bool, String, String) {
+        fn fields<I>(e: &Event<I>) -> (u64, bool, String, String) {
+            (
+                e.seq,
+                matches!(e.stub, Some(Stub::Overflow)),
+                e.received_at.clone(),
+                e.event.clone(),
+            )
+        }
+        match self {
+            Self::Github(event) => fields(event),
+            Self::Apps(app) => fields(&app.event),
+        }
+    }
+
+    fn commit(
+        self,
+        db: &PlexusStore,
+        stream: &str,
+        metadata: &AppRelayMetadata,
+    ) -> Result<CommitOutcome, cortexkit_store::StoreError> {
+        match self {
+            Self::Github(event) => db.commit_relay_event_with_outcome(SOURCE, stream, &event),
+            Self::Apps(app) => db.commit_app_relay_event(
+                stream,
+                &app.event,
+                app.app_id.as_str().and_then(canonical_app_id),
+                metadata,
+            ),
+        }
+    }
+}
+
+fn read_frame(source: Source, text: &str) -> serde_json::Result<WireFrame<Delivery>> {
+    match source {
+        Source::Github => Ok(match serde_json::from_str::<WireFrame<Event>>(text)? {
+            WireFrame::Hello(hello) => WireFrame::Hello(hello),
+            WireFrame::Event(event) => WireFrame::Event(Delivery::Github(event)),
+        }),
+        Source::Apps => Ok(match serde_json::from_str::<WireFrame<AppEvent>>(text)? {
+            WireFrame::Hello(hello) => WireFrame::Hello(hello),
+            WireFrame::Event(event) => WireFrame::Event(Delivery::Apps(event)),
+        }),
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Failure {
@@ -634,7 +877,18 @@ async fn protocol_error<S: AsyncRead + AsyncWrite + Unpin>(
     Failure::Reconnecting
 }
 
+#[cfg(test)]
 async fn consume<S: AsyncRead + AsyncWrite + Unpin>(
+    socket: WebSocketStream<S>,
+    store: Arc<PlexusStore>,
+    status: &Status,
+    home: &ConnectorHome,
+) -> Failure {
+    consume_source(Source::Github, socket, store, status, home).await
+}
+
+async fn consume_source<S: AsyncRead + AsyncWrite + Unpin>(
+    source: Source,
     mut socket: WebSocketStream<S>,
     store: Arc<PlexusStore>,
     status: &Status,
@@ -656,21 +910,22 @@ async fn consume<S: AsyncRead + AsyncWrite + Unpin>(
         received_at = tokio::time::Instant::now();
         match message {
             Some(Ok(Message::Text(text))) => {
-                let Ok(frame) = serde_json::from_str::<Frame>(&text) else {
+                let Ok(frame) = read_frame(source, &text) else {
                     return protocol_error(&mut socket).await;
                 };
                 match frame {
-                    Frame::Hello(hello) if stream.is_none() => {
+                    WireFrame::Hello(hello) if stream.is_none() => {
                         // Validate source before opening a cursor, admitting an event or sending an ack.
-                        if hello.source != SOURCE {
+                        if hello.source != source.name() {
                             return protocol_error(&mut socket).await;
                         }
                         next = hello.oldest_seq.max(hello.last_acked_seq.saturating_add(1));
                         let db = Arc::clone(&store);
                         let stream_id = hello.stream_id.clone();
-                        let hello_result =
-                            tokio::task::spawn_blocking(move || db.relay_hello(SOURCE, &hello))
-                                .await;
+                        let hello_result = tokio::task::spawn_blocking(move || {
+                            db.relay_hello(source.name(), &hello)
+                        })
+                        .await;
                         let reset = match hello_result {
                             Ok(Ok(reset)) => reset,
                             failure => {
@@ -679,21 +934,24 @@ async fn consume<S: AsyncRead + AsyncWrite + Unpin>(
                             }
                         };
                         stream = Some(stream_id);
-                        status.connected(stream.as_ref().unwrap().clone(), reset);
+                        status.source_connected_at(
+                            source,
+                            stream.as_ref().unwrap().clone(),
+                            reset,
+                            Instant::now(),
+                        );
                     }
-                    Frame::Event(event) if stream.is_some() => {
-                        if event.seq != next {
+                    WireFrame::Event(event) if stream.is_some() => {
+                        let (seq, overflow, received, event_type) = event.fields();
+                        if seq != next {
                             return protocol_error(&mut socket).await;
                         }
-                        let seq = event.seq;
-                        let overflow = matches!(event.stub, Some(Stub::Overflow));
-                        let received = event.received_at.clone();
-                        let event_type = event.event.clone();
                         let stream_id = stream.as_ref().unwrap().clone();
                         let db = Arc::clone(&store);
+                        let metadata = Arc::clone(&status.2);
                         // One received frame at a time bounds our queue below the relay's 64-frame window.
                         let committed = tokio::task::spawn_blocking(move || {
-                            db.commit_relay_event_with_outcome(SOURCE, &stream_id, &event)
+                            event.commit(&db, &stream_id, &metadata)
                         })
                         .await;
                         let outcome = match committed {
@@ -704,9 +962,10 @@ async fn consume<S: AsyncRead + AsyncWrite + Unpin>(
                             }
                         };
                         // Count stored and dropped outcomes after commit, even if the acknowledgement fails.
-                        status.committed(outcome, event_type);
-                        if overflow {
-                            status.reset_clock("overflow");
+                        let committed_marker = overflow && outcome == CommitOutcome::CursorOnly;
+                        status.source_committed(source, outcome, event_type);
+                        if committed_marker {
+                            status.reset_source_clock(source, "overflow");
                         }
                         #[cfg(test)]
                         if let Some(after_commit) =
@@ -727,7 +986,7 @@ async fn consume<S: AsyncRead + AsyncWrite + Unpin>(
                         {
                             return Failure::Reconnecting;
                         }
-                        status.event(received);
+                        status.event(source, received);
                         next = seq + 1;
                     }
                     _ => return protocol_error(&mut socket).await,
@@ -757,8 +1016,9 @@ pub(crate) fn spawn(
     stop: mpsc::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run(
+        run_sources(
             URL,
+            Some(APPS_URL),
             state.store().clone(),
             state.runtime.credential_source().clone(),
             state.runtime.connector_home.clone(),
@@ -769,6 +1029,7 @@ pub(crate) fn spawn(
     })
 }
 
+#[cfg(test)]
 async fn run(
     url: &str,
     store: Arc<PlexusStore>,
@@ -777,8 +1038,35 @@ async fn run(
     status: &Status,
     stop: mpsc::Receiver<()>,
 ) {
-    let connection = run_connections(url, store.clone(), credentials, home, status, stop);
-    tokio::pin!(connection);
+    run_sources(url, None, store, credentials, home, status, stop).await;
+}
+
+async fn run_sources(
+    github_url: &str,
+    apps_url: Option<&str>,
+    store: Arc<PlexusStore>,
+    credentials: Arc<dyn CredentialSource>,
+    home: Arc<ConnectorHome>,
+    status: &Status,
+    mut stop: mpsc::Receiver<()>,
+) {
+    let github = run_connections(
+        Source::Github,
+        github_url,
+        store.clone(),
+        credentials.clone(),
+        home.clone(),
+        status,
+    );
+    let apps = async {
+        match apps_url {
+            Some(url) => {
+                run_connections(Source::Apps, url, store.clone(), credentials, home, status).await
+            }
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(github, apps);
     // The outer relay loop survives reconnects and credential waits without a separate task.
     let mut summary =
         tokio::time::interval_at(tokio::time::Instant::now() + SUMMARY_PERIOD, SUMMARY_PERIOD);
@@ -786,7 +1074,9 @@ async fn run(
     loop {
         let deadline = status.polling_deadline();
         tokio::select! {
-            _ = &mut connection => return,
+            _ = stop.recv() => return,
+            _ = &mut github => return,
+            _ = &mut apps => return,
             _ = summary.tick() => status.log_summary(),
             _ = status.1.notified() => {},
             _ = async {
@@ -808,12 +1098,12 @@ async fn run(
 }
 
 async fn run_connections(
+    source: Source,
     url: &str,
     store: Arc<PlexusStore>,
     credentials: Arc<dyn CredentialSource>,
     home: Arc<ConnectorHome>,
     status: &Status,
-    mut stop: mpsc::Receiver<()>,
 ) {
     let mut rejected: Option<(Zeroizing<Vec<u8>>, RejectionCause)> = None;
     let mut failures = 0u32;
@@ -821,24 +1111,30 @@ async fn run_connections(
     let mut credential_recheck = INITIAL_CREDENTIAL_RECHECK;
     let mut claim = home.decisions();
     loop {
-        tokio::select! { biased; _ = stop.recv() => return, _ = claim.changed() => {}, _ = tokio::time::sleep(delay) => {} }
+        tokio::select! { _ = claim.changed() => {}, _ = tokio::time::sleep(delay) => {} }
         let provider = credentials.clone();
-        let credential = tokio::select! {
-            biased;
-            _ = stop.recv() => return,
-            credential = tokio::task::spawn_blocking(move || provider.get_by_id(CREDENTIAL)) => credential,
-        };
+        let credential =
+            tokio::task::spawn_blocking(move || provider.get_by_id(source.credential())).await;
         let credential = match credential {
             Ok(Ok(credential)) => credential,
             Ok(Err(error)) => {
-                eprintln!(warn relay: "relay credential lookup failed: {}", error.class());
-                status.set(credential_failure_state(&error));
+                let state = credential_failure_state(&error);
+                if source == Source::Github {
+                    eprintln!(warn relay: "relay credential lookup failed: {}", error.class());
+                    status.transition(source, state, None);
+                } else if state == State::NoCredential
+                    || status.state(source) != State::NoCredential
+                {
+                    status.transition(source, state, None);
+                }
                 delay = credential_recheck_delay(&mut credential_recheck);
                 continue;
             }
             Err(error) => {
-                eprintln!(warn relay: "relay credential lookup worker failed: {error}");
-                status.set(State::Reconnecting);
+                if source == Source::Github || status.state(source) != State::NoCredential {
+                    plexus_core::diag!(warn relay: "relay credential lookup worker failed: {error}");
+                    status.transition(source, State::Reconnecting, None);
+                }
                 delay = credential_recheck_delay(&mut credential_recheck);
                 continue;
             }
@@ -847,7 +1143,11 @@ async fn run_connections(
             .as_ref()
             .is_some_and(|(old, _)| old.as_slice() == credential.payload())
         {
-            status.rejected(rejected.as_ref().unwrap().1);
+            status.transition(
+                source,
+                State::CredentialRejected,
+                Some(rejected.as_ref().unwrap().1),
+            );
             delay = credential_recheck_delay(&mut credential_recheck);
             continue;
         }
@@ -855,40 +1155,43 @@ async fn run_connections(
         credential_recheck = INITIAL_CREDENTIAL_RECHECK;
         // A periodic retry of a source the relay does not serve keeps that
         // state rather than flapping through `reconnecting` on every attempt.
-        if status.0.lock().unwrap().state != State::SourceNotServed {
-            status.set(State::Reconnecting);
+        if status.state(source) != State::SourceNotServed {
+            status.transition(source, State::Reconnecting, None);
         }
-        let failure = tokio::select! {
-            biased;
-            _ = stop.recv() => return,
-            result = async {
-                let socket = tokio::time::timeout(Duration::from_secs(30), dial(url, credential.payload(), &home)).await.map_err(|_| Failure::Reconnecting)??;
-                Ok::<_, Failure>(consume(socket, store.clone(), status, &home).await)
-            } => result.unwrap_or_else(|failure| failure),
-        };
-        reset_failure_count(status.0.lock().unwrap().state, failure, &mut failures);
-        if status.0.lock().unwrap().state == State::Connected && failure != Failure::Superseded {
+        let failure = async {
+            let socket = tokio::time::timeout(
+                Duration::from_secs(30),
+                dial(url, credential.payload(), &home),
+            )
+            .await
+            .map_err(|_| Failure::Reconnecting)??;
+            Ok::<_, Failure>(consume_source(source, socket, store.clone(), status, &home).await)
+        }
+        .await
+        .unwrap_or_else(|failure| failure);
+        reset_failure_count(status.state(source), failure, &mut failures);
+        if status.state(source) == State::Connected && failure != Failure::Superseded {
             credential_recheck = INITIAL_CREDENTIAL_RECHECK;
         }
         match failure {
             Failure::Rejected(cause) => {
                 // Relay revocation is not a vendor token failure; never report it to the vault.
                 rejected = Some((Zeroizing::new(credential.payload().to_vec()), cause));
-                status.rejected(cause);
+                status.transition(source, State::CredentialRejected, Some(cause));
                 delay = credential_recheck_delay(&mut credential_recheck);
             }
             // The relay may start serving this source later (the account
             // enables it), so ask again at the credential recheck interval
             // instead of parking until a restart.
             Failure::SourceNotServed => {
-                status.set(State::SourceNotServed);
+                status.transition(source, State::SourceNotServed, None);
                 delay = CREDENTIAL_RECHECK;
             }
             Failure::Superseded => {
-                status.superseded();
+                status.source_superseded(source);
                 let claim = home.clone();
                 let _ = tokio::task::spawn_blocking(move || claim.refresh()).await;
-                status.set(State::Reconnecting);
+                status.transition(source, State::Reconnecting, None);
                 if !home.held() {
                     delay = CREDENTIAL_RECHECK;
                 } else {
@@ -897,17 +1200,18 @@ async fn run_connections(
                 }
             }
             Failure::NotHome => {
-                status.set(State::NotHome);
+                status.transition(source, State::NotHome, None);
                 delay = NOT_HOME_RECHECK;
             }
             Failure::Reconnecting => {
-                status.set(State::Reconnecting);
+                status.transition(source, State::Reconnecting, None);
                 failures = failures.saturating_add(1);
                 delay = backoff(failures);
             }
         }
     }
 }
+
 fn backoff(failures: u32) -> Duration {
     Duration::from_millis(plexus_core::backoff::doubling_ms(
         1_000, failures, 9, 300_000,

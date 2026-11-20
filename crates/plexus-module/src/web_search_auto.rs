@@ -70,6 +70,28 @@ fn active_keys(reply: &Value) -> Result<BTreeSet<SearchKey>, ()> {
     Ok(keys)
 }
 
+fn listed_app_id(metadata: &Value, slug: &str) -> Option<i64> {
+    if metadata["slug"].as_str() != Some(slug) {
+        return None;
+    }
+    plexus_core::storage::relay::canonical_app_id(metadata["app_id"].as_str()?)
+}
+
+fn listed_app_ids(reply: &Value) -> Option<BTreeMap<String, i64>> {
+    let rows = reply.pointer("/result/credentials")?.as_array()?;
+    Some(
+        rows.iter()
+            .filter_map(|row| {
+                let id = row["id"].as_str()?;
+                let slug = id
+                    .strip_prefix("github_app:")
+                    .filter(|slug| !slug.is_empty())?;
+                Some((id.into(), listed_app_id(&row["github_app"], slug)?))
+            })
+            .collect(),
+    )
+}
+
 #[derive(Default)]
 struct Reconciler {
     retries: BTreeMap<SearchKey, (i64, i64)>,
@@ -119,6 +141,11 @@ impl Reconciler {
     ) -> Result<(), cortexkit_store::StoreError> {
         if !state.runtime.connector_home.held() {
             return Ok(());
+        }
+        if let Some(ids) = listed_app_ids(reply) {
+            if let Err(error) = state.health.relay.observe_app_ids(state.store(), ids) {
+                diag!(warn relay: "could not cross-check vault App IDs: {error}");
+            }
         }
         let active = match active_keys(reply) {
             Ok(active) => active,

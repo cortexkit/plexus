@@ -3748,3 +3748,6 @@ fn relay_backoff_sequences_are_pinned_for_their_first_ten_steps() {
         "backoff step"
     );
 }
+
+#[path = "relay_apps_tests.rs"]
+mod apps;

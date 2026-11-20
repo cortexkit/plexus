@@ -801,6 +801,7 @@ impl HealthState {
             detail,
             metrics: Some(json!({
                 "githubPolling": self.relay.polling_status(),
+                "githubAppsRelay": self.relay.apps_state(),
                 "heartbeatAgeMs": heartbeat_wall_age_ms,
                 "moduleLifetimeMs": lifetime_ms,
                 "schedulerAlive": scheduler_alive,
