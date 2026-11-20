@@ -261,12 +261,22 @@ impl ChangesSource for NatsChanges {
 async fn run_change_watch(state: Arc<ModuleState>, source: impl ChangesSource) {
     let mut failures = 0;
     let mut logged = false;
+    let mut watched_before = false;
     let mut ownership = OwnershipWake::default();
     let mut agents = AgentWake::default();
     loop {
         let result = async {
             let mut watch = source.watch().await?;
             failures = 0;
+            if watched_before {
+                // A replacement snapshot may omit marker keys. Fold it into
+                // one connector-home refresh and one wake for each sweep.
+                watch.next().await?;
+                ownership.pending = true;
+                agents.pending = true;
+                refresh_home(&state).await;
+            }
+            watched_before = true;
             consume_changes(watch.as_mut(), &state, &mut ownership, &mut agents).await
         }
         .await;
@@ -303,9 +313,9 @@ struct AgentWake {
     pending: bool,
 }
 
-/// A reconnect republishes Entorhinal's `changes` bucket snapshot, including
-/// `agents`. Keep the throttle outside the watcher task so reconnects cannot
-/// start extra retirement sweeps.
+/// A new snapshot or a watch catch-up can both wake the retired-agent sweep.
+/// Keep the throttle outside the watcher task so reconnects cannot start extra
+/// sweeps.
 #[derive(Default)]
 pub(crate) struct AgentSweepThrottle(Mutex<Option<tokio::time::Instant>>);
 

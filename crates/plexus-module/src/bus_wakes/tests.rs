@@ -7,9 +7,10 @@ use plexus_core::{
 };
 use serde_json::{json, Value};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Mutex,
 };
+use tokio::sync::oneshot;
 
 fn fixture() -> (plexus_core::test_scratch::Scratch, Arc<ModuleState>) {
     let scratch = plexus_core::test_scratch::Scratch::database("bus-wakes");
@@ -542,6 +543,137 @@ async fn missing_bucket_keeps_task_alive_and_retries_with_bounded_backoff() {
     }
     task.abort();
     let _ = task.await;
+}
+
+struct ResettingChanges {
+    reset: Mutex<Option<oneshot::Receiver<()>>>,
+    attempts: Arc<AtomicUsize>,
+    first_dropped: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl ChangesSource for ResettingChanges {
+    async fn watch(&self) -> BusResult<Box<dyn RegisterWatch>> {
+        let reset = self.reset.lock().unwrap().take();
+        let keys: &[&str] = if reset.is_some() {
+            &["role.connector_home", "registry", "agents"]
+        } else {
+            &["role.connector_home"]
+        };
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(ResettingWatch {
+            keys: Some(keys),
+            reset,
+            first_dropped: self.first_dropped.clone(),
+        }))
+    }
+}
+
+struct ResettingWatch {
+    keys: Option<&'static [&'static str]>,
+    reset: Option<oneshot::Receiver<()>>,
+    first_dropped: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl RegisterWatch for ResettingWatch {
+    async fn next(&mut self) -> BusResult<WatchEvent> {
+        use cortexkit_bus_trait::{BusError, RegisterEntry, Revision};
+
+        if let Some(keys) = self.keys.take() {
+            return Ok(WatchEvent::Snapshot {
+                entries: keys
+                    .iter()
+                    .map(|key| RegisterEntry {
+                        key: (*key).into(),
+                        value: vec![],
+                        revision: Revision(1),
+                    })
+                    .collect(),
+                revision: Revision(1),
+            });
+        }
+        if let Some(reset) = &mut self.reset {
+            reset.await.unwrap();
+            return Err(BusError::unavailable("register watch bucket changes reset"));
+        }
+        std::future::pending().await
+    }
+
+    fn has_snapshot(&self) -> bool {
+        self.keys.is_none()
+    }
+}
+
+impl Drop for ResettingWatch {
+    fn drop(&mut self) {
+        if self.reset.is_some() {
+            self.first_dropped.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn bucket_reset_reopens_and_wakes_each_pass_once() {
+    let (_scratch, state) = fixture();
+    plant_agent_grant(state.store(), "agent");
+    let agents = Arc::new(
+        plexus_core::agent_registry::StubAgentRegistry::with_default_response(
+            plexus_core::AgentLookup::Known,
+        ),
+    );
+    let repositories = Peer::new(Err(PrefrontalRouteError::Transport));
+    let home = Arc::new(RolePeer {
+        calls: AtomicUsize::new(0),
+        reply: Mutex::new(Ok(json!({
+            "role":"connector_home", "epoch":1, "holder":null, "holder_name":null, "source":null,
+            "known":true, "held_here":true, "stale":false
+        }))),
+    });
+    let mut runtime = crate::runtime_for_test(state.store().clone());
+    runtime.agent_registry = agents.clone();
+    runtime.repository_registry = Some(Arc::new(
+        plexus_core::repository_ownership::EntorhinalRepositoryRegistry::new(repositories.clone()),
+    ));
+    runtime.connector_home = Arc::new(crate::connector_home::ConnectorHome::new(home.clone()));
+    let state = Arc::new(ModuleState {
+        runtime,
+        health: Arc::new(crate::health::HealthState::new()),
+    });
+    let (reset, signal) = oneshot::channel();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let first_dropped = Arc::new(AtomicBool::new(false));
+    let task = tokio::spawn(run_change_watch(
+        state,
+        ResettingChanges {
+            reset: Mutex::new(Some(signal)),
+            attempts: attempts.clone(),
+            first_dropped: first_dropped.clone(),
+        },
+    ));
+    until(|| agents.requests().len() == 1 && repositories.calls.lock().unwrap().len() == 1).await;
+    assert_eq!(home.calls.load(Ordering::SeqCst), 1);
+    reset.send(()).unwrap();
+    until(|| first_dropped.load(Ordering::SeqCst)).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    until(|| home.calls.load(Ordering::SeqCst) >= 2).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+    // The replacement snapshot only includes the role. Both sweeps must still run.
+    tokio::time::advance(Duration::from_secs(8)).await;
+    until(|| repositories.calls.lock().unwrap().len() == 2).await;
+    tokio::time::advance(Duration::from_secs(49)).await;
+    assert_eq!(agents.requests(), ["agent"], "reset bypassed the throttle");
+    tokio::time::advance(Duration::from_secs(1)).await;
+    until(|| agents.requests().len() == 2).await;
+    tokio::time::advance(Duration::from_secs(60)).await;
+    task.abort();
+    let _ = task.await;
+    assert_eq!(home.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(repositories.calls.lock().unwrap().len(), 2);
+    assert_eq!(agents.requests(), ["agent", "agent"]);
 }
 
 struct MissingDurable(Arc<AtomicUsize>);
