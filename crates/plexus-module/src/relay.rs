@@ -368,7 +368,8 @@ impl Status {
         Self::observe(&mut status, Instant::now());
         status.healthy_since = None;
         status.last_clock_reset = reason;
-        // A marker reconciles its own coverage, not a concurrent outage on the other stream.
+        // A relay overflow marker (events lost on this source) triggers a catch-up for this
+        // source's coverage only; it doesn't clear an outage still open on the other source.
         status.source_mut(source).disconnected_at = None;
         Self::observe(&mut status, Instant::now());
         self.1.notify_one();
