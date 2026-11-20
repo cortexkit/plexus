@@ -1,0 +1,3 @@
+[
+  {"request":{"method":"agent.register_session","params":{"agent_id":"agent_0000000000000101","harness":"broca","network":"yes","project_root":"/fixture/project","ref":"delegated-ref","ref_kind":"broca-session","role":"worker","runner":"broca","session_id":"delegated-session"}},"principal":{"kind":"reserved","moduleId":"prefrontal"},"reply":{"code":"invalid_request","detail":null,"message":"role must be head or delegated"}}
+]

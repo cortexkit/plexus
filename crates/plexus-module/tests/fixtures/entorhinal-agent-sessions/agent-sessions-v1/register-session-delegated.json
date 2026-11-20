@@ -1,0 +1,3 @@
+[
+  {"request":{"method":"agent.register_session","params":{"agent_id":"agent_0000000000000101","harness":"broca","project_root":"/fixture/project","ref":"delegated-ref","ref_kind":"broca-session","role":"delegated","runner":"broca","session_id":"delegated-session"}},"principal":{"kind":"reserved","moduleId":"prefrontal"},"reply":{"result":{"agent_id":"agent_0000000000000101","harness":"broca","project_root":"/fixture/project","ref":"delegated-ref","ref_kind":"broca-session","registered_at_ms":700,"registered_by":"orchestrator","role":"delegated","session_id":"delegated-session"}}}
+]

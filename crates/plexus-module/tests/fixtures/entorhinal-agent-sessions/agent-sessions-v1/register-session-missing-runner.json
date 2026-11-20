@@ -1,0 +1,3 @@
+[
+  {"request":{"method":"agent.register_session","params":{"agent_id":"agent_0000000000000101","harness":"pi","project_root":"/workspace/session-vectors","ref":"0123456789abcdef0123456789abcdef","ref_kind":"pi-session","session_id":"session-001"}},"principal":{"kind":"reserved","moduleId":"prefrontal"},"reply":{"code":"invalid_request","detail":null,"message":"missing field `runner`"}}
+]

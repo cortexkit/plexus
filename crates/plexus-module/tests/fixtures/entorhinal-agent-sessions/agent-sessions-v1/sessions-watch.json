@@ -1,0 +1,3 @@
+[
+  {"op":"agent.sessions_watch","request":{"agent_id":"agent_0000000000000001","open":true},"principal":{"kind":"reserved","moduleId":"callosum"},"frames":[{"type":"StreamData","body":{"kind":"resync","sessions":[]}},{"type":"StreamData","body":{"kind":"changes","removed":[],"sessions":[{"ended_at_ms":null,"harness":"broca","liveness":"unknown","network":"unknown","project_root":null,"ref":"sessions-watch-ref","ref_kind":"broca","registered_at_ms":700,"runner":"broca","session":"sessions-watch-session"}]}},{"type":"StreamData","body":{"kind":"changes","removed":[{"harness":"broca","session":"sessions-watch-session"}],"sessions":[]}}]}
+]

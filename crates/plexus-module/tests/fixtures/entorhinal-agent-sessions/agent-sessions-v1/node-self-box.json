@@ -1,0 +1,3 @@
+[
+  {"request":{"method":"node.self","params":{}},"principal":{"kind":"reserved","moduleId":"phone"},"reply":{"result":{"author":"11111111111111111111111111111111","box_id":"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd","display_name":"This machine","sharing":"enabled"}}}
+]

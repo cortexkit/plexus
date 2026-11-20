@@ -1,0 +1,5 @@
+[
+  {"request":{"method":"node.self","params":{}},"principal":{"kind":"reserved","moduleId":"phone"},"reply":{"result":{"author":null,"display_name":null,"sharing":"disabled"}}},
+  {"request":{"method":"node.self","params":{}},"principal":{"kind":"reserved","moduleId":"phone"},"reply":{"result":{"author":"1111111111111111","display_name":"Workshop machine","sharing":"enabled"}}},
+  {"request":{"method":"node.self","params":{}},"principal":{"kind":"reserved","moduleId":"phone"},"reply":{"result":{"author":"1111111111111111","display_name":null,"sharing":"enabled"}}}
+]

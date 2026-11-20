@@ -1,0 +1,4 @@
+[
+  {"op":"agent.where","request":{"agent_id":"agent_0000000000000041"},"reply":{"result":{"cut_id":null,"epoch":1,"holder":"0123456789abcdef0123456789abcdef","holder_box":"0123456789abcdef0123456789abcdef","holder_name":null,"known":true,"read_at_ms":700,"stale":false,"status":"held_elsewhere"}}},
+  {"op":"agent.where","request":{"agent_id":"agent_0000000000000040"},"reply":{"result":{"cut_id":null,"epoch":5,"holder":"engram:11111111111111111111111111111111","holder_name":null,"known":true,"read_at_ms":700,"stale":false,"status":"held_elsewhere"}}}
+]
