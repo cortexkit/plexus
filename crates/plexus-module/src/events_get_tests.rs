@@ -72,7 +72,7 @@ fn seed_test_events_with_issue_payload(
             grant_id: "grant-core-consume".to_string(),
             principal: "direct".to_string(),
             connection_id: "conn-github".to_string(),
-            grantee_principal: "reserved:prefrontal-core".to_string(),
+            grantee_principal: "reserved:prefrontal".to_string(),
             risk_ceiling: "read".to_string(),
             action_selectors: vec!["list_issues".to_string()],
             authority_kind: "events_consume".to_string(),
@@ -200,7 +200,7 @@ async fn event_pages_preserve_full_listing_and_stable_ties() {
     for principal in [
         Principal::Direct,
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
     ] {
         let full = execute_tool_call(
@@ -379,7 +379,7 @@ async fn event_byte_pages_preserve_backlog_and_timestamp_ties() {
     for principal in [
         Principal::Direct,
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
     ] {
         let mut expected = store.list_events("direct", None, None).unwrap();
@@ -603,7 +603,7 @@ async fn event_list_metadata_stays_complete_or_returns_a_measured_refusal() {
     for principal in [
         Principal::Direct,
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
     ] {
         let page = execute_tool_call(
@@ -667,7 +667,7 @@ async fn event_list_metadata_stays_complete_or_returns_a_measured_refusal() {
             grant_id: "large-metadata-grant".into(),
             principal: "direct".into(),
             connection_id,
-            grantee_principal: "reserved:prefrontal-core".into(),
+            grantee_principal: "reserved:prefrontal".into(),
             risk_ceiling: "read".into(),
             action_selectors: vec!["list_issues".into()],
             authority_kind: "events_consume".into(),
@@ -677,7 +677,7 @@ async fn event_list_metadata_stays_complete_or_returns_a_measured_refusal() {
     let authority_overflow = execute_tool_call(
         store,
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         None,
         manifest::EVENTS_TOOL,
@@ -778,7 +778,7 @@ async fn events_get_pre_handler_refusals_have_retryable_policy() {
             1,
             1,
             Principal::Reserved {
-                module_id: "prefrontal-core".into(),
+                module_id: "prefrontal".into(),
             },
             None,
             CallMode::Classic,
@@ -825,7 +825,7 @@ async fn events_get_pre_handler_refusals_have_retryable_policy() {
         let reply = crate::test_support::send_tool_call(
             &state,
             Principal::Reserved {
-                module_id: "prefrontal-core".into(),
+                module_id: "prefrontal".into(),
             },
             None,
             None,
@@ -878,7 +878,7 @@ async fn events_get_pre_handler_refusals_have_retryable_policy() {
                     1,
                     1,
                     Principal::Reserved {
-                        module_id: "prefrontal-core".into(),
+                        module_id: "prefrontal".into(),
                     },
                     None,
                     CallMode::Classic,
@@ -962,7 +962,7 @@ async fn events_get_store_failure_is_retryable() {
     let reply = crate::test_support::send_tool_call(
         &state,
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         None,
         None,
@@ -1130,22 +1130,21 @@ fn assert_issue_reply(reply: &Value, issue_key: &str) {
 }
 
 #[tokio::test]
-async fn prefrontal_rename_events_get_keeps_exact_carrier_rights() {
-    let (_scratch, store, path) = test_store("prefrontal_rename_get");
+async fn events_get_denies_retired_and_lookalike_prefrontal_carriers() {
+    let (_scratch, store, path) = test_store("retired_prefrontal_get");
     let (issue_key, _) = seed_test_events(&path, &store);
     store
         .insert_grant(&GrantInput {
-            grant_id: "grant-new-consume".into(),
+            grant_id: "grant-retired-consume".into(),
             principal: "direct".into(),
             connection_id: "conn-github".into(),
-            grantee_principal: "reserved:prefrontal".into(),
+            grantee_principal: "reserved:prefrontal-core".into(),
             risk_ceiling: "read".into(),
             action_selectors: vec!["list_issues".into()],
             authority_kind: "events_consume".into(),
             expires_at: Some(i64::MAX / 2),
         })
         .unwrap();
-    let mut accepted = Vec::new();
     for module in [
         "prefrontal-core",
         "prefrontal",
@@ -1162,9 +1161,8 @@ async fn prefrontal_rename_events_get_keeps_exact_carrier_rights() {
             json!({"event_key":issue_key,"event_name":"github_issue_changed"}),
         )
         .await;
-        if matches!(module, "prefrontal-core" | "prefrontal") {
+        if module == "prefrontal" {
             assert_issue_reply(&reply, &issue_key);
-            accepted.push(reply["result"].clone());
         } else {
             assert_eq!(
                 reply["error"]["code"], "events_get_carrier_refused",
@@ -1172,7 +1170,6 @@ async fn prefrontal_rename_events_get_keeps_exact_carrier_rights() {
             );
         }
     }
-    assert_eq!(accepted[0], accepted[1]);
 }
 
 #[tokio::test]
@@ -1182,7 +1179,7 @@ async fn events_get_tool_matches_legacy_for_consumer() {
     let reply = compare_get_replies(
         store,
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         None,
         json!({"event_key": issue_key, "event_name": "github_issue_changed"}),
@@ -1216,7 +1213,7 @@ async fn events_get_tool_matches_legacy_refusals() {
     for (principal, scope, invisible_key, invisible_name) in [
         (
             Principal::Reserved {
-                module_id: "prefrontal-core".into(),
+                module_id: "prefrontal".into(),
             },
             None,
             ci_key,
@@ -1313,7 +1310,7 @@ async fn events_get_tool_rejects_extra_arguments() {
         let reply = execute_tool_call(
             store.clone(),
             Principal::Reserved {
-                module_id: "prefrontal-core".into(),
+                module_id: "prefrontal".into(),
             },
             None,
             manifest::EVENTS_GET_TOOL,
@@ -1329,7 +1326,7 @@ async fn events_get_version_one_is_the_default_and_version_two_never_falls_back(
     let (_scratch, store, path) = test_store("get_tool_version");
     let (issue_key, _) = seed_test_events(&path, &store);
     let core = || Principal::Reserved {
-        module_id: "prefrontal-core".into(),
+        module_id: "prefrontal".into(),
     };
     let call = |arguments: Value| {
         execute_tool_call(
@@ -1387,7 +1384,7 @@ async fn v2_fetch_preserves_pre_workflow_name_ci_job_envelope_and_digest() {
             grant_id: "grant-core-ci-consume".into(),
             principal: "direct".into(),
             connection_id: "conn-github-actions".into(),
-            grantee_principal: "reserved:prefrontal-core".into(),
+            grantee_principal: "reserved:prefrontal".into(),
             risk_ceiling: "read".into(),
             action_selectors: vec!["list_workflow_runs".into()],
             authority_kind: "events_consume".into(),
@@ -1468,7 +1465,7 @@ async fn v2_fetch_preserves_pre_workflow_name_ci_job_envelope_and_digest() {
     let result = execute_tool_call(
         store,
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         None,
         manifest::EVENTS_GET_TOOL,
@@ -1498,7 +1495,7 @@ async fn v2_fetch_returns_stored_bytes_and_digest_without_recomputation() {
     assert_eq!(body["actor_unknown"]["reason"], "actor_source_unbound");
     assert!(body["actor_logins"].is_null());
     let core = || Principal::Reserved {
-        module_id: "prefrontal-core".into(),
+        module_id: "prefrontal".into(),
     };
     let default = execute_tool_call(
         store.clone(),
@@ -1586,7 +1583,7 @@ async fn events_get_tool_matches_legacy_argument_validation() {
         let reply = compare_get_replies(
             store.clone(),
             Principal::Reserved {
-                module_id: "prefrontal-core".into(),
+                module_id: "prefrontal".into(),
             },
             None,
             arguments,
@@ -1696,7 +1693,7 @@ async fn events_get_mismatching_names_have_bounded_refusal_echoes() {
             let reply = execute_tool_call(
                 store.clone(),
                 Principal::Reserved {
-                    module_id: "prefrontal-core".into(),
+                    module_id: "prefrontal".into(),
                 },
                 None,
                 tool,
@@ -1916,7 +1913,7 @@ async fn events_get_global_flow_and_core_grants() {
     let res = execute_tool_call(
         store.clone(),
         Principal::Reserved {
-            module_id: "prefrontal-core".to_string(),
+            module_id: "prefrontal".to_string(),
         },
         None,
         manifest::EVENTS_TOOL,
@@ -1929,7 +1926,7 @@ async fn events_get_global_flow_and_core_grants() {
     let res_ci = execute_tool_call(
         store.clone(),
         Principal::Reserved {
-            module_id: "prefrontal-core".to_string(),
+            module_id: "prefrontal".to_string(),
         },
         None,
         manifest::EVENTS_TOOL,
@@ -1949,7 +1946,7 @@ async fn scoped_core_requires_own_consume_grant() {
     let reply = execute_tool_call(
         store,
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         Some(scope),
         manifest::EVENTS_TOOL,
@@ -1965,7 +1962,7 @@ async fn codemode_events_get_keeps_module_visibility_despite_delegation() {
     let (issue_key, ci_key) = seed_test_events(&path, &store);
     seed_agent_binding(&path, "agent-a", "owner/repo");
     let principal = Principal::Reserved {
-        module_id: "prefrontal-core".into(),
+        module_id: "prefrontal".into(),
     };
     let stamp = subc_protocol::scope::ScopeStamp::new(
         principal.clone(),
@@ -2055,7 +2052,7 @@ async fn events_get_body_matches_independent_sqlite_payload_bytes() {
     let reply = execute_tool_call(
         store,
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         None,
         manifest::EVENTS_TOOL,
@@ -2082,7 +2079,7 @@ async fn events_get_read_only_and_survives_ack() {
     let res_before = execute_tool_call(
         store.clone(),
         Principal::Reserved {
-            module_id: "prefrontal-core".to_string(),
+            module_id: "prefrontal".to_string(),
         },
         None,
         manifest::EVENTS_TOOL,
@@ -2096,7 +2093,7 @@ async fn events_get_read_only_and_survives_ack() {
     let list_res = execute_tool_call(
         store.clone(),
         Principal::Reserved {
-            module_id: "prefrontal-core".to_string(),
+            module_id: "prefrontal".to_string(),
         },
         None,
         manifest::EVENTS_TOOL,
@@ -2111,7 +2108,7 @@ async fn events_get_read_only_and_survives_ack() {
     let ack_res = execute_tool_call(
         store.clone(),
         Principal::Reserved {
-            module_id: "prefrontal-core".to_string(),
+            module_id: "prefrontal".to_string(),
         },
         None,
         manifest::EVENTS_TOOL,
@@ -2124,7 +2121,7 @@ async fn events_get_read_only_and_survives_ack() {
     let res_after = execute_tool_call(
         store.clone(),
         Principal::Reserved {
-            module_id: "prefrontal-core".to_string(),
+            module_id: "prefrontal".to_string(),
         },
         None,
         manifest::EVENTS_TOOL,

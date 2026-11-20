@@ -333,7 +333,7 @@ pub fn build_with_launch_nonce_source(
             // add write contention rather than throughput.
             concurrency: Concurrency::Serial,
             operations: vec![
-                ManagementOperation { name: crate::grants_would_ask::METHOD.to_string(), kind: ManagementOperationKind::Query, description: Some("Inspect proposed flow grants and policy without reserving or prompting; reserved:prefrontal-core, reserved:prefrontal and flow-scoped reserved:basal only".to_string()) },
+                ManagementOperation { name: crate::grants_would_ask::METHOD.to_string(), kind: ManagementOperationKind::Query, description: Some("Inspect proposed flow grants and policy without reserving or prompting; reserved:prefrontal and flow-scoped reserved:basal only".to_string()) },
                 // Cingulate finds permissions/v1 providers in the daemon's
                 // module catalog and calls only modules that also declare these
                 // two operations here, so the capability alone is not enough.

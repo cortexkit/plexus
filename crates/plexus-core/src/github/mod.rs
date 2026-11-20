@@ -22,23 +22,11 @@ pub mod sweeper;
 /// operator adds with `github.handle.grant`).
 pub const AFT_PRINCIPAL: &str = "reserved:aft";
 
-/// The legacy prefrontal principal, retained while rollback binaries use it.
-pub const PREFRONTAL_PRINCIPAL: &str = "reserved:prefrontal-core";
-
-/// Exact daemon-issued identities for the same module across its rename.
-pub const PREFRONTAL_PRINCIPALS: [&str; 2] = [PREFRONTAL_PRINCIPAL, "reserved:prefrontal"];
+pub const PREFRONTAL_MODULE_ID: &str = "prefrontal";
+pub const PREFRONTAL_PRINCIPAL: &str = "reserved:prefrontal";
 
 pub fn is_prefrontal(principal: &str) -> bool {
-    PREFRONTAL_PRINCIPALS.contains(&principal)
-}
-
-/// The reserved module ids, in dial order: the new name before the legacy one.
-pub fn prefrontal_module_ids() -> impl Iterator<Item = &'static str> {
-    PREFRONTAL_PRINCIPALS.into_iter().rev().map(|principal| {
-        principal
-            .strip_prefix("reserved:")
-            .expect("reserved module")
-    })
+    principal == PREFRONTAL_PRINCIPAL
 }
 
 /// The one stored and compared form of a GitHub `owner/repo` name: ASCII

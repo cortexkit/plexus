@@ -47,7 +47,7 @@ impl ScriptedReader {
 
 impl ScopeReader for ScriptedReader {
     fn describe(&self, owner: &str, scope_ref: &str) -> Result<ScopeDescription, ScopeReadError> {
-        assert_eq!((owner, scope_ref), ("reserved:prefrontal-core", "head-1"));
+        assert_eq!((owner, scope_ref), ("reserved:prefrontal", "head-1"));
         *self.reads.lock().unwrap() += 1;
         let mut answer = self.answer.lock().unwrap();
         let current = answer
@@ -62,7 +62,7 @@ impl ScopeReader for ScriptedReader {
 
 fn scope(delegates: bool) -> CallScope {
     CallScope {
-        owner: "reserved:prefrontal-core".into(),
+        owner: "reserved:prefrontal".into(),
         scope_ref: "head-1".into(),
         scope_epoch: 3,
         kind: Some("head".into()),
@@ -268,14 +268,7 @@ fn a_request_raised_under_a_scope_records_that_scope() {
             recorded.delegates,
             recorded.owner_authorized,
         ),
-        (
-            "reserved:prefrontal-core",
-            "head-1",
-            3,
-            Some(AGENT),
-            true,
-            true
-        )
+        ("reserved:prefrontal", "head-1", 3, Some(AGENT), true, true)
     );
     // An identical call on an unscoped route parks its own request: one
     // session's approval never collects another's call.

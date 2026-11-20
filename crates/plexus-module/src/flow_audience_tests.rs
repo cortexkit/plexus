@@ -43,6 +43,9 @@ impl Core {
         Self::with_call_timeout(reply, ANSWERED_CALL_TIMEOUT).await
     }
     async fn with_call_timeout(reply: Value, call_timeout: Duration) -> Self {
+        Self::with_module("prefrontal", reply, call_timeout).await
+    }
+    async fn with_module(core_module: &str, reply: Value, call_timeout: Duration) -> Self {
         let _boot = DAEMON_BOOT.lock().await;
         let scratch = Scratch::directory("flow-audience-core");
         let connection = scratch.join("connection.json");
@@ -63,7 +66,7 @@ impl Core {
         atomic_json(
             &config_path,
             &json!({"version":1,"storage":{"backend":"sqlite","data_home":home},
-            "modules":{"prefrontal-core":module("prefrontal-core"),"plexus":module("plexus")}}),
+            "modules":{(core_module):module(core_module),"plexus":module("plexus")}}),
         );
         atomic_json(&scratch.join("behavior.json"), &json!({"reply":reply}));
         let config = subc_daemon::bootstrap::BootstrapConfig::new(&connection, 0)
@@ -73,7 +76,7 @@ impl Core {
         let task = tokio::spawn(subc_daemon::bootstrap::run_with_config(config));
         let credentials = timeout(LIMIT, async {
             loop {
-                if scratch.join("prefrontal-core.ready.json").exists() {
+                if scratch.join(format!("{core_module}.ready.json")).exists() {
                     if let Ok(bytes) = fs::read(scratch.join("plexus.ready.json")) {
                         break serde_json::from_slice::<Value>(&bytes).unwrap();
                     }
@@ -83,8 +86,9 @@ impl Core {
         })
         .await
         .unwrap_or_else(|_| panic!("core fixture startup failed: {:?}", scratch.path()));
-        let peer = SubcPrefrontalRoutePeer::connect_unbound(
+        let peer = SubcPrefrontalRoutePeer::connect(
             &connection,
+            "prefrontal",
             subc_protocol::BindIdentity::new("plexus", "module"),
         )
         .unwrap()
@@ -159,7 +163,7 @@ async fn core_module_fixture() {
             subc_protocol::manifest::ProviderRole::ManagementSurface { .. }
         )
     });
-    if id == "prefrontal-core" {
+    if id != "plexus" {
         if let subc_protocol::manifest::ProviderRole::ManagementSurface { operations, .. } =
             &mut module_manifest.provides[0]
         {
@@ -215,7 +219,7 @@ async fn core_module_fixture() {
             .await;
             continue;
         }
-        assert_eq!(id, "prefrontal-core");
+        assert_ne!(id, "plexus");
         assert_eq!(value["method"], "flow.audience");
         assert_eq!(value["params"].as_object().unwrap().len(), 1);
         calls.push(value);
@@ -247,7 +251,7 @@ fn workspace() -> Value {
 }
 fn scope(agent: Option<&str>) -> CallScope {
     CallScope {
-        owner: "reserved:prefrontal-core".into(),
+        owner: "reserved:prefrontal".into(),
         scope_ref: "flow-a".into(),
         scope_epoch: 1,
         kind: Some("head".into()),
@@ -383,6 +387,21 @@ async fn agentless_routes_require_core_before_dispatch() {
         binds[0].get("scope").is_none_or(Value::is_null),
         "audience lookup must be unscoped: {binds}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flow_audience_does_not_dial_the_retired_module() {
+    let mut legacy = Core::with_module("prefrontal-core", global(), ANSWERED_CALL_TIMEOUT).await;
+    let (state, _, transport, scratch) = setup(legacy.audiences());
+    quiet_refusal(
+        &state,
+        &transport,
+        &scratch,
+        "github_read",
+        read_args("o/x"),
+        "flow_audience_unavailable",
+    );
+    assert!(legacy.calls().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

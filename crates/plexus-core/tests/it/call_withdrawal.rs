@@ -19,7 +19,7 @@ use serde_json::json;
 const ACTION: &str = "held_write";
 const AFT: &str = "reserved:aft";
 const BROCA: &str = "reserved:broca";
-const OWNER: &str = "reserved:prefrontal-core";
+const OWNER: &str = "reserved:prefrontal";
 const HANDLE: &[u8] = b"test:call-withdrawal-handle";
 
 /// Answers `scope.describe` from a script the test changes.

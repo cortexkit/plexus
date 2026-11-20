@@ -749,7 +749,7 @@ pub(super) fn event_get_reply(
     if !is_basal_flow && !is_prefrontal {
         return tool_error(
             "events_get_carrier_refused",
-            "events.get is restricted to reserved:basal on a flow route, reserved:prefrontal-core or reserved:prefrontal",
+            "events.get is restricted to reserved:basal on a flow route or reserved:prefrontal",
         );
     }
     let Some(event_key) = arguments.get("event_key").and_then(Value::as_str) else {

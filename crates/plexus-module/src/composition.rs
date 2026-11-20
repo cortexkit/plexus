@@ -497,10 +497,15 @@ fn production_agent_registry(connection_file: &Path) -> Arc<dyn AgentRegistry> {
 }
 
 fn production_prefrontal_peer(connection_file: &Path) -> Option<SubcPrefrontalRoutePeer> {
+    use plexus_core::github::PREFRONTAL_MODULE_ID;
     configured_peer(
-        SubcPrefrontalRoutePeer::connect_unbound(connection_file, plexus_bind_identity()),
+        SubcPrefrontalRoutePeer::connect(
+            connection_file,
+            PREFRONTAL_MODULE_ID,
+            plexus_bind_identity(),
+        ),
         "flow audience",
-        "prefrontal",
+        PREFRONTAL_MODULE_ID,
     )
 }
 
@@ -547,17 +552,15 @@ mod tests {
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(output.status.success(), "{stderr}");
             assert!(
-                stderr.contains("configured agent registry peer prefrontal-core unavailable"),
+                stderr.contains("configured agent registry peer entorhinal unavailable"),
                 "configured peer failure must be visible: {stderr}"
             );
             let line = stderr
                 .lines()
-                .find(|line| {
-                    line.contains("configured agent registry peer prefrontal-core unavailable")
-                })
+                .find(|line| line.contains("configured agent registry peer entorhinal unavailable"))
                 .expect("configured peer failure must be visible");
             diagnostic_logging::assert_diagnostic(line, cortexkit_log::ParsedLevel::Warn, "plexus.wire",
-                "configured agent registry peer prefrontal-core unavailable; keeping the route fail-closed");
+                "configured agent registry peer entorhinal unavailable; keeping the route fail-closed");
             assert!(
                 !stderr.contains("opaque-token-secret"),
                 "peer errors must not be dumped: {stderr}"
@@ -565,17 +568,17 @@ mod tests {
             return;
         }
         diagnostic_logging::init_child();
-        let message = peer_failure_warning("agent registry", "prefrontal-core");
-        assert!(message.contains("agent registry") && message.contains("prefrontal-core"));
+        let message = peer_failure_warning("agent registry", "entorhinal");
+        assert!(message.contains("agent registry") && message.contains("entorhinal"));
         assert!(message.contains("fail-closed"));
         assert!(configured_peer::<u8, _>(
             Err("opaque-token-secret"),
             "agent registry",
-            "prefrontal-core"
+            "entorhinal"
         )
         .is_none());
         assert_eq!(
-            configured_peer::<u8, &str>(Ok(7), "agent registry", "prefrontal-core"),
+            configured_peer::<u8, &str>(Ok(7), "agent registry", "entorhinal"),
             Some(7)
         );
     }

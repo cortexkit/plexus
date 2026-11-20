@@ -216,7 +216,7 @@ fn stamp(mode: &CallMode) -> Option<ScopeStamp> {
         _ => return None,
     };
     Some(
-        ScopeStamp::new(reserved("prefrontal-core"), "scope-1", 1, ScopeKind::Worker)
+        ScopeStamp::new(reserved("prefrontal"), "scope-1", 1, ScopeKind::Worker)
             .with_attributes(
                 attributes
                     .with_agent_id(Some(ALL_AGENT.into()))
@@ -783,7 +783,7 @@ async fn only_cingulate_and_direct_are_admitted() {
     let total = count(&f.scratch, "SELECT COUNT(*) FROM grants");
     for (principal, mode) in [
         (reserved("aft"), CallMode::Classic),
-        (reserved("prefrontal-core"), CallMode::Classic),
+        (reserved("prefrontal"), CallMode::Classic),
         (reserved("broca"), CallMode::Classic),
         (reserved("basal"), CallMode::Flow),
         (reserved("cingulate"), CallMode::Flow),

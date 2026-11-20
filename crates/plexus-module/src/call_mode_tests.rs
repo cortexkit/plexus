@@ -17,7 +17,7 @@ fn stamp(mode: &CallMode) -> Option<ScopeStamp> {
         _ => return None,
     };
     Some(
-        ScopeStamp::new(reserved("prefrontal-core"), "scope-1", 1, ScopeKind::Worker)
+        ScopeStamp::new(reserved("prefrontal"), "scope-1", 1, ScopeKind::Worker)
             .with_attributes(
                 attributes
                     .with_agent_id(Some("agent-1".into()))
@@ -202,7 +202,7 @@ async fn every_tool_checks_the_bound_mode_with_standard_refusals() {
         let principal = reserved(if mode == CallMode::Flow {
             "basal"
         } else {
-            "prefrontal-core"
+            "prefrontal"
         });
         assert_eq!(
             bind_route(&state, &routes, principal, stamp(&mode), Some(mode.clone()))
@@ -249,14 +249,7 @@ async fn unknown_mode_bind_is_refused_and_never_installed() {
     let (state, _scratch) = state();
     let routes = Arc::new(RouteBindings::new());
     let mode = CallMode::Unknown("future-mode".into());
-    let reply = bind_route(
-        &state,
-        &routes,
-        reserved("prefrontal-core"),
-        None,
-        Some(mode),
-    )
-    .await;
+    let reply = bind_route(&state, &routes, reserved("prefrontal"), None, Some(mode)).await;
     assert_eq!(
         reply.header.ty,
         FrameType::Error,
@@ -276,14 +269,7 @@ async fn absent_bind_mode_is_derived_from_scope_and_explicit_mode_is_not_from_bo
     let (state, _scratch) = state();
     for mode in [CallMode::Classic, CallMode::Codemode, CallMode::Flow] {
         let routes = Arc::new(RouteBindings::new());
-        bind_route(
-            &state,
-            &routes,
-            reserved("prefrontal-core"),
-            stamp(&mode),
-            None,
-        )
-        .await;
+        bind_route(&state, &routes, reserved("prefrontal"), stamp(&mode), None).await;
         assert_eq!(
             routes.binding(17, 3).unwrap().map(|binding| binding.mode),
             Some(mode)
@@ -293,7 +279,7 @@ async fn absent_bind_mode_is_derived_from_scope_and_explicit_mode_is_not_from_bo
     bind_route(
         &state,
         &routes,
-        reserved("prefrontal-core"),
+        reserved("prefrontal"),
         None,
         Some(CallMode::Codemode),
     )
@@ -319,7 +305,7 @@ async fn codemode_github_is_refused_before_grant_lookup_or_dispatch() {
     bind_route(
         &state,
         &routes,
-        reserved("prefrontal-core"),
+        reserved("prefrontal"),
         stamp(&CallMode::Codemode),
         Some(CallMode::Codemode),
     )
@@ -351,7 +337,7 @@ async fn codemode_github_agent_bindings_are_refused_before_grant_lookup() {
     bind_route(
         &state,
         &routes,
-        reserved("prefrontal-core"),
+        reserved("prefrontal"),
         stamp(&CallMode::Codemode),
         Some(CallMode::Codemode),
     )

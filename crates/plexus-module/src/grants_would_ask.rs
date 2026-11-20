@@ -62,7 +62,10 @@ fn evaluate(
     request: &serde_json::Map<String, Value>,
 ) -> Value {
     if caller != principal::BASAL_PRINCIPAL && !plexus_core::github::is_prefrontal(caller) {
-        return tool_error("principal_denied", "grants.would_ask is reserved to reserved:prefrontal-core, reserved:prefrontal and flow-scoped reserved:basal");
+        return tool_error(
+            "principal_denied",
+            "grants.would_ask is reserved to reserved:prefrontal and flow-scoped reserved:basal",
+        );
     }
     if caller == principal::BASAL_PRINCIPAL && !scope.is_some_and(|scope| scope.flow_id.is_some()) {
         return tool_error(
@@ -170,7 +173,7 @@ fn evaluate(
 
 /// Prefrontal, which installs flows, registers an agent-owned flow with an
 /// `agent_id` and `delegates: true`, and a global (operator-installed) flow
-/// with neither (`flow_scope_record` in prefrontal-core). At run time Basal
+/// with neither (`flow_scope_record` in prefrontal). At run time Basal
 /// calls on its flow's route, and the daemon attaches that scope to the route,
 /// so the check reads `agent_id` and `delegates` from there. At install time
 /// there is no route scope yet, so the same rule is derived from whether the

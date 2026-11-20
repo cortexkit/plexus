@@ -28,7 +28,7 @@ fn call(state: &Arc<ModuleState>, tool: &str, arguments: Value) -> Value {
             2,
             1,
             Principal::Reserved {
-                module_id: "prefrontal-core".into(),
+                module_id: "prefrontal".into(),
             },
         )
         .unwrap();

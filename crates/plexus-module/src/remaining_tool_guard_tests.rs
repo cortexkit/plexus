@@ -161,7 +161,7 @@ impl Fixture {
             || (request["name"] == manifest::EVENTS_TOOL && request["arguments"]["op"] == "get")
         {
             Principal::Reserved {
-                module_id: "prefrontal-core".into(),
+                module_id: "prefrontal".into(),
             }
         } else {
             Principal::Direct

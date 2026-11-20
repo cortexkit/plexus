@@ -700,7 +700,7 @@ async fn webhook_ci_on_circuit_breaker_watch_is_stored_and_published() {
                 grant_id: "issue-consumer".into(),
                 principal: "direct".into(),
                 connection_id: "conn-1".into(),
-                grantee_principal: "reserved:prefrontal-core".into(),
+                grantee_principal: "reserved:prefrontal".into(),
                 risk_ceiling: "read".into(),
                 action_selectors: vec!["*".into()],
                 authority_kind: "events_consume".into(),
@@ -712,7 +712,7 @@ async fn webhook_ci_on_circuit_breaker_watch_is_stored_and_published() {
                 .event_by_key(
                     &event.event_key,
                     EventReader::Consumer {
-                        principal: "reserved:prefrontal-core"
+                        principal: "reserved:prefrontal"
                     },
                     now_ms()
                 )

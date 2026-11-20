@@ -1046,7 +1046,7 @@ mod tests {
         let mut scheduler = Scheduler::new(engine.with_scope_reader(reader.clone()), 86_400_000);
         scheduler.run_pass(&[], now_ms());
         let scope = crate::scope::CallScope {
-            owner: "reserved:prefrontal-core".into(),
+            owner: "reserved:prefrontal".into(),
             scope_ref: "head-1".into(),
             scope_epoch: 1,
             kind: None,

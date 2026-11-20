@@ -1296,7 +1296,7 @@ fn receipt_fingerprint_refuses_distinct_large_integers() {
 #[test]
 fn github_flow_ask_first_refuses_before_claim_but_allow_and_block_keep_their_policy() {
     let scope = plexus_core::scope::CallScope {
-        owner: "reserved:prefrontal-core".into(),
+        owner: "reserved:prefrontal".into(),
         scope_ref: "flow-1".into(),
         scope_epoch: 1,
         kind: Some("head".into()),

@@ -388,7 +388,7 @@ async fn delegated_codemode_code_search_uses_only_module_rights() {
     let f = Fixture::new();
     let scope = subc_protocol::scope::ScopeStamp::new(
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         "run-code",
         1,

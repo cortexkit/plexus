@@ -452,7 +452,7 @@ fn agent_acting_write_reads_back_only_under_the_agents_grant() {
             .transport()
             .set_response(MockResponse::OutcomeUnknown);
         let scope = plexus_core::scope::CallScope {
-            owner: "reserved:prefrontal-core".into(),
+            owner: "reserved:prefrontal".into(),
             scope_ref: "head-1".into(),
             scope_epoch: 3,
             kind: Some("head".into()),

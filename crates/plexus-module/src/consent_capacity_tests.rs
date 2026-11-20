@@ -209,7 +209,7 @@ async fn parked_calls_do_not_starve_work(recalled: bool) {
     let held_stamp = crate::consent_test_support::worker_stamp("worker-7", 4);
     let bot_stamp = ScopeStamp::new(
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         "bot-session",
         1,

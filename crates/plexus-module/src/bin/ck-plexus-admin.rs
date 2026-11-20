@@ -2528,7 +2528,7 @@ mod tests {
             serde_json::json!({
                 "grant_id": "grant-1",
                 "connection_id": "conn-github",
-                "grantee_principal": "reserved:prefrontal-core",
+                "grantee_principal": "reserved:prefrontal",
                 "authority_kind": kind,
                 "risk_ceiling": "read",
                 "action_selectors": ["list_issues"],
@@ -2541,7 +2541,7 @@ mod tests {
             "a consume grant must state that it designates a drainer: {consume}"
         );
         assert!(
-            consume.contains("reserved:prefrontal-core") && consume.contains("conn-github"),
+            consume.contains("reserved:prefrontal") && consume.contains("conn-github"),
             "the notice must name WHO drains WHAT: {consume}"
         );
         assert!(

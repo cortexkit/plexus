@@ -50,12 +50,17 @@ fn parse_catalog_source(source: &str) -> plexus_core::AppManifest {
 }
 
 fn setup(label: &str, actions: &[(&str, &str)]) -> Setup {
-    setup_as(label, actions, plexus_core::github::AFT_PRINCIPAL)
+    setup_as(
+        label,
+        actions,
+        plexus_core::github::AFT_PRINCIPAL,
+        delegating_scope("agent-fixture"),
+    )
 }
 
 /// `module` is the calling module that holds the module grant. The agent grant
 /// keeps the grantee the import gives it, reserved:aft.
-fn setup_as(label: &str, actions: &[(&str, &str)], module: &str) -> Setup {
+fn setup_as(label: &str, actions: &[(&str, &str)], module: &str, scope: CallScope) -> Setup {
     let (scratch, store) = crate::scratch_store::open(label);
     let store = Arc::new(store);
     store
@@ -112,7 +117,6 @@ fn setup_as(label: &str, actions: &[(&str, &str)], module: &str) -> Setup {
     ] {
         facade_rows::insert_invoke_grant(&db, grant, grantee, &selectors, agent);
     }
-    let scope = delegating_scope("agent-fixture");
     let transport = Arc::new(MockTransport::default());
     let seams = GithubGovernanceSeams {
         store: store.clone(),
@@ -130,13 +134,19 @@ fn setup_as(label: &str, actions: &[(&str, &str)], module: &str) -> Setup {
     (scratch, store, engine, transport, scope)
 }
 
-/// Seen markers are sent by prefrontal-core, so the golden is captured from a
-/// real facade run with prefrontal-core as the caller.
+/// Keep the caller and owner from the historical wire fixture. The fixture
+/// exercises the facade below the daemon's route-bind trust check.
 #[test]
 fn seen_marker_reaction_golden_is_a_real_facade_dispatch() {
-    let caller = plexus_core::github::PREFRONTAL_PRINCIPAL;
-    let (scratch, store, engine, transport, scope) =
-        setup_as("facade-seen-marker", &[("add_reaction", "write")], caller);
+    let caller = "reserved:prefrontal-core";
+    let mut scope = delegating_scope("agent-fixture");
+    scope.owner = caller.into();
+    let (scratch, store, engine, transport, scope) = setup_as(
+        "facade-seen-marker",
+        &[("add_reaction", "write")],
+        caller,
+        scope,
+    );
     // GitHub's reaction body; the reply carries only its id and content.
     transport.set_response(MockResponse::Success(json!({
         "id": 701,
@@ -3053,7 +3063,7 @@ mod scoped {
 
     fn stamp(agent: &str, delegates: bool) -> CallScope {
         CallScope {
-            owner: "reserved:prefrontal-core".into(),
+            owner: "reserved:prefrontal".into(),
             scope_ref: "head-1".into(),
             scope_epoch: 3,
             kind: Some("head".into()),

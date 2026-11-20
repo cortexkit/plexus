@@ -263,7 +263,7 @@ fn local_agent_identity_never_selects_federated_authority_or_recipients() {
     let mut req = request(Some(json!({"kind":"agent","agent_id":"agent-a"})));
     req.attributed_agent_id = Some("agent-a".into());
     req = req.with_scope(CallScope {
-        owner: "reserved:prefrontal-core".into(),
+        owner: "reserved:prefrontal".into(),
         scope_ref: "head".into(),
         scope_epoch: 1,
         kind: Some("head".into()),

@@ -133,10 +133,9 @@ The daemon's configuration (`subc.jsonc`) carries these in the module's `env`
 block. The module entry itself is subconscious's format and is documented in
 that repository; plexus does not yet document a complete entry.
 
-Plexus resolves credentials through the `claustrum` vault. For flow audiences,
-it tries `prefrontal` first and falls back to `prefrontal-core` if the daemon
-says the preferred module is unknown or unavailable. It keeps using the
-selected module until that route stops opening.
+Plexus resolves credentials through the `claustrum` vault. It looks up flow
+audiences only through `prefrontal`. If that route is unavailable, the lookup
+fails closed.
 
 Approval cards are filed with the module named `cingulate`. If that route
 cannot be opened, plexus logs it and starts without approval cards.

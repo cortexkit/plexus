@@ -174,7 +174,7 @@ fn metadata_state() -> Arc<ModuleState> {
         ("reserved:callosum", "callosum-only", "active"),
         // Not "shared": a pending row may register a transport, so a second
         // owner on the same bare id would make every `shared` call refuse.
-        ("reserved:prefrontal-core", "prefrontal-pending", "pending"),
+        ("reserved:prefrontal", "prefrontal-pending", "pending"),
     ] {
         store
             .insert_connection(
@@ -390,7 +390,7 @@ async fn metadata_local_replies_keep_complete_legacy_bytes_with_admission_on_or_
             .unwrap()
             .runtime
             .set_federated_callers_enabled_for_test(enabled);
-        for principal in [Principal::Direct, reserved("prefrontal-core")] {
+        for principal in [Principal::Direct, reserved("prefrontal")] {
             let owner = principal::principal_key(&principal);
             let routes = Arc::new(RouteBindings::new());
             assert_eq!(
@@ -515,11 +515,7 @@ local_stamp_refused!(callosum_ephemeral_is_refused, Ephemeral);
 
 #[tokio::test]
 async fn first_party_principal_on_callosum_federated_stamp_is_refused() {
-    for principal in [
-        Principal::Direct,
-        reserved("prefrontal-core"),
-        reserved("basal"),
-    ] {
+    for principal in [Principal::Direct, reserved("prefrontal"), reserved("basal")] {
         assert_bind_denied(bind_body(principal, Some(stamp()), CallMode::Classic), true).await;
     }
 }
@@ -527,7 +523,7 @@ async fn first_party_principal_on_callosum_federated_stamp_is_refused() {
 #[tokio::test]
 async fn federated_stamp_with_another_owner_is_refused() {
     let mut scope = stamp();
-    scope.owner = reserved("prefrontal-core");
+    scope.owner = reserved("prefrontal");
     assert_bind_denied(
         bind_body(reserved("callosum"), Some(scope), CallMode::Classic),
         true,

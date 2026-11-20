@@ -720,7 +720,7 @@ async fn tool_catalog_route_serves_metadata_without_grants() {
             module_id: "aft".to_owned(),
         },
         Principal::Reserved {
-            module_id: "prefrontal-core".to_owned(),
+            module_id: "prefrontal".to_owned(),
         },
     ] {
         let frame = send_metadata(principal, ops::TOOL_CATALOG, json!({})).await;
@@ -798,7 +798,7 @@ async fn tool_catalog_route_serves_core_head_registration_request() {
     use subc_protocol::{FrameType, Principal};
     let frame = send_metadata(
         Principal::Reserved {
-            module_id: "prefrontal-core".to_owned(),
+            module_id: "prefrontal".to_owned(),
         },
         ops::TOOL_CATALOG,
         json!({"params":{"capabilities":["code.search.public/v1","web.search/v1"]}}),

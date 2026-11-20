@@ -170,7 +170,7 @@ fn bot_carriers_direct_wildcards_agents_and_other_authorities_are_not_module_row
         ("other", "other"),
     ] {
         f.connection("direct", id, app, "active");
-        for module in ["aft", "basal", "prefrontal-core", "broca"] {
+        for module in ["aft", "basal", "prefrontal", "broca"] {
             f.grant(
                 &format!("{id}-{module}"),
                 "direct",

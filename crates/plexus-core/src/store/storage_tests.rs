@@ -1043,11 +1043,11 @@ fn migration_35_adds_scope_columns_additively() {
         manifest_cache: Default::default(),
     };
     let scope = CallScope {
-        owner: "reserved:prefrontal-core".into(),
+        owner: "reserved:prefrontal".into(),
         scope_ref: "head-1".into(),
         scope_epoch: u64::MAX,
         kind: Some("head".into()),
-        parent: Some("reserved:prefrontal-core/root@1".into()),
+        parent: Some("reserved:prefrontal/root@1".into()),
         parent_state: Some("linked".into()),
         agent_id: Some("agent-a".into()),
         delegates: true,

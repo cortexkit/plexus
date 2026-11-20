@@ -3,7 +3,7 @@ use plexus_core::scope::{CallScope, ScopeDescription, ScopeReadError, ScopeReade
 
 pub fn delegating_scope(agent: &str) -> CallScope {
     CallScope {
-        owner: "reserved:prefrontal-core".into(),
+        owner: "reserved:prefrontal".into(),
         scope_ref: "fixture-session".into(),
         scope_epoch: 1,
         kind: Some("head".into()),

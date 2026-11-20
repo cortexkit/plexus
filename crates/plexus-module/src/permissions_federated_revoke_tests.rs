@@ -305,7 +305,7 @@ async fn federated_revoke_keeps_operator_refusal_unchanged() {
     let refusal = serde_json::from_str::<Value>(REFUSED_AGENT).unwrap()["error"].clone();
     for (principal, mode) in [
         (reserved("aft"), CallMode::Classic),
-        (reserved("prefrontal-core"), CallMode::Classic),
+        (reserved("prefrontal"), CallMode::Classic),
         (reserved("broca"), CallMode::Classic),
         (reserved("basal"), CallMode::Flow),
         (reserved("cingulate"), CallMode::Flow),

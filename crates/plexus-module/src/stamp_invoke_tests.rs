@@ -199,7 +199,7 @@ async fn bot_request_module_entry_dispatches_through_governed_transport() {
     }));
     let stamp = subc_protocol::scope::ScopeStamp::new(
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         "bot-session",
         1,
@@ -318,7 +318,7 @@ async fn stamped_invoke_sends_only_vendor_args_and_audits_agent() {
     let (runtime, store, transport, _path) = seeded_runtime("stamped");
     let stamp = subc_protocol::scope::ScopeStamp::new(
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         "head-fixture",
         1,

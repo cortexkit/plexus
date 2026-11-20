@@ -2216,7 +2216,7 @@ mod tests {
         for reader in [
             EventReader::Agent { agent_id: "absent" },
             EventReader::Consumer {
-                principal: "reserved:prefrontal-core",
+                principal: "reserved:prefrontal",
             },
         ] {
             assert!(matches!(

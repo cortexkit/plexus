@@ -109,7 +109,7 @@ pub(super) fn anonymous_handle_credentials(
 
 pub(super) fn worker_stamp(scope_ref: &str, epoch: u64) -> subc_protocol::scope::ScopeStamp {
     let owner = subc_protocol::Principal::Reserved {
-        module_id: "prefrontal-core".into(),
+        module_id: "prefrontal".into(),
     };
     let mut stamp = subc_protocol::scope::ScopeStamp::new(
         owner.clone(),

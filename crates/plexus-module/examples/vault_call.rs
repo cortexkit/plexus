@@ -26,7 +26,7 @@ use subc_protocol::{BindIdentity, RouteTarget};
 use tokio::time::timeout;
 
 /// The vault registers `ManagementSurface` only; a `ToolProvider` target is
-/// refused at route open. Other first-party modules (prefrontal-core) expose
+/// refused at route open. Other first-party modules (such as prefrontal) expose
 /// management operations the same way, so the target is overridable: pass
 /// `--module <id>` as the first pair of arguments to address one of them.
 const DEFAULT_MODULE_ID: &str = "claustrum";

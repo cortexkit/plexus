@@ -372,7 +372,7 @@ mod tests {
 
     fn scope(agent: Option<&str>, delegates: bool, owner_authorized: bool) -> CallScope {
         CallScope {
-            owner: "reserved:prefrontal-core".into(),
+            owner: "reserved:prefrontal".into(),
             scope_ref: "head-1".into(),
             scope_epoch: 3,
             kind: Some("head".into()),
@@ -388,7 +388,7 @@ mod tests {
     fn bound(acted_as_agent: bool) -> ApprovalScope {
         ApprovalScope {
             request_id: "req-1".into(),
-            owner: "reserved:prefrontal-core".into(),
+            owner: "reserved:prefrontal".into(),
             scope_ref: "head-1".into(),
             scope_epoch: 3,
             agent_id: Some("agent-a".into()),
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn owner_labels_round_trip_and_only_modules_own_scopes() {
         let owner = Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         };
         assert_eq!(parse_scope_owner(&principal_label(&owner)), Some(owner));
         assert_eq!(parse_scope_owner("direct"), None);

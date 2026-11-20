@@ -604,7 +604,7 @@ async fn an_exa_reply_maps_onto_every_neutral_field() {
 async fn a_caller_without_a_grant_is_refused_before_the_vendor() {
     let fixture = Fixture::new("no-grant");
     let stranger = Principal::Reserved {
-        module_id: "prefrontal-core".to_string(),
+        module_id: "prefrontal".to_string(),
     };
     let reply = fixture.search(stranger, json!({"query": "anything"})).await;
     assert_eq!(code(&reply), "web_search_not_granted", "{reply}");
@@ -615,7 +615,7 @@ async fn a_caller_without_a_grant_is_refused_before_the_vendor() {
 async fn a_stamped_agent_cannot_replace_the_carriers_module_grant() {
     let fixture = Fixture::new("stamped-no-module-grant");
     let stranger = Principal::Reserved {
-        module_id: "prefrontal-core".to_string(),
+        module_id: "prefrontal".to_string(),
     };
     fixture.agent_grant(&stranger, AGENT);
     let reply = fixture
@@ -1068,7 +1068,7 @@ async fn only_web_search_rows_carry_query_text_and_result_count() {
     let refused = fixture
         .search(
             Principal::Reserved {
-                module_id: "prefrontal-core".to_string(),
+                module_id: "prefrontal".to_string(),
             },
             json!({"query": "ungranted query"}),
         )
@@ -1262,7 +1262,7 @@ fn stamp(
 ) -> subc_protocol::scope::ScopeStamp {
     subc_protocol::scope::ScopeStamp::new(
         Principal::Reserved {
-            module_id: "prefrontal-core".to_string(),
+            module_id: "prefrontal".to_string(),
         },
         "head-7",
         4,
@@ -1548,7 +1548,7 @@ async fn assert_flow_carrier_refused(module_id: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn flow_carrier_non_basal_refuses_before_dispatch_or_parking() {
-    assert_flow_carrier_refused("prefrontal-core").await;
+    assert_flow_carrier_refused("prefrontal").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1594,7 +1594,7 @@ async fn flow_carrier_without_a_flow_scope_is_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn flow_carrier_gate_does_not_affect_non_flow_calls() {
     let carrier = Principal::Reserved {
-        module_id: "prefrontal-core".into(),
+        module_id: "prefrontal".into(),
     };
     for body in carrier_calls() {
         let fixture = Fixture::new("flow-carrier-non-flow");
@@ -1755,7 +1755,7 @@ async fn the_audit_rows_of_a_stamped_call_carry_its_scope() {
                 row.scope_owner_authorized,
             ),
             (
-                Some("reserved:prefrontal-core"),
+                Some("reserved:prefrontal"),
                 Some("head-7"),
                 Some(4),
                 Some("head"),
@@ -2329,7 +2329,7 @@ async fn a_verbatim_relayed_vector_passes_its_origin_and_reaches_the_tool_check(
 /// relays a call to it.
 fn prefrontal_core() -> Principal {
     Principal::Reserved {
-        module_id: "prefrontal-core".to_string(),
+        module_id: "prefrontal".to_string(),
     }
 }
 
@@ -3075,7 +3075,7 @@ async fn typed_would_ask_global_flow_matches_module_only_call() {
     let query = fixture
         .send(
             Principal::Reserved {
-                module_id: "prefrontal-core".into(),
+                module_id: "prefrontal".into(),
             },
             body,
         )

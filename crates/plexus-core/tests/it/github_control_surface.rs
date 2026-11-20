@@ -275,7 +275,7 @@ fn import_requires_direct_and_does_not_read_vault_on_refusal() {
 }
 
 #[test]
-fn prefrontal_rename_import_plan_grants_both_exact_principals() {
+fn import_plan_grants_aft_and_only_the_current_prefrontal_principal() {
     let store = store();
     let plan = control::import(
         &store,
@@ -288,20 +288,13 @@ fn prefrontal_rename_import_plan_grants_both_exact_principals() {
     )
     .unwrap();
     let grants = plan["module_grants"].as_array().unwrap();
-    assert_eq!(grants.len(), 3);
-    let old = grants
-        .iter()
-        .find(|row| row["grantee_principal"] == "reserved:prefrontal-core")
-        .unwrap();
-    let new = grants
-        .iter()
-        .find(|row| row["grantee_principal"] == "reserved:prefrontal")
-        .unwrap();
-    assert_eq!(old["action_selectors"], new["action_selectors"]);
-    assert_eq!(old["connection_id"], new["connection_id"]);
-    for caller in ["reserved:prefrontal-evil", "reserved:xprefrontal"] {
-        assert!(!grants.iter().any(|row| row["grantee_principal"] == caller));
-    }
+    assert_eq!(
+        grants
+            .iter()
+            .map(|row| row["grantee_principal"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["reserved:aft", "reserved:prefrontal"]
+    );
 }
 
 #[test]
@@ -312,7 +305,7 @@ fn import_resolves_repositories_with_own_installation_token_and_pages_to_complet
     let plan =
         control::import(&store, "direct", &inventory(), &provider, &reader, 0, true).unwrap();
     assert_eq!(plan["agents"]["agent-one"][0]["repository"], "org/last");
-    assert_eq!(plan["module_grants"].as_array().unwrap().len(), 3);
+    assert_eq!(plan["module_grants"].as_array().unwrap().len(), 2);
     assert_eq!(reader.0.load(Ordering::Relaxed), 2);
     assert!(store
         .github_handle_and_bindings("app-one")
@@ -376,7 +369,7 @@ fn import_resolves_repositories_with_own_installation_token_and_pages_to_complet
     let grants = store
         .list_grants("direct", "github-handle-app-one")
         .unwrap();
-    assert_eq!(grants.len(), 4);
+    assert_eq!(grants.len(), 3);
     assert_eq!(
         grants
             .iter()

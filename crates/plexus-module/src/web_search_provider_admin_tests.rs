@@ -8,11 +8,7 @@ use subc_protocol::session::{OperatorConfirmReply, OperatorConfirmRequest};
 
 const ADD: &str = manifest::ADMIN_ADD_WEB_SEARCH_PROVIDER_OP;
 /// The callers that hold search grants on the deployed Exa connection.
-const CALLERS: [&str; 3] = [
-    "reserved:broca",
-    "reserved:prefrontal-core",
-    "reserved:basal",
-];
+const CALLERS: [&str; 3] = ["reserved:broca", "reserved:prefrontal", "reserved:basal"];
 const SEARXNG_CANARY: &str = "https://private-searx-canary.invalid/secret-instance-path";
 
 pub(super) struct Fixture {
@@ -787,14 +783,11 @@ async fn default_grantees_are_the_live_search_callers_and_never_a_wildcard() {
         &fixture.path,
         &format!("UPDATE grants SET grantee_principal = '*' WHERE grant_id = '{wild}'"),
     );
-    let expected: Vec<(String, String)> = [
-        "reserved:basal",
-        "reserved:broca",
-        "reserved:prefrontal-core",
-    ]
-    .into_iter()
-    .map(|grantee| (grantee.to_string(), "to_mint".to_string()))
-    .collect();
+    let expected: Vec<(String, String)> =
+        ["reserved:basal", "reserved:broca", "reserved:prefrontal"]
+            .into_iter()
+            .map(|grantee| (grantee.to_string(), "to_mint".to_string()))
+            .collect();
     let preview = add(
         &fixture.state,
         &fixture.path,
@@ -823,7 +816,7 @@ async fn default_grantees_are_the_live_search_callers_and_never_a_wildcard() {
         count(
             &fixture.path,
             "SELECT COUNT(*) FROM grants WHERE connection_id = 'conn-web-search-tavily'
-             AND grantee_principal IN ('reserved:basal','reserved:broca','reserved:prefrontal-core')"
+             AND grantee_principal IN ('reserved:basal','reserved:broca','reserved:prefrontal')"
         ),
         3,
         "{}",

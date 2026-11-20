@@ -742,7 +742,7 @@ mod tests {
 
     fn scope() -> CallScope {
         CallScope {
-            owner: "reserved:prefrontal-core".into(),
+            owner: "reserved:prefrontal".into(),
             scope_ref: "head".into(),
             scope_epoch: 7,
             kind: Some("head".into()),
@@ -756,15 +756,16 @@ mod tests {
     }
 
     #[test]
-    fn prefrontal_rename_worker_card_scopes_keep_exact_owner_rights() {
+    fn worker_card_scopes_require_the_current_prefrontal_owner() {
         let mut worker = scope();
         worker.kind = Some("worker".into());
         worker.parent = Some("head".into());
-        for owner in ["reserved:prefrontal-core", "reserved:prefrontal"] {
-            worker.owner = owner.into();
-            assert!(ConsentCards::available_scope(Some(&worker)), "{owner}");
-        }
-        for owner in ["reserved:prefrontal-evil", "reserved:xprefrontal"] {
+        assert!(ConsentCards::available_scope(Some(&worker)));
+        for owner in [
+            "reserved:prefrontal-core",
+            "reserved:prefrontal-evil",
+            "reserved:xprefrontal",
+        ] {
             worker.owner = owner.into();
             assert!(!ConsentCards::available_scope(Some(&worker)), "{owner}");
         }

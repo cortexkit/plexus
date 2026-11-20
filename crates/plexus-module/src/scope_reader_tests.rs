@@ -39,7 +39,7 @@ async fn describe_sends_one_request_and_reads_the_matching_reply() {
                 sent,
                 ModuleControlRequestFromModule::ScopeDescribe {
                     owner: Principal::Reserved {
-                        module_id: "prefrontal-core".into()
+                        module_id: "prefrontal".into()
                     },
                     scope_ref: "head-1".into(),
                 }
@@ -54,7 +54,7 @@ async fn describe_sends_one_request_and_reads_the_matching_reply() {
                 scope: Some(
                     ScopeStamp::new(
                         Principal::Reserved {
-                            module_id: "prefrontal-core".into(),
+                            module_id: "prefrontal".into(),
                         },
                         "head-1",
                         7,
@@ -68,7 +68,7 @@ async fn describe_sends_one_request_and_reads_the_matching_reply() {
                     .with_owner_authorized(true)
                     .with_parent(Some(subc_protocol::scope::ScopeParent::new(
                         Principal::Reserved {
-                            module_id: "prefrontal-core".into(),
+                            module_id: "prefrontal".into(),
                         },
                         "outer-head",
                         3,
@@ -85,7 +85,7 @@ async fn describe_sends_one_request_and_reads_the_matching_reply() {
         }
     });
     let described = tokio::task::spawn_blocking(move || {
-        reader.describe_blocking("reserved:prefrontal-core", "head-1")
+        reader.describe_blocking("reserved:prefrontal", "head-1")
     })
     .await
     .expect("join")
@@ -96,7 +96,7 @@ async fn describe_sends_one_request_and_reads_the_matching_reply() {
         described.parent,
         Some(subc_protocol::scope::ScopeParent::new(
             Principal::Reserved {
-                module_id: "prefrontal-core".into()
+                module_id: "prefrontal".into()
             },
             "outer-head",
             3,
@@ -171,7 +171,7 @@ async fn describe_against(
     });
     let result = tokio::task::spawn_blocking(move || {
         let started = std::time::Instant::now();
-        let result = reader.describe_blocking("reserved:prefrontal-core", "head-1");
+        let result = reader.describe_blocking("reserved:prefrontal", "head-1");
         if silence {
             // Measure before joining the responder, whose keepalive sleep
             // must not masquerade as time spent waiting for the reply.
@@ -208,7 +208,7 @@ fn describe_body(
 /// stored approval.
 fn bound_stamp() -> (CallScope, plexus_core::scope::ApprovalScope) {
     let stamp = CallScope {
-        owner: "reserved:prefrontal-core".into(),
+        owner: "reserved:prefrontal".into(),
         scope_ref: "head-1".into(),
         scope_epoch: 7,
         kind: Some("head".into()),
@@ -293,7 +293,7 @@ fn a_full_send_queue_is_bounded_by_the_describe_deadline() {
     .with_timeout(Duration::from_millis(100));
     let (done, finished) = std_mpsc::channel();
     std::thread::spawn(move || {
-        let _ = done.send(reader.describe_blocking("reserved:prefrontal-core", "head-1"));
+        let _ = done.send(reader.describe_blocking("reserved:prefrontal", "head-1"));
     });
     let result = finished
         .recv_timeout(Duration::from_secs(5))

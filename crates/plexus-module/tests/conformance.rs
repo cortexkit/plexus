@@ -390,7 +390,7 @@ async fn live_daemon_federated_consent_denial_worker_run_and_unpair() {
         ("fed-claim:run", json!({"kind":"run","agent_id":"Sage"})),
         (
             "fed-claim:worker",
-            json!({"kind":"worker","owner_module_id":"prefrontal-core","worker_ref":"b".repeat(64),"on_behalf_of":"Sage"}),
+            json!({"kind":"worker","owner_module_id":"prefrontal","worker_ref":"b".repeat(64),"on_behalf_of":"Sage"}),
         ),
     ];
     let attributes = json!({"peer_class":"computer","peer_fingerprint":"a".repeat(32),
@@ -1359,7 +1359,7 @@ async fn granted_reserved_principal_invokes_the_owners_rest_connection_through_t
             grant_id: "grant-facade-cross-principal".to_string(),
             principal: "direct".to_string(),
             connection_id: "conn-facade-rest".to_string(),
-            grantee_principal: "reserved:prefrontal-core".to_string(),
+            grantee_principal: "reserved:prefrontal".to_string(),
             risk_ceiling: "read".to_string(),
             action_selectors: vec!["get_item".to_string()],
             authority_kind: "invoke".to_string(),
@@ -1415,7 +1415,7 @@ async fn granted_reserved_principal_invokes_the_owners_rest_connection_through_t
         &writer,
         runtime,
         Principal::Reserved {
-            module_id: "prefrontal-core".to_string(),
+            module_id: "prefrontal".to_string(),
         },
     )
     .await

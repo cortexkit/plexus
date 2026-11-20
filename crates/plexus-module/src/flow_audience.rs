@@ -191,7 +191,7 @@ impl FlowAudiences {
         // the flow's scope. The route peer preserves ERROR-frame refusal details,
         // including the approved versions whose audiences conflict.
         let reply = peer
-            .call_core_service("flow.audience", json!({"flow_id":flow_id}))
+            .call_service("flow.audience", json!({"flow_id":flow_id}))
             .unwrap_or_else(|error| json!({"error":error}));
         let answer = parse(flow_id, reply)?;
         let mut cache = self

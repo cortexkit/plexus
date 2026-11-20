@@ -436,7 +436,7 @@ async fn bulk_four_actions_keep_head_and_worker_identity_and_payloads() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bulk_only_reserved_aft_is_admitted() {
     let vector = source_vector("repo-get-diff");
-    for caller in ["prefrontal-core", "basal", "other"] {
+    for caller in ["prefrontal", "basal", "other"] {
         let (runtime, _store, transport, _scratch) = setup(&vector["github"]);
         let body = send_bound(
             &runtime,

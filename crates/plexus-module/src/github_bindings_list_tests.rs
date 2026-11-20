@@ -56,7 +56,7 @@ fn fixture() -> (
 
 fn scope(agent: Option<&str>) -> CallScope {
     CallScope {
-        owner: "reserved:prefrontal-core".into(),
+        owner: "reserved:prefrontal".into(),
         scope_ref: "flow-a".into(),
         scope_epoch: 1,
         kind: Some("head".into()),

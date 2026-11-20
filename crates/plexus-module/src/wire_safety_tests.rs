@@ -382,7 +382,7 @@ async fn scope_describe_control_reply_bypasses_full_request_budget() {
     let replies = Arc::new(PendingControlReplies::default());
     let scope_reader = DaemonScopeReader::new(writer.clone(), PROTOCOL_VERSION, replies.clone());
     let described = tokio::task::spawn_blocking(move || {
-        scope_reader.describe("reserved:prefrontal-core", "worker-1")
+        scope_reader.describe("reserved:prefrontal", "worker-1")
     });
     let request = recv_within(outbound.recv(), Duration::from_secs(5), "scope request").await;
     let (mut peer, mut reader) = tokio::io::duplex(8192);
@@ -477,15 +477,20 @@ fn refused_grant_inspection_records_the_real_actor_and_decision() {
 }
 
 #[test]
-fn prefrontal_rename_grant_inspection_keeps_exact_caller_rights() {
+fn prefrontal_grant_inspection_refuses_retired_and_lookalike_callers() {
     let state = state();
     let request = json!({"method":"grants.would_ask","params":{"agent_id":"agent","flow_id":"flow","items":[]}});
     let inspect =
         |caller| grants_would_ask::run(&state, caller, None, request.as_object().unwrap());
-    let old = inspect("reserved:prefrontal-core");
-    assert_eq!(old, json!({"result":{"items":[]}}));
-    assert_eq!(inspect("reserved:prefrontal"), old);
-    for caller in ["reserved:prefrontal-evil", "reserved:xprefrontal"] {
+    assert_eq!(
+        inspect("reserved:prefrontal"),
+        json!({"result":{"items":[]}})
+    );
+    for caller in [
+        "reserved:prefrontal-core",
+        "reserved:prefrontal-evil",
+        "reserved:xprefrontal",
+    ] {
         assert_eq!(inspect(caller)["error"]["code"], "principal_denied");
     }
 }
@@ -493,7 +498,7 @@ fn prefrontal_rename_grant_inspection_keeps_exact_caller_rights() {
 #[test]
 fn unavailable_grant_target_is_not_reported_as_malformed() {
     let state = state();
-    let reply = grants_would_ask::run(&state, "reserved:prefrontal-core", None,
+    let reply = grants_would_ask::run(&state, "reserved:prefrontal", None,
         json!({"method":"grants.would_ask","params":{"flow_id":"f1","items":[{"tool":"invoke","connection":"missing","action":"read"}]}}).as_object().unwrap());
     let reason = reply["result"]["items"][0]["reason"].as_str().unwrap();
     assert_ne!(
@@ -511,7 +516,7 @@ fn agent_binding_grant_inspection_previews_the_named_connections_module_grant() 
     let run = || {
         grants_would_ask::run(
             &state,
-            "reserved:prefrontal-core",
+            "reserved:prefrontal",
             None,
             request.as_object().unwrap(),
         )
@@ -570,7 +575,7 @@ async fn journal_failure_preserves_management_and_binding_refusals() {
             1,
             1,
             Principal::Reserved {
-                module_id: "prefrontal-core".into(),
+                module_id: "prefrontal".into(),
             },
         )
         .unwrap();
@@ -691,7 +696,7 @@ fn oversized_would_ask_batch_is_refused_before_evaluation() {
     let request = json!({"method":"grants.would_ask","params":{"agent_id":"agent","flow_id":"flow","items":vec![json!({"tool":"invoke","connection":"missing","action":"read"});101]}});
     let reply = grants_would_ask::run(
         &state(),
-        "reserved:prefrontal-core",
+        "reserved:prefrontal",
         None,
         request.as_object().unwrap(),
     );
@@ -1008,7 +1013,7 @@ fn would_ask_accepts_one_hundred_items() {
     let request = json!({"method":"grants.would_ask","params":{"agent_id":"agent","flow_id":"flow","items":vec![json!({"tool":"invoke","connection":"missing","action":"read"});100]}});
     let reply = grants_would_ask::run(
         &state(),
-        "reserved:prefrontal-core",
+        "reserved:prefrontal",
         None,
         request.as_object().unwrap(),
     );

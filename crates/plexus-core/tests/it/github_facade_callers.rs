@@ -1,5 +1,5 @@
 //! `github.bot_request` authorizes the module that calls it, through the real
-//! handle import and the real facade. prefrontal-core sends the eyes reaction
+//! handle import and the real facade. Prefrontal sends the eyes reaction
 //! that marks an issue as seen; AFT sends everything else. A caller without a
 //! module grant on the handle connection is refused before any GitHub contact.
 use crate::scope_support::{delegating_scope, LiveScopeReader};
@@ -259,45 +259,35 @@ fn refused(reply: &Value, code: &str) {
 }
 
 #[test]
-fn prefrontal_rename_import_grants_equal_rights_to_exact_principals() {
+fn import_grants_only_the_current_prefrontal_principal() {
     let f = Fixture::new("callers-rename", &["add_reaction"]);
     let grants = f.store.list_grants("direct", CONNECTION).unwrap();
-    let old = grants
-        .iter()
-        .find(|g| g.grantee_principal == "reserved:prefrontal-core")
-        .unwrap();
     let new = grants
         .iter()
         .find(|g| g.grantee_principal == "reserved:prefrontal")
         .unwrap();
-    assert_eq!(old.grant_id, "github-import:app-fixture:prefrontal");
     assert_eq!(
         new.grant_id,
         "github-import:app-fixture:reserved-prefrontal"
     );
-    assert_eq!(old.action_selectors, new.action_selectors);
-    assert_eq!(old.risk_ceiling, new.risk_ceiling);
-    assert_eq!(old.authority_kind, new.authority_kind);
-    assert_eq!(old.expires_at, new.expires_at);
-    for (index, caller) in ["reserved:prefrontal-core", "reserved:prefrontal"]
-        .into_iter()
-        .enumerate()
-    {
-        let reply = f.call(caller, &seen_marker(), &format!("rename-{index}"));
-        assert_eq!(reply["result"]["status"], "completed", "{reply}");
-        refused(
-            &f.call(caller, &comment(), &format!("comment-{index}")),
-            "module_grant_absent",
-        );
-    }
-    for caller in ["reserved:prefrontal-evil", "reserved:xprefrontal"] {
+    let reply = f.call(PREFRONTAL_PRINCIPAL, &seen_marker(), "seen");
+    assert_eq!(reply["result"]["status"], "completed", "{reply}");
+    refused(
+        &f.call(PREFRONTAL_PRINCIPAL, &comment(), "comment"),
+        "module_grant_absent",
+    );
+    for caller in [
+        "reserved:prefrontal-core",
+        "reserved:prefrontal-evil",
+        "reserved:xprefrontal",
+    ] {
         assert!(!grants.iter().any(|g| g.grantee_principal == caller));
         refused(
             &f.call(caller, &seen_marker(), caller),
             "module_grant_absent",
         );
     }
-    assert_eq!(f.transport.requests().len(), 2);
+    assert_eq!(f.transport.requests().len(), 1);
 }
 
 #[test]
@@ -398,7 +388,7 @@ fn revoking_the_agent_reaction_grant_stops_prefrontal_seen_marker() {
 #[test]
 fn revoking_prefrontal_module_grant_stops_its_seen_marker_but_not_aft() {
     let f = Fixture::new("callers-module-revoked", &["add_reaction"]);
-    f.revoke("github-import:app-fixture:prefrontal");
+    f.revoke("github-import:app-fixture:reserved-prefrontal");
     let reply = f.call(PREFRONTAL_PRINCIPAL, &seen_marker(), "seen");
     refused(&reply, "module_grant_absent");
     assert!(f.transport.requests().is_empty());
@@ -414,7 +404,7 @@ fn revoking_prefrontal_module_grant_stops_its_seen_marker_but_not_aft() {
     );
 }
 
-/// Claim as prefrontal-core, move one grant, then run the vendor band: the
+/// Claim as prefrontal, move one grant, then run the vendor band: the
 /// receipt's baseline names the moved dimension and nothing is sent.
 fn moved_after_claim(grant_id: &str, dimension: &str) {
     let f = Fixture::new("callers-moved-after-claim", &["add_reaction"]);
@@ -451,7 +441,7 @@ fn agent_grant_revoked_after_prefrontal_claim_is_stale_authority() {
 #[test]
 fn prefrontal_module_grant_revoked_after_claim_is_stale_authority() {
     moved_after_claim(
-        "github-import:app-fixture:prefrontal",
+        "github-import:app-fixture:reserved-prefrontal",
         "module_grant_revoked",
     );
 }

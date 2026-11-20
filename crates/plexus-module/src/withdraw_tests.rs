@@ -31,7 +31,7 @@ fn broca() -> Principal {
 /// The owner of the test scope.
 fn owner() -> Principal {
     Principal::Reserved {
-        module_id: "prefrontal-core".to_string(),
+        module_id: "prefrontal".to_string(),
     }
 }
 
@@ -613,7 +613,7 @@ async fn a_withdrawal_under_another_scope_is_refused() {
             aft(),
             Some(stamp()),
             json!({"call_key": "k", "scope": {
-                "owner": "reserved:prefrontal-core", "ref": "worker-7", "scope_epoch": 5
+                "owner": "reserved:prefrontal", "ref": "worker-7", "scope_epoch": 5
             }}),
         )
         .await;
@@ -625,7 +625,7 @@ async fn a_withdrawal_under_another_scope_is_refused() {
             aft(),
             Some(stamp()),
             json!({"call_key": "k", "scope": {
-                "owner": "reserved:prefrontal-core", "ref": "worker-7", "scope_epoch": 4
+                "owner": "reserved:prefrontal", "ref": "worker-7", "scope_epoch": 4
             }}),
         )
         .await;

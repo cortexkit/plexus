@@ -45,7 +45,7 @@ fn fixtures() -> PathBuf {
 }
 fn head() -> CallScope {
     CallScope {
-        owner: "reserved:prefrontal-core".into(),
+        owner: "reserved:prefrontal".into(),
         scope_ref: "head".into(),
         scope_epoch: 3,
         kind: Some("head".into()),
@@ -92,7 +92,8 @@ impl Daemon {
         atomic_json(
             &config_path,
             &json!({"version":1, "storage":{"backend":"sqlite","data_home":home},
-            "modules":{"cingulate":module("cingulate"), "prefrontal-core":module("prefrontal-core"), "plexus":module("plexus")}}),
+            "scope_authority_owners":["prefrontal"],
+            "modules":{"cingulate":module("cingulate"), "prefrontal":module("prefrontal"), "plexus":module("plexus")}}),
         );
         atomic_json(&scratch.join("behavior.json"), &json!({"answer":"pending"}));
         let config = subc_daemon::bootstrap::BootstrapConfig::new(&connection, 0)
@@ -103,7 +104,7 @@ impl Daemon {
         let credentials = timeout(FIXTURE_LIMIT, async {
             loop {
                 if scratch.join("cingulate.ready.json").exists()
-                    && scratch.join("prefrontal-core.ready.json").exists()
+                    && scratch.join("prefrontal.ready.json").exists()
                 {
                     if let Ok(bytes) = fs::read(scratch.join("plexus.ready.json")) {
                         break serde_json::from_slice::<Value>(&bytes).unwrap();
@@ -119,6 +120,10 @@ impl Daemon {
                 scratch.path()
             )
         });
+        let sync: Value =
+            serde_json::from_slice(&fs::read(scratch.join("scope-sync.json")).unwrap()).unwrap();
+        assert_eq!(sync["results"][0]["outcome"], "created", "{sync}");
+        assert_eq!(sync["results"][1]["outcome"], "created", "{sync}");
         let options = subc_client_rs::CallOptions {
             consumer_identity: Some(serde_json::from_value(credentials).unwrap()),
             ..Default::default()
@@ -248,10 +253,10 @@ async fn cingulate_module_fixture() {
         "{}",
         String::from_utf8_lossy(&ack.body)
     );
-    if id == "prefrontal-core" {
+    if id == "prefrontal" {
         let request = ModuleControlRequestFromModule::ScopeSync { generation: 1, scopes: vec![
             serde_json::from_value(json!({"ref":"head","scope_epoch":3,"kind":"head","carriers":[{"principal":{"kind":"reserved","module_id":"plexus"},"targets":["cingulate"]}],"attributes":{"agent_id":"agent","delegates":true}})).unwrap(),
-            serde_json::from_value(json!({"ref":"worker","scope_epoch":2,"kind":"worker","carriers":[{"principal":{"kind":"reserved","module_id":"plexus"},"targets":["cingulate"]}],"parent":{"owner":{"kind":"reserved","module_id":"prefrontal-core"},"ref":"head","scope_epoch":3}})).unwrap()
+            serde_json::from_value(json!({"ref":"worker","scope_epoch":2,"kind":"worker","carriers":[{"principal":{"kind":"reserved","module_id":"plexus"},"targets":["cingulate"]}],"parent":{"owner":{"kind":"reserved","module_id":"prefrontal"},"ref":"head","scope_epoch":3}})).unwrap()
         ] };
         let frame = Frame::build(
             FrameType::Request,
@@ -269,6 +274,10 @@ async fn cingulate_module_fixture() {
             FrameType::Response,
             "{}",
             String::from_utf8_lossy(&answer.body)
+        );
+        atomic_json(
+            &root.join("scope-sync.json"),
+            &serde_json::from_slice(&answer.body).unwrap(),
         );
     }
     atomic_json(
@@ -623,7 +632,7 @@ async fn files_redacted_scoped_card_with_requester_ref_and_carrier_dedup_key() {
     );
     assert_eq!(
         bind["scope"]["owner"],
-        json!({"kind":"reserved","module_id":"prefrontal-core"})
+        json!({"kind":"reserved","module_id":"prefrontal"})
     );
     assert_eq!(bind["scope"]["ref"], "head");
     assert_eq!(bind["scope"]["scope_epoch"], 3);
@@ -945,7 +954,7 @@ async fn worker_without_agent_uses_its_own_attested_scope_and_unkeyed_dedup_fall
     worker.scope_ref = "worker".into();
     worker.scope_epoch = 2;
     worker.kind = Some("worker".into());
-    worker.parent = Some("reserved:prefrontal-core/head@3".into());
+    worker.parent = Some("reserved:prefrontal/head@3".into());
     worker.parent_state = Some("linked".into());
     worker.agent_id = None;
     worker.delegates = false;

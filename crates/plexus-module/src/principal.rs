@@ -72,11 +72,15 @@ pub fn trust_for_principal(principal: &Option<Principal>) -> PrincipalTrust {
 /// `striatum` is the routing module. It was `prefrontal-routing` until the
 /// rename settled on 2026-11-11; the old id is retired below.
 fn is_first_party_module_id(module_id: &str) -> bool {
-    plexus_core::github::prefrontal_module_ids().any(|id| id == module_id)
-        || matches!(
-            module_id,
-            "striatum" | "aft" | "broca" | "basal" | "cingulate"
-        )
+    matches!(
+        module_id,
+        plexus_core::github::PREFRONTAL_MODULE_ID
+            | "striatum"
+            | "aft"
+            | "broca"
+            | "basal"
+            | "cingulate"
+    )
 }
 
 pub use plexus_core::scope::principal_label as principal_key;
@@ -105,7 +109,6 @@ mod tests {
     #[test]
     fn every_first_party_module_id_is_accepted() {
         for module_id in [
-            "prefrontal-core",
             "prefrontal",
             "striatum",
             "aft",
@@ -152,6 +155,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn retired_prefrontal_core_principal_is_untrusted() {
+        assert_eq!(
+            trust_for_principal(&Some(Principal::Reserved {
+                module_id: "prefrontal-core".to_string(),
+            })),
+            PrincipalTrust::Untrusted,
+            "reserved:prefrontal-core must not be granted first-party standing"
+        );
+    }
+
     /// Matching is EXACT, so no id that merely resembles a first-party one is
     /// admitted.
     ///
@@ -167,9 +181,6 @@ mod tests {
     #[test]
     fn ids_that_merely_resemble_a_first_party_id_are_denied() {
         for module_id in [
-            // The module was renamed from prefrontal-core to prefrontal.
-            // Both exact ids stay accepted until the old name is dropped;
-            // neither name admits prefixes or suffixes.
             "prefrontal-evil",
             "xprefrontal",
             "prefrontal-host:abc123",

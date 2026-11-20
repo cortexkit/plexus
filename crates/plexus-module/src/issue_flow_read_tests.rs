@@ -205,7 +205,7 @@ async fn non_flow_agent_stamp_does_not_restrict_issue_reads() {
     transport.set_response(MockResponse::Success(json!({"number":42})));
     let scope = subc_protocol::scope::ScopeStamp::new(
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         "head",
         1,
@@ -218,7 +218,7 @@ async fn non_flow_agent_stamp_does_not_restrict_issue_reads() {
         runtime,
         manifest::GITHUB_READ_TOOL,
         json!({"action":"github.issue.get","repository":"o/x","args":{"issue_number":42}}),
-        "prefrontal-core",
+        "prefrontal",
         Some(scope),
     )
     .await;

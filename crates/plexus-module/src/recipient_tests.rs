@@ -10,11 +10,11 @@ struct Cards(Mutex<Vec<Value>>);
 
 fn recipient_worker_scope() -> CallScope {
     CallScope {
-        owner: "reserved:prefrontal-core".into(),
+        owner: "reserved:prefrontal".into(),
         scope_ref: "recipient-worker".into(),
         scope_epoch: 1,
         kind: Some("worker".into()),
-        parent: Some("reserved:prefrontal-core/head@1".into()),
+        parent: Some("reserved:prefrontal/head@1".into()),
         parent_state: Some("linked".into()),
         agent_id: None,
         flow_id: None,
@@ -365,7 +365,7 @@ async fn flow_unlisted_recipient_refuses_consent_without_reservation() {
                 module_id: "basal".into(),
             },
             Some(CallScope {
-                owner: "reserved:prefrontal-core".into(),
+                owner: "reserved:prefrontal".into(),
                 scope_ref: "flow".into(),
                 scope_epoch: 1,
                 kind: Some("head".into()),
@@ -587,7 +587,7 @@ async fn recipient_keys_separate_agents_connections_and_module_only_calls() {
             1,
             Principal::Direct,
             Some(CallScope {
-                owner: "reserved:prefrontal-core".into(),
+                owner: "reserved:prefrontal".into(),
                 scope_ref: "session".into(),
                 scope_epoch: 1,
                 kind: Some("head".into()),
@@ -627,7 +627,7 @@ async fn recipient_keys_separate_agents_connections_and_module_only_calls() {
             1,
             Principal::Direct,
             Some(CallScope {
-                owner: "reserved:prefrontal-core".into(),
+                owner: "reserved:prefrontal".into(),
                 scope_ref: "session".into(),
                 scope_epoch: 1,
                 kind: Some("head".into()),

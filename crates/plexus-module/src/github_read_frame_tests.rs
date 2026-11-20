@@ -120,7 +120,7 @@ async fn send_github_read_frame(runtime: Arc<ModuleState>, action: &str) -> Valu
         runtime,
         manifest::GITHUB_READ_TOOL,
         json!({"repository":["o/x"], "action":action, "args":{"terms":"bug"}}),
-        "prefrontal-core",
+        "prefrontal",
         None,
     )
     .await
@@ -178,7 +178,7 @@ async fn github_read_returns_the_governed_envelope_for_all_three_actions() {
             runtime.clone(),
             manifest::GITHUB_READ_TOOL,
             arguments.clone(),
-            "prefrontal-core",
+            "prefrontal",
             None,
         )
         .await;
@@ -201,7 +201,7 @@ async fn github_facade_refuses_removed_read_op_by_name_and_keeps_bindings_read()
             runtime.clone(),
             manifest::GITHUB_TOOL,
             json!({"op":"read","action":"github.issue.get","repository":"o/x","args":{"issue_number":42}}),
-            "prefrontal-core",
+            "prefrontal",
             None,
         )
         .await;
@@ -214,7 +214,7 @@ async fn github_facade_refuses_removed_read_op_by_name_and_keeps_bindings_read()
             grant_id: "prefrontal-bindings-read".into(),
             principal: "direct".into(),
             connection_id: "github-handle-app-x".into(),
-            grantee_principal: "reserved:prefrontal-core".into(),
+            grantee_principal: "reserved:prefrontal".into(),
             risk_ceiling: "read".into(),
             action_selectors: vec![],
             authority_kind: "invoke".into(),
@@ -225,7 +225,7 @@ async fn github_facade_refuses_removed_read_op_by_name_and_keeps_bindings_read()
         runtime,
         manifest::GITHUB_TOOL,
         json!({"op":"bindings.read","connection_id":"github-handle-app-x"}),
-        "prefrontal-core",
+        "prefrontal",
         None,
     )
     .await;
@@ -247,7 +247,7 @@ async fn github_read_refuses_write_and_unknown_actions_by_name_before_other_inpu
             runtime.clone(),
             manifest::GITHUB_READ_TOOL,
             json!({"action":action,"repository":null,"args":{"api_token":"ckh_secret"}}),
-            "prefrontal-core",
+            "prefrontal",
             None,
         )
         .await;
@@ -282,7 +282,7 @@ async fn github_read_rejects_extra_or_missing_fields_without_dispatch() {
             runtime.clone(),
             manifest::GITHUB_READ_TOOL,
             arguments,
-            "prefrontal-core",
+            "prefrontal",
             None,
         )
         .await;
@@ -313,7 +313,7 @@ async fn github_read_requires_the_calling_modules_grant() {
         None,
     )
     .await;
-    // The fixture grants prefrontal-core read access on this bot's
+    // The fixture grants prefrontal read access on this bot's
     // connection. A different module with no grant of its own must not
     // borrow that one: it cannot even see the connection.
     assert_eq!(
@@ -350,7 +350,7 @@ async fn delegated_codemode_github_read_keeps_only_module_authority() {
     let (runtime, store, transport, _scratch) = imported_runtime();
     let scope = subc_protocol::scope::ScopeStamp::new(
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         "run-read",
         1,
@@ -367,7 +367,7 @@ async fn delegated_codemode_github_read_keeps_only_module_authority() {
     let reply = crate::call_mode_tests::bound_state_call(
         runtime.clone(),
         Principal::Reserved {
-            module_id: "prefrontal-core".into(),
+            module_id: "prefrontal".into(),
         },
         Some(scope.clone()),
         Some(CallMode::Codemode),

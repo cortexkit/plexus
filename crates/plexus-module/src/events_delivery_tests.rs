@@ -45,7 +45,7 @@ fn insert_consume_grant(store: &PlexusStore, grant_id: &str, expires_at: Option<
             grant_id: grant_id.to_string(),
             principal: "direct".to_string(),
             connection_id: "conn-consume-authority".to_string(),
-            grantee_principal: "reserved:prefrontal-core".to_string(),
+            grantee_principal: "reserved:prefrontal".to_string(),
             risk_ceiling: "read".to_string(),
             action_selectors: vec!["list_issues".to_string()],
             authority_kind: plexus_core::AUTHORITY_EVENTS_CONSUME.to_string(),
@@ -62,7 +62,7 @@ async fn list_as_reserved_consumer(store: Arc<PlexusStore>) -> Value {
     crate::test_support::send_tool_call(
         &state,
         Principal::Reserved {
-            module_id: "prefrontal-core".to_string(),
+            module_id: "prefrontal".to_string(),
         },
         None,
         None,
@@ -244,7 +244,7 @@ async fn a_reserved_consumer_sees_granted_events_only_through_the_wire() {
                 // an invented module id is refused at the bind and every
                 // later assertion then fails for the wrong reason.
                 principal: Some(Principal::Reserved {
-                    module_id: "prefrontal-core".to_string(),
+                    module_id: "prefrontal".to_string(),
                 }),
                 consumer_capabilities: None,
                 admission_facts: None,
@@ -315,7 +315,7 @@ async fn a_reserved_consumer_sees_granted_events_only_through_the_wire() {
             grant_id: "grant-consume-events".to_string(),
             principal: "direct".to_string(),
             connection_id: "conn-consume".to_string(),
-            grantee_principal: "reserved:prefrontal-core".to_string(),
+            grantee_principal: "reserved:prefrontal".to_string(),
             risk_ceiling: "read".to_string(),
             action_selectors: vec!["list_issues".to_string()],
             authority_kind: plexus_core::AUTHORITY_EVENTS_CONSUME.to_string(),
@@ -457,7 +457,7 @@ async fn a_consumer_ack_respects_the_same_action_selectors_as_its_read() {
     let now = plexus_core::now_ms();
     let visible = store
         .list_events_including_granted(
-            "reserved:prefrontal-core",
+            "reserved:prefrontal",
             Some("conn-consume-authority"),
             None,
             now,
@@ -482,7 +482,7 @@ async fn a_consumer_ack_respects_the_same_action_selectors_as_its_read() {
             4,
             2,
             Principal::Reserved {
-                module_id: "prefrontal-core".to_string(),
+                module_id: "prefrontal".to_string(),
             },
         )
         .expect("bind reserved consumer");
