@@ -4,6 +4,8 @@ use crate::actor_attribution::ActorUnknownCode;
 use crate::poller::iso8601::parse_to_millis;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
@@ -89,7 +91,7 @@ fn ci_run_key(repo: &str, run_id: Option<&Value>, attempt: Option<&Value>) -> Op
 impl CiRunCache {
     /// Remember the run values of any `workflow_run` webhook, whatever its
     /// action. Storing does not admit the webhook as an event.
-    fn remember(&self, event: &Event, received: i64) {
+    fn remember<I>(&self, event: &Event<I>, received: i64) {
         let Some((repo, _)) = repository(&event.body) else {
             return;
         };
@@ -168,15 +170,44 @@ pub struct Hello {
 }
 
 #[derive(Deserialize)]
-pub struct Event {
+pub struct Event<I = i64> {
     pub seq: u64,
     pub delivery_id: String,
     pub event: String,
     pub action: Option<String>,
-    pub installation_id: i64,
+    pub installation_id: I,
     pub received_at: String,
     pub stub: Option<Stub>,
     pub body: Value,
+}
+
+pub const GITHUB_APPS_SOURCE: &str = "github-apps";
+
+pub fn canonical_app_id(value: &str) -> Option<i64> {
+    let id: i64 = value.parse().ok()?;
+    (id > 0 && id.to_string() == value).then_some(id)
+}
+
+#[derive(Default)]
+pub struct AppRelayMetadata(Mutex<AppRelayMetadataSnapshot>);
+
+#[derive(Default)]
+struct AppRelayMetadataSnapshot {
+    ids: BTreeMap<String, i64>,
+    reported: BTreeMap<String, (i64, i64)>,
+}
+
+impl AppRelayMetadataSnapshot {
+    fn disagrees(&mut self, reference: &str, handle: &str, stored: i64) -> bool {
+        let Some(&vault) = self.ids.get(reference).filter(|&&vault| vault != stored) else {
+            self.reported.remove(reference);
+            return false;
+        };
+        if self.reported.insert(reference.into(), (stored, vault)) != Some((stored, vault)) {
+            diag!(warn relay: "relay App ID mismatch: handle={handle:?} stored_app_id={stored} vault_app_id={vault}");
+        }
+        true
+    }
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -217,6 +248,11 @@ pub enum DropReason {
     UnsupportedEvent,
     AlreadyDelivered,
     PrCommentReread,
+    InvalidAppId,
+    UnknownAppId,
+    DisabledAppHandle,
+    UnboundAppRepository,
+    AppIdMismatch,
 }
 
 /// Admission result after a relay frame's store transaction commits.
@@ -236,12 +272,98 @@ impl DropReason {
             Self::UnsupportedEvent => "relay_drop_unsupported_event",
             Self::AlreadyDelivered => "relay_drop_already_delivered",
             Self::PrCommentReread => "relay_drop_pr_comment_reread",
+            Self::InvalidAppId => "relay_drop_invalid_app_id",
+            Self::UnknownAppId => "relay_drop_unknown_app_id",
+            Self::DisabledAppHandle => "relay_drop_disabled_app_handle",
+            Self::UnboundAppRepository => "relay_drop_unbound_app_repository",
+            Self::AppIdMismatch => "relay_drop_app_id_mismatch",
         }
     }
 }
 
 fn protocol_error() -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName("invalid relay protocol".into())
+}
+
+fn record_drop<I>(
+    conn: &Connection,
+    event: &Event<I>,
+    reason: DropReason,
+) -> rusqlite::Result<CommitOutcome> {
+    event_outbox::increment(conn, reason.counter(), 1)?;
+    // Malformed payloads need immediate visibility; a changed GitHub repository ID already emits a storage warning.
+    if reason == DropReason::InvalidPayload {
+        diag!(info relay: "relay event dropped reason={reason:?} seq={} event={} action={:?}", event.seq, event.event, event.action);
+    } else {
+        diag!(debug relay: "relay event dropped reason={reason:?} seq={} event={} action={:?}", event.seq, event.event, event.action);
+    }
+    Ok(CommitOutcome::Dropped(reason))
+}
+
+fn app_admission<I>(
+    conn: &Connection,
+    event: &Event<I>,
+    app_id: Option<i64>,
+    metadata: &AppRelayMetadata,
+) -> rusqlite::Result<Result<Vec<String>, DropReason>> {
+    let Some(id) = app_id else {
+        return Ok(Err(DropReason::InvalidAppId));
+    };
+    if event.event == "cortexkit_installation_bound" {
+        return Ok(Err(DropReason::UnsupportedEvent));
+    }
+    let repository = repository(&event.body).map(|(name, _)| name);
+    let unscoped_stub = event.stub.is_some() && event.body.get("repository").is_none();
+    let mut handles = conn.prepare(
+        "SELECT h.app_handle_id, h.status, h.credential_reference,
+                EXISTS(SELECT 1 FROM github_repo_binding b
+                       WHERE b.app_handle_id=h.app_handle_id AND b.repository=lower(?2))
+         FROM github_app_handle h WHERE h.app_id=?1 ORDER BY 4 DESC, h.app_handle_id",
+    )?;
+    let mut rows = handles.query((id, &repository))?;
+    let mut reason = DropReason::UnknownAppId;
+    let mut usable = false;
+    let mut repositories = Vec::new();
+    let mut metadata = metadata.0.lock().unwrap();
+    while let Some(row) = rows.next()? {
+        let handle: String = row.get(0)?;
+        let status: String = row.get(1)?;
+        let reference: String = row.get(2)?;
+        let binding: bool = row.get(3)?;
+        let rejected = if status != "enabled" {
+            DropReason::DisabledAppHandle
+        } else if metadata.disagrees(&reference, &handle, id) {
+            DropReason::AppIdMismatch
+        } else if binding {
+            return Ok(Ok(Vec::new()));
+        } else if unscoped_stub {
+            usable = true;
+            let mut bound =
+                conn.prepare("SELECT repository FROM github_repo_binding WHERE app_handle_id=?1")?;
+            let names = bound.query_map([&handle], |row| row.get(0))?;
+            for name in names {
+                repositories.push(name?);
+            }
+            continue;
+        } else if repository.is_none() {
+            DropReason::InvalidPayload
+        } else {
+            DropReason::UnboundAppRepository
+        };
+        // A repository has at most one binding. An unrelated handle with the
+        // same App ID must not override the bound handle's refusal.
+        if binding {
+            return Ok(Err(rejected));
+        }
+        if reason == DropReason::UnknownAppId || status == "enabled" {
+            reason = rejected;
+        }
+    }
+    if usable {
+        Ok(Ok(repositories))
+    } else {
+        Ok(Err(reason))
+    }
 }
 fn cursor(conn: &rusqlite::Connection, source: &str) -> rusqlite::Result<Option<Cursor>> {
     conn.query_row(
@@ -292,7 +414,7 @@ fn reconcile_backstop(
         rusqlite::params![repository.map(|(name, _)| name), include_releases])
 }
 
-fn reread(conn: &rusqlite::Connection, event: &Event) -> rusqlite::Result<usize> {
+fn reread<I>(conn: &rusqlite::Connection, event: &Event<I>) -> rusqlite::Result<usize> {
     let repo = repository(&event.body);
     reconcile(
         conn,
@@ -301,6 +423,38 @@ fn reread(conn: &rusqlite::Connection, event: &Event) -> rusqlite::Result<usize>
 }
 
 impl PlexusStore {
+    /// Cross-check the existing handles without importing or modifying them.
+    pub fn observe_relay_app_ids(
+        &self,
+        metadata: &AppRelayMetadata,
+        ids: BTreeMap<String, i64>,
+    ) -> Result<(), StoreError> {
+        self.inner.with_read(|conn| {
+            let mut snapshot = metadata.0.lock().unwrap();
+            snapshot
+                .reported
+                .retain(|reference, (_, vault)| ids.get(reference) == Some(vault));
+            snapshot.ids = ids;
+            if !snapshot.ids.is_empty() {
+                let mut handles = conn.prepare(
+                    "SELECT credential_reference, app_handle_id, app_id FROM github_app_handle",
+                )?;
+                let rows = handles.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get(2)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (reference, handle, id) = row?;
+                    snapshot.disagrees(&reference, &handle, id);
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Reuse relay reconciliation after a lost connection. Releases are not
     /// covered by the relay App, so their polling schedule is left alone.
     pub fn relay_disconnected(&self) -> Result<(), StoreError> {
@@ -387,6 +541,33 @@ impl PlexusStore {
         stream: &str,
         event: &Event,
     ) -> Result<CommitOutcome, StoreError> {
+        self.commit_relay_frame(source, stream, event, Some(event.installation_id), None)
+    }
+
+    pub fn commit_app_relay_event(
+        &self,
+        stream: &str,
+        event: &Event<Option<i64>>,
+        app_id: Option<i64>,
+        metadata: &AppRelayMetadata,
+    ) -> Result<CommitOutcome, StoreError> {
+        self.commit_relay_frame(
+            GITHUB_APPS_SOURCE,
+            stream,
+            event,
+            event.installation_id,
+            Some((app_id, metadata)),
+        )
+    }
+
+    fn commit_relay_frame<I>(
+        &self,
+        source: &str,
+        stream: &str,
+        event: &Event<I>,
+        installation_id: Option<i64>,
+        app: Option<(Option<i64>, &AppRelayMetadata)>,
+    ) -> Result<CommitOutcome, StoreError> {
         let received = parse_to_millis(&event.received_at)
             .ok_or_else(|| StoreError::Backend("invalid relay receipt time".into()))?;
         if event.seq == 0
@@ -400,7 +581,6 @@ impl PlexusStore {
         {
             return Err(StoreError::Backend("invalid relay event".into()));
         }
-        let mut inserted = false;
         let mut outcome = CommitOutcome::CursorOnly;
         let mut committed_new = false;
         let mut due_watches = 0;
@@ -411,12 +591,42 @@ impl PlexusStore {
             if current.stream_id != stream { return Err(protocol_error()); }
             if event.seq <= current.committed_seq { return Ok(()); }
             if event.seq != current.committed_seq + 1 { return Err(protocol_error()); }
+            let advance = || conn.execute("UPDATE relay_cursor SET committed_seq=?1 WHERE source=?2 AND stream_id=?3", (event.seq, source, stream)).map(|_| ());
+            let admitted = match app {
+                Some((app_id, metadata)) => app_admission(conn, event, app_id, metadata)?,
+                None => Ok(Vec::new()),
+            };
+            let repositories = match admitted {
+                Ok(repositories) => repositories,
+                Err(reason) => {
+                    outcome = record_drop(conn, event, reason)?;
+                    return advance();
+                }
+            };
             committed_new = true;
+            let stub_without_repo = event.stub.is_some() && event.body.get("repository").is_none();
             match event.stub {
+                Some(stub) if app.is_some() && stub_without_repo => {
+                    marker_reason = match stub {
+                        Stub::Oversized => "oversized",
+                        Stub::RateLimited => "rate_limited",
+                        Stub::Overflow => "overflow",
+                    };
+                    for repo in repositories {
+                        due_watches += reconcile(conn, Some((&repo, None)))?;
+                    }
+                    if matches!(stub, Stub::Overflow) {
+                        diag!(warn relay: "relay {source} overflow gap at seq={}; bound repositories queued for reconcile", event.seq);
+                    }
+                }
                 Some(Stub::Oversized) => { marker_reason = "oversized"; due_watches += reread(conn, event)?; }
                 Some(Stub::RateLimited) => { marker_reason = "rate_limited"; due_watches += reread(conn, event)?; }
+                Some(Stub::Overflow) if app.is_some() => {
+                    marker_reason = "overflow";
+                    due_watches += reread(conn, event)?;
+                }
                 Some(Stub::Overflow) => {
-                    diag!(warn relay: "relay overflow gap at seq={} installation={}; full reconcile queued", event.seq, event.installation_id);
+                    diag!(warn relay: "relay overflow gap at seq={} installation={}; full reconcile queued", event.seq, installation_id.unwrap_or_default());
                     // Relay installations are not agent bot Apps; without an authoritative mapping, reconcile all watches.
                     marker_reason = "overflow";
                     due_watches += reconcile(conn, None)?;
@@ -433,22 +643,13 @@ impl PlexusStore {
                 }
                 None => {
                     if let Err(reason) = admit(conn, event, received, &self.ci_runs, &mut due_watches, &mut late_ci)? {
-                        event_outbox::increment(conn, reason.counter(), 1)?;
-                        // Malformed payloads need immediate visibility; identity changes already emit a storage warning.
-                        if matches!(reason, DropReason::InvalidPayload) {
-                            diag!(info relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action);
-                        } else {
-                            diag!(debug relay: "relay event dropped reason={:?} seq={} event={} action={:?}", reason, event.seq, event.event, event.action);
-                        }
-                        outcome = CommitOutcome::Dropped(reason);
+                        outcome = record_drop(conn, event, reason)?;
                     } else {
-                        inserted = true;
                         outcome = CommitOutcome::Stored;
                     }
                 }
             }
-            conn.execute("UPDATE relay_cursor SET committed_seq=?1 WHERE source=?2 AND stream_id=?3", (event.seq, source, stream))?;
-            Ok(())
+            advance()
         })?;
         if let Some(LateCiDelivery {
             repo,
@@ -463,7 +664,7 @@ impl PlexusStore {
         if committed_new && event.stub.is_none() && event.event == "workflow_run" {
             self.ci_runs.remember(event, received);
         }
-        if inserted {
+        if outcome == CommitOutcome::Stored {
             self.outbox_ready.notify_one();
         }
         Ok(outcome)
@@ -600,7 +801,7 @@ type EventShape = (
     &'static str,
 );
 
-fn event_shape(event: &Event) -> Result<EventShape, DropReason> {
+fn event_shape<I>(event: &Event<I>) -> Result<EventShape, DropReason> {
     use crate::event_key::*;
     Ok(match event.event.as_str() {
         "issues" | "issue_comment" => (
@@ -775,9 +976,9 @@ fn late_ci_delivery(
     })
 }
 
-fn admit(
+fn admit<I>(
     conn: &rusqlite::Connection,
-    event: &Event,
+    event: &Event<I>,
     received: i64,
     ci_runs: &CiRunCache,
     due_watches: &mut usize,
@@ -979,9 +1180,9 @@ fn admit(
     })
 }
 
-fn insert_review_notice(
+fn insert_review_notice<I>(
     conn: &Connection,
-    event: &Event,
+    event: &Event<I>,
     repo: &str,
     repo_id: i64,
     received: i64,
