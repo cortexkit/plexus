@@ -7,8 +7,9 @@ pub mod card;
 pub mod matcher;
 
 /// The paired computer and its remote claim, copied from the daemon's bind
-/// stamp. These facts identify a caller for consent and audit; remote agent ids
-/// never select this computer's agent grants, policies, recipient lists or bots.
+/// stamp. The general connector path uses these facts for consent and audit,
+/// not local agent authority. The GitHub bot facade separately verifies live
+/// identity and remote residence before a moved agent can use its own bot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FederatedCaller {
     pub attributes: subc_protocol::scope::FederatedAttributes,

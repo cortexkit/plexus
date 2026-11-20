@@ -12,9 +12,9 @@ use plexus_core::transport::Transport;
 use rusqlite::Connection;
 use subc_protocol::scope::{ScopeAttributes, ScopeKind, ScopeStamp};
 
-const AGENT: &str = "agent-fixture";
+pub(super) const AGENT: &str = "agent-fixture";
 
-fn stamp(delegates: bool, flow: bool) -> ScopeStamp {
+pub(super) fn stamp(delegates: bool, flow: bool) -> ScopeStamp {
     let attributes = ScopeAttributes::new()
         .with_agent_id(Some(AGENT.into()))
         .with_delegates(delegates);
@@ -44,6 +44,14 @@ fn stamp(delegates: bool, flow: bool) -> ScopeStamp {
 /// `add_issue_comment` under an `allow` policy, so a refused comment is
 /// refused by github_react itself rather than by a missing grant or a card.
 fn runtime(label: &str, carrier: &str) -> (Arc<ModuleState>, Arc<MockTransport>, Scratch) {
+    runtime_with_actions(label, carrier, &["add_reaction", "add_issue_comment"])
+}
+
+pub(super) fn runtime_with_actions(
+    label: &str,
+    carrier: &str,
+    actions: &[&str],
+) -> (Arc<ModuleState>, Arc<MockTransport>, Scratch) {
     let path = Scratch::database(&format!("github-react-{label}"));
     let store = Arc::new(
         PlexusStore::open(&StorageDescriptor {
@@ -107,7 +115,7 @@ fn runtime(label: &str, carrier: &str) -> (Arc<ModuleState>, Arc<MockTransport>,
         connection_id: "conn-react".into(),
         grantee_principal: format!("reserved:{carrier}"),
         risk_ceiling: "write".into(),
-        action_selectors: vec!["add_reaction".into(), "add_issue_comment".into()],
+        action_selectors: actions.iter().map(|action| (*action).into()).collect(),
         authority_kind: "invoke".into(),
         expires_at: None,
     };
@@ -118,7 +126,7 @@ fn runtime(label: &str, carrier: &str) -> (Arc<ModuleState>, Arc<MockTransport>,
     // The reviewed catalog makes every write ask first. An operator lets the
     // bot write without a card by setting an `allow` policy on the connection,
     // as a GitHub handle import does for the actions it grants.
-    for action in ["add_reaction", "add_issue_comment"] {
+    for &action in actions {
         store
             .insert_policy(&plexus_core::PolicyInput {
                 policy_id: format!("allow-{action}"),
@@ -164,7 +172,7 @@ fn runtime(label: &str, carrier: &str) -> (Arc<ModuleState>, Arc<MockTransport>,
 
 /// Send one tool call on a route bound with `carrier` and `scope`, and return
 /// the reply frame's exact body bytes.
-async fn send(
+pub(super) async fn send(
     state: &Arc<ModuleState>,
     carrier: &str,
     scope: Option<ScopeStamp>,
@@ -221,12 +229,12 @@ async fn call(
     serde_json::from_slice(&send(state, "aft", scope, name, arguments).await).unwrap()
 }
 
-fn react(nonce: &str, reaction: &str) -> Value {
+pub(super) fn react(nonce: &str, reaction: &str) -> Value {
     json!({"repository":"org/repo","kind":"issue","target":{"number":42},"reaction":reaction,"request_nonce":nonce})
 }
 
 /// The `github` tool call that carries the same reaction as [`react`].
-fn bot_request(nonce: &str, reaction: &str) -> Value {
+pub(super) fn bot_request(nonce: &str, reaction: &str) -> Value {
     json!({"op":"bot_request","request_nonce":nonce,"request":{
         "action":"issue reaction","repository":"org/repo","target":{"number":42},"body":{"reaction":reaction}
     }})

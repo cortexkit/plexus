@@ -1,6 +1,8 @@
 use super::*;
 #[path = "federated_invoke_tests.rs"]
 mod invoke_kept_gates;
+#[path = "federated_github_tests.rs"]
+mod moved_bot;
 use subc_protocol::{
     manifest::ProviderRole,
     scope::{

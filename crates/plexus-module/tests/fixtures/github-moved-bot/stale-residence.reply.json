@@ -1,0 +1,28 @@
+{
+  "content": [
+    {
+      "text": "{\n  \"repo_binding_generation\": 1,\n  \"result\": {\n    \"code\": \"stale_authority\",\n    \"dimension\": \"residence\",\n    \"legs_sent\": [\n      \"add_issue_comment\"\n    ],\n    \"refusal_code\": \"stale_authority{dimension: residence}\",\n    \"retry_same_nonce\": true,\n    \"status\": \"refused\",\n    \"transmission\": \"not_sent\"\n  }\n}",
+      "type": "text"
+    }
+  ],
+  "isError": false,
+  "repo_binding_generation": 1,
+  "result": {
+    "code": "stale_authority",
+    "dimension": "residence",
+    "legs_sent": ["add_issue_comment"],
+    "refusal_code": "stale_authority{dimension: residence}",
+    "retry_same_nonce": true,
+    "status": "refused",
+    "transmission": "not_sent"
+  },
+  "structuredContent": {
+    "code": "stale_authority",
+    "dimension": "residence",
+    "legs_sent": ["add_issue_comment"],
+    "refusal_code": "stale_authority{dimension: residence}",
+    "retry_same_nonce": true,
+    "status": "refused",
+    "transmission": "not_sent"
+  }
+}

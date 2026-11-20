@@ -2,6 +2,7 @@
 //! repository-bound mutation only after those reads complete.
 use super::{effects, gates, taxonomy};
 use crate::credentials::CredentialSource;
+use crate::github::moved_bot::MovedBot;
 use crate::github::pagination::{self, WalkError};
 use crate::github::receipt::{Claim, Receipt};
 use crate::github::resolver::{self, DeclaredArgsError};
@@ -12,6 +13,24 @@ use crate::governance::{
 use crate::storage::PlexusStore;
 use crate::transport::Transport;
 use serde_json::{json, Value};
+
+const STALE_RESIDENCE: &str = "stale_authority{dimension: residence}";
+
+fn check_residence(moved: Option<&MovedBot<'_>>, row: &Receipt) -> Result<(), taxonomy::Failure> {
+    if let Some(moved) = moved {
+        let current = moved.current_residence();
+        if !current.is_some_and(|residence| json!(residence) == row.authority_baseline["residence"])
+        {
+            return Err(taxonomy::Failure {
+                code: STALE_RESIDENCE.into(),
+                // A new route can resume this nonce after proving the new
+                // residence. Completed legs are recorded and never repeated.
+                retryable: true,
+            });
+        }
+    }
+    Ok(())
+}
 
 fn receipt_update(
     result: Result<bool, cortexkit_store::StoreError>,
@@ -104,6 +123,7 @@ fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     action: &str,
     args: Value,
     clock: &dyn Fn() -> i64,
+    moved: Option<&MovedBot<'_>>,
 ) -> Result<Value, taxonomy::Failure> {
     let expires_at = row.claim_lease_expires_at.ok_or("store_failure")?;
     let check_lease = || {
@@ -128,6 +148,7 @@ fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             .with_bound_agent(&row.agent_id, &handle.app_handle_id);
     let request = with_reply_scope(request, reply);
     let request = facade_origin::request(request, approval(row));
+    check_residence(moved, row)?;
     let reservation = engine
         .authorize(request)
         .map_err(|denial| taxonomy::denied(&denial, "G8"))?;
@@ -762,6 +783,11 @@ fn refuse(
     if code == "review_thread_not_own" {
         value["transmission"] = json!("not_sent");
     }
+    if code == STALE_RESIDENCE {
+        value["code"] = json!("stale_authority");
+        value["dimension"] = json!("residence");
+        value["transmission"] = json!("not_sent");
+    }
     // The flag mirrors the receipt action taken below, not a table of code
     // names: released claims (including the wait-and-retry `nonce_in_flight`)
     // stay safe to retry with the same nonce, while finished refusals replay
@@ -819,6 +845,18 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     claim_owner: &str,
     now: i64,
 ) -> Value {
+    run_with_residence(engine, store, reply, nonce, claim_owner, now, None)
+}
+
+pub(super) fn run_with_residence<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+    engine: &GovernanceEngine<C, T>,
+    store: &PlexusStore,
+    reply: &mut gates::GateReply,
+    nonce: &str,
+    claim_owner: &str,
+    now: i64,
+    moved: Option<&MovedBot<'_>>,
+) -> Value {
     run_with_clock(
         engine,
         store,
@@ -827,6 +865,7 @@ pub fn run<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         claim_owner,
         now,
         &crate::storage::now_ms,
+        moved,
     )
 }
 
@@ -842,7 +881,7 @@ pub fn run_with_test_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     now: i64,
     clock: &dyn Fn() -> i64,
 ) -> Value {
-    run_with_clock(engine, store, reply, nonce, claim_owner, now, clock)
+    run_with_clock(engine, store, reply, nonce, claim_owner, now, clock, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -854,6 +893,7 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
     claim_owner: &str,
     now: i64,
     clock: &dyn Fn() -> i64,
+    moved: Option<&MovedBot<'_>>,
 ) -> Value {
     let Some(Claim::Owned(row)) = reply.claim.as_ref() else {
         return json!({"status":"pending"});
@@ -917,6 +957,7 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 "github.issue_comments.list",
                 page_args,
                 clock,
+                moved,
             ) {
                 Ok(value) => Ok(value),
                 Err(code) => {
@@ -964,6 +1005,7 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
                 "github.pull_request.get",
                 json!({"owner":args["owner"], "repo":args["repo"], "pull_number":number}),
                 clock,
+                moved,
             ) {
                 Ok(value) => value,
                 Err(code) => return fail_read(reply, "G8", code),
@@ -991,7 +1033,7 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         } else {
             args.clone()
         };
-        let value = match read(engine, reply, &row, action, read_args, clock) {
+        let value = match read(engine, reply, &row, action, read_args, clock, moved) {
             Ok(value) => value,
             Err(code)
                 if mapped.request_kind == "issue_edit"
@@ -1275,30 +1317,32 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             Ok(args) => args,
             Err(code) => return fail(reply, "G10", code.into()),
         };
-        // A request sent under a scope re-reads that scope, uncached, before
-        // every write it has not sent yet, so a session revoked mid-request
-        // sends nothing more. Pre-dispatch reads are not re-checked.
+        // Local requests re-read their session scope. A moved agent has no
+        // such local scope: its residence is checked instead before sending.
+        // A caller-supplied run scope remains an additional precondition.
         let mut run_deadline_ms = None;
         if let Some(scope) = reply.scope.clone() {
-            let answer = engine.describe_scope(&scope.owner, &scope.scope_ref);
-            if let Err(code) = crate::scope::recheck_call_scope(&scope, answer.as_ref()) {
-                if let Err(error) = &answer {
-                    eprintln!(warn governance:
-                        "scope read for bot_request {} failed: {}",
-                        reply.request_id, error.0
+            if moved.is_none() {
+                let answer = engine.describe_scope(&scope.owner, &scope.scope_ref);
+                if let Err(code) = crate::scope::recheck_call_scope(&scope, answer.as_ref()) {
+                    if let Err(error) = &answer {
+                        eprintln!(warn governance:
+                            "scope read for bot_request {} failed: {}",
+                            reply.request_id, error.0
+                        );
+                    }
+                    return stop_for_scope(
+                        store,
+                        reply,
+                        &agent,
+                        nonce,
+                        claim_owner,
+                        now,
+                        code,
+                        "route",
+                        &responses,
                     );
                 }
-                return stop_for_scope(
-                    store,
-                    reply,
-                    &agent,
-                    nonce,
-                    claim_owner,
-                    now,
-                    code,
-                    "route",
-                    &responses,
-                );
             }
             if let Some(run_scope) = reply.run_scope.as_ref() {
                 let answer = engine.describe_scope(&run_scope.owner, &run_scope.scope_ref);
@@ -1336,6 +1380,9 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             },
             proof.clone(),
         );
+        if let Err(failure) = check_residence(moved, &row) {
+            return fail(reply, "G10", failure);
+        }
         let reservation = match engine.authorize(request) {
             Ok(reservation) => reservation,
             Err(denial) => return fail(reply, "G10", taxonomy::denied(&denial, "G10")),

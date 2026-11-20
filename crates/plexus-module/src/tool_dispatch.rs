@@ -90,7 +90,9 @@ pub(super) async fn handle_frame(
                     .then(|| serde_json::from_slice::<Value>(&frame.body).ok())
                     .flatten();
                 let object = body.as_ref().and_then(Value::as_object);
-                if !object.is_some_and(federated::serves) {
+                if !object.is_some_and(|object| {
+                    federated::serves(object, binding.federated_caller.as_ref())
+                }) {
                     send_tool_response(
                         writer,
                         frame.header.ver,
@@ -414,15 +416,13 @@ pub(super) async fn handle_tool_request_with_reply_guard(
         let reply = blocking_section(|| {
             facade_tool_reply_with_budget(&frame, object, state, route_bindings, budget)
         })?;
-        return send_tool_response(
-            writer,
-            frame.header.ver,
-            channel,
-            epoch,
-            correlation,
-            with_call_tool_result_with_repo(Some(manifest::GITHUB_READ_TOOL), reply, None, false),
-        )
-        .await;
+        let reply = if federated::is_admission_refusal(&reply) {
+            reply
+        } else {
+            with_call_tool_result_with_repo(Some(manifest::GITHUB_READ_TOOL), reply, None, false)
+        };
+        return send_tool_response(writer, frame.header.ver, channel, epoch, correlation, reply)
+            .await;
     }
     if object.get("method").and_then(Value::as_str) == Some(grants_would_ask::METHOD) {
         let reply = match route_bindings.binding(channel, epoch)? {
@@ -489,6 +489,10 @@ pub(super) async fn handle_tool_request_with_reply_guard(
     let reply = blocking_section(|| {
         facade_tool_reply_with_budget(&frame, object, state, route_bindings, budget)
     })?;
+    if federated::is_admission_refusal(&reply) {
+        return send_tool_response(writer, frame.header.ver, channel, epoch, correlation, reply)
+            .await;
+    }
     if tool.is_some_and(tool_provider::is_metadata_op) {
         // Role metadata is not an MCP tool result: consumers decode the role's
         // answer directly, and refusals are terminal ERROR frames.

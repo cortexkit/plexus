@@ -1,4 +1,4 @@
-//! Resolution of agent ids against Entorhinal's shared identity registry.
+//! Identity and residence reads against Entorhinal's shared agent registry.
 //!
 //! Delivery routing needs an existence check when an operator changes a
 //! subscription, but polling must not pay for that check. This module keeps the
@@ -11,12 +11,23 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use cortexkit_agent_identity::{AgentResolveReply, AgentStatus, GoneReason};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::github_identity::PrefrontalRoutePeer;
 
 /// The Entorhinal management operation that resolves an agent registry id.
 pub const AGENT_RESOLVE_OPERATION: &str = "agent.resolve";
+
+const AGENT_WHERE_OPERATION: &str = "agent.where";
+
+/// A confirmed, non-local residence. The box id survives re-keying, while
+/// the residence epoch changes on a move, including a move back to this box.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentResidence {
+    pub holder_box: String,
+    pub epoch: u64,
+}
 
 /// The registry's set-time verdict for a requested delivery agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +46,12 @@ pub enum AgentLookup {
 /// agents during periodic scheduler maintenance, not during event dispatch.
 pub trait AgentRegistry: Send + Sync {
     fn lookup(&self, agent_id: &str) -> AgentLookup;
+
+    /// Read confirmed remote residence uncached. Missing, stale, local, or
+    /// unavailable residence cannot authorize remote work.
+    fn remote_residence(&self, _agent_id: &str) -> Option<AgentResidence> {
+        None
+    }
 }
 
 /// In-memory registry stub for tests that need explicit registry verdicts.
@@ -147,6 +164,54 @@ impl<P: PrefrontalRoutePeer + 'static> AgentRegistry for EntorhinalAgentRegistry
         };
         resolve_agent_lookup_reply(agent_id, &reply)
     }
+
+    fn remote_residence(&self, agent_id: &str) -> Option<AgentResidence> {
+        let reply = self
+            .peer
+            .call(
+                AGENT_WHERE_OPERATION,
+                serde_json::json!({"agent_id": agent_id}),
+            )
+            .ok()?;
+        confirmed_remote_residence(&reply)
+    }
+}
+
+fn confirmed_remote_residence(reply: &Value) -> Option<AgentResidence> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Status {
+        HeldElsewhere,
+    }
+
+    #[derive(Deserialize)]
+    struct Row {
+        status: Status,
+        known: bool,
+        stale: bool,
+        epoch: u64,
+        holder_box: String,
+    }
+
+    if reply.get("error").is_some() || reply.get("code").is_some() {
+        return None;
+    }
+    let Row {
+        status: Status::HeldElsewhere,
+        known,
+        stale,
+        epoch,
+        holder_box,
+    } = serde_json::from_value(reply.get("result")?.clone()).ok()?;
+    // `holder` can contain the identity of the writer of the residence record
+    // rather than a daemon box id. Check only `holder_box`, and trust `stale`
+    // instead of guessing freshness from the wall clock.
+    (known
+        && !stale
+        && epoch > 0
+        && holder_box.len() == 32
+        && holder_box.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then_some(AgentResidence { holder_box, epoch })
 }
 
 /// Decode Entorhinal's registry reply without performing I/O.
@@ -252,6 +317,31 @@ mod tests {
                 serde_json::json!({"agent_id": "agent-1"}),
             )]
         );
+    }
+
+    #[test]
+    fn malformed_residence_rows_cannot_authorize_a_remote_caller() {
+        let valid = serde_json::json!({"result": {
+            "status":"held_elsewhere", "known":true, "stale":false, "epoch":1,
+            "holder_box":"0123456789abcdef0123456789abcdef", "ignored":{}
+        }});
+        assert!(confirmed_remote_residence(&valid).is_some());
+        for (field, concrete) in [
+            ("status", serde_json::json!("future_state")),
+            ("known", serde_json::json!(false)),
+            ("stale", serde_json::json!("false")),
+            ("epoch", serde_json::json!(1.5)),
+            ("epoch", serde_json::json!(-1)),
+            ("holder_box", serde_json::json!(["a"])),
+            ("holder_box", serde_json::json!("not-a-box-id")),
+        ] {
+            let mut reply = valid.clone();
+            reply["result"][field] = concrete;
+            assert_eq!(confirmed_remote_residence(&reply), None, "{reply}");
+        }
+        let mut ambiguous = valid;
+        ambiguous["error"] = serde_json::json!({"code":"unavailable"});
+        assert_eq!(confirmed_remote_residence(&ambiguous), None);
     }
 
     #[test]

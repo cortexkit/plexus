@@ -1,0 +1,13 @@
+{
+  "name": "github",
+  "arguments": {
+    "op": "bot_request",
+    "request_nonce": "partial",
+    "request": {
+      "verb": "issue close",
+      "repository": "org/repo",
+      "number": "42",
+      "comment": "done"
+    }
+  }
+}

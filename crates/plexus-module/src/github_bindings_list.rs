@@ -8,6 +8,30 @@ pub(super) fn reply(
     audience: Option<&flow_audience::Audience>,
 ) -> Value {
     let agent = plexus_core::scope::basal_flow_read_agent(principal, scope);
+    reply_with_agent(state, principal, arguments, agent, audience)
+}
+
+pub(super) fn reply_for_moved(
+    state: &ModuleState,
+    moved: &plexus_core::github::moved_bot::MovedBot<'_>,
+    arguments: &serde_json::Map<String, Value>,
+) -> Value {
+    reply_with_agent(
+        state,
+        &moved.principal(),
+        arguments,
+        Some(moved.agent_id()),
+        None,
+    )
+}
+
+fn reply_with_agent(
+    state: &ModuleState,
+    principal: &str,
+    arguments: &serde_json::Map<String, Value>,
+    agent: Option<&str>,
+    audience: Option<&flow_audience::Audience>,
+) -> Value {
     let result = (|| {
         if let Some(field) = arguments.keys().find(|field| field.as_str() != "action") {
             return json!({"error":{"code":"invalid_request","field":plexus_core::text::refusal_echo(field)}});

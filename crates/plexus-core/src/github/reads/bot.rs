@@ -505,6 +505,24 @@ fn prepare<'a, C: CredentialSource + ?Sized, T: Transport + ?Sized>(
 ) -> Result<BotCall<'a, C, T>, BotReadError> {
     let identity = crate::scope::bot_read_identity(scope, on_behalf_of_agent)
         .ok_or(BotReadError::AgentIdentityRequired)?;
+    prepare_for_identity(
+        engine,
+        principal,
+        repository,
+        scope,
+        identity,
+        diagnostic_tool,
+    )
+}
+
+fn prepare_for_identity<'a, C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+    engine: &'a GovernanceEngine<C, T>,
+    principal: &'a str,
+    repository: &Value,
+    scope: Option<&'a CallScope>,
+    identity: BotReadIdentity,
+    diagnostic_tool: &'static str,
+) -> Result<BotCall<'a, C, T>, BotReadError> {
     let repository = repository
         .as_str()
         .map(crate::github::canonical_repository)
@@ -520,6 +538,47 @@ fn prepare<'a, C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         handle,
         diagnostic_tool,
     })
+}
+
+/// A moved agent reads only its bot's repositories. Like local bot reads,
+/// the originating module (from Callosum's `origin_principal`) needs an
+/// invoke grant for the read, which counts against the bot's budget.
+pub fn read_moved<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+    engine: &GovernanceEngine<C, T>,
+    moved: &crate::github::moved_bot::MovedBot<'_>,
+    action: &str,
+    repository: &Value,
+    args: &Value,
+    scope: Option<&CallScope>,
+    bulk: bool,
+) -> Result<Value, BotReadError> {
+    let principal = moved.principal();
+    let supported = if bulk {
+        !moved.is_flow()
+            && principal == crate::github::AFT_PRINCIPAL
+            && BULK_ACTIONS.contains(&action)
+    } else {
+        ACTIONS.contains(&action)
+            || (action == JOB_LOG_ACTION
+                && principal == crate::github::AFT_PRINCIPAL
+                && args.get("max_bytes").is_none())
+    };
+    if !supported {
+        return Err(not_allowed("action"));
+    }
+    let call = prepare_for_identity(
+        engine,
+        &principal,
+        repository,
+        scope,
+        BotReadIdentity::Head(moved.agent_id().into()),
+        if bulk { BULK_METHOD } else { "github" },
+    )?;
+    if action == JOB_LOG_ACTION {
+        job_log_prepared(call, args)
+    } else {
+        read_prepared(call, action, args)
+    }
 }
 
 /// Serve one of [`ACTIONS`] with the GitHub bot of the agent the call is for.

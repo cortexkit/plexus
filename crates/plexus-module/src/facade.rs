@@ -28,6 +28,9 @@ pub(super) fn facade_tool_reply_with_budget(
     budget: Arc<request_execution::RequestBudget>,
 ) -> Result<Value, ModuleError> {
     let reply = facade_tool_reply_inner(frame, object, state, route_bindings, budget)?;
+    if federated::is_admission_refusal(&reply) {
+        return Ok(reply);
+    }
     let reply = if is_event_get_call(object) {
         with_event_get_retryable(reply)
     } else {
@@ -137,9 +140,21 @@ fn facade_tool_reply_inner(
     let held_deadline = budget.deadline;
     let channel = frame.header.channel;
     let epoch = frame.header.epoch;
-    let federated_held_reply = route_bindings
-        .binding(channel, epoch)?
-        .is_some_and(|binding| binding.held_reply_v1);
+    let route = route_bindings.binding(channel, epoch)?;
+    let federated_held_reply = route.as_ref().is_some_and(|binding| binding.held_reply_v1);
+    let moved = if let Some(route) = route.as_ref().filter(|binding| {
+        federated::is_callosum(Some(&binding.principal)) && federated::is_github_frame(object)
+    }) {
+        let Some(claim) = federated::github_claim(object, route.federated_caller.as_ref()) else {
+            return Ok(federated::caller_not_allowed());
+        };
+        let Some(moved) = claim.admit(state.runtime.agent_registry.as_ref()) else {
+            return Ok(federated::caller_not_allowed());
+        };
+        Some(moved)
+    } else {
+        None
+    };
     let bulk_read = object.get("method").and_then(Value::as_str)
         == Some(plexus_core::github::reads::bot::BULK_METHOD);
     if bulk_read {
@@ -262,6 +277,13 @@ fn facade_tool_reply_inner(
         return Ok(tool_error("unknown_method", "unknown plexus facade tool"));
     }
 
+    let binding = if moved.is_some() {
+        // Use the same bind stamp that supplied the claim, not another
+        // lookup that may see the route close while Entorhinal is answering.
+        route.clone()
+    } else {
+        route_bindings.binding(channel, epoch)?
+    };
     let Some(RouteBinding {
         principal,
         scope: route_scope,
@@ -269,7 +291,7 @@ fn facade_tool_reply_inner(
         on_behalf_of_agent,
         federated_caller,
         ..
-    }) = route_bindings.binding(channel, epoch)?
+    }) = binding
     else {
         // THE CHANNEL AND EPOCH ARE PRINTED because this refusal can follow a
         // SUCCESSFUL bind: the binding is keyed on (channel, epoch), so a tool
@@ -285,7 +307,10 @@ fn facade_tool_reply_inner(
             "plexus tools require an accepted route.bind",
         ));
     };
-    let principal_key = principal::principal_key(&principal);
+    let principal_key = moved.as_ref().map_or_else(
+        || principal::principal_key(&principal),
+        |moved| moved.principal(),
+    );
     if bulk_read && principal_key != plexus_core::github::AFT_PRINCIPAL {
         return Ok(json!({"error": {
             "code": "caller_not_allowed",
@@ -293,7 +318,16 @@ fn facade_tool_reply_inner(
             "transmission": "not_sent",
         }}));
     }
-    if let Some(refusal) = tool_provider::mode_refusal(name, &mode) {
+    // Run claims carry attribution only. Reuse the local codemode refusal
+    // for bot writes even if the remote carrier requested another mode.
+    let admission_mode = if moved.as_ref().is_some_and(|moved| moved.is_run())
+        && matches!(name, manifest::GITHUB_TOOL | manifest::GITHUB_REACT_TOOL)
+    {
+        &CallMode::Codemode
+    } else {
+        &mode
+    };
+    if let Some(refusal) = tool_provider::mode_refusal(name, admission_mode) {
         return Ok(json!({"error": refusal}));
     }
     let federated_route = federated::is_callosum(Some(&principal));
@@ -376,6 +410,11 @@ fn facade_tool_reply_inner(
             .and_then(Value::as_str)
             .unwrap_or("");
         if !bulk_read && action == "github.bindings.list" {
+            if let Some(moved) = &moved {
+                return Ok(github_bindings_list::reply_for_moved(
+                    state, moved, arguments,
+                ));
+            }
             return Ok(github_bindings_list::reply(
                 state,
                 &principal_key,
@@ -571,6 +610,31 @@ fn facade_tool_reply_inner(
                 .unwrap_or("");
             let repository = arguments.get("repository").cloned().unwrap_or(Value::Null);
             let args = arguments.get("args").cloned().unwrap_or_else(|| json!({}));
+            if let Some(moved) = &moved {
+                let args = if bulk_read {
+                    args
+                } else {
+                    let range = BotReadForm::of(action, &principal_key, &args)
+                        == Some(BotReadForm::JobLogRange);
+                    github_read_tool::bounded_args(action, args, range).0
+                };
+                return Ok(blocking_section(
+                    || match plexus_core::github::reads::bot::read_moved(
+                        &state.runtime.engine,
+                        moved,
+                        action,
+                        &repository,
+                        &args,
+                        route_scope.as_ref(),
+                        bulk_read,
+                    ) {
+                        Err(
+                            plexus_core::github::reads::bot::BotReadError::RepositoryNotVisible,
+                        ) => federated::caller_not_allowed(),
+                        result => bot_read_reply(result),
+                    },
+                ));
+            }
             if bulk_read {
                 return Ok(bot_read_reply(plexus_core::github::reads::bot::read_bulk(
                     &state.runtime.engine,
@@ -682,7 +746,32 @@ fn facade_tool_reply_inner(
             let request_id = fresh_request_id();
             let owner = request_id.clone();
             let now = plexus_core::now_ms();
+            let expect = arguments
+                .get("expect")
+                .filter(|_| reaction_request.is_none());
+            let run_scope = arguments
+                .get("run_scope")
+                .filter(|_| reaction_request.is_none());
             blocking_section(|| {
+                if let Some(moved) = &moved {
+                    let Some(scope) = route_scope.as_ref() else {
+                        return federated::caller_not_allowed();
+                    };
+                    return plexus_core::github::facade::bot_request_moved(
+                        state.store(),
+                        &state.runtime.engine,
+                        moved,
+                        scope,
+                        &request,
+                        nonce,
+                        expect,
+                        run_scope,
+                        &request_id,
+                        &owner,
+                        now,
+                    )
+                    .unwrap_or_else(federated::caller_not_allowed);
+                }
                 plexus_core::github::facade::bot_request_scoped_with_preconditions(
                     state.store(),
                     &state.runtime.engine,
@@ -690,12 +779,8 @@ fn facade_tool_reply_inner(
                     route_scope.as_ref(),
                     &request,
                     nonce,
-                    arguments
-                        .get("expect")
-                        .filter(|_| reaction_request.is_none()),
-                    arguments
-                        .get("run_scope")
-                        .filter(|_| reaction_request.is_none()),
+                    expect,
+                    run_scope,
                     &request_id,
                     &owner,
                     now,
@@ -958,7 +1043,7 @@ pub(super) fn request_expired_reply() -> Value {
 /// Which `github_read` calls are agent bot reads, served with the stamped
 /// agent's own bot rather than the calling module's connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BotReadForm {
+pub(super) enum BotReadForm {
     /// `github.repo.get`, `github.search.code` and `github.search.issues`,
     /// whichever module carries the call.
     Repository,
@@ -998,7 +1083,7 @@ fn is_bot_read_call(
 }
 
 impl BotReadForm {
-    fn of(action: &str, principal_key: &str, args: &Value) -> Option<Self> {
+    pub(super) fn of(action: &str, principal_key: &str, args: &Value) -> Option<Self> {
         if plexus_core::github::reads::bot::ACTIONS.contains(&action) {
             return Some(Self::Repository);
         }

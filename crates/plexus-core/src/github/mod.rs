@@ -8,6 +8,7 @@ pub mod control;
 pub mod credential;
 pub mod facade;
 pub mod manifest_binding;
+pub mod moved_bot;
 pub mod pagination;
 pub mod reads;
 pub mod receipt;

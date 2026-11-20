@@ -105,8 +105,14 @@ pub(crate) fn unknown_claim_bind(body: &[u8]) -> Option<Option<Principal>> {
 }
 
 /// Match dispatch's discriminator, including malformed and mixed method frames.
-/// No method is served; a newly added tool or sub-operation starts out denied.
-pub(crate) fn serves(object: &Map<String, Value>) -> bool {
+/// New tools and sub-operations start out denied.
+pub(crate) fn serves(
+    object: &Map<String, Value>,
+    caller: Option<&plexus_core::federated::FederatedCaller>,
+) -> bool {
+    if is_github_frame(object) {
+        return github_claim(object, caller).is_some();
+    }
     if object.contains_key("method") {
         return false;
     }
@@ -118,16 +124,78 @@ pub(crate) fn serves(object: &Map<String, Value>) -> bool {
     }
 }
 
+pub(super) fn is_github_frame(object: &Map<String, Value>) -> bool {
+    object.get("method").and_then(Value::as_str)
+        == Some(plexus_core::github::reads::bot::BULK_METHOD)
+        || matches!(
+            object.get("name").and_then(Value::as_str),
+            Some("github" | "github_react" | "github_read")
+        )
+}
+
+/// Only bot forms can get past this gate. In particular no remote call may
+/// fall through to the operator's GitHub connections or management handler.
+pub(super) fn github_claim<'a>(
+    object: &Map<String, Value>,
+    caller: Option<&'a plexus_core::federated::FederatedCaller>,
+) -> Option<plexus_core::github::moved_bot::Claim<'a>> {
+    use plexus_core::github::{moved_bot::Claim, reads::bot, AFT_PRINCIPAL};
+
+    let claim = Claim::from_caller(caller?)?;
+    let principal = format!("reserved:{}", claim.module_id());
+    let allowed = if let Some(method) = object.get("method") {
+        method.as_str() == Some(bot::BULK_METHOD)
+            && object
+                .keys()
+                .all(|key| matches!(key.as_str(), "method" | "params"))
+            && principal == AFT_PRINCIPAL
+            && !claim.is_flow()
+            && object
+                .get("params")
+                .and_then(|args| args.get("action"))
+                .and_then(Value::as_str)
+                .is_some_and(|action| bot::BULK_ACTIONS.contains(&action))
+    } else {
+        let arguments = object.get("arguments")?.as_object()?;
+        match object.get("name").and_then(Value::as_str) {
+            Some("github") => !claim.is_flow() && op(object) == Some("bot_request"),
+            Some("github_react") => true,
+            Some("github_read") => {
+                arguments
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .is_some_and(|action| {
+                        action == "github.bindings.list"
+                            || crate::facade::BotReadForm::of(
+                                action,
+                                &principal,
+                                arguments.get("args").unwrap_or(&Value::Null),
+                            )
+                            .is_some()
+                    })
+            }
+            _ => false,
+        }
+    };
+    allowed.then_some(claim)
+}
+
 fn op(object: &Map<String, Value>) -> Option<&str> {
     object.get("arguments")?.get("op")?.as_str()
 }
 
+const NOT_SERVED: &str = "this frame is not served to federated callers";
+
 pub(crate) fn caller_not_allowed() -> Value {
     json!({"error": {
         "code": "caller_not_allowed",
-        "message": "this frame is not served to federated callers",
+        "message": NOT_SERVED,
         "transmission": "not_sent",
     }})
+}
+
+pub(super) fn is_admission_refusal(reply: &Value) -> bool {
+    reply["error"]["code"] == "caller_not_allowed" && reply["error"]["message"] == NOT_SERVED
 }
 
 /// Build only public discovery fields, using the same severity rule as invoke.

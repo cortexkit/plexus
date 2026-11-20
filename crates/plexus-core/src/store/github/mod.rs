@@ -1524,6 +1524,12 @@ impl PlexusStore {
                     return Ok(Claim::Unknown(row.clone()));
                 }
                 if row.state == "pending_approval" {
+                    // The claim's residence baseline marks a moved caller.
+                    // Check under the write fence too: a local caller could
+                    // have created an approval after the facade's first read.
+                    if baseline.get("residence").is_some() {
+                        return Ok(Claim::PendingApproval(row.clone()));
+                    }
                     let (status, expires_at): (String, i64) = conn.query_row(
                         "SELECT status,expires_at FROM action_requests WHERE principal=?1 AND request_id=?2",
                         params![handle.connection_principal, row.action_request_id],

@@ -292,6 +292,7 @@ pub fn run_scoped_with_preconditions(
         store,
         caller_principal,
         scope,
+        None,
         request,
         nonce,
         expect,
@@ -305,40 +306,11 @@ pub fn run_scoped_with_preconditions(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn replay_scoped(
+pub(super) fn run_scoped_mode(
     store: &impl GateStore,
     caller_principal: &str,
     scope: Option<&crate::scope::CallScope>,
-    request: &Value,
-    nonce: &str,
-    expect: Option<&Value>,
-    run_scope: Option<&Value>,
-    request_id: &str,
-    claim_owner: &str,
-    now: i64,
-    lease_seconds: i64,
-) -> GateReply {
-    run_scoped_mode(
-        store,
-        caller_principal,
-        scope,
-        request,
-        nonce,
-        expect,
-        run_scope,
-        request_id,
-        claim_owner,
-        now,
-        lease_seconds,
-        true,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_scoped_mode(
-    store: &impl GateStore,
-    caller_principal: &str,
-    scope: Option<&crate::scope::CallScope>,
+    moved: Option<&crate::github::moved_bot::MovedBot<'_>>,
     request: &Value,
     nonce: &str,
     expect: Option<&Value>,
@@ -373,7 +345,11 @@ fn run_scoped_mode(
         scope: scope.cloned(),
         run_scope: None,
     };
-    let Some(agent) = scope.and_then(crate::scope::CallScope::acting_agent) else {
+    let agent = match moved {
+        Some(moved) => Some(moved.agent_id()),
+        None => scope.and_then(crate::scope::CallScope::acting_agent),
+    };
+    let Some(agent) = agent else {
         return reply.refuse("G1", "delegating_scope_required");
     };
     reply.claimed_agent_id = Some(agent.to_string());
@@ -406,6 +382,11 @@ fn run_scoped_mode(
     {
         return reply.refuse_g2("agent_handle_unknown");
     }
+    // Do not disclose a disabled bot or a repository that no longer belongs
+    // to the remote caller, even via the old receipt replay path.
+    if moved.is_some() && handle.status != "enabled" {
+        return reply.refuse_g2("handle_disabled");
+    }
     reply.app_handle_id = Some(handle.app_handle_id.clone());
     let agent = agent.to_string();
     let repository = match request.get("repository").and_then(Value::as_str) {
@@ -414,6 +395,7 @@ fn run_scoped_mode(
     };
     let (binding, bound_agent) = match store.binding(repository) {
         Ok(Some(binding)) => binding,
+        Ok(None) if moved.is_some() => return reply.refuse_g2("repository_unbound"),
         Ok(None) => {
             match terminal_binding_replay(
                 store,
@@ -433,6 +415,9 @@ fn run_scoped_mode(
         Err(code) => return reply.refuse_g2(code),
     };
     if binding.app_handle_id != handle.app_handle_id {
+        if moved.is_some() {
+            return reply.refuse_g2("repository_unbound");
+        }
         match terminal_binding_replay(
             store,
             &agent,
@@ -488,6 +473,9 @@ fn run_scoped_mode(
         Ok(Some(mut existing)) => {
             if existing.request_fingerprint != mapped.fingerprint {
                 return reply.refuse("G4", "nonce_payload_mismatch");
+            }
+            if moved.is_some() && existing.state == "pending_approval" {
+                return reply.refuse("G6", "consent_unavailable");
             }
             if let Some(outcome) =
                 super::vendor_band::recover_completed(&existing, &mapped.request_kind)
@@ -547,22 +535,23 @@ fn run_scoped_mode(
     }
     // A caller with no live module grant on this handle connection (including
     // `direct` and any unknown module) refuses module_grant_absent below.
-    let authority = match store.authority(&handle, caller_principal, &agent, &mapped, repository) {
-        Ok(authority) => authority,
-        Err(code) if code == "module_grant_absent" => {
-            return reply.refuse_grant(
-                crate::grant_refusal::GrantTarget::new(
-                    crate::grant_refusal::Layer::Module,
-                    caller_principal,
-                    "github",
-                    Some(&handle.connection_id),
-                    mapped.action,
-                ),
-                crate::grant_refusal::Cause::Missing,
-            );
-        }
-        Err(code) => return reply.refuse("G6", code),
-    };
+    let mut authority =
+        match store.authority(&handle, caller_principal, &agent, &mapped, repository) {
+            Ok(authority) => authority,
+            Err(code) if code == "module_grant_absent" => {
+                return reply.refuse_grant(
+                    crate::grant_refusal::GrantTarget::new(
+                        crate::grant_refusal::Layer::Module,
+                        caller_principal,
+                        "github",
+                        Some(&handle.connection_id),
+                        mapped.action,
+                    ),
+                    crate::grant_refusal::Cause::Missing,
+                );
+            }
+            Err(code) => return reply.refuse("G6", code),
+        };
     // Compare with the authority baseline that the receipt will pin, not the
     // facade's earlier generation preflight. G2 must first establish that the
     // agent's handle is bound to this repository; terminal nonce replay above
@@ -618,7 +607,9 @@ fn run_scoped_mode(
         );
     }
     if !authority.pair_allowed {
-        if scope.is_some_and(|scope| scope.flow_id.is_some()) {
+        if moved.is_some_and(|moved| moved.is_flow())
+            || scope.is_some_and(|scope| scope.flow_id.is_some())
+        {
             return reply.refuse_grant(
                 crate::grant_refusal::GrantTarget::new(
                     crate::grant_refusal::Layer::Agent,
@@ -653,8 +644,13 @@ fn run_scoped_mode(
         };
         return reply.refuse("G6", format!("policy_blocked{{source: {source}}}"));
     }
-    if effect == "ask_first" && scope.is_some_and(|scope| scope.flow_id.is_some()) {
+    if effect == "ask_first"
+        && (moved.is_some() || scope.is_some_and(|scope| scope.flow_id.is_some()))
+    {
         return reply.refuse("G6", "consent_unavailable");
+    }
+    if let Some(moved) = moved {
+        authority.baseline["residence"] = moved.residence();
     }
     let planned = super::effects::plan(&mapped);
     if planned.is_empty() || planned.len() > 6 {
@@ -683,6 +679,9 @@ fn run_scoped_mode(
     ) {
         Ok(Claim::PayloadMismatch) => return reply.refuse("G4", "nonce_payload_mismatch"),
         Ok(Claim::InFlight) => return reply.refuse("G4", "nonce_in_flight"),
+        Ok(Claim::PendingApproval(_)) if moved.is_some() => {
+            return reply.refuse("G6", "consent_unavailable");
+        }
         Ok(claim) => claim,
         Err(code) => return reply.refuse("G7", code),
     };

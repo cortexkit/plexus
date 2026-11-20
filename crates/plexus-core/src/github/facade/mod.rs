@@ -9,6 +9,7 @@ pub(crate) mod validation;
 pub mod vendor_band;
 
 use crate::credentials::CredentialSource;
+use crate::github::moved_bot::MovedBot;
 use crate::github::receipt::Claim;
 use crate::github::receipt::DEFAULT_CLAIM_LEASE_SECONDS;
 use crate::governance::GovernanceEngine;
@@ -98,14 +99,82 @@ pub fn bot_request_scoped_with_preconditions<
     claim_owner: &str,
     now: i64,
 ) -> Value {
+    bot_request(
+        store,
+        engine,
+        caller_principal,
+        scope,
+        None,
+        request,
+        nonce,
+        expect,
+        run_scope,
+        request_id,
+        claim_owner,
+        now,
+    )
+    .expect("a local bot request always has a reply")
+}
+
+/// Serve an already admitted moved agent using the same handle, write grants
+/// and receipt path as a local agent. `None` conceals an inadmissible binding.
+#[allow(clippy::too_many_arguments)]
+pub fn bot_request_moved<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+    store: &PlexusStore,
+    engine: &GovernanceEngine<C, T>,
+    moved: &MovedBot<'_>,
+    scope: &crate::scope::CallScope,
+    request: &Value,
+    nonce: &str,
+    expect: Option<&Value>,
+    run_scope: Option<&Value>,
+    request_id: &str,
+    claim_owner: &str,
+    now: i64,
+) -> Option<Value> {
+    if moved.is_run() {
+        return None;
+    }
+    bot_request(
+        store,
+        engine,
+        &moved.principal(),
+        Some(scope),
+        Some(moved),
+        request,
+        nonce,
+        expect,
+        run_scope,
+        request_id,
+        claim_owner,
+        now,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bot_request<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
+    store: &PlexusStore,
+    engine: &GovernanceEngine<C, T>,
+    caller_principal: &str,
+    scope: Option<&crate::scope::CallScope>,
+    moved: Option<&MovedBot<'_>>,
+    request: &Value,
+    nonce: &str,
+    expect: Option<&Value>,
+    run_scope: Option<&Value>,
+    request_id: &str,
+    claim_owner: &str,
+    now: i64,
+) -> Option<Value> {
     let generation = match store.github_repo_binding_generation() {
         Ok(generation) => generation,
         Err(error) => {
             eprintln!(warn storage: "GitHub binding generation preflight failed for request {request_id}, nonce {nonce}: {error}");
-            let mut reply = gates::replay_scoped(
+            let mut reply = gates::run_scoped_mode(
                 store,
                 caller_principal,
                 scope,
+                moved,
                 request,
                 nonce,
                 expect,
@@ -114,7 +183,11 @@ pub fn bot_request_scoped_with_preconditions<
                 claim_owner,
                 now,
                 DEFAULT_CLAIM_LEASE_SECONDS,
+                true,
             );
+            if moved.is_some() && reply.gate == "G2" {
+                return None;
+            }
             let outcome = if matches!(
                 reply.claim,
                 Some(Claim::Replay(_) | Claim::Unknown(_) | Claim::InFlight)
@@ -129,13 +202,14 @@ pub fn bot_request_scoped_with_preconditions<
             if let Err(error) = store.audit_github_facade(&reply) {
                 eprintln!(error storage: "GitHub facade audit failed for nonce {nonce}, request {}: {error}", reply.request_id);
             }
-            return json!({"result":outcome});
+            return Some(json!({"result":outcome}));
         }
     };
-    let mut reply = gates::run_scoped_with_preconditions(
+    let mut reply = gates::run_scoped_mode(
         store,
         caller_principal,
         scope,
+        moved,
         request,
         nonce,
         expect,
@@ -144,20 +218,30 @@ pub fn bot_request_scoped_with_preconditions<
         claim_owner,
         now,
         DEFAULT_CLAIM_LEASE_SECONDS,
+        false,
     );
+    if moved.is_some() && reply.gate == "G2" {
+        return None;
+    }
     let outcome = match reply.claim.as_ref() {
         Some(Claim::PendingApproval(row)) => {
             json!({"status":"pending_approval", "action_request_id":row.action_request_id})
         }
-        Some(Claim::Owned(_)) => {
-            vendor_band::run(engine, store, &mut reply, nonce, claim_owner, now)
-        }
+        Some(Claim::Owned(_)) => vendor_band::run_with_residence(
+            engine,
+            store,
+            &mut reply,
+            nonce,
+            claim_owner,
+            now,
+            moved,
+        ),
         _ => replay_or_refusal(&reply),
     };
     if let Err(error) = store.audit_github_facade(&reply) {
         eprintln!(error storage: "GitHub facade audit failed for nonce {nonce}, request {}: {error}", reply.request_id);
     }
-    json!({"result":outcome, "repo_binding_generation":generation})
+    Some(json!({"result":outcome, "repo_binding_generation":generation}))
 }
 
 fn replay_or_refusal(reply: &gates::GateReply) -> Value {
