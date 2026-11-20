@@ -1155,9 +1155,11 @@ mod tests {
         for _ in &ids {
             release.send(()).unwrap();
         }
-        // One 350 ms poll plus scheduling/storage slack, not twenty polls.
+        // One 350 ms poll plus slack, not twenty polls (at least 7 s). Alone
+        // this finishes in about 0.4 s; under the full suite's load it once
+        // took over 1 s, so allow 3 s, still well short of a full pass.
         let report = task
-            .join_timeout(std::time::Duration::from_secs(1))
+            .join_timeout(std::time::Duration::from_secs(3))
             .expect("shutdown must finish within one poll's time, not the whole pass");
         assert_eq!(report.outcomes.len(), 1);
         assert!(matches!(
