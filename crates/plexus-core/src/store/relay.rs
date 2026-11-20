@@ -547,9 +547,9 @@ impl PlexusStore {
 
 /// The watch action whose polled inserts can prove the relay missed a delivery.
 ///
-/// Only webhook-backed completed CI runs and jobs qualify: GitHub sends one
-/// `workflow_run` or `workflow_job` "completed" webhook for each, and the relay
-/// stores it under the same event key a poll would derive. Issues and pull
+/// Only webhook-backed completed CI runs and jobs qualify: the relay stores
+/// their `workflow_run` or `workflow_job` webhooks under the same event key a
+/// poll would derive, subject to the exceptions below. Issues and pull
 /// requests do not: their `updated_at` also moves on activity the relay
 /// carries no webhook for, or turns into a re-read instead of a stored event
 /// (a comment on a pull request). A polled issue or PR change is therefore
@@ -564,13 +564,18 @@ pub(super) fn poll_coverage_action(event_name: &str) -> Option<&'static str> {
     }
 }
 
-/// GitHub sends no `workflow_run` webhook for a run with a startup failure.
+/// Startup failures have no run webhook, and skipped rerun jobs do not reliably have a job webhook.
 pub(super) fn github_sends_no_webhook(event: &KeyedPollEventInput<'_>) -> bool {
-    event
-        .identity
-        .as_ref()
-        .is_some_and(|identity| identity.event_name == crate::event_key::GITHUB_CI_RUN_COMPLETED)
-        && event.event.payload["conclusion"] == "startup_failure"
+    event.identity.as_ref().is_some_and(|identity| {
+        let payload = event.event.payload;
+        (identity.event_name == crate::event_key::GITHUB_CI_RUN_COMPLETED
+            && payload["conclusion"] == "startup_failure")
+            || (identity.event_name == crate::event_key::GITHUB_CI_JOB_COMPLETED
+                && payload["conclusion"] == "skipped"
+                && payload["run"]["run_attempt"]
+                    .as_i64()
+                    .is_some_and(|attempt| attempt > 1))
+    })
 }
 
 pub(super) fn covers_poll_watch(

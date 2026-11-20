@@ -3221,6 +3221,45 @@ mod tests {
     }
 
     #[test]
+    fn skipped_rerun_jobs_are_stored_without_relay_misses() {
+        for attempt in [2, 1] {
+            let f = Fixture::new();
+            let run = run(1, attempt, f.now, "in_progress", None);
+            let mut expected_job = job(5, f.now, Some("skipped"));
+            f.add(run.clone(), vec![expected_job.clone()], true);
+            expected_job["run"] = serde_json::to_value(metadata(&run).unwrap()).unwrap();
+            let observer = Arc::new(RelayInsertRecorder::default());
+            let mut poller = TestPoller::new(f.engine.clone());
+            poller.relay_health = Some(observer.clone());
+            assert_eq!(
+                poller.poll_ci_runs_at(PRINCIPAL, &f.watch(), f.now),
+                PollCycle::Completed {
+                    inserted: 1,
+                    duplicates: 0
+                }
+            );
+            assert_eq!(
+                f.events(),
+                vec![("ci_job".into(), expected_job.clone(), f.now)]
+            );
+            let markers = f.markers();
+            assert_eq!(markers.len(), 1);
+            assert_eq!(
+                markers[0].event_name,
+                crate::event_key::GITHUB_CI_JOB_COMPLETED
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(&markers[0].body).unwrap(),
+                expected_job
+            );
+            assert_eq!(
+                *observer.0.lock().unwrap(),
+                if attempt == 1 { vec![f.now] } else { vec![] }
+            );
+        }
+    }
+
+    #[test]
     fn successful_runs_still_count_for_relay_misses() {
         assert_polled_run_relay_activity("success", true);
     }
