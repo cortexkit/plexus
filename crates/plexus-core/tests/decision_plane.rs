@@ -1348,10 +1348,14 @@ fn reconciliation_owner_change_abandons_the_unused_reservation() {
     }
     let mut record = reconciliation_record("destroy_item");
     record.principal = "old-owner".into();
+    // Two active owners now share `conn-1`, so authorization refuses the
+    // owner-ambiguous transport before any reservation is made. The later
+    // owner-changed check stays as a second layer and is pinned in
+    // `write_reconciliation`; either way no reservation may be left behind.
     assert_eq!(
         engine.reconcile(&record),
         ReconcileResult::Denied {
-            reason_code: "reconciliation_owner_changed".into()
+            reason_code: "connection_unhealthy".into()
         }
     );
     let live: i64 = rusqlite::Connection::open(path.path())

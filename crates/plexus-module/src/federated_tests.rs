@@ -170,7 +170,9 @@ fn metadata_state() -> Arc<ModuleState> {
         ("direct", "shared", "active"),
         ("reserved:callosum", "shared", "revoked"),
         ("reserved:callosum", "callosum-only", "active"),
-        ("reserved:prefrontal-core", "shared", "pending"),
+        // Not "shared": a pending row may register a transport, so a second
+        // owner on the same bare id would make every `shared` call refuse.
+        ("reserved:prefrontal-core", "prefrontal-pending", "pending"),
     ] {
         store
             .insert_connection(
@@ -414,9 +416,15 @@ async fn metadata_local_replies_keep_complete_legacy_bytes_with_admission_on_or_
                     value
                 })
                 .collect();
+            // Each owner lists its own connection; they no longer share an id.
+            let connection = if owner == "direct" {
+                "shared"
+            } else {
+                "prefrontal-pending"
+            };
             let actions = state
                 .store()
-                .list_catalog_actions(&owner, "shared")
+                .list_catalog_actions(&owner, connection)
                 .unwrap();
             assert_eq!(actions[0].severity, "S1");
             for (name, arguments, result) in [
@@ -428,12 +436,12 @@ async fn metadata_local_replies_keep_complete_legacy_bytes_with_admission_on_or_
                 ("catalog", json!({"op":"apps"}), json!({"apps":apps})),
                 (
                     "catalog",
-                    json!({"op":"list","connection":"shared"}),
+                    json!({"op":"list","connection":connection}),
                     json!({"actions":actions}),
                 ),
                 (
                     "catalog",
-                    json!({"op":"inspect","connection":"shared","action":"meta.write"}),
+                    json!({"op":"inspect","connection":connection,"action":"meta.write"}),
                     json!({"actions":actions.iter().filter(|action| action.name == "meta.write").collect::<Vec<_>>()}),
                 ),
             ] {

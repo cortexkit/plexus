@@ -617,10 +617,10 @@ fn caller_connection_id_collision_is_denied_without_read_back() {
         })
         .unwrap();
     tick(&f);
-    assert_eq!(
-        status(&f).1.as_deref(),
-        Some("reconciliation_owner_changed")
-    );
+    // Both owners now hold an active `conn`, so authorization refuses the
+    // owner-ambiguous transport id before any read-back. The later
+    // owner-changed check remains as a second layer behind it.
+    assert_eq!(status(&f).1.as_deref(), Some("connection_unhealthy"));
     assert_settled(&f, "denied", 1);
 }
 
