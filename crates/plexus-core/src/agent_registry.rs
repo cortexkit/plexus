@@ -21,8 +21,9 @@ pub const AGENT_RESOLVE_OPERATION: &str = "agent.resolve";
 
 const AGENT_WHERE_OPERATION: &str = "agent.where";
 
-/// A confirmed, non-local residence. The box id survives re-keying, while
-/// the residence epoch changes on a move, including a move back to this box.
+/// A confirmed, non-local residence. The box id names the computer and stays
+/// the same even when that computer's pairing keys are replaced, while the
+/// residence epoch changes on every move, including a move back to a box.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentResidence {
     pub holder_box: String,
