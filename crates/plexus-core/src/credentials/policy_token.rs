@@ -65,7 +65,11 @@ pub(super) fn decode(reply: WipingValue) -> Result<ResolvedCredential, PolicyTok
     let expiry = body["result"]["expires_at_ms"]
         .as_i64()
         .ok_or(InvalidReply)?;
-    // The vault keeps the record version; Plexus uses this credential for only one leg.
+    // The reply carries no version of the vault's `github_app:` record, so the
+    // version slot is 0. Nothing reads it: plexus asks the vault again for every
+    // GitHub request it sends (each step of a bot write, each pre-read) and keeps
+    // no copy, so a replaced or revoked record is refused by the vault on the
+    // next request.
     Ok(ResolvedCredential::new(
         token.as_bytes().to_vec(),
         Some(expiry),
