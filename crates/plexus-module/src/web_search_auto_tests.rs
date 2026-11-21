@@ -36,11 +36,23 @@ fn scoped_app_metadata_requires_the_record_slug_and_canonical_string() {
     );
 }
 
+#[test]
+fn scoped_app_metadata_replays_vault_app_identity() {
+    let reply = vault_case("github_app_identity");
+    assert_eq!(
+        listed_app_ids(&reply),
+        Some(BTreeMap::from([(
+            "github_app:listing-vector".into(),
+            9_007_199_254_740_993,
+        )]))
+    );
+}
+
 fn vault_case(name: &str) -> Value {
     let bytes = include_bytes!("../../plexus-core/tests/fixtures/vault-wire/list-scoped-v2.json");
     assert_eq!(
         format!("{:x}", Sha256::digest(bytes)),
-        "e9dfb2140ff4d92ece55de09da5987b27d8ca1a2023f0f9c50439499c3c3d603"
+        "9757606b454f4a3920f5a4b36018b1c82cdf1fcfb15c719338377c8af8285bed"
     );
     let vectors: Value = serde_json::from_slice(bytes).unwrap();
     let case = vectors["cases"]
@@ -48,7 +60,7 @@ fn vault_case(name: &str) -> Value {
         .unwrap()
         .iter()
         .find(|case| case["case"] == name)
-        .unwrap();
+        .unwrap_or_else(|| panic!("missing vault fixture case {name}"));
     let reply = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(case["reply_b64url"].as_str().unwrap())
         .unwrap();
