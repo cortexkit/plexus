@@ -87,3 +87,31 @@ fn one_tap_binding_decision_is_independent_of_the_policy_member() {
         assert_eq!(f.record().state, "bound");
     }
 }
+
+#[test]
+fn one_tap_proposes_but_leaves_binding_to_enabled_agent_policy() {
+    let mut f = Fixture::new();
+    f.store.set_github_policy_apply(true).unwrap();
+    f.discover();
+    f.notice();
+    assert_eq!(f.record().state, "awaiting_active");
+    *f.vault.status.lock().unwrap() = active_status("active_status.ready", Some(paired_policy()));
+    f.pass().follow_ready(NOW).unwrap();
+    assert!(!f.bound(), "one-tap bound while policy apply was enabled");
+    assert_eq!(f.record().state, "awaiting_active");
+    // Even a pass that read the installation before the switch flipped cannot bind.
+    f.store
+        .bind_github_manifest_repository(&f.record(), vec![REPO.into()])
+        .unwrap()
+        .unwrap();
+    assert!(
+        !f.bound(),
+        "the bind transaction did not recheck the switch"
+    );
+    f.store.set_github_policy_apply(false).unwrap();
+    f.pass().follow_ready(NOW).unwrap();
+    assert!(
+        f.bound(),
+        "one-tap should bind again after policy apply is disabled"
+    );
+}

@@ -152,14 +152,16 @@ fn null_policy_reads_as_none_and_unknown_method_reads_as_absent() {
     assert_eq!(
         health(&state),
         json!({"state":"none","version":null,"policy_sha256":null,"served":[],"unserved":[],
-            "apply":{"enabled":false,"applied_version":null,"plan":{"agents":[],"unchanged_agents":0}}})
+            "apply":{"enabled":false,"applied_version":null,"plan":{"agents":[],"unchanged_agents":0}},
+            "imports":{"imported":[],"pending":[],"conflicts":[]}})
     );
     vault.reply(json!({"code":"unknown_method"}));
     assert!(!refresh(&state, &vault));
     assert_eq!(
         health(&state),
         json!({"state":"absent","version":null,"policy_sha256":null,"served":[],"unserved":[],
-            "apply":{"enabled":false,"applied_version":null,"plan":{"agents":[],"unchanged_agents":0}}})
+            "apply":{"enabled":false,"applied_version":null,"plan":{"agents":[],"unchanged_agents":0}},
+            "imports":{"imported":[],"pending":[],"conflicts":[]}})
     );
 }
 

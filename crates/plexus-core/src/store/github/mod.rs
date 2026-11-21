@@ -1763,35 +1763,95 @@ impl PlexusStore {
         rows: &[GithubImportRow],
         dry_run: bool,
     ) -> Result<Result<(), String>, StoreError> {
+        self.import_github_handles_inner(rows, dry_run, None)
+            .map(|result| result.map(|_| ()))
+    }
+
+    pub(crate) fn import_attested_github_handle(
+        &self,
+        row: &GithubImportRow,
+        held: &dyn Fn() -> bool,
+    ) -> Result<Result<bool, String>, StoreError> {
+        self.import_github_handles_inner(std::slice::from_ref(row), false, Some(held))
+    }
+
+    pub(crate) fn github_handle_identity_for_record(
+        &self,
+        record: &str,
+    ) -> Result<Option<(i64, String, bool)>, StoreError> {
+        self.inner
+            .with_read(|conn| github_handle_identity_on_conn(conn, record))
+    }
+
+    fn import_github_handles_inner(
+        &self,
+        rows: &[GithubImportRow],
+        dry_run: bool,
+        attested: Option<&dyn Fn() -> bool>,
+    ) -> Result<Result<bool, String>, StoreError> {
         let refusal = std::sync::Mutex::new(None::<String>);
         let result = self.inner.with_conn_fenced(|conn| {
             let tx = conn;
+            let refuse = |code: String| {
+                *refusal.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(code);
+                Err(rusqlite::Error::QueryReturnedNoRows)
+            };
+            if attested.is_some_and(|held| !held()) {
+                return refuse("connector_home_not_held".into());
+            }
             let mut planned = std::collections::BTreeMap::new();
             for row in rows {
+                if attested.is_some() {
+                    let handle = &row.handle;
+                    // Check identity again in the write transaction in case an
+                    // operator imported the same record during the probe.
+                    if let Some((app_id, agent, _)) = github_handle_identity_on_conn(tx, &handle.credential_reference)? {
+                        if app_id == handle.app_id && agent == handle.agent_id {
+                            return Ok(false);
+                        }
+                        return refuse("handle_identity_conflict".into());
+                    }
+                }
                 let conflict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM github_app_handle WHERE app_handle_id=?1 OR agent_id=?2 OR credential_reference=?3)
                     OR EXISTS(SELECT 1 FROM connections WHERE principal=?4 AND connection_id=?5)
                     OR EXISTS(SELECT 1 FROM grants WHERE principal=?4 AND grant_id LIKE ?6)",
                     params![row.handle.app_handle_id,row.handle.agent_id,row.handle.credential_reference,row.handle.connection_principal,row.handle.connection_id,
                         format!("github-import:{}:%",row.handle.app_handle_id)], |row| row.get(0))?;
                 if conflict {
+                    if attested.is_some() {
+                        return refuse("handle_import_conflict".into());
+                    }
                     eprintln!(warn storage: "GitHub import conflicts with an existing handle, agent, credential, connection or grant: handle {}, agent {}, connection {}/{}; inspect the existing rows and rerun the preview", row.handle.app_handle_id, row.handle.agent_id, row.handle.connection_principal, row.handle.connection_id);
-                    *refusal.lock().unwrap_or_else(|poison| poison.into_inner()) = Some("inventory_handle_invalid".into());
-                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                    return refuse("inventory_handle_invalid".into());
                 }
                 for repository in &row.repositories {
                     let repository = &crate::github::canonical_repository(repository);
                     let current: Option<String> = tx.query_row("SELECT app_handle_id FROM github_repo_binding WHERE repository=?1", [repository], |row| row.get(0)).optional()?;
                     let holder = current.or_else(|| planned.get(repository).cloned());
                     if let Some(other) = holder.filter(|id| *id != row.handle.app_handle_id) {
-                        *refusal.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(format!("repository_bound_elsewhere{{repository: {repository}, app_handle_id: {other}}}"));
-                        return Err(rusqlite::Error::QueryReturnedNoRows);
+                        return refuse(format!("repository_bound_elsewhere{{repository: {repository}, app_handle_id: {other}}}"));
                     }
                     planned.insert(repository.clone(), row.handle.app_handle_id.clone());
                 }
             }
-            if dry_run { return Ok(()); }
+            if dry_run { return Ok(false); }
             for row in rows {
                 let handle = &row.handle;
+                let additional = if attested.is_some() {
+                    crate::github::control::VAULT_APP_IMPORT_ADDITIONAL_CARRIERS
+                } else {
+                    &[]
+                };
+                let prefrontal = crate::github::control::prefrontal_selectors();
+                let ceiling = if attested.is_some() {
+                    row.module_actions.iter().map(String::as_str)
+                        .chain(prefrontal.iter().map(String::as_str))
+                        .chain(additional.iter().flat_map(|carrier| carrier.selectors.iter().copied()))
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter().collect::<Vec<_>>()
+                } else {
+                    row.module_actions.iter().map(String::as_str).collect()
+                };
                 // Filled in by rewrite_filters once the bindings exist, so an
                 // imported handle gets the same owner-plus-names allowlist and
                 // single-owner check as one bound by bind_github_repo.
@@ -1800,7 +1860,7 @@ impl PlexusStore {
                 tx.execute("INSERT INTO connections (principal,connection_id,app_key,status,resource_filters,created_at_ms,updated_at_ms,ceiling_risk,ceiling_selectors)
                     VALUES (?1,?2,'github_rest','active',?3,?4,?4,'write',?5)",
                     params![handle.connection_principal,handle.connection_id,filter,now,
-                        serde_json::to_string(&row.module_actions).map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?])?;
+                         serde_json::to_string(&ceiling).map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?])?;
                 // The ticket-connection seeder reads the reviewed manifest and
                 // writes catalog rows on this same fenced connection.
                 if super::seed_catalog_from_manifest_on_conn(tx, &handle.connection_principal,
@@ -1809,27 +1869,28 @@ impl PlexusStore {
                 }
                 tx.execute("INSERT INTO github_app_handle (app_handle_id,agent_id,app_id,installation_id,credential_reference,
                     credential_generation,status,proven_at,connection_principal,connection_id)
-                    VALUES (?1,?2,?3,?4,?5,?6,?7,NULL,?8,?9)",
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                     params![handle.app_handle_id,handle.agent_id,handle.app_id,handle.installation_id,
                         handle.credential_reference,handle.credential_generation,handle.status,
-                        handle.connection_principal,handle.connection_id])?;
+                        attested.and(handle.proven_at),handle.connection_principal,handle.connection_id])?;
                 for repository in &row.repositories {
                     tx.execute("INSERT INTO github_repo_binding(repository,app_handle_id) VALUES (?1,?2)",
                         params![crate::github::canonical_repository(repository),handle.app_handle_id])?;
                 }
                 rewrite_filters(tx, &handle.app_handle_id)?;
-                for (suffix, principal, selectors) in [
-                    ("aft", crate::github::AFT_PRINCIPAL, row.module_actions.clone()),
+                let carriers = [
+                    ("aft", crate::github::AFT_PRINCIPAL, "invoke", "write", row.module_actions.iter().map(String::as_str).collect::<Vec<_>>()),
                     // Use the same grant ID as grants already issued to reserved:prefrontal.
-                    ("reserved-prefrontal", crate::github::PREFRONTAL_PRINCIPAL, crate::github::control::prefrontal_selectors()),
-                ] {
-                    // AFT's writes and prefrontal's seen-marker reaction carry
-                    // write authority, limited to the actions named here.
+                    ("reserved-prefrontal", crate::github::PREFRONTAL_PRINCIPAL, "invoke", "write", prefrontal.iter().map(String::as_str).collect()),
+                ].into_iter().chain(additional.iter().map(|carrier| {
+                    (carrier.suffix, carrier.principal, carrier.kind, carrier.risk, carrier.selectors.to_vec())
+                }));
+                for (suffix, principal, kind, risk, selectors) in carriers {
                     tx.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,action_selectors,authority_kind,expires_at,generation,created_at_ms)
-                        VALUES (?1,?2,?3,?4,?5,?6,'invoke',NULL,1,?7)",
-                        params![format!("github-import:{}:{suffix}",handle.app_handle_id),handle.connection_principal,
-                            handle.connection_id,principal,"write",
-                            serde_json::to_string(&selectors).map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,now])?;
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,NULL,1,?8)",
+                         params![format!("github-import:{}:{suffix}",handle.app_handle_id),handle.connection_principal,
+                             handle.connection_id,principal,risk,
+                             serde_json::to_string(&selectors).map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,kind,now])?;
                 }
                 for (index, grant) in row.grants.iter().enumerate() {
                     tx.execute("INSERT INTO grants (grant_id,principal,connection_id,grantee_principal,risk_ceiling,action_selectors,authority_kind,expires_at,generation,created_at_ms,agent_id)
@@ -1859,10 +1920,13 @@ impl PlexusStore {
                     })?;
                 }
             }
-            Ok(())
+            if attested.is_some_and(|held| !held()) {
+                return refuse("connector_home_not_held".into());
+            }
+            Ok(true)
         });
         match result {
-            Ok(()) => Ok(Ok(())),
+            Ok(created) => Ok(Ok(created)),
             Err(error) => match refusal
                 .into_inner()
                 .unwrap_or_else(|poison| poison.into_inner())
@@ -2445,6 +2509,10 @@ impl PlexusStore {
             .map(|name| crate::github::canonical_repository(name))
             .collect();
         let result = self.inner.with_conn_fenced(|tx| {
+            // The switch may have flipped after the watcher's installation read.
+            if manifest.is_some() && policy_apply::enabled_on_conn(tx)? {
+                return Ok(json!({"deferred_to_policy": true}));
+            }
             // A refusal rolls the transaction back through an error and leaves
             // its code here for the caller.
             let refuse = |code: String| -> rusqlite::Result<Value> {
@@ -2764,6 +2832,18 @@ impl PlexusStore {
             )? == 1)
         })
     }
+}
+
+fn github_handle_identity_on_conn(
+    conn: &rusqlite::Connection,
+    record: &str,
+) -> rusqlite::Result<Option<(i64, String, bool)>> {
+    conn.query_row(
+        "SELECT app_id,agent_id,status='enabled' FROM github_app_handle WHERE credential_reference=?1",
+        [record],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
 }
 
 impl PlexusStore {

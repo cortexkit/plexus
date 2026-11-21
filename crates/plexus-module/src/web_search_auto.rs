@@ -1,4 +1,4 @@
-//! Reconcile scoped vault metadata, never credential payloads, into search connections.
+//! Reconcile scoped vault listings into search connections and attested App handles.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -12,6 +12,9 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::{blocking_section, web_search_provider_admin, ModuleState};
+
+#[path = "web_search_auto_app_import.rs"]
+mod app_import;
 
 const OWNER: &str = "direct";
 const MIN_RETRY_MS: i64 = 60_000;
@@ -96,6 +99,7 @@ fn listed_app_ids(reply: &Value) -> Option<BTreeMap<String, i64>> {
 struct Reconciler {
     retries: BTreeMap<SearchKey, (i64, i64)>,
     warned_unsupported: bool,
+    apps: app_import::Reconciler,
 }
 
 impl Reconciler {
@@ -107,7 +111,7 @@ impl Reconciler {
     }
 
     fn due(&self, now: i64) -> bool {
-        self.retries.values().any(|(next, _)| *next <= now)
+        self.apps.due(now) || self.retries.values().any(|(next, _)| *next <= now)
     }
 
     fn list_and_reconcile(
@@ -127,6 +131,7 @@ impl Reconciler {
                 }
             }
             Err(_) => {
+                self.apps.defer_retry(now);
                 diag!(warn web_search: "scoped search key list is unavailable; no connections changed")
             }
         }
@@ -147,6 +152,7 @@ impl Reconciler {
                 diag!(warn relay: "could not cross-check vault App IDs: {error}");
             }
         }
+        self.apps.reconcile(state, reply, now);
         let active = match active_keys(reply) {
             Ok(active) => active,
             Err(()) => {

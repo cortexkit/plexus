@@ -595,6 +595,10 @@ impl ApprovalPass<'_> {
         if !self.admitted() {
             return Ok(());
         }
+        let policy_binds = self
+            .store
+            .github_policy_apply_enabled()
+            .map_err(|_| "store_error")?;
         let handles = self
             .store
             .github_manifest_handles()
@@ -611,6 +615,9 @@ impl ApprovalPass<'_> {
                 continue;
             }
             if self.card_settlement(&mut record)? {
+                continue;
+            }
+            if policy_binds {
                 continue;
             }
             let Some(handle) = handles

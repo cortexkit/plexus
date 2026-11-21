@@ -87,6 +87,20 @@ pub(crate) struct Snapshot {
     apply: Option<Value>,
     apply_failed: bool,
     logged_conflicts: BTreeSet<String>,
+    pub(crate) imports: ImportStatus,
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct ImportStatus {
+    pub(crate) imported: Vec<String>,
+    pub(crate) pending: Vec<ImportIssue>,
+    pub(crate) conflicts: Vec<ImportIssue>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ImportIssue {
+    pub(crate) slug: String,
+    pub(crate) reason: &'static str,
 }
 
 impl Snapshot {
@@ -104,6 +118,7 @@ impl Snapshot {
             "served": checked.map_or(&[][..], |c| c.github.served.as_slice()),
             "unserved": checked.map_or(&[][..], |c| c.github.unserved.as_slice()),
             "apply": self.apply.clone().unwrap_or_else(empty_apply_status),
+            "imports": self.imports,
         })
     }
 

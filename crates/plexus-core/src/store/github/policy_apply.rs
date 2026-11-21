@@ -35,6 +35,10 @@ impl PlexusStore {
         })
     }
 
+    pub(crate) fn github_policy_apply_enabled(&self) -> Result<bool, StoreError> {
+        self.inner.with_read(enabled_on_conn)
+    }
+
     /// Replan in the write transaction so no concurrent bind or grant change can invalidate it.
     pub fn apply_github_policy(
         &self,
@@ -129,15 +133,19 @@ fn refusal(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
 }
 
-fn read_view(conn: &Connection) -> rusqlite::Result<StoreView> {
-    let enabled = conn
+pub(super) fn enabled_on_conn(conn: &Connection) -> rusqlite::Result<bool> {
+    Ok(conn
         .query_row(
             "SELECT enabled FROM policy_apply_switch WHERE service='github'",
             [],
             |row| row.get::<_, bool>(0),
         )
         .optional()?
-        .unwrap_or_default();
+        .unwrap_or_default())
+}
+
+fn read_view(conn: &Connection) -> rusqlite::Result<StoreView> {
+    let enabled = enabled_on_conn(conn)?;
     let applied = conn.prepare("SELECT agent,policy_version,policy_sha256,manifest_version,grant_ids FROM policy_applied WHERE service='github'")?
         .query_map([], |row| Ok((row.get(0)?, Applied {
             version: row.get(1)?, sha256: row.get(2)?, manifest_version: row.get(3)?,

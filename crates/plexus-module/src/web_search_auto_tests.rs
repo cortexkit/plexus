@@ -820,3 +820,6 @@ async fn without_connector_home_no_connection_revoke_or_order_write_occurs() {
         ["tavily", "exa"]
     );
 }
+
+#[path = "web_search_auto_app_tests.rs"]
+mod app_import;

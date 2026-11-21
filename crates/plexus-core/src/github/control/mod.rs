@@ -14,6 +14,10 @@ use crate::storage::github_store::{
 };
 use crate::storage::PlexusStore;
 
+mod attested;
+pub(crate) use attested::VAULT_APP_IMPORT_ADDITIONAL_CARRIERS;
+pub use attested::{AttestedApp, AttestedImport, ExistingAttestedApp};
+
 const WRITES: &[&str] = &[
     "add_issue_comment",
     "add_pr_review",
@@ -186,7 +190,11 @@ fn resolve_repositories(
     handle: &InventoryHandle,
     generation: i64,
     now: i64,
+    held: impl Fn() -> bool,
 ) -> Result<Vec<String>, String> {
+    if !held() {
+        return Err("connector_home_not_held".into());
+    }
     let credential = provider
         .prepare(&handle.app_handle_id, generation, &handle.credential_id)
         .map_err(|code| {
@@ -204,6 +212,9 @@ fn resolve_repositories(
         now,
         || now.saturating_add(started.elapsed().as_millis().min(i64::MAX as u128) as i64),
         |page| {
+            if !held() {
+                return Err(WalkError::ReadFailed);
+            }
             reader
                 .repositories_page(&credential, page.page, page.per_page)
                 .map_err(|_| WalkError::ReadFailed)
@@ -411,7 +422,7 @@ pub fn import(
     dry_run: bool,
 ) -> Result<Value, String> {
     import_with(store, principal, inventory, dry_run, |item, generation| {
-        resolve_repositories(provider, reader, item, generation, now)
+        resolve_repositories(provider, reader, item, generation, now, || true)
     })
 }
 
@@ -433,6 +444,7 @@ pub fn installation_repositories(
         handle,
         handle_generation(store, handle)?,
         now,
+        || true,
     )
 }
 
@@ -534,30 +546,13 @@ fn import_with(
                 })
                 .collect::<Vec<_>>(),
         );
-        let mut aft: BTreeSet<String> = grants.iter().map(|row| row.action.clone()).collect();
-        aft.extend(READS.iter().map(|action| (*action).to_owned()));
-        aft.extend(
-            crate::github::reads::bot::GRANT_ACTIONS
-                .iter()
-                .map(|action| (*action).to_owned()),
-        );
+        let aft = aft_import_selectors(grants.iter().map(|row| row.action.as_str()));
         let connection_id = handle_connection_id(&item.app_handle_id);
         module_grants.push(json!({"connection_id":connection_id,"grantee_principal":crate::github::AFT_PRINCIPAL,"action_selectors":aft}));
         module_grants.push(json!({"connection_id":connection_id,"grantee_principal":crate::github::PREFRONTAL_PRINCIPAL,"action_selectors":prefrontal_selectors()}));
         matrix.insert(item.agent_id.clone(), agent_matrix);
         rows.push(GithubImportRow {
-            handle: GithubHandle {
-                app_handle_id: item.app_handle_id.clone(),
-                agent_id: item.agent_id.clone(),
-                app_id: item.app_id,
-                installation_id: item.installation_id,
-                credential_reference: item.credential_id.clone(),
-                credential_generation: IMPORTED_CREDENTIAL_GENERATION,
-                status: item.status.clone(),
-                proven_at: None,
-                connection_principal: "direct".into(),
-                connection_id,
-            },
+            handle: import_handle(item),
             repositories: bound.into_iter().collect(),
             grants,
             module_actions: aft.into_iter().collect(),
@@ -569,6 +564,30 @@ fn import_with(
         .import_github_handles_checked(&rows, dry_run)
         .map_err(|error| format!("import_failed: {error}"))??;
     Ok(plan)
+}
+
+fn aft_import_selectors<'a>(actions: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+    actions
+        .into_iter()
+        .chain(READS.iter().copied())
+        .chain(crate::github::reads::bot::GRANT_ACTIONS.iter().copied())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn import_handle(item: &InventoryHandle) -> GithubHandle {
+    GithubHandle {
+        app_handle_id: item.app_handle_id.clone(),
+        agent_id: item.agent_id.clone(),
+        app_id: item.app_id,
+        installation_id: item.installation_id,
+        credential_reference: item.credential_id.clone(),
+        credential_generation: IMPORTED_CREDENTIAL_GENERATION,
+        status: item.status.clone(),
+        proven_at: None,
+        connection_principal: "direct".into(),
+        connection_id: handle_connection_id(&item.app_handle_id),
+    }
 }
 
 /// Grant scheduled-poll authority for reviewed reads on one already-imported
@@ -822,6 +841,7 @@ pub fn bind(
                 &installation_item(handle),
                 generation,
                 now,
+                || true,
             )
         },
     )
@@ -1015,6 +1035,7 @@ pub fn probe(
             &installation_item(handle),
             generation,
             now,
+            || true,
         )
     })
 }
