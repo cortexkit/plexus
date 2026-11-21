@@ -48,6 +48,9 @@ const TABLES: &[&str] = &[
     // replayed request nonce from acting twice.
     "github_app_handle",
     "github_repo_binding",
+    // Keep the switch and each agent's recorded policy version across cutover.
+    "policy_apply_switch",
+    "policy_applied",
     // One-tap repository proposals and their phone cards. Without them the new
     // store would propose again and file a second card from a session that
     // cannot claim the first, so the owner's answer would be lost.

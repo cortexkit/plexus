@@ -587,8 +587,10 @@ fn delete_connection_deletes_every_keyed_row_and_keeps_the_audit_trail() {
             conn.execute_batch(
                 "INSERT INTO grants (grant_id, principal, connection_id, grantee_principal,
                      risk_ceiling, authority_kind, expires_at, created_at_ms)
-                 VALUES ('grant-live', 'direct', 'conn-target', 'direct', 'read', 'invoke',
-                     NULL, 1);",
+                  VALUES ('grant-live', 'direct', 'conn-target', 'direct', 'read', 'invoke',
+                      NULL, 1);
+                  INSERT INTO policy_applied (service, agent, policy_version, policy_sha256, manifest_version, grant_ids, applied_at_ms)
+                  VALUES ('github', 'agent', 7, 'signed-policy-hash', 9, '[\"policy:github:agent:conn-target:v7\"]', 1);",
             )
         })
         .unwrap();
@@ -677,6 +679,17 @@ fn delete_connection_deletes_every_keyed_row_and_keeps_the_audit_trail() {
     assert!(summary.contains("status revoked"), "{summary}");
     assert!(summary.contains("catalog_actions=1"), "{summary}");
     assert_eq!(snapshot("conn-sibling"), sibling_before);
+    let remembered_version: i64 = store
+        .inner
+        .with_read(|conn| {
+            conn.query_row(
+                "SELECT policy_version FROM policy_applied WHERE service='github' AND agent='agent'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(remembered_version, 7);
     assert_eq!(
         store
             .delete_connection("direct", "conn-target", true)

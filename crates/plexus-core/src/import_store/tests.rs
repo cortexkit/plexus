@@ -303,6 +303,9 @@ fn handles_receipts_markers_cursor_and_reconciliations_are_carried() {
 INSERT INTO github_app_handle (app_handle_id, agent_id, app_id, credential_reference, status, connection_principal, connection_id)
     VALUES ('handle', 'agent', 1, 'github_app:handle', 'enabled', 'direct', 'c');
 INSERT INTO github_repo_binding (repository, app_handle_id) VALUES ('org/repo', 'handle');
+INSERT INTO policy_apply_switch (service, enabled) VALUES ('github', 1);
+INSERT INTO policy_applied (service, agent, policy_version, policy_sha256, manifest_version, grant_ids, applied_at_ms)
+    VALUES ('github', 'agent', 2, 'signed-policy-hash', 3, '["policy:github:agent:c:v2"]', 4);
 INSERT INTO github_bot_receipt (agent_id, request_nonce, request_fingerprint, state, created_at, updated_at)
     VALUES ('agent', 'nonce-1', 'fingerprint', 'completed', 1, 1);
 INSERT INTO event_outbox (event_key, event_id, event_name, repo_id, repo, created_at_ms)
@@ -328,6 +331,8 @@ INSERT INTO write_reconciliation_results (principal, request_id, acting_principa
     };
     assert_eq!(carried("github_app_handle"), (1, 1));
     assert_eq!(carried("github_repo_binding"), (1, 1));
+    assert_eq!(carried("policy_applied"), (1, 1));
+    assert_eq!(carried("policy_apply_switch"), (1, 1));
     assert_eq!(carried("github_bot_receipt"), (1, 1));
     assert_eq!(
         carried("event_outbox"),
@@ -338,6 +343,17 @@ INSERT INTO write_reconciliation_results (principal, request_id, acting_principa
     assert_eq!(carried("pending_write_reconciliations"), (1, 1));
     assert_eq!(carried("write_reconciliation_results"), (1, 1));
     let new = f.destination();
+    assert_eq!(
+        scalar::<String>(&new, "SELECT grant_ids FROM policy_applied WHERE service='github' AND agent='agent' AND policy_version=2 AND policy_sha256='signed-policy-hash' AND manifest_version=3 AND applied_at_ms=4"),
+        r#"["policy:github:agent:c:v2"]"#
+    );
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT enabled FROM policy_apply_switch WHERE service='github'"
+        ),
+        1
+    );
     assert_eq!(
         scalar::<i64>(
             &new,
@@ -366,6 +382,35 @@ INSERT INTO write_reconciliation_results (principal, request_id, acting_principa
             "SELECT app_handle_id FROM github_repo_binding WHERE repository = 'org/repo'"
         ),
         "handle"
+    );
+}
+
+#[test]
+fn previous_migrator_can_open_the_policy_apply_tables() {
+    let f = Fixture::new();
+    let descriptor = descriptor(&f.from).unwrap();
+    let current = open_sqlite(&descriptor).unwrap();
+    current.migrate("plexus", MIGRATIONS).unwrap();
+    current
+        .with_conn(|conn| {
+            conn.execute_batch(
+                "INSERT INTO policy_apply_switch(service, enabled) VALUES ('github', 1);",
+            )
+        })
+        .unwrap();
+    drop(current);
+
+    let old_schema = MIGRATIONS
+        .split_at(MIGRATIONS.iter().position(|m| m.version == 64).unwrap())
+        .0;
+    let previous = open_sqlite(&descriptor).unwrap();
+    previous.migrate("plexus", old_schema).unwrap();
+    assert_eq!(
+        scalar::<i64>(
+            &Connection::open(&f.from).unwrap(),
+            "SELECT enabled FROM policy_apply_switch WHERE service='github'"
+        ),
+        1
     );
 }
 
@@ -559,6 +604,8 @@ fn production_v23_round_trip_dispositions_and_routing() {
             | "relay_cursor"
             | "github_app_handle"
             | "github_repo_binding"
+            | "policy_apply_switch"
+            | "policy_applied"
             | "github_manifest_binding"
             | "github_bot_receipt"
             | "pending_write_reconciliations"

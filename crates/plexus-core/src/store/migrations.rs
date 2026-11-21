@@ -1169,6 +1169,25 @@ CREATE INDEX route_fact_outbox_age ON route_fact_outbox(created_at_ms, msg_id);
         version: 63,
         statements: PREFRONTAL_GRANT_BACKFILL,
     },
+    Migration {
+        version: 64,
+        statements: r#"
+CREATE TABLE policy_apply_switch (
+    service TEXT PRIMARY KEY NOT NULL,
+    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1))
+);
+CREATE TABLE policy_applied (
+    service TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    policy_version INTEGER NOT NULL CHECK(policy_version > 0),
+    policy_sha256 TEXT NOT NULL,
+    manifest_version INTEGER NOT NULL CHECK(manifest_version > 0),
+    grant_ids TEXT NOT NULL,
+    applied_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (service, agent)
+);
+"#,
+    },
 ];
 
 /// Shared with offline store import, whose destination is migrated before
