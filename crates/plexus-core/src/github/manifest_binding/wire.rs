@@ -2,7 +2,7 @@
 //! refusals stay separate: a malformed request is not a repository verdict.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +224,43 @@ pub struct ActiveStatus {
     pub manifest_sha256: String,
     pub ready: bool,
     pub computers: Vec<Computer>,
+    /// Pairing is reported by the vault; only manifest activation governs a one-tap binding.
+    #[serde(default, deserialize_with = "deserialize_policy_pairing")]
+    pub policy: PolicyPairing,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum PolicyPairing {
+    /// The vault has not signed its first policy yet.
+    #[default]
+    Absent,
+    /// The queried manifest version has no paired policy.
+    Unpaired,
+    Paired(PairedPolicy),
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PairedPolicy {
+    pub version: i64,
+    pub policy_sha256: String,
+}
+
+fn deserialize_policy_pairing<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<PolicyPairing, D::Error> {
+    match Value::deserialize(deserializer)? {
+        Value::Null => Ok(PolicyPairing::Unpaired),
+        value @ Value::Object(_) => {
+            let policy: PairedPolicy =
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            if !valid_hash(&policy.policy_sha256) {
+                return Err(serde::de::Error::custom("invalid policy_sha256"));
+            }
+            Ok(PolicyPairing::Paired(policy))
+        }
+        _ => Err(serde::de::Error::custom("policy must be an object or null")),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

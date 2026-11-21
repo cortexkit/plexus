@@ -10,6 +10,8 @@ use std::{
     },
 };
 
+mod policy_pairing;
+
 const AGENT: &str = "agent_4444444444444444";
 const REPO: &str = "octo-owner/new-repo";
 const SLUG: &str = "plex-alfonso";
@@ -108,6 +110,7 @@ fn producer_samples_pin_every_decoder_and_refusal_remedy() {
             }
             "active_status.ready" | "active_status.not_ready" => {
                 let reply: ActiveStatus = wire::response(value).unwrap();
+                assert_eq!(reply.policy, wire::PolicyPairing::Absent);
                 let hash = sample("propose.reply")["result"]["manifest_sha256"]
                     .as_str()
                     .unwrap()
