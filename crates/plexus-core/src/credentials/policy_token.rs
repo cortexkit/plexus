@@ -151,7 +151,7 @@ mod tests {
         ))
         .unwrap();
         let cases = vectors["cases"].as_array().unwrap();
-        assert_eq!(cases.len(), 9);
+        assert_eq!(cases.len(), 14);
         for case in cases {
             assert_eq!(case["method"], "credential.policy_token");
             let name = case["name"].as_str().unwrap();
@@ -168,6 +168,15 @@ mod tests {
                     assert!(!format!("{token:?}").contains("fixture-token-3"));
                     continue;
                 }
+                "issue_record_replaced_during_mint" => {
+                    let token = result.unwrap();
+                    assert_eq!(token.payload(), b"fixture-token-6");
+                    assert_eq!(token.expires_at_ms, Some(4102444800000));
+                    continue;
+                }
+                "issue_needs_reauth" | "issue_retired" => AuthRequired,
+                "issue_deleted_record" => NotInstalled,
+                "issue_record_changed_twice" => Unavailable,
                 "issue_ungranted"
                 | "issue_wrong_service"
                 | "issue_unbound_resource_without_approval" => NotFound,

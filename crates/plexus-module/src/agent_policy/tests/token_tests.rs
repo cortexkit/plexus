@@ -272,6 +272,10 @@ async fn domain_and_route_refusals_stop_the_leg_without_broad_fallback() {
         ("issue_policy_changed", "permanent", false),
         ("issue_store_error", "transient", true),
         ("issue_provider_error", "transient", true),
+        ("issue_needs_reauth", "auth_required", false),
+        ("issue_retired", "auth_required", false),
+        ("issue_deleted_record", "permanent", false),
+        ("issue_record_changed_twice", "transient", true),
         ("issue_old_policy_without_proof", "transient", true),
         ("route-unavailable", "transient", true),
     ] {
@@ -297,7 +301,7 @@ async fn domain_and_route_refusals_stop_the_leg_without_broad_fallback() {
         );
     }
     assert!(f.transport.requests().is_empty());
-    let expected: Vec<_> = (0..9)
+    let expected: Vec<_> = (0..13)
         .flat_map(|_| {
             [
                 narrowed("add_issue_comment", 1),
@@ -309,6 +313,27 @@ async fn domain_and_route_refusals_stop_the_leg_without_broad_fallback() {
     assert_eq!(
         health(&f.state)["token_legs"],
         json!({"narrowed":0,"broad":0})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replaced_record_uses_the_retried_narrowed_token_for_the_leg() {
+    let f = Fixture::new(true);
+    f.vault
+        .set_token_reply(vector("issue_record_replaced_during_mint"));
+    let reply = f.write("record-replaced", comment()).await;
+    assert_eq!(reply["result"]["status"], "completed", "{reply}");
+    assert_eq!(f.vault.calls(), [narrowed("add_issue_comment", 1)]);
+    let requests = f.transport.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].action, "add_issue_comment");
+    assert_eq!(
+        f.transport.authorization_headers(),
+        [b"Bearer fixture-token-6".to_vec()]
+    );
+    assert_eq!(
+        health(&f.state)["token_legs"],
+        json!({"narrowed":1,"broad":0})
     );
 }
 
