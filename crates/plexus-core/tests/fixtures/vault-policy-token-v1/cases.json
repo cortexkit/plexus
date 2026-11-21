@@ -1,0 +1,217 @@
+{
+  "cases": [
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_required"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_no_approval_members",
+      "params": {
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_ungranted",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:other"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_wrong_service",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "other"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "not_found"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_unbound_resource_without_approval",
+      "params": {
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "resource": "org/unbound",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "transient",
+            "code": "github_unavailable"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_provider_error",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "transient",
+            "code": "store_error"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_store_error",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000000",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "approval_policy_changed"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_policy_changed",
+      "params": {
+        "approval_request_id": "01MCC5RM010000000000000002",
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:plexus"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "error": {
+            "class": "permanent",
+            "code": "policy_version_not_active"
+          }
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_old_policy_without_proof",
+      "params": {
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 1,
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    },
+    {
+      "at_ms": 1800000000000,
+      "body": {
+        "result": {
+          "expires_at_ms": 4102444800000,
+          "permissions": {
+            "issues": "write",
+            "pull_requests": "write"
+          },
+          "repositories": [
+            "org/r"
+          ],
+          "token": "fixture-token-3"
+        }
+      },
+      "frame": "response",
+      "method": "credential.policy_token",
+      "name": "issue_none_kind",
+      "params": {
+        "identity": "github_app:plex-alfonso",
+        "kind": "add_issue_comment",
+        "policy_version": 2,
+        "resource": "org/r",
+        "service": "github"
+      },
+      "route": "reserved:aft"
+    }
+  ]
+}

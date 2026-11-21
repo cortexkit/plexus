@@ -13,6 +13,9 @@ use std::sync::Mutex;
 
 use zeroize::{Zeroize, Zeroizing};
 
+mod policy_token;
+pub use policy_token::PolicyTokenFailure;
+
 use crate::fingerprint;
 
 /// The supervised module that owns the credential vault.
@@ -503,6 +506,22 @@ pub trait CkcredRoutePeer: Send + Sync {
         self.call("policy.active", serde_json::json!({}))
     }
 
+    fn policy_token(
+        &self,
+        identity: &str,
+        kind: &str,
+        resource: &str,
+        policy_version: i64,
+    ) -> Result<ResolvedCredential, PolicyTokenFailure> {
+        policy_token::decode(WipingValue(
+            self.call(
+                policy_token::OPERATION,
+                policy_token::params(identity, kind, resource, policy_version),
+            )
+            .map_err(|_| PolicyTokenFailure::Unavailable)?,
+        ))
+    }
+
     /// Manifest replies contain no credentials. Transport Error frames have
     /// no domain-refusal class: preserve their codes so an unsupported method
     /// stops the worker, while a broken route can reconnect and retry.
@@ -849,6 +868,7 @@ pub struct SubcCkcredRoutePeer {
     consumer: std::sync::Arc<subc_client_rs::SubcConsumer>,
     target: subc_protocol::RouteTarget,
     identity: subc_protocol::BindIdentity,
+    unsupported_policy_token_route: Mutex<Option<subc_client_rs::RouteHandle>>,
     /// Dedicated long-lived runtime that OWNS the consumer's background I/O
     /// tasks. The consumer must execute on the same runtime it was created on:
     /// a per-call throwaway runtime would destroy those tasks the moment the
@@ -921,6 +941,7 @@ impl SubcCkcredRoutePeer {
                 module_id: module_id.into(),
             },
             identity,
+            unsupported_policy_token_route: Mutex::new(None),
         })
     }
 }
@@ -1022,6 +1043,21 @@ impl CkcredRoutePeer for SubcCkcredRoutePeer {
 
     fn policy_active(&self) -> Result<serde_json::Value, CkcredRouteError> {
         self.call_preserving_refusal("policy.active", serde_json::json!({}), Default::default())
+    }
+
+    fn policy_token(
+        &self,
+        identity: &str,
+        kind: &str,
+        resource: &str,
+        policy_version: i64,
+    ) -> Result<ResolvedCredential, PolicyTokenFailure> {
+        self.call_policy_token(policy_token::params(
+            identity,
+            kind,
+            resource,
+            policy_version,
+        ))
     }
 
     fn manifest_call(
