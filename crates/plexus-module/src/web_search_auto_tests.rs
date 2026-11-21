@@ -52,7 +52,7 @@ fn vault_case(name: &str) -> Value {
     let bytes = include_bytes!("../../plexus-core/tests/fixtures/vault-wire/list-scoped-v2.json");
     assert_eq!(
         format!("{:x}", Sha256::digest(bytes)),
-        "9757606b454f4a3920f5a4b36018b1c82cdf1fcfb15c719338377c8af8285bed"
+        "23ffce58ba90532171bc5661d8d4afda7659eab3f33a63a291b1ccebdfe6ed36"
     );
     let vectors: Value = serde_json::from_slice(bytes).unwrap();
     let case = vectors["cases"]

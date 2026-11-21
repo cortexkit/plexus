@@ -359,6 +359,56 @@
         "method": "credential.list_scoped",
         "params": {}
       }
+    },
+    {
+      "case": "github_app_attestation",
+      "frame_type": "Response",
+      "reply": {
+        "result": {
+          "credentials": [
+            {
+              "categories": [
+                "github-app-native"
+              ],
+              "github_app": {
+                "agent": "agent_0123456789abcdef",
+                "app_id": "9007199254740993",
+                "created_at_ms": 1700000000000,
+                "created_by": "vault",
+                "slug": "attested-vector"
+              },
+              "id": "github_app:attested-vector",
+              "incarnation": "0123456789abcdef0123456789abcdef",
+              "operations": [
+                "list"
+              ],
+              "plan_tier_observed_at_ms": null,
+              "provider": null,
+              "provider_ids": [],
+              "record_version": 1,
+              "refresh_adapter": "github_app",
+              "serves": [],
+              "state": "active",
+              "type": "github_app"
+            }
+          ],
+          "grant_tuples": [
+            {
+              "operation": "list",
+              "selector": "github_app:attested-vector",
+              "selector_kind": "exact"
+            }
+          ],
+          "grants": 1,
+          "view": "uWwqFRF0TaAZQgpqtWL+YEz+025xCdS+i8CPqXu73TQ="
+        }
+      },
+      "reply_b64url": "eyJyZXN1bHQiOnsiY3JlZGVudGlhbHMiOlt7ImNhdGVnb3JpZXMiOlsiZ2l0aHViLWFwcC1uYXRpdmUiXSwiZ2l0aHViX2FwcCI6eyJhZ2VudCI6ImFnZW50XzAxMjM0NTY3ODlhYmNkZWYiLCJhcHBfaWQiOiI5MDA3MTk5MjU0NzQwOTkzIiwiY3JlYXRlZF9hdF9tcyI6MTcwMDAwMDAwMDAwMCwiY3JlYXRlZF9ieSI6InZhdWx0Iiwic2x1ZyI6ImF0dGVzdGVkLXZlY3RvciJ9LCJpZCI6ImdpdGh1Yl9hcHA6YXR0ZXN0ZWQtdmVjdG9yIiwiaW5jYXJuYXRpb24iOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsIm9wZXJhdGlvbnMiOlsibGlzdCJdLCJwbGFuX3RpZXJfb2JzZXJ2ZWRfYXRfbXMiOm51bGwsInByb3ZpZGVyIjpudWxsLCJwcm92aWRlcl9pZHMiOltdLCJyZWNvcmRfdmVyc2lvbiI6MSwicmVmcmVzaF9hZGFwdGVyIjoiZ2l0aHViX2FwcCIsInNlcnZlcyI6W10sInN0YXRlIjoiYWN0aXZlIiwidHlwZSI6ImdpdGh1Yl9hcHAifV0sImdyYW50X3R1cGxlcyI6W3sib3BlcmF0aW9uIjoibGlzdCIsInNlbGVjdG9yIjoiZ2l0aHViX2FwcDphdHRlc3RlZC12ZWN0b3IiLCJzZWxlY3Rvcl9raW5kIjoiZXhhY3QifV0sImdyYW50cyI6MSwidmlldyI6InVXd3FGUkYwVGFBWlFncHF0V0wrWUV6KzAyNXhDZFMraThDUHFYdTczVFE9In19",
+      "reply_sha256": "34ca1220f57af45e0e1c3b605247c3bdf4528915c8db43e88c1e13ff32fdb1da",
+      "request": {
+        "method": "credential.list_scoped",
+        "params": {}
+      }
     }
   ],
   "v": "ck-list-scoped-vectors/v2"

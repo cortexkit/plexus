@@ -8,13 +8,15 @@ Besides the scoped list/watch additions, this version includes additive
 `admin.enroll_approve`, `admin.enroll_revoke` and enrollment display-name examples.
 
 `list-scoped-v2.json` is copied byte for byte from claustrum tag
-`agent-policy-vectors-v1`, commit `1d391cdf1c41e8108eacc4b58ce499912e83d802`,
-at `crates/credentials-module/tests/vectors/list-scoped-v2.json`. SHA-256:
-`9757606b454f4a3920f5a4b36018b1c82cdf1fcfb15c719338377c8af8285bed`.
+`list-scoped-vectors-v2.2`, commit `e4d06ea81e3fb31c969012ac374cb92e04745c11`
+(tag object `2f58937c1c0a4cf0872f395abe8e61e114d1ec3e`), at
+`crates/credentials-module/tests/vectors/list-scoped-v2.json`. SHA-256:
+`23ffce58ba90532171bc5661d8d4afda7659eab3f33a63a291b1ccebdfe6ed36`.
 Its cases pin scoped provider/incarnation metadata, opening and changed watch
 notices, terminal revocation, an older vault's refusal, and GitHub App identity
-metadata. The latter includes a decimal-string App ID beyond JavaScript's safe
-integer limit.
+metadata. The GitHub App cases include a decimal-string App ID beyond JavaScript's
+safe integer limit and distinguish vault-created Apps, whose listing metadata
+names the agent recorded by the vault at creation, from hand-added Apps.
 Tests decode `reply_b64url` and verify each `reply_sha256`, not reconstructed JSON.
 
 The signed-policy inputs and their provenance are in [agent-policy-v1](agent-policy-v1/README.md).
