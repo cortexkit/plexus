@@ -11,7 +11,13 @@ use subc_protocol::session::ModuleControlResponse;
 const SEED: &str =
     include_str!("../../../plexus-core/tests/fixtures/vault-wire/agent-policy-v1/github.json");
 
+mod token_tests;
+
 fn ready(version: i64) -> Value {
+    ready_for(version, "other-agent", "github_app:other-app", "o/x")
+}
+
+fn ready_for(version: i64, agent: &str, identity: &str, repository: &str) -> Value {
     let mut seed: Value = serde_json::from_str(SEED).unwrap();
     seed["source"] = json!({
         "release":"cortexkit-defaults-2026.11",
@@ -20,8 +26,9 @@ fn ready(version: i64) -> Value {
     let text = json!({
         "schema":"ck-agent-policy/v1", "version":version, "issued_at_unix_secs":1,
         "root_key_id":"56fae12f77164627", "rule_sets":{"github":seed},
-        "bindings":[{"agent":"other-agent","identity":"github_app:other-app","resources":["o/x"],"service":"github"}]
-    }).to_string();
+        "bindings":[{"agent":agent,"identity":identity,"resources":[repository],"service":"github"}]
+    })
+    .to_string();
     json!({"result":{
         "version":version,
         "policy_sha256":format!("{:x}", Sha256::digest(&text)),
@@ -153,7 +160,7 @@ fn null_policy_reads_as_none_and_unknown_method_reads_as_absent() {
         health(&state),
         json!({"state":"none","version":null,"policy_sha256":null,"served":[],"unserved":[],
             "apply":{"enabled":false,"applied_version":null,"plan":{"agents":[],"unchanged_agents":0}},
-            "imports":{"imported":[],"pending":[],"conflicts":[]}})
+            "imports":{"imported":[],"pending":[],"conflicts":[]},"token_legs":{"broad":0,"narrowed":0}})
     );
     vault.reply(json!({"code":"unknown_method"}));
     assert!(!refresh(&state, &vault));
@@ -161,7 +168,7 @@ fn null_policy_reads_as_none_and_unknown_method_reads_as_absent() {
         health(&state),
         json!({"state":"absent","version":null,"policy_sha256":null,"served":[],"unserved":[],
             "apply":{"enabled":false,"applied_version":null,"plan":{"agents":[],"unchanged_agents":0}},
-            "imports":{"imported":[],"pending":[],"conflicts":[]}})
+            "imports":{"imported":[],"pending":[],"conflicts":[]},"token_legs":{"broad":0,"narrowed":0}})
     );
 }
 

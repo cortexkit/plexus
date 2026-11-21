@@ -65,7 +65,7 @@ pub(super) fn spawn_background_tasks(
     // events unwritten, which is the correct outcome.
     let (claim_shutdown, mut claim_stop) = mpsc::channel::<()>(1);
     let claim_state = Arc::clone(&state);
-    let policy_wakes = Arc::new(agent_policy::Wakes::default());
+    let policy_wakes = Arc::clone(&state.health.agent_policy_wakes);
     let policy_maintenance = Arc::clone(&policy_wakes);
     let claim_task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));

@@ -15,6 +15,12 @@ pub struct CheckedGitHub {
     pub(super) served_kinds: BTreeSet<String>,
 }
 
+impl CheckedGitHub {
+    pub fn serves_kind(&self, kind: &str) -> bool {
+        self.served_kinds.contains(kind)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct Unserved {
     pub name: String,

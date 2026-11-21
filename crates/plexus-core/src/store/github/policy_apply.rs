@@ -39,6 +39,23 @@ impl PlexusStore {
         self.inner.with_read(enabled_on_conn)
     }
 
+    pub fn github_policy_applied_version(
+        &self,
+        agent: &str,
+        version: i64,
+        sha256: &str,
+    ) -> Result<bool, StoreError> {
+        self.inner.with_read(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM policy_applied AS p JOIN policy_apply_switch AS s
+                 ON s.service=p.service AND s.enabled=1 WHERE p.service='github' AND p.agent=?1
+                 AND p.policy_version=?2 AND p.policy_sha256=?3)",
+                params![agent, version, sha256],
+                |row| row.get(0),
+            )
+        })
+    }
+
     /// Replan in the write transaction so no concurrent bind or grant change can invalidate it.
     pub fn apply_github_policy(
         &self,

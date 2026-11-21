@@ -1492,6 +1492,7 @@ where
     credential_source: Arc<C>,
     transport: Arc<T>,
     gmail: Option<Arc<crate::gmail::GmailBackend>>,
+    github_policy_tokens: Option<Arc<dyn crate::github::credential::GithubPolicyTokens>>,
     decision_plane: Option<Arc<dyn DecisionPlane>>,
     seams: Option<Arc<dyn GovernanceSeams>>,
     /// Asks the daemon for a scope's current state when a stored approval
@@ -1539,6 +1540,7 @@ where
             credential_source: Arc::clone(&self.credential_source),
             transport: Arc::clone(&self.transport),
             gmail: self.gmail.clone(),
+            github_policy_tokens: self.github_policy_tokens.clone(),
             decision_plane: self.decision_plane.clone(),
             seams: self.seams.clone(),
             scope_reader: self.scope_reader.clone(),
@@ -1562,6 +1564,7 @@ where
             credential_source,
             transport,
             gmail: None,
+            github_policy_tokens: None,
             decision_plane: None,
             seams: None,
             scope_reader: None,
@@ -1576,6 +1579,13 @@ where
     pub fn with_gmail_backend(mut self, backend: Arc<crate::gmail::GmailBackend>) -> Self {
         self.gmail = Some(backend);
         self
+    }
+
+    pub fn set_github_policy_tokens(
+        &mut self,
+        tokens: Arc<dyn crate::github::credential::GithubPolicyTokens>,
+    ) {
+        self.github_policy_tokens = Some(tokens);
     }
 
     pub fn gmail_mailbox(&self) -> Result<String, &'static str> {
@@ -1864,13 +1874,24 @@ where
     }
 
     pub fn revalidate_and_dispatch(&self, reservation: &Reservation) -> DispatchOutcome {
-        self.revalidate_and_dispatch_with_run_deadline(reservation, None)
+        self.dispatch_reserved(reservation, None, None)
     }
 
-    pub(crate) fn revalidate_and_dispatch_with_run_deadline(
+    pub(crate) fn revalidate_and_dispatch_github_leg(
+        &self,
+        reservation: &Reservation,
+        agent: &str,
+        repository: &str,
+        run_deadline_ms: Option<u64>,
+    ) -> DispatchOutcome {
+        self.dispatch_reserved(reservation, run_deadline_ms, Some((agent, repository)))
+    }
+
+    fn dispatch_reserved(
         &self,
         reservation: &Reservation,
         run_deadline_ms: Option<u64>,
+        github_leg: Option<(&str, &str)>,
     ) -> DispatchOutcome {
         if let Some(outcome) = self.check_dispatch_home(reservation, false) {
             return outcome;
@@ -2097,19 +2118,43 @@ where
             }
             None => None,
         };
+        let mut narrowed = false;
         let credential = match (handle_authority.as_ref(), handle.as_ref()) {
-            (Some(authority), _) => match self
-                .seams
-                .as_ref()
-                .expect("handle came from seams")
-                .prepare_handle_credential(&connection, authority)
-            {
-                Ok(token) => token,
-                Err(code) => {
-                    self.abandon_marked_transmit(reservation);
-                    return self.deny_before_transmit(reservation, code.into());
+            (Some(authority), _) => {
+                let mut prepare = || {
+                    if let (Some(tokens), Some((agent, repository))) =
+                        (&self.github_policy_tokens, github_leg)
+                    {
+                        // The policy's repo.get kind covers only the exact root.
+                        let suffix = reservation.action == "github.repo.get"
+                            && reservation
+                                .args
+                                .get("path")
+                                .is_some_and(|path| path.as_str() != Some(""));
+                        if !suffix {
+                            let identity = std::str::from_utf8(&authority.credential_reference)
+                                .map_err(|_| crate::github::credential::UNRESOLVABLE_PERMANENT)?;
+                            if let Some(token) =
+                                tokens.prepare(agent, identity, &reservation.action, repository)?
+                            {
+                                narrowed = true;
+                                return Ok(token);
+                            }
+                        }
+                    }
+                    self.seams
+                        .as_ref()
+                        .expect("handle came from seams")
+                        .prepare_handle_credential(&connection, authority)
+                };
+                match prepare() {
+                    Ok(token) => token,
+                    Err(code) => {
+                        self.abandon_marked_transmit(reservation);
+                        return self.deny_before_transmit(reservation, code.into());
+                    }
                 }
-            },
+            }
             // Losing an App authority row during preparation must not turn an
             // authenticated App call into an anonymous vendor request.
             (None, None) if app_credential => {
@@ -2143,6 +2188,11 @@ where
         }) {
             self.abandon_marked_transmit(reservation);
             return self.deny_before_transmit(reservation, crate::scope::SCOPE_ENDED.into());
+        }
+        if github_leg.is_some() && handle_authority.is_some() {
+            if let Some(tokens) = &self.github_policy_tokens {
+                tokens.record_leg(narrowed);
+            }
         }
         let response = if connection.app_key == "gmail" && reservation.action == "gmail.send" {
             match (&self.gmail, gmail) {

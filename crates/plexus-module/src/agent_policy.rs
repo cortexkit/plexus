@@ -15,6 +15,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
 
+mod tokens;
+pub(crate) use tokens::configure_tokens;
+
 pub(crate) const BACKSTOP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const WATCH_RETRY: Duration = Duration::from_secs(30);
 const GITHUB_CATALOG: &str = "github_rest";
@@ -87,6 +90,7 @@ pub(crate) struct Snapshot {
     apply: Option<Value>,
     apply_failed: bool,
     logged_conflicts: BTreeSet<String>,
+    token_legs: tokens::LegCounts,
     pub(crate) imports: ImportStatus,
 }
 
@@ -119,6 +123,7 @@ impl Snapshot {
             "unserved": checked.map_or(&[][..], |c| c.github.unserved.as_slice()),
             "apply": self.apply.clone().unwrap_or_else(empty_apply_status),
             "imports": self.imports,
+            "token_legs": self.token_legs,
         })
     }
 

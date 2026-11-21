@@ -125,7 +125,8 @@ pub(super) fn spawn(
                 check_cancelled()?;
 
                 let composition_started = Instant::now();
-                let runtime = compose(Arc::new(store), &connection_file);
+                let mut runtime = compose(Arc::new(store), &connection_file);
+                crate::agent_policy::configure_tokens(&mut runtime, &health);
                 let composition_elapsed = composition_started.elapsed();
                 check_cancelled()?;
                 let state = ModuleState { health, runtime };

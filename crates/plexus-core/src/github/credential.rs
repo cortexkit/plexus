@@ -19,7 +19,7 @@ const EXPIRY_MARGIN_MS: i64 = 60_000;
 /// refuse. The codes are fixed strings so the provider trait can keep its
 /// `&'static str` error type.
 pub const UNRESOLVABLE_TRANSIENT: &str = "handle_credential_unresolvable{class: transient}";
-const UNRESOLVABLE_AUTH_REQUIRED: &str = "handle_credential_unresolvable{class: auth_required}";
+pub const UNRESOLVABLE_AUTH_REQUIRED: &str = "handle_credential_unresolvable{class: auth_required}";
 pub const UNRESOLVABLE_PERMANENT: &str = "handle_credential_unresolvable{class: permanent}";
 pub(crate) const APP_PREFIX: &str = "github_app:";
 
@@ -54,6 +54,20 @@ pub trait HandleCredentialProvider: Send + Sync {
         reference: &str,
     ) -> Result<ResolvedCredential, &'static str>;
     fn vendor_status(&self, app_handle_id: &str, generation: i64, reference: &str, status: u16);
+}
+
+/// Selects a policy token for a governed bot leg. `None` leaves the existing
+/// scoped credential path in charge; an error must never fetch a broad token.
+pub trait GithubPolicyTokens: Send + Sync {
+    fn prepare(
+        &self,
+        agent: &str,
+        identity: &str,
+        kind: &str,
+        repository: &str,
+    ) -> Result<Option<ResolvedCredential>, &'static str>;
+
+    fn record_leg(&self, narrowed: bool);
 }
 
 /// An injectable clock keeps cache expiry independent of wall-clock tests.

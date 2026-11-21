@@ -136,6 +136,11 @@ fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         .handle
         .as_ref()
         .ok_or_else(|| taxonomy::Failure::from("store_failure".to_string()))?;
+    let repository = reply
+        .mapped
+        .as_ref()
+        .and_then(|mapped| mapped.canonical["repository"].as_str())
+        .ok_or("store_failure")?;
     let args = leg_args(engine, handle, action, &args, "G8")?;
     if action == "github.issue_comments.list"
         && (args.get("per_page").and_then(Value::as_u64) != Some(pagination::PER_PAGE as u64)
@@ -153,7 +158,8 @@ fn read<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
         .authorize(request)
         .map_err(|denial| taxonomy::denied(&denial, "G8"))?;
     check_lease()?;
-    let result = engine.revalidate_and_dispatch(&reservation);
+    let result =
+        engine.revalidate_and_dispatch_github_leg(&reservation, &row.agent_id, repository, None);
     check_lease()?;
     taxonomy::dispatched(result)
 }
@@ -1387,8 +1393,15 @@ fn run_with_clock<C: CredentialSource + ?Sized, T: Transport + ?Sized>(
             Ok(reservation) => reservation,
             Err(denial) => return fail(reply, "G10", taxonomy::denied(&denial, "G10")),
         };
-        let dispatch =
-            engine.revalidate_and_dispatch_with_run_deadline(&reservation, run_deadline_ms);
+        let repository = mapped.canonical["repository"]
+            .as_str()
+            .expect("mapped request has repository");
+        let dispatch = engine.revalidate_and_dispatch_github_leg(
+            &reservation,
+            &agent,
+            repository,
+            run_deadline_ms,
+        );
         if matches!(
             dispatch.outcome,
             crate::governance::TransportOutcome::NotSent { .. }

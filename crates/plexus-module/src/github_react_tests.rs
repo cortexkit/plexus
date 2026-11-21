@@ -52,6 +52,20 @@ pub(super) fn runtime_with_actions(
     carrier: &str,
     actions: &[&str],
 ) -> (Arc<ModuleState>, Arc<MockTransport>, Scratch) {
+    runtime_with_actions_and_provider(
+        label,
+        carrier,
+        actions,
+        crate::consent_test_support::anonymous_handle_credentials(),
+    )
+}
+
+pub(super) fn runtime_with_actions_and_provider(
+    label: &str,
+    carrier: &str,
+    actions: &[&str],
+    provider: Arc<dyn plexus_core::github::credential::HandleCredentialProvider>,
+) -> (Arc<ModuleState>, Arc<MockTransport>, Scratch) {
     let path = Scratch::database(&format!("github-react-{label}"));
     let store = Arc::new(
         PlexusStore::open(&StorageDescriptor {
@@ -151,7 +165,7 @@ pub(super) fn runtime_with_actions(
     )
     .with_governance_seams(Arc::new(GithubGovernanceSeams {
         store: store.clone(),
-        credential_provider: Some(crate::consent_test_support::anonymous_handle_credentials()),
+        credential_provider: Some(provider),
     }))
     // Stands in for the daemon's session-scope lookup. Just before a bot write
     // is sent, plexus asks the daemon whether the caller's session scope is

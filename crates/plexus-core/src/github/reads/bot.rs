@@ -420,7 +420,15 @@ impl<C: CredentialSource + ?Sized, T: Transport + ?Sized> BotCall<'_, C, T> {
                 .map_err(|_| BotReadError::Denied(Denial::StoreFailure))?;
             return Err(error);
         }
-        let outcome = self.engine.revalidate_and_dispatch(&reservation).outcome;
+        let outcome = self
+            .engine
+            .revalidate_and_dispatch_github_leg(
+                &reservation,
+                self.identity.agent(),
+                &self.repository,
+                None,
+            )
+            .outcome;
         match outcome {
             TransportOutcome::Completed {
                 response: Some(response),
