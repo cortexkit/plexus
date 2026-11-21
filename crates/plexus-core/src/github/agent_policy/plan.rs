@@ -48,7 +48,11 @@ pub struct ApplyPlan {
     pub enabled: bool,
     pub applied_version: Option<i64>,
     pub version: Option<i64>,
-    /// Served read kinds that are not write pre-reads use only the caller's module grants.
+    /// GitHub reads the policy allows that no bot write runs as a lookup first
+    /// (for example `github.repo.get` or `github.actions.job_log`). Plexus
+    /// authorizes those reads by the calling module's grant alone, so they get
+    /// no agent selector here; they are listed so a preview shows they were
+    /// kept on the module grants, not dropped.
     pub module_layer: Vec<String>,
     pub agents: Vec<AgentChange>,
     pub unchanged_agents: usize,
