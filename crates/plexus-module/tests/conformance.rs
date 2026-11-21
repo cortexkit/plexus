@@ -3135,15 +3135,17 @@ async fn vault_route_fixture() {
         } else if !roles
             && matches!(
                 request["method"].as_str(),
-                Some("auth.watch_scoped" | "manifest.watch")
+                Some("auth.watch_scoped" | "manifest.watch" | "policy.active" | "policy.watch")
             )
         {
-            // Plexus opens two vault feeds in the background as soon as it
-            // starts: stored search keys (`auth.watch_scoped`) and one-tap
-            // manifest versions (`manifest.watch`). Whether either request
-            // lands before a test ends depends on timing. This fixture models
-            // only scoped reads, so it answers both the way a vault without
-            // them does, which leaves both features dormant.
+            // Plexus reads three vault feeds in the background as soon as it
+            // holds the connector role: stored search keys
+            // (`auth.watch_scoped`), one-tap manifest versions
+            // (`manifest.watch`), and the signed agent policy
+            // (`policy.active`, then `policy.watch`). Whether any request lands
+            // before a test ends depends on timing. This fixture models only
+            // scoped reads, so it answers them all the way a vault without
+            // them does, which leaves those features dormant.
             json!({"error": {"code": "unknown_method", "message": "this test fixture serves only credential.get_scoped"}})
         } else {
             assert_eq!(

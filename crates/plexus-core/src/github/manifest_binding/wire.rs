@@ -224,7 +224,10 @@ pub struct ActiveStatus {
     pub manifest_sha256: String,
     pub ready: bool,
     pub computers: Vec<Computer>,
-    /// Pairing is reported by the vault; only manifest activation governs a one-tap binding.
+    /// The signed agent policy the vault pairs with this manifest version. It is
+    /// reported for information only: whether plexus binds a newly approved
+    /// repository to its bot (the phone's one-tap approval) still depends only
+    /// on the manifest version being active on every computer.
     #[serde(default, deserialize_with = "deserialize_policy_pairing")]
     pub policy: PolicyPairing,
 }
