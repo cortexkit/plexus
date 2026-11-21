@@ -127,7 +127,7 @@ pub fn implied_by_write(write: &str, grantable: &[&str]) -> BTreeSet<&'static st
         .collect()
 }
 
-fn effects_for_kind(kind: &str) -> &'static [&'static str] {
+pub(crate) fn effects_for_kind(kind: &str) -> &'static [&'static str] {
     match kind {
         "comment_edit_last" | "comment_edit" => &["update_issue_comment"],
         "comment" => &["add_issue_comment"],
@@ -156,6 +156,16 @@ fn effects_for_kind(kind: &str) -> &'static [&'static str] {
             "remove_issue_assignees",
         ],
         _ => &[],
+    }
+}
+
+/// Whether a planned effect may be skipped because of the request's arguments
+/// or because a pre-read shows the transition has already happened.
+pub(crate) fn optional_effect(kind: &str, effect: &str) -> bool {
+    match kind {
+        "close" | "reopen" => effect == "add_issue_comment",
+        "issue_edit" | "pr_ready" | "pr_draft" | "pr_enqueue" | "pr_dequeue" => true,
+        _ => false,
     }
 }
 

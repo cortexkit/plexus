@@ -495,6 +495,14 @@ pub trait CkcredRoutePeer: Send + Sync {
         Err(CkcredRouteError::Transport)
     }
 
+    fn watch_policy(&self) -> Result<CkcredWatch, CkcredRouteError> {
+        Err(CkcredRouteError::Transport)
+    }
+
+    fn policy_active(&self) -> Result<serde_json::Value, CkcredRouteError> {
+        self.call("policy.active", serde_json::json!({}))
+    }
+
     /// Manifest replies contain no credentials. Transport Error frames have
     /// no domain-refusal class: preserve their codes so an unsupported method
     /// stops the worker, while a broken route can reconnect and retry.
@@ -945,9 +953,8 @@ impl SubcCkcredRoutePeer {
                     return;
                 }
             }
-            // Preserve the terminal refusal: an old vault's unknown_method
-            // must disable automatic connection rather than be treated as a
-            // metadata-change notice.
+            // Preserve a terminal refusal (including an older vault's
+            // unknown_method) so consumers can distinguish it from a notice.
             let terminal = match subscription.ended().await {
                 subc_client_rs::SubscriptionEnd::Response(bytes) => {
                     serde_json::from_slice(&bytes).ok()
@@ -966,21 +973,11 @@ impl SubcCkcredRoutePeer {
             task: Some(task),
         })
     }
-}
-
-impl CkcredRoutePeer for SubcCkcredRoutePeer {
-    fn watch_scoped(&self) -> Result<CkcredWatch, CkcredRouteError> {
-        self.watch_operation("auth.watch_scoped")
-    }
-
-    fn watch_manifest(&self) -> Result<CkcredWatch, CkcredRouteError> {
-        self.watch_operation("manifest.watch")
-    }
-
-    fn manifest_call(
+    fn call_preserving_refusal(
         &self,
         operation: &str,
         params: serde_json::Value,
+        options: subc_client_rs::CallOptions,
     ) -> Result<serde_json::Value, CkcredRouteError> {
         let runtime = self.runtime.as_ref().ok_or(CkcredRouteError::Transport)?;
         let consumer = self.consumer.clone();
@@ -989,13 +986,6 @@ impl CkcredRoutePeer for SubcCkcredRoutePeer {
         let body = serde_json::to_vec(&serde_json::json!({"method":operation,"params":params}))
             .map_err(|_| CkcredRouteError::NotSent)?;
         run_on(runtime, async move {
-            // Proposing performs bounded upstream reads before its serialized
-            // commit. Repeating the same agent/repository pair returns the
-            // live proposal, or its stored version if approval already won.
-            let options = subc_client_rs::CallOptions {
-                timeout: std::time::Duration::from_secs(120),
-                ..Default::default()
-            };
             match consumer.call(target, identity, body, options).await {
                 Ok(bytes) => {
                     serde_json::from_slice(&bytes).map_err(|_| CkcredRouteError::Transport)
@@ -1014,6 +1004,42 @@ impl CkcredRoutePeer for SubcCkcredRoutePeer {
                 }
             }
         })
+    }
+}
+
+impl CkcredRoutePeer for SubcCkcredRoutePeer {
+    fn watch_scoped(&self) -> Result<CkcredWatch, CkcredRouteError> {
+        self.watch_operation("auth.watch_scoped")
+    }
+
+    fn watch_manifest(&self) -> Result<CkcredWatch, CkcredRouteError> {
+        self.watch_operation("manifest.watch")
+    }
+
+    fn watch_policy(&self) -> Result<CkcredWatch, CkcredRouteError> {
+        self.watch_operation("policy.watch")
+    }
+
+    fn policy_active(&self) -> Result<serde_json::Value, CkcredRouteError> {
+        self.call_preserving_refusal("policy.active", serde_json::json!({}), Default::default())
+    }
+
+    fn manifest_call(
+        &self,
+        operation: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, CkcredRouteError> {
+        // Proposing performs bounded upstream reads before its serialized
+        // commit. Repeating the same agent/repository pair returns the live
+        // proposal, or its stored version if approval already won.
+        self.call_preserving_refusal(
+            operation,
+            params,
+            subc_client_rs::CallOptions {
+                timeout: std::time::Duration::from_secs(120),
+                ..Default::default()
+            },
+        )
     }
 
     fn call(

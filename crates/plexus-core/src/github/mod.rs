@@ -4,6 +4,7 @@
 //! storage, and the store-backed governance projections, live under
 //! `storage::github_store`.
 
+pub mod agent_policy;
 pub mod control;
 pub mod credential;
 pub mod facade;

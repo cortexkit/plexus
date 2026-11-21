@@ -103,6 +103,7 @@ use test_support::{
     assert_bind_ack, facade_tool_reply, run_health_probes, test_mcp_manifest, test_write_manifest,
     with_call_tool_result,
 };
+mod agent_policy;
 mod manifest_binding;
 mod tool_provider;
 mod web_search_auto;

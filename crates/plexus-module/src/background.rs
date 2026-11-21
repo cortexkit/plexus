@@ -65,9 +65,12 @@ pub(super) fn spawn_background_tasks(
     // events unwritten, which is the correct outcome.
     let (claim_shutdown, mut claim_stop) = mpsc::channel::<()>(1);
     let claim_state = Arc::clone(&state);
+    let policy_wake = Arc::new(tokio::sync::Notify::new());
+    let policy_backstop = Arc::clone(&policy_wake);
     let claim_task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_policy_backstop = tokio::time::Instant::now();
         let mut last_refresh_error: Option<String> = None;
         loop {
             tokio::select! {
@@ -86,6 +89,12 @@ pub(super) fn spawn_background_tasks(
                             Ok(_) => eprintln!(info wire: "connector home refresh recovered"),
                         }
                         last_refresh_error = code;
+                    }
+                    if last_policy_backstop.elapsed() >= agent_policy::BACKSTOP_INTERVAL {
+                        last_policy_backstop = tokio::time::Instant::now();
+                        if claim_state.runtime.connector_home.held() {
+                            policy_backstop.notify_one();
+                        }
                     }
                 }
             }
@@ -122,6 +131,9 @@ pub(super) fn spawn_background_tasks(
     let (manifest_shutdown, manifest_stop) = mpsc::channel::<()>(1);
     let manifest_task = manifest_binding::spawn(Arc::clone(&state), manifest_stop);
 
+    let (policy_shutdown, policy_stop) = mpsc::channel::<()>(1);
+    let policy_task = agent_policy::spawn(Arc::clone(&state), policy_stop, policy_wake);
+
     BackgroundTasks {
         shutdown: vec![
             claim_shutdown,
@@ -130,6 +142,7 @@ pub(super) fn spawn_background_tasks(
             relay_shutdown,
             search_shutdown,
             manifest_shutdown,
+            policy_shutdown,
         ],
         tasks: vec![
             ("connector-home refresh", claim_task, TASK_SHUTDOWN_GRACE),
@@ -138,6 +151,7 @@ pub(super) fn spawn_background_tasks(
             ("relay", relay_task, BUS_SHUTDOWN_GRACE),
             ("search key watch", search_task, TASK_SHUTDOWN_GRACE),
             ("manifest binding", manifest_task, TASK_SHUTDOWN_GRACE),
+            ("agent policy watch", policy_task, TASK_SHUTDOWN_GRACE),
         ],
     }
 }
