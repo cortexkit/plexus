@@ -12,3 +12,6 @@ Keep only `credential.policy_token` cases named `issue_none_kind`, `issue_ungran
 Copy each case object byte for byte (including its indentation) in source order into a new
 `{"cases": [...]}` wrapper. Omit all other members and cases, including the approval proof
 lifecycle, which Plexus does not implement. Tokens in these vault vectors are synthetic.
+
+The pending `broker-action-vault-vectors-v1.1` supplement will cover credential lifecycle
+refusals, including a record replaced during mint. The cases here cover only the v1 wire contract.
