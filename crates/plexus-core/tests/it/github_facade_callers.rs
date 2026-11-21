@@ -439,6 +439,70 @@ fn agent_grant_revoked_after_prefrontal_claim_is_stale_authority() {
 }
 
 #[test]
+fn policy_grant_replacement_fences_a_planned_bot_write() {
+    use plexus_core::github::agent_policy::{check_github, ActivePolicy, AgentPolicy};
+    use sha2::{Digest, Sha256};
+
+    let f = Fixture::new("policy-replaces-claimed-grant", &["add_reaction"]);
+    let mut seed: Value = serde_json::from_str(include_str!(
+        "../fixtures/vault-wire/agent-policy-v1/github.json"
+    ))
+    .unwrap();
+    seed["source"] = json!({"release":"test-seed","sha256":"aca7b285dce9d1ebff602aae291d0205779a932fc47cf2afd380b3ee5d91f1a7"});
+    seed["actions"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|action| action["action"] == "reaction");
+    let policy_text = json!({"schema":"ck-agent-policy/v1","version":1,"issued_at_unix_secs":1,
+        "root_key_id":"56fae12f77164627","rule_sets":{"github":seed},
+        "bindings":[{"service":"github","agent":AGENT,"identity":"github_app:app-fixture","resources":["org/repo"]}],
+    }).to_string();
+    let active = ActivePolicy {
+        policy: AgentPolicy::parse(&policy_text).unwrap(),
+        policy_sha256: format!("{:x}", Sha256::digest(&policy_text)),
+        manifest_version: 1,
+    };
+    let checked = check_github(&active.policy, &github_manifest().manifest.actions_baseline);
+    let nonce = "planned-before-policy";
+    let mut claim = gates::run_scoped(
+        &*f.store,
+        PREFRONTAL_PRINCIPAL,
+        Some(&f.scope),
+        &seen_marker(),
+        nonce,
+        nonce,
+        "worker",
+        f.now,
+        120,
+    );
+    assert!(claim.refusal_code.is_none(), "{claim:?}");
+    f.store.set_github_policy_apply(true).unwrap();
+    assert_eq!(
+        f.store
+            .apply_github_policy((&active, &checked), || true)
+            .unwrap()
+            .applied_version,
+        Some(1)
+    );
+    let outcome = vendor_band::run(&f.engine, &f.store, &mut claim, nonce, "worker", f.now);
+    assert_eq!(
+        outcome["refusal_code"], "stale_authority{dimension: agent_grant_revoked}",
+        "{outcome}"
+    );
+    assert_eq!(outcome["retry_same_nonce"], false, "{outcome}");
+    assert!(f.transport.requests().is_empty());
+    let retry = f.call(PREFRONTAL_PRINCIPAL, &seen_marker(), nonce);
+    assert_eq!(
+        retry["result"]["refusal_code"], outcome["refusal_code"],
+        "{retry}"
+    );
+    assert!(f.transport.requests().is_empty());
+    let fresh = f.call(PREFRONTAL_PRINCIPAL, &seen_marker(), "planned-after-policy");
+    assert_eq!(fresh["result"]["status"], "completed", "{fresh}");
+    assert_eq!(f.transport.requests().len(), 1);
+}
+
+#[test]
 fn prefrontal_module_grant_revoked_after_claim_is_stale_authority() {
     moved_after_claim(
         "github-import:app-fixture:reserved-prefrontal",

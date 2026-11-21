@@ -45,6 +45,15 @@ const READS: &[&str] = &[
     "github.pull_request.queue_state.get",
     "github.pr.review_threads",
 ];
+
+pub(crate) fn invoke_selectors<'a>(writes: impl IntoIterator<Item = &'a str>) -> BTreeSet<&'a str> {
+    let mut selectors = BTreeSet::new();
+    for write in writes {
+        selectors.insert(write);
+        selectors.extend(effects::implied_by_write(write, WRITES));
+    }
+    selectors
+}
 /// The reviewed reads a scheduled poll may be granted on a handle connection:
 /// the import's module reads plus the issue timeline, which actor enrichment
 /// reads when an event's comment window names nobody.
@@ -709,10 +718,7 @@ fn grant_request(
         return Err(format!("effect_invalid{{effect: {effect}}}"));
     }
     let listed: BTreeSet<&str> = actions.iter().map(String::as_str).collect();
-    let mut expanded: BTreeSet<&str> = listed.clone();
-    for action in &listed {
-        expanded.extend(effects::implied_by_write(action, WRITES));
-    }
+    let expanded = invoke_selectors(listed.iter().copied());
     Ok(crate::storage::github_store::GithubHandleGrant {
         app_handle_id: app_handle_id.to_owned(),
         module: module.to_owned(),

@@ -8,13 +8,14 @@ use crate::manifest::{ActionBaseline, HttpMethod, HttpOperation};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CheckedGitHub {
     pub served: Vec<String>,
     pub unserved: Vec<Unserved>,
+    pub(super) served_kinds: BTreeSet<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct Unserved {
     pub name: String,
     pub reason: &'static str,
@@ -62,6 +63,7 @@ pub(super) fn check_rule_set(rules: &RuleSet, catalog: &[ActionBaseline]) -> Che
     }
     checked.served.sort_unstable();
     checked.unserved.sort_unstable();
+    checked.served_kinds = matching_kinds.into_iter().map(str::to_owned).collect();
     checked
 }
 

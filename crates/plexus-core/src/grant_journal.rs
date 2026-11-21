@@ -32,7 +32,7 @@ fn parse_record(line: &[u8]) -> Result<Revocation, String> {
 /// an unreadable revocation could do exactly that, so reject the file and
 /// prevent startup rather than silently omitting the revocation.
 ///
-/// This strict reader relies on `append` writing complete records. It builds
+/// This strict reader relies on the writer encoding complete records. It puts
 /// each record and its newline in one buffer and passes it to `write_all` on
 /// a file opened for append. The revoking transaction holds the database write
 /// lock while appending. Writers must preserve these record boundaries or the
@@ -114,9 +114,19 @@ pub(crate) fn ensure(path: &Path) -> std::io::Result<()> {
 }
 
 pub(crate) fn append(path: &Path, entry: &Revocation) -> rusqlite::Result<()> {
+    append_all(path, std::slice::from_ref(entry))
+}
+
+pub(crate) fn append_all(path: &Path, entries: &[Revocation]) -> rusqlite::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
     let persist = || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut bytes = serde_json::to_vec(entry)?;
-        bytes.push(b'\n');
+        let mut bytes = Vec::new();
+        for entry in entries {
+            serde_json::to_writer(&mut bytes, entry)?;
+            bytes.push(b'\n');
+        }
         drop_torn_tail(path)?;
         let mut file = OpenOptions::new().append(true).open(path)?;
         file.write_all(&bytes)?;

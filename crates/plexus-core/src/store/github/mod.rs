@@ -19,6 +19,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 mod invoke_grant;
+mod policy_apply;
 mod read_grant;
 pub use read_grant::GithubHandleReadGrant;
 
@@ -269,6 +270,14 @@ fn bind_repo_on_conn(
 }
 
 fn rewrite_filters(conn: &rusqlite::Connection, handle: &str) -> rusqlite::Result<()> {
+    rewrite_filters_with_generation(conn, handle, true)
+}
+
+fn rewrite_filters_with_generation(
+    conn: &rusqlite::Connection,
+    handle: &str,
+    bump_generation: bool,
+) -> rusqlite::Result<()> {
     let (principal, connection_id): (String, String) = conn.query_row(
         "SELECT connection_principal, connection_id FROM github_app_handle WHERE app_handle_id=?1",
         [handle],
@@ -302,9 +311,16 @@ fn rewrite_filters(conn: &rusqlite::Connection, handle: &str) -> rusqlite::Resul
             json_set(json_set(resource_filters, '$.values.repo', json(?3)),
                 '$.values.owner', ?4),
             '$.write_enabling', json('[\"owner\",\"repo\"]')),
-            generation=generation+1, updated_at_ms=?5
+             generation=generation+?6, updated_at_ms=?5
          WHERE principal=?1 AND connection_id=?2",
-        params![principal, connection_id, json, owner, now_ms()],
+        params![
+            principal,
+            connection_id,
+            json,
+            owner,
+            now_ms(),
+            bump_generation
+        ],
     )?;
     if updated != 1 {
         return Err(rusqlite::Error::QueryReturnedNoRows);
