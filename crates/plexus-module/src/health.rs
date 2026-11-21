@@ -88,6 +88,7 @@ type CredentialRepairSource = Box<dyn Fn() -> BTreeMap<String, String> + Send + 
 pub struct HealthState {
     pub(crate) relay: Arc<crate::relay::Status>,
     pub(crate) agent_policy: std::sync::Mutex<crate::agent_policy::Snapshot>,
+    pub(crate) agent_policy_wake: tokio::sync::Notify,
     pub(crate) store_metrics: std::sync::Mutex<serde_json::Value>,
     /// The last sampled outbox aggregates behind `store_metrics`. `None`
     /// until the first refresh; a failed re-query keeps the previous sample
@@ -279,6 +280,7 @@ impl HealthState {
         Self {
             relay: Arc::new(crate::relay::Status::default()),
             agent_policy: std::sync::Mutex::default(),
+            agent_policy_wake: tokio::sync::Notify::new(),
             store_metrics: std::sync::Mutex::new(serde_json::json!({})),
             outbox_health: std::sync::Mutex::new(None),
             web_search: std::sync::Mutex::new(None),

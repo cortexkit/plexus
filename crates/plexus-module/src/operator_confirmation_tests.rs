@@ -144,6 +144,7 @@ impl Case {
                     "carrier":"reserved:basal","effect":"allow",
                     "shim_manifest_maps_repo":true,"dry_run":false})
             }
+            manifest::ADMIN_AGENT_POLICY_ENABLE_OP => json!({}),
             manifest::GITHUB_IMPORT_OP | manifest::GITHUB_BIND_OP | manifest::GITHUB_GRANT_OP => {
                 let source = include_str!("../../../catalog/github_rest.jsonc");
                 let manifest = plexus_core::ingest_value(
@@ -234,6 +235,7 @@ const WIDENING: &[&str] = &[
     manifest::ADMIN_ADD_POLL_CONNECTION_OP,
     manifest::ADMIN_WIDEN_AND_GRANT_OP,
     manifest::ADMIN_ONBOARD_GITHUB_BOT_OP,
+    manifest::ADMIN_AGENT_POLICY_ENABLE_OP,
 ];
 
 #[test]
@@ -565,6 +567,19 @@ async fn all_widening_ceremonies_write_only_after_confirmation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_policy_enable_checks_connector_home_before_confirmation() {
+    let mut case = Case::new(manifest::ADMIN_AGENT_POLICY_ENABLE_OP);
+    Arc::get_mut(&mut case.state)
+        .unwrap()
+        .runtime
+        .connector_home = Arc::new(crate::connector_home::ConnectorHome::unavailable());
+    let before = case.snapshot(true);
+    let refusal = ceremony_with_peer(&case, Ok(()), false).await;
+    assert_eq!(refusal["error"]["code"], "connector_home_not_held");
+    assert_eq!(case.snapshot(true), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn previews_never_request_confirmation() {
     for method in [
         manifest::ADMIN_WIDEN_CEILING_OP,
@@ -666,6 +681,8 @@ async fn ungated_ceremonies_never_request_confirmation() {
             json!({"provider":"exa","clear":true,"dry_run":false}),
         ),
         (relay::STATUS_OP, json!({})),
+        (manifest::ADMIN_AGENT_POLICY_PREVIEW_OP, json!({})),
+        (manifest::ADMIN_AGENT_POLICY_DISABLE_OP, json!({})),
         (
             manifest::ADMIN_DELETE_CONNECTION_OP,
             json!({"connection_id":CONNECTION,"dry_run":false}),

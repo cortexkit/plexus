@@ -151,13 +151,15 @@ fn null_policy_reads_as_none_and_unknown_method_reads_as_absent() {
     assert!(refresh(&state, &vault));
     assert_eq!(
         health(&state),
-        json!({"state":"none","version":null,"policy_sha256":null,"served":[],"unserved":[]})
+        json!({"state":"none","version":null,"policy_sha256":null,"served":[],"unserved":[],
+            "apply":{"enabled":false,"applied_version":null,"plan":{"agents":[],"unchanged_agents":0}}})
     );
     vault.reply(json!({"code":"unknown_method"}));
     assert!(!refresh(&state, &vault));
     assert_eq!(
         health(&state),
-        json!({"state":"absent","version":null,"policy_sha256":null,"served":[],"unserved":[]})
+        json!({"state":"absent","version":null,"policy_sha256":null,"served":[],"unserved":[],
+            "apply":{"enabled":false,"applied_version":null,"plan":{"agents":[],"unchanged_agents":0}}})
     );
 }
 
@@ -385,7 +387,12 @@ async fn catalog_recovery_reads_policy_again_without_promoting_the_unchecked_can
     let (stop, rx) = mpsc::channel(1);
     let wakes = Arc::new(Wakes::default());
     let worker = spawn(state.clone(), rx, wakes.clone());
-    until(|| health(&state)["state"] == "loaded").await;
+    until(|| {
+        let status = health(&state);
+        status["state"] == "loaded"
+            && status["apply"]["plan"]["agents"][0]["agent"] == "other-agent"
+    })
+    .await;
     let mut retained = assert_loaded(&state, 1, &original);
 
     let db = rusqlite::Connection::open(scratch.path()).unwrap();
@@ -416,4 +423,86 @@ async fn catalog_recovery_reads_policy_again_without_promoting_the_unchecked_can
     stop.send(()).await.unwrap();
     worker.await.unwrap();
     assert_eq!(vault.calls(), 3, "catalog recovery triggers one fresh read");
+}
+
+#[test]
+fn retained_policy_is_previewable_but_stale_vault_replies_cannot_apply_it() {
+    use plexus_core::github::control::{self, AgentPermission, Inventory, InventoryHandle};
+
+    let scratch = Scratch::database("policy-stale-vault");
+    let store = Arc::new(crate::test_support::open_file_store(scratch.path()));
+    let state = runtime(store.clone());
+    let vault = Vault::new(ready(2));
+    refresh(&state, &vault);
+    let planned = preview(&state).unwrap();
+    assert!(!planned.enabled);
+    assert_eq!(planned.agents[0].held, Some("handle_not_imported"));
+    assert_eq!(set_enabled(&state, true)["result"]["enabled"], true);
+    let inventory = Inventory {
+        version: "github-grant-import.v1".into(),
+        handles: vec![InventoryHandle {
+            app_handle_id: "other-app".into(),
+            agent_id: "other-agent".into(),
+            app_id: 1,
+            installation_id: None,
+            credential_id: "github_app:other-app".into(),
+            status: "enabled".into(),
+            grants: vec![AgentPermission {
+                action: "create_issue".into(),
+                repository: "o/x".into(),
+                provenance: "operator".into(),
+                policy: "allow".into(),
+            }],
+        }],
+    };
+    control::import_listed(
+        &store,
+        "direct",
+        &inventory,
+        &BTreeMap::from([("other-app".into(), vec!["o/x".into()])]),
+        false,
+    )
+    .unwrap();
+    let hand = store.grants_held_by_agent("other-agent").unwrap();
+    for reply in [ready(1), no_policy()] {
+        vault.reply(reply);
+        refresh(&state, &vault);
+        assert!(preview(&state).unwrap().has_eligible_agents());
+        let status = health(&state);
+        assert_eq!(status["version"], 2, "{status}");
+        assert!(status["apply"]["applied_version"].is_null(), "{status}");
+        assert_eq!(
+            store.grants_held_by_agent("other-agent").unwrap()[0].grant_id,
+            hand[0].grant_id
+        );
+    }
+    let db = rusqlite::Connection::open(scratch.path()).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER inject_apply_failure BEFORE INSERT ON policy_applied
+        BEGIN SELECT RAISE(ABORT,'injected apply failure'); END;",
+    )
+    .unwrap();
+    vault.reply(ready(2));
+    refresh(&state, &vault);
+    assert_eq!(health(&state)["apply"]["error"], "store_failure");
+    assert!(health(&state)["apply"]["applied_version"].is_null());
+    assert_eq!(
+        store.grants_held_by_agent("other-agent").unwrap()[0].grant_id,
+        hand[0].grant_id
+    );
+    db.execute_batch("DROP TRIGGER inject_apply_failure")
+        .unwrap();
+    update_apply(&state, true);
+    assert_eq!(health(&state)["apply"]["applied_version"], 2);
+    assert!(health(&state)["apply"].get("error").is_none());
+    let derived = store.grants_held_by_agent("other-agent").unwrap();
+    assert!(derived[0].grant_id.starts_with("policy:github:"));
+    assert_eq!(set_enabled(&state, false)["result"]["enabled"], false);
+    vault.reply(ready(3));
+    refresh(&state, &vault);
+    assert_eq!(health(&state)["apply"]["applied_version"], 2);
+    assert_eq!(
+        store.grants_held_by_agent("other-agent").unwrap()[0].grant_id,
+        derived[0].grant_id
+    );
 }

@@ -119,6 +119,7 @@ commands:
   sent-text-read    open an archived sent message through the vault (audited)
   sent-text-retention set the sent-text retention period independently of audit
   connector-home status
+  agent-policy <preview|enable|disable>
                  read the live Entorhinal role and plexus gate
   import-store   offline cutover to a new store (no --subc required)
   issue-ticket   place a vault credential reference and issue a binding ticket
@@ -422,7 +423,7 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         );
         return Ok(());
     }
-    let connector_position = if command == "connector-home" {
+    let subcommand_position = if matches!(command.as_str(), "connector-home" | "agent-policy") {
         let mut index = 1;
         while let Some(argument) = arguments.get(index) {
             if !argument.starts_with('-') {
@@ -438,15 +439,18 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
     } else {
         None
     };
-    let connector_command = connector_position
+    let subcommand = subcommand_position
         .map(|index| {
-            arguments
-                .get(index)
-                .map(String::as_str)
-                .ok_or_else(|| Failure::usage("connector-home requires status"))
+            arguments.get(index).map(String::as_str).ok_or_else(|| {
+                Failure::usage(if command == "connector-home" {
+                    "connector-home requires status"
+                } else {
+                    "agent-policy requires preview, enable, or disable"
+                })
+            })
         })
         .transpose()?;
-    if connector_command == Some("claim") {
+    if command == "connector-home" && subcommand == Some("claim") {
         return Err(Failure::usage(
             "connector-home claim was removed; use ck roles take connector_home",
         ));
@@ -455,7 +459,7 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
         .iter()
         .enumerate()
         .skip(1)
-        .filter(|(index, _)| Some(*index) != connector_position)
+        .filter(|(index, _)| Some(*index) != subcommand_position)
         .map(|(_, value)| value.clone())
         .collect();
     let flags = if matches!(
@@ -526,7 +530,8 @@ fn run(arguments: &[String]) -> Result<(), Failure> {
     }
 
     let (method, params) = match command.as_str() {
-        "connector-home" => connector_home_request(connector_command.unwrap(), &flags)?,
+        "connector-home" => connector_home_request(subcommand.unwrap(), &flags)?,
+        "agent-policy" => agent_policy_request(subcommand.unwrap())?,
         "grant" => grant_request(&flags)?,
         "widen-ceiling" => widen_ceiling_request(&flags)?,
         "revoke-grant" => revoke_grant_request(&flags)?,
@@ -600,9 +605,43 @@ const COMMON_FLAGS: &[&str] = &["--subc", "--module"];
 
 /// The command-specific flags, in addition to [`COMMON_FLAGS`]. Unknown flags
 /// are refused so a mistyped selector cannot silently use a wider default.
+fn agent_policy_request(subcommand: &str) -> Result<(&'static str, Value), Failure> {
+    use plexus_module::manifest::*;
+    let operation = match subcommand {
+        "preview" => ADMIN_AGENT_POLICY_PREVIEW_OP,
+        "enable" => ADMIN_AGENT_POLICY_ENABLE_OP,
+        "disable" => ADMIN_AGENT_POLICY_DISABLE_OP,
+        other => {
+            return Err(Failure::usage(format!(
+                "unknown agent-policy subcommand '{other}'"
+            )))
+        }
+    };
+    Ok((operation, json!({})))
+}
+
+#[cfg(test)]
+#[test]
+fn agent_policy_subcommands_use_separate_management_operations() {
+    use plexus_module::manifest::*;
+    assert_eq!(
+        agent_policy_request("preview").unwrap(),
+        (ADMIN_AGENT_POLICY_PREVIEW_OP, json!({}))
+    );
+    assert_eq!(
+        agent_policy_request("enable").unwrap(),
+        (ADMIN_AGENT_POLICY_ENABLE_OP, json!({}))
+    );
+    assert_eq!(
+        agent_policy_request("disable").unwrap(),
+        (ADMIN_AGENT_POLICY_DISABLE_OP, json!({}))
+    );
+    assert!(agent_policy_request("apply").is_err());
+}
+
 fn accepted_flags(command: &str) -> Option<&'static [&'static str]> {
     Some(match command {
-        "connector-home" => &[],
+        "connector-home" | "agent-policy" => &[],
         // Accept --handle-file only to explain that --credential-id replaced it.
         "issue-ticket" => &[
             "--app",
@@ -1993,7 +2032,7 @@ fn report(command: &str, response: &Value, flags: &Flags) -> Result<(), Failure>
             println!("status:          {}", text(&result["status"]));
             println!("schema_hash:     {}", text(&result["schema_hash"]));
         }
-        "connector-home" => {
+        "connector-home" | "agent-policy" => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(result).unwrap_or_default()

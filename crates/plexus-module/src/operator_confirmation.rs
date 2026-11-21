@@ -51,6 +51,7 @@ pub fn may_need_confirmation(method: &str, params: &Value) -> bool {
     match method {
         manifest::ADMIN_ISSUE_TICKET_OP
         | manifest::ADMIN_GRANT_OP
+        | manifest::ADMIN_AGENT_POLICY_ENABLE_OP
         | manifest::ADMIN_REPIN_ACTION_OP => true,
         manifest::ADMIN_SET_POLICY_OP => params["effect"] == "allow",
         manifest::ADMIN_REBIND_CREDENTIAL_OP => params["apply"] == true,
@@ -148,6 +149,7 @@ fn is_composite(method: &str) -> bool {
             | manifest::ADMIN_ADD_POLL_CONNECTION_OP
             | manifest::ADMIN_WIDEN_AND_GRANT_OP
             | manifest::ADMIN_ONBOARD_GITHUB_BOT_OP
+            | manifest::ADMIN_AGENT_POLICY_ENABLE_OP
     )
 }
 

@@ -42,6 +42,9 @@ pub(super) async fn handle_management_request(
             | manifest::ADMIN_ADD_POLL_CONNECTION_OP
             | manifest::ADMIN_WIDEN_AND_GRANT_OP
             | manifest::ADMIN_ONBOARD_GITHUB_BOT_OP
+            | manifest::ADMIN_AGENT_POLICY_PREVIEW_OP
+            | manifest::ADMIN_AGENT_POLICY_ENABLE_OP
+            | manifest::ADMIN_AGENT_POLICY_DISABLE_OP
             | manifest::ADMIN_RECIPIENTS_ADD_OP
             | manifest::ADMIN_RECIPIENTS_REMOVE_OP
             | manifest::ADMIN_RECIPIENTS_LIST_OP
@@ -138,6 +141,7 @@ pub(super) async fn handle_management_request(
             | manifest::GITHUB_BIND_OP
             | manifest::ADMIN_ISSUE_TICKET_OP
             | manifest::ADMIN_REBIND_CREDENTIAL_OP
+            | manifest::ADMIN_AGENT_POLICY_ENABLE_OP
     ) {
         if let Some(refusal) = state.runtime.connector_home.refusal() {
             return send_tool_response(writer, version, channel, epoch, correlation, refusal).await;
@@ -146,7 +150,37 @@ pub(super) async fn handle_management_request(
     let bulk_invoke_grant = method == manifest::GITHUB_GRANT_OP
         && params["all_handles"] == true
         && params["kind"] != "read";
-    let summary = if bulk_invoke_grant {
+    if matches!(
+        method,
+        manifest::ADMIN_AGENT_POLICY_PREVIEW_OP
+            | manifest::ADMIN_AGENT_POLICY_ENABLE_OP
+            | manifest::ADMIN_AGENT_POLICY_DISABLE_OP
+    ) && !params.as_object().is_some_and(|params| params.is_empty())
+    {
+        return send_tool_error(
+            writer,
+            version,
+            channel,
+            epoch,
+            correlation,
+            "invalid_request",
+            "agent policy management operations take no arguments",
+        )
+        .await;
+    }
+    let summary = if method == manifest::ADMIN_AGENT_POLICY_ENABLE_OP {
+        let plan = match blocking_section(|| agent_policy::preview(state)) {
+            Ok(plan) => plan,
+            Err(response) => {
+                return send_tool_response(writer, version, channel, epoch, correlation, response)
+                    .await
+            }
+        };
+        Some(match plan.version {
+            Some(version) => format!("enable signed GitHub agent policies, starting with version {version} and continuing with newer versions"),
+            None => "enable automatic changes from signed GitHub agent policies when available".into(),
+        })
+    } else if bulk_invoke_grant {
         let mut preview = params.clone();
         preview["dry_run"] = json!(true);
         let plan = github_handle_grant(state, &principal_key, &preview);
@@ -208,6 +242,17 @@ pub(super) async fn handle_management_request(
         }
     }
     let mut response = match method {
+        manifest::ADMIN_AGENT_POLICY_PREVIEW_OP => {
+            blocking_section(|| match agent_policy::preview(state) {
+                Ok(plan) => json!({"result": plan}),
+                Err(response) => response,
+            })
+        }
+        manifest::ADMIN_AGENT_POLICY_ENABLE_OP | manifest::ADMIN_AGENT_POLICY_DISABLE_OP => {
+            blocking_section(|| {
+                agent_policy::set_enabled(state, method == manifest::ADMIN_AGENT_POLICY_ENABLE_OP)
+            })
+        }
         manifest::ADMIN_SENT_TEXT_READ_OP => blocking_section(|| {
             let Some(row_id) = params.get("row_id").and_then(Value::as_str) else {
                 return json!({"error":{"code":"invalid_request","message":"row_id is required"}});
@@ -404,6 +449,16 @@ pub(super) async fn handle_management_request(
         }
         _ => unreachable!("management operation was checked above"),
     };
+    if matches!(
+        method,
+        manifest::GITHUB_IMPORT_OP
+            | manifest::GITHUB_BIND_OP
+            | manifest::GITHUB_UNBIND_OP
+            | manifest::ADMIN_ONBOARD_GITHUB_BOT_OP
+    ) && params["dry_run"] == false
+    {
+        state.health.agent_policy_wake.notify_one();
+    }
     if matches!(
         method,
         manifest::GITHUB_IMPORT_OP

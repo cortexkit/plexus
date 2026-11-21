@@ -956,6 +956,9 @@ fn manifest_exposes_the_privileged_ops_on_a_management_surface() {
             ADMIN_ADD_POLL_CONNECTION_OP,
             ADMIN_WIDEN_AND_GRANT_OP,
             ADMIN_ONBOARD_GITHUB_BOT_OP,
+            ADMIN_AGENT_POLICY_PREVIEW_OP,
+            ADMIN_AGENT_POLICY_ENABLE_OP,
+            ADMIN_AGENT_POLICY_DISABLE_OP,
             crate::connector_home::STATUS_OP,
             crate::relay::STATUS_OP,
         ]

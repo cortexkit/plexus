@@ -1,10 +1,10 @@
-//! Read and check the signed policy without changing grants or bindings.
+//! Read and check the signed policy, and reconcile eligible GitHub agents when enabled.
 
 use crate::{blocking_section, ModuleState};
 use plexus_core::credentials::{CkcredRoutePeer, CkcredWatch};
 use plexus_core::diag;
 use plexus_core::github::agent_policy::{
-    check_github, read_active, ActivePolicy, CheckedGitHub, ReadFailure, WatchNotice,
+    check_github, read_active, ActivePolicy, ApplyPlan, CheckedGitHub, ReadFailure, WatchNotice,
 };
 use plexus_core::manifest::AppManifest;
 use serde::Serialize;
@@ -18,6 +18,7 @@ use tokio::time::Instant;
 pub(crate) const BACKSTOP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const WATCH_RETRY: Duration = Duration::from_secs(30);
 const GITHUB_CATALOG: &str = "github_rest";
+const HEALTH_PLAN_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Default)]
 pub(crate) struct Wakes {
@@ -36,7 +37,7 @@ enum Observation {
 }
 
 struct Checked {
-    active: ActivePolicy,
+    active: Arc<ActivePolicy>,
     github: CheckedGitHub,
     catalog: Arc<AppManifest>,
     logged_unserved: BTreeSet<String>,
@@ -46,7 +47,7 @@ impl Checked {
     fn new(active: ActivePolicy, catalog: Arc<AppManifest>) -> Self {
         let github = check_github(&active.policy, &catalog.actions_baseline);
         let mut checked = Self {
-            active,
+            active: Arc::new(active),
             github,
             catalog,
             logged_unserved: BTreeSet::new(),
@@ -82,6 +83,10 @@ pub(crate) struct Snapshot {
     catalog_unreadable: bool,
     logged_absence: bool,
     last_reply_was_none: bool,
+    current_reply: bool,
+    apply: Option<Value>,
+    apply_failed: bool,
+    logged_conflicts: BTreeSet<String>,
 }
 
 impl Snapshot {
@@ -98,6 +103,7 @@ impl Snapshot {
             "policy_sha256": checked.map(|c| &c.active.policy_sha256),
             "served": checked.map_or(&[][..], |c| c.github.served.as_slice()),
             "unserved": checked.map_or(&[][..], |c| c.github.unserved.as_slice()),
+            "apply": self.apply.clone().unwrap_or_else(empty_apply_status),
         })
     }
 
@@ -117,6 +123,7 @@ impl Snapshot {
         reply: Result<Option<ActivePolicy>, ReadFailure>,
         catalog: Option<&Arc<AppManifest>>,
     ) {
+        self.current_reply = false;
         let previously_none =
             std::mem::replace(&mut self.last_reply_was_none, matches!(reply, Ok(None)));
         match reply {
@@ -150,6 +157,7 @@ impl Snapshot {
                             && active.manifest_version == previous.manifest_version
                         {
                             self.observation = Observation::Loaded;
+                            self.current_reply = true;
                         } else {
                             self.unreadable();
                         }
@@ -159,6 +167,7 @@ impl Snapshot {
                 if let Some(catalog) = catalog {
                     self.checked = Some(Checked::new(active, Arc::clone(catalog)));
                     self.observation = Observation::Loaded;
+                    self.current_reply = true;
                 } else {
                     // The catalog must be readable before a version becomes
                     // retained state. Read policy.active again after recovery.
@@ -190,6 +199,173 @@ impl Snapshot {
         }
         self.observation = Observation::Unreadable;
     }
+
+    fn plan_input(&self) -> Option<(Arc<ActivePolicy>, CheckedGitHub)> {
+        self.checked
+            .as_ref()
+            .map(|checked| (Arc::clone(&checked.active), checked.github.clone()))
+    }
+}
+
+pub(crate) fn preview(state: &ModuleState) -> Result<ApplyPlan, Value> {
+    let checked = state
+        .health
+        .agent_policy
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .plan_input();
+    state
+        .store()
+        .github_policy_preview(
+            checked
+                .as_ref()
+                .map(|(active, github)| (active.as_ref(), github)),
+        )
+        .map_err(|error| {
+            crate::wire::store_failure(
+                "agent policy preview",
+                "the agent policy plan could not be read",
+                &error,
+            )
+        })
+}
+
+pub(crate) fn set_enabled(state: &ModuleState, enabled: bool) -> Value {
+    if enabled {
+        if let Some(refusal) = state.runtime.connector_home.refusal() {
+            return refusal;
+        }
+    }
+    match state.store().set_github_policy_apply(enabled) {
+        Ok(()) => {
+            update_apply(state, false);
+            state.health.agent_policy_wake.notify_one();
+            json!({"result":{"enabled":enabled}})
+        }
+        Err(error) => crate::wire::store_failure(
+            "agent policy switch",
+            "the agent policy switch could not be stored",
+            &error,
+        ),
+    }
+}
+
+fn update_apply(state: &ModuleState, apply: bool) {
+    let (checked, current) = {
+        let snapshot = state
+            .health
+            .agent_policy
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        (
+            snapshot.plan_input(),
+            snapshot.current_reply && !snapshot.catalog_unreadable,
+        )
+    };
+    let checked = checked
+        .as_ref()
+        .map(|(active, github)| (active.as_ref(), github));
+    let plan = state.store().github_policy_preview(checked);
+    let mut failed = None;
+    let mut attempted = false;
+    let plan = match plan {
+        Ok(mut plan) => {
+            if let Some(checked) = checked.filter(|_| {
+                apply
+                    && current
+                    && plan.enabled
+                    && plan.has_eligible_agents()
+                    && state.runtime.connector_home.held()
+            }) {
+                attempted = true;
+                match state
+                    .store()
+                    .apply_github_policy(checked, || state.runtime.connector_home.held())
+                {
+                    Ok(remaining) => plan = remaining,
+                    Err(error) => failed = Some(error),
+                }
+            }
+            Some(plan)
+        }
+        Err(error) => {
+            failed = Some(error);
+            None
+        }
+    };
+    let mut snapshot = state
+        .health
+        .agent_policy
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(plan) = plan {
+        if failed.is_none() && (attempted || !plan.enabled || !plan.has_eligible_agents()) {
+            snapshot.apply_failed = false;
+        }
+        let conflicts: BTreeSet<_> = plan
+            .agents
+            .iter()
+            .flat_map(|agent| {
+                agent.conflicts.iter().map(|conflict| {
+                    format!(
+                        "version {:?} agent {:?}: {:?}",
+                        plan.version, agent.agent, conflict
+                    )
+                })
+            })
+            .collect();
+        for conflict in conflicts.difference(&snapshot.logged_conflicts) {
+            diag!(warn governance: "agent policy conflict: {conflict}");
+        }
+        snapshot.logged_conflicts = conflicts;
+        snapshot.apply = Some(health_plan(&plan));
+    }
+    if let Some(error) = failed {
+        if !snapshot.apply_failed {
+            diag!(warn governance: "could not reconcile agent policy: {error}");
+        }
+        snapshot.apply_failed = true;
+    }
+    if snapshot.apply_failed {
+        snapshot.apply.get_or_insert_with(empty_apply_status)["error"] = json!("store_failure");
+    }
+}
+
+fn empty_apply_status() -> Value {
+    json!({"enabled": false, "applied_version": null,
+        "plan": {"agents": [], "unchanged_agents": 0}})
+}
+
+fn health_plan(plan: &ApplyPlan) -> Value {
+    let mut agents = Vec::new();
+    let mut remaining = HEALTH_PLAN_MAX_BYTES;
+    let mut omitted = 0;
+    for row in plan.agents.iter().filter(|row| row.changed()) {
+        let entry = json!({
+            "agent": row.agent, "handle": row.handle, "add_selectors": row.add_selectors,
+            "remove_selectors": row.remove_selectors, "add_repos": row.add_repos,
+            "remove_repos": row.remove_repos, "revoke_grant_ids": row.revoke_grant_ids,
+            "held": row.held, "conflicts": row.conflicts,
+        });
+        let bytes = entry.to_string().len() + 1;
+        if let Some(left) = remaining.checked_sub(bytes) {
+            agents.push(entry);
+            remaining = left;
+        } else {
+            omitted += 1;
+        }
+    }
+    let mut status = json!({
+        "enabled": plan.enabled, "applied_version": plan.applied_version,
+        "plan": {"agents": agents, "unchanged_agents": plan.unchanged_agents},
+    });
+    if omitted != 0 {
+        status["plan"]["omitted_agents"] = json!(omitted);
+    }
+    if !plan.module_layer.is_empty() {
+        status["plan"]["module_layer"] = json!(plan.module_layer);
+    }
+    status
 }
 
 fn read_catalog(state: &ModuleState) -> Option<Arc<AppManifest>> {
@@ -211,6 +387,7 @@ fn refresh(state: &ModuleState, peer: &dyn CkcredRoutePeer) -> bool {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .observe(reply, catalog.as_ref());
+            update_apply(state, true);
         }
     }
     supported
@@ -239,6 +416,7 @@ pub(crate) fn spawn(
 }
 
 async fn run(state: Arc<ModuleState>, mut stop: mpsc::Receiver<()>, wakes: Arc<Wakes>) {
+    blocking_section(|| update_apply(&state, false));
     let Some(peer) = state.runtime.vault_peer.as_deref() else {
         return;
     };
@@ -256,6 +434,7 @@ async fn run(state: Arc<ModuleState>, mut stop: mpsc::Receiver<()>, wakes: Arc<W
                 _ = stop.recv() => return,
                 _ = wakes.read.notified() => {},
                 _ = wakes.catalog.notified() => {},
+                _ = state.health.agent_policy_wake.notified() => blocking_section(|| update_apply(&state, false)),
                 changed = claim.changed() => if changed.is_err() { return; },
             }
             continue;
@@ -276,7 +455,10 @@ async fn run(state: Arc<ModuleState>, mut stop: mpsc::Receiver<()>, wakes: Arc<W
             _ = wakes.catalog.notified() => {
                 if blocking_section(|| recheck_catalog(&state)) {
                     wakes.read.notify_one();
-                }
+                } else { blocking_section(|| update_apply(&state, true)); }
+            },
+            _ = state.health.agent_policy_wake.notified() => {
+                blocking_section(|| update_apply(&state, true));
             },
             event = async {
                 match watch.as_mut() {

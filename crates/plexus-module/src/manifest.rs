@@ -123,6 +123,9 @@ pub const ADMIN_WIDEN_AND_GRANT_OP: &str = "plexus.admin.widen_and_grant";
 /// Import, prove, bind and grant one GitHub App handle under a single
 /// operator confirmation.
 pub const ADMIN_ONBOARD_GITHUB_BOT_OP: &str = "plexus.admin.onboard_github_bot";
+pub const ADMIN_AGENT_POLICY_PREVIEW_OP: &str = "plexus.admin.agent_policy.preview";
+pub const ADMIN_AGENT_POLICY_ENABLE_OP: &str = "plexus.admin.agent_policy.enable";
+pub const ADMIN_AGENT_POLICY_DISABLE_OP: &str = "plexus.admin.agent_policy.disable";
 /// Adding a recipient entry lets the agent send to that recipient without
 /// asking for approval, widening its authority under an allow policy.
 pub const ADMIN_RECIPIENTS_ADD_OP: &str = "plexus.admin.recipients_add";
@@ -254,6 +257,7 @@ pub fn build_with_launch_nonce_source(
             ADMIN_ADD_POLL_CONNECTION_OP.to_owned(),
             ADMIN_WIDEN_AND_GRANT_OP.to_owned(),
             ADMIN_ONBOARD_GITHUB_BOT_OP.to_owned(),
+            ADMIN_AGENT_POLICY_ENABLE_OP.to_owned(),
         ]))
         // The same facts the binary already embeds for deploy verification
         // (health `buildCommit`/`lockDigest`), now
@@ -463,6 +467,21 @@ pub fn build_with_launch_nonce_source(
                     name: ADMIN_ONBOARD_GITHUB_BOT_OP.to_string(),
                     kind: ManagementOperationKind::Mutate,
                     description: Some("Preview or apply a GitHub App handle's import, probe, bind and grants under one confirmation; Direct only".to_string()),
+                },
+                ManagementOperation {
+                    name: ADMIN_AGENT_POLICY_PREVIEW_OP.to_string(),
+                    kind: ManagementOperationKind::Query,
+                    description: Some("Read the signed agent policy plan against the store; Direct only".into()),
+                },
+                ManagementOperation {
+                    name: ADMIN_AGENT_POLICY_ENABLE_OP.to_string(),
+                    kind: ManagementOperationKind::Mutate,
+                    description: Some("Enable automatic changes from checked agent policies under one confirmation; Direct only".into()),
+                },
+                ManagementOperation {
+                    name: ADMIN_AGENT_POLICY_DISABLE_OP.to_string(),
+                    kind: ManagementOperationKind::Mutate,
+                    description: Some("Stop automatic agent policy changes without undoing applied authority; Direct only".into()),
                 },
                 ManagementOperation {
                     name: crate::connector_home::STATUS_OP.to_string(),
