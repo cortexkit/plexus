@@ -47,6 +47,7 @@ const TABLES: &[&str] = &[
     // receipts. The handle carries authority; a receipt is what stops a
     // replayed request nonce from acting twice.
     "github_app_handle",
+    "github_attested_probe",
     "github_repo_binding",
     // Keep the switch and each agent's recorded policy version across cutover.
     "policy_apply_switch",
@@ -454,7 +455,7 @@ fn identity(table: &str, row: &Record) -> String {
         "event_outbox" => vec!["event_key"],
         "event_outbox_failures" => vec!["event_key", "version"],
         "relay_cursor" => vec!["source"],
-        "github_app_handle" => vec!["app_handle_id"],
+        "github_app_handle" | "github_attested_probe" => vec!["app_handle_id"],
         "github_repo_binding" => vec!["repository"],
         "github_manifest_binding" => vec!["app_handle_id", "repository"],
         "github_bot_receipt" => vec!["agent_id", "request_nonce"],

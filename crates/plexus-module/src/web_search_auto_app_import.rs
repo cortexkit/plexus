@@ -28,8 +28,13 @@ impl Reconciler {
         }
     }
 
-    pub(super) fn reconcile(&mut self, state: &ModuleState, reply: &Value, now: i64) {
-        self.defer_retry(now);
+    pub(super) fn reconcile(
+        &mut self,
+        state: &ModuleState,
+        reply: &Value,
+        clock: &dyn Fn() -> i64,
+    ) {
+        self.defer_retry(clock());
         let Some(rows) = reply
             .pointer("/result/credentials")
             .and_then(Value::as_array)
@@ -57,13 +62,13 @@ impl Reconciler {
         self.logged
             .retain(|(slug, _)| candidates.contains_key(slug.as_str()));
         let mut health = ImportStatus::default();
-        let mut retry = false;
+        let mut next_retry = None;
         for (slug, candidate) in candidates {
             if !state.runtime.connector_home.held() {
                 return;
             }
             let outcome = match candidate {
-                Ok(app) => reconcile_app(state, &app, now),
+                Ok(app) => reconcile_app(state, &app, clock),
                 Err(reason) => {
                     self.log_once(slug, reason);
                     continue;
@@ -71,8 +76,8 @@ impl Reconciler {
             };
             match outcome {
                 Outcome::Imported => push_bounded(&mut health.imported, || slug.to_owned()),
-                Outcome::Pending(reason, again) => {
-                    retry |= again;
+                Outcome::Pending(reason, retry_at) => {
+                    next_retry = next_retry.into_iter().chain(retry_at).min();
                     push_bounded(&mut health.pending, || ImportIssue {
                         slug: slug.to_owned(),
                         reason,
@@ -89,7 +94,7 @@ impl Reconciler {
             }
         }
         if state.runtime.connector_home.held() {
-            self.next_retry = retry.then(|| now.saturating_add(MIN_RETRY_MS));
+            self.next_retry = next_retry;
             state
                 .health
                 .agent_policy
@@ -148,48 +153,69 @@ fn parse<'a>(
 
 enum Outcome {
     Imported,
-    Pending(&'static str, bool),
+    Pending(&'static str, Option<i64>),
     Conflict(&'static str),
     NotHome,
 }
 
-fn existing_app(state: &ModuleState, app: &AttestedApp<'_>) -> Option<Outcome> {
-    match app.existing(state.store()) {
-        Ok(Some(ExistingAttestedApp::Enabled)) => Some(Outcome::Imported),
-        Ok(Some(ExistingAttestedApp::Disabled)) => Some(Outcome::Pending("handle_disabled", false)),
-        Ok(Some(ExistingAttestedApp::Conflict)) => {
-            Some(Outcome::Conflict("handle_identity_conflict"))
+fn existing_outcome(existing: ExistingAttestedApp) -> Outcome {
+    match existing {
+        ExistingAttestedApp::Enabled => Outcome::Imported,
+        ExistingAttestedApp::Disabled { next_probe_at_ms } => {
+            Outcome::Pending("handle_disabled", next_probe_at_ms)
         }
-        Ok(None) => None,
-        Err(_) => Some(Outcome::Pending("import_store_failed", true)),
+        ExistingAttestedApp::Conflict => Outcome::Conflict("handle_identity_conflict"),
     }
 }
 
-fn reconcile_app(state: &ModuleState, app: &AttestedApp<'_>, now: i64) -> Outcome {
-    if let Some(outcome) = existing_app(state, app) {
-        return outcome;
-    }
+fn reconcile_app(state: &ModuleState, app: &AttestedApp<'_>, clock: &dyn Fn() -> i64) -> Outcome {
+    let retry = |reason| Outcome::Pending(reason, Some(clock().saturating_add(MIN_RETRY_MS)));
+    let current = || match app.existing(state.store()) {
+        Ok(Some(existing)) => existing_outcome(existing),
+        _ => retry("import_store_failed"),
+    };
+    let reprobe = match app.existing(state.store()) {
+        Ok(Some(ExistingAttestedApp::Disabled {
+            next_probe_at_ms: Some(next),
+        })) if clock() >= next => true,
+        Ok(Some(existing)) => return existing_outcome(existing),
+        Ok(None) => false,
+        Err(_) => return retry("import_store_failed"),
+    };
     let held = || state.runtime.connector_home.held();
     if !held() {
         return Outcome::NotHome;
     }
     match state.runtime.agent_registry.lookup(app.agent) {
         AgentLookup::Known => {}
-        AgentLookup::Retired => return Outcome::Pending("agent_retired", true),
-        AgentLookup::Unknown => return Outcome::Pending("agent_unknown", true),
-        AgentLookup::Unavailable => return Outcome::Pending("agent_registry_unavailable", true),
+        AgentLookup::Retired => return retry("agent_retired"),
+        AgentLookup::Unknown => return retry("agent_unknown"),
+        AgentLookup::Unavailable => return retry("agent_registry_unavailable"),
     }
     if !held() {
         return Outcome::NotHome;
     }
     let reader = crate::github_control_reader(state);
-    match app.import(
-        state.store(),
-        state.runtime.github_handle_credentials.as_deref(),
-        reader.as_ref(),
-        now,
-        &held,
-    ) {
+    let provider = state.runtime.github_handle_credentials.as_deref();
+    if reprobe {
+        let Some(provider) = provider else {
+            return retry("handle_disabled");
+        };
+        return match app.reprobe(state.store(), provider, reader.as_ref(), clock(), &held) {
+            Ok(true) if held() => {
+                let connection_id = control::handle_connection_id(app.slug);
+                if !state.runtime.rest_transport.has_connection(&connection_id) {
+                    crate::register_handle_connection_transports(state, OWNER, &[connection_id]);
+                }
+                wake_binders(state);
+                Outcome::Imported
+            }
+            Ok(true) => Outcome::NotHome,
+            Ok(false) => current(),
+            Err(_) => retry("import_store_failed"),
+        };
+    }
+    match app.import(state.store(), provider, reader.as_ref(), clock(), &held) {
         Ok(AttestedImport::Imported { proven }) => {
             if !held() {
                 return Outcome::NotHome;
@@ -200,21 +226,23 @@ fn reconcile_app(state: &ModuleState, app: &AttestedApp<'_>, now: i64) -> Outcom
                 &[control::handle_connection_id(app.slug)],
             );
             if proven {
-                state.health.agent_policy_wake.notify_one();
-                state.runtime.manifest_binding_wake.notify_one();
+                wake_binders(state);
                 Outcome::Imported
             } else {
-                Outcome::Pending("handle_disabled", false)
+                current()
             }
         }
-        Ok(AttestedImport::AlreadyImported) => {
-            existing_app(state, app).unwrap_or(Outcome::Pending("import_store_failed", true))
-        }
+        Ok(AttestedImport::AlreadyImported) => current(),
         Err(code) => match code.as_str() {
             "connector_home_not_held" => Outcome::NotHome,
             "handle_identity_conflict" => Outcome::Conflict("handle_identity_conflict"),
             "handle_import_conflict" => Outcome::Conflict("handle_import_conflict"),
-            _ => Outcome::Pending("import_store_failed", true),
+            _ => retry("import_store_failed"),
         },
     }
+}
+
+fn wake_binders(state: &ModuleState) {
+    state.health.agent_policy_wake.notify_one();
+    state.runtime.manifest_binding_wake.notify_one();
 }

@@ -300,8 +300,12 @@ fn handles_receipts_markers_cursor_and_reconciliations_are_carried() {
         .with_conn(|conn| {
             conn.execute_batch(
                 r#"
+INSERT INTO connections (principal, connection_id, app_key, status, created_at_ms, updated_at_ms)
+    VALUES ('direct', 'c-pending', 'app', 'active', 1, 2);
 INSERT INTO github_app_handle (app_handle_id, agent_id, app_id, credential_reference, status, connection_principal, connection_id)
-    VALUES ('handle', 'agent', 1, 'github_app:handle', 'enabled', 'direct', 'c');
+    VALUES ('handle', 'agent', 1, 'github_app:handle', 'enabled', 'direct', 'c'),
+           ('pending', 'agent-pending', 2, 'github_app:pending', 'disabled', 'direct', 'c-pending');
+INSERT INTO github_attested_probe (app_handle_id, next_probe_at_ms) VALUES ('pending', 900001);
 INSERT INTO github_repo_binding (repository, app_handle_id) VALUES ('org/repo', 'handle');
 INSERT INTO policy_apply_switch (service, enabled) VALUES ('github', 1);
 INSERT INTO policy_applied (service, agent, policy_version, policy_sha256, manifest_version, grant_ids, applied_at_ms)
@@ -329,7 +333,8 @@ INSERT INTO write_reconciliation_results (principal, request_id, acting_principa
             .unwrap_or_else(|| panic!("{table} must be carried"));
         (row.read, row.carried)
     };
-    assert_eq!(carried("github_app_handle"), (1, 1));
+    assert_eq!(carried("github_app_handle"), (2, 2));
+    assert_eq!(carried("github_attested_probe"), (1, 1));
     assert_eq!(carried("github_repo_binding"), (1, 1));
     assert_eq!(carried("policy_applied"), (1, 1));
     assert_eq!(carried("policy_apply_switch"), (1, 1));
@@ -343,6 +348,13 @@ INSERT INTO write_reconciliation_results (principal, request_id, acting_principa
     assert_eq!(carried("pending_write_reconciliations"), (1, 1));
     assert_eq!(carried("write_reconciliation_results"), (1, 1));
     let new = f.destination();
+    assert_eq!(
+        scalar::<i64>(
+            &new,
+            "SELECT next_probe_at_ms FROM github_attested_probe WHERE app_handle_id='pending'"
+        ),
+        900001
+    );
     assert_eq!(
         scalar::<String>(&new, "SELECT grant_ids FROM policy_applied WHERE service='github' AND agent='agent' AND policy_version=2 AND policy_sha256='signed-policy-hash' AND manifest_version=3 AND applied_at_ms=4"),
         r#"["policy:github:agent:c:v2"]"#
@@ -603,6 +615,7 @@ fn production_v23_round_trip_dispositions_and_routing() {
             | "consent_call_keys"
             | "relay_cursor"
             | "github_app_handle"
+            | "github_attested_probe"
             | "github_repo_binding"
             | "policy_apply_switch"
             | "policy_applied"

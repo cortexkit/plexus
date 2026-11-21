@@ -18,6 +18,7 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 use std::sync::Arc;
 
+mod attested_probe;
 mod invoke_grant;
 mod policy_apply;
 mod read_grant;
@@ -67,7 +68,8 @@ impl PlexusStore {
 
     pub(crate) fn retire_github_agent(&self, agent: &str) -> Result<(), StoreError> {
         self.inner.with_conn_fenced(|conn| {
-            conn.execute("UPDATE github_app_handle SET status='disabled',proven_at=NULL WHERE agent_id=?1 AND status<>'disabled'", [agent])?;
+            conn.execute("UPDATE github_app_handle SET status='disabled',proven_at=NULL WHERE agent_id=?1
+                AND (status<>'disabled' OR app_handle_id IN (SELECT app_handle_id FROM github_attested_probe))", [agent])?;
             conn.execute("UPDATE action_requests SET status='denied' WHERE agent_id=?1 AND status IN ('pending','approved')", [agent])?;
             Ok(())
         })
@@ -1770,15 +1772,23 @@ impl PlexusStore {
     pub(crate) fn import_attested_github_handle(
         &self,
         row: &GithubImportRow,
+        next_probe_at_ms: Option<i64>,
         held: &dyn Fn() -> bool,
     ) -> Result<Result<bool, String>, StoreError> {
-        self.import_github_handles_inner(std::slice::from_ref(row), false, Some(held))
+        self.import_github_handles_inner(
+            std::slice::from_ref(row),
+            false,
+            Some(AttestedImportGuard {
+                held,
+                next_probe_at_ms,
+            }),
+        )
     }
 
     pub(crate) fn github_handle_identity_for_record(
         &self,
         record: &str,
-    ) -> Result<Option<(i64, String, bool)>, StoreError> {
+    ) -> Result<Option<attested_probe::ImportedIdentity>, StoreError> {
         self.inner
             .with_read(|conn| github_handle_identity_on_conn(conn, record))
     }
@@ -1787,7 +1797,7 @@ impl PlexusStore {
         &self,
         rows: &[GithubImportRow],
         dry_run: bool,
-        attested: Option<&dyn Fn() -> bool>,
+        attested: Option<AttestedImportGuard<'_>>,
     ) -> Result<Result<bool, String>, StoreError> {
         let refusal = std::sync::Mutex::new(None::<String>);
         let result = self.inner.with_conn_fenced(|conn| {
@@ -1796,7 +1806,7 @@ impl PlexusStore {
                 *refusal.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(code);
                 Err(rusqlite::Error::QueryReturnedNoRows)
             };
-            if attested.is_some_and(|held| !held()) {
+            if attested.is_some_and(|source| !(source.held)()) {
                 return refuse("connector_home_not_held".into());
             }
             let mut planned = std::collections::BTreeMap::new();
@@ -1805,8 +1815,8 @@ impl PlexusStore {
                     let handle = &row.handle;
                     // Check identity again in the write transaction in case an
                     // operator imported the same record during the probe.
-                    if let Some((app_id, agent, _)) = github_handle_identity_on_conn(tx, &handle.credential_reference)? {
-                        if app_id == handle.app_id && agent == handle.agent_id {
+                    if let Some(existing) = github_handle_identity_on_conn(tx, &handle.credential_reference)? {
+                        if existing.app_id == handle.app_id && existing.agent == handle.agent_id {
                             return Ok(false);
                         }
                         return refuse("handle_identity_conflict".into());
@@ -1873,6 +1883,10 @@ impl PlexusStore {
                     params![handle.app_handle_id,handle.agent_id,handle.app_id,handle.installation_id,
                         handle.credential_reference,handle.credential_generation,handle.status,
                         attested.and(handle.proven_at),handle.connection_principal,handle.connection_id])?;
+                if let Some(next_probe_at_ms) = attested.and_then(|source| source.next_probe_at_ms) {
+                    tx.execute("INSERT INTO github_attested_probe (app_handle_id,next_probe_at_ms) VALUES (?1,?2)",
+                        params![handle.app_handle_id, next_probe_at_ms])?;
+                }
                 for repository in &row.repositories {
                     tx.execute("INSERT INTO github_repo_binding(repository,app_handle_id) VALUES (?1,?2)",
                         params![crate::github::canonical_repository(repository),handle.app_handle_id])?;
@@ -1920,7 +1934,7 @@ impl PlexusStore {
                     })?;
                 }
             }
-            if attested.is_some_and(|held| !held()) {
+            if attested.is_some_and(|source| !(source.held)()) {
                 return refuse("connector_home_not_held".into());
             }
             Ok(true)
@@ -2834,14 +2848,29 @@ impl PlexusStore {
     }
 }
 
+#[derive(Clone, Copy)]
+struct AttestedImportGuard<'a> {
+    held: &'a dyn Fn() -> bool,
+    next_probe_at_ms: Option<i64>,
+}
+
 fn github_handle_identity_on_conn(
     conn: &rusqlite::Connection,
     record: &str,
-) -> rusqlite::Result<Option<(i64, String, bool)>> {
+) -> rusqlite::Result<Option<attested_probe::ImportedIdentity>> {
     conn.query_row(
-        "SELECT app_id,agent_id,status='enabled' FROM github_app_handle WHERE credential_reference=?1",
+        "SELECT h.app_id,h.agent_id,h.status='enabled',p.next_probe_at_ms
+         FROM github_app_handle h LEFT JOIN github_attested_probe p USING (app_handle_id)
+         WHERE h.credential_reference=?1",
         [record],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| {
+            Ok(attested_probe::ImportedIdentity {
+                app_id: row.get(0)?,
+                agent: row.get(1)?,
+                enabled: row.get(2)?,
+                next_probe_at_ms: row.get(3)?,
+            })
+        },
     )
     .optional()
 }

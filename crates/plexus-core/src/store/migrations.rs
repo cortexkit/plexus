@@ -1188,6 +1188,36 @@ CREATE TABLE policy_applied (
 );
 "#,
     },
+    Migration {
+        version: 65,
+        statements: r#"
+CREATE TABLE github_attested_probe (
+    app_handle_id TEXT PRIMARY KEY NOT NULL REFERENCES github_app_handle(app_handle_id) ON DELETE CASCADE,
+    next_probe_at_ms INTEGER NOT NULL
+);
+
+-- A status write to disabled is intentional even if the handle was already disabled.
+CREATE TRIGGER github_attested_probe_handle_disabled AFTER UPDATE OF status ON github_app_handle
+WHEN NEW.status = 'disabled' BEGIN
+    DELETE FROM github_attested_probe WHERE app_handle_id = NEW.app_handle_id;
+END;
+
+CREATE TRIGGER github_attested_probe_connection_disabled AFTER UPDATE OF status ON connections
+WHEN NEW.status <> 'active' BEGIN
+    DELETE FROM github_attested_probe WHERE app_handle_id IN (
+        SELECT app_handle_id FROM github_app_handle
+        WHERE connection_principal = NEW.principal AND connection_id = NEW.connection_id
+    );
+END;
+
+CREATE TRIGGER github_attested_probe_connection_deleted AFTER DELETE ON connections BEGIN
+    DELETE FROM github_attested_probe WHERE app_handle_id IN (
+        SELECT app_handle_id FROM github_app_handle
+        WHERE connection_principal = OLD.principal AND connection_id = OLD.connection_id
+    );
+END;
+"#,
+    },
 ];
 
 /// Shared with offline store import, whose destination is migrated before

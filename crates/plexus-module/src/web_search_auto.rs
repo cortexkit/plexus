@@ -126,7 +126,16 @@ impl Reconciler {
         }
         match peer.call("credential.list_scoped", json!({})) {
             Ok(reply) => {
-                if self.reconcile(state, &reply, now, notice).is_err() {
+                if self
+                    .reconcile_with_app_clock(
+                        state,
+                        &reply,
+                        now,
+                        notice,
+                        &plexus_core::storage::now_ms,
+                    )
+                    .is_err()
+                {
                     diag!(warn web_search: "search key reconciliation could not read or write its store; it will retry");
                 }
             }
@@ -137,12 +146,24 @@ impl Reconciler {
         }
     }
 
+    #[cfg(test)]
     fn reconcile(
         &mut self,
         state: &Arc<ModuleState>,
         reply: &Value,
         now: i64,
         notice: bool,
+    ) -> Result<(), cortexkit_store::StoreError> {
+        self.reconcile_with_app_clock(state, reply, now, notice, &|| now)
+    }
+
+    fn reconcile_with_app_clock(
+        &mut self,
+        state: &Arc<ModuleState>,
+        reply: &Value,
+        now: i64,
+        notice: bool,
+        app_clock: &dyn Fn() -> i64,
     ) -> Result<(), cortexkit_store::StoreError> {
         if !state.runtime.connector_home.held() {
             return Ok(());
@@ -152,7 +173,7 @@ impl Reconciler {
                 diag!(warn relay: "could not cross-check vault App IDs: {error}");
             }
         }
-        self.apps.reconcile(state, reply, now);
+        self.apps.reconcile(state, reply, app_clock);
         let active = match active_keys(reply) {
             Ok(active) => active,
             Err(()) => {

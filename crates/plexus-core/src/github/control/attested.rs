@@ -5,6 +5,8 @@ use super::{
 use crate::github::credential::{app_reference, HandleCredentialProvider};
 use crate::storage::{github_store::GithubImportRow, PlexusStore};
 
+const REPROBE_INTERVAL_MS: i64 = 15 * 60 * 1000;
+
 pub(crate) struct Carrier {
     pub suffix: &'static str,
     pub principal: &'static str,
@@ -67,7 +69,7 @@ pub enum AttestedImport {
 
 pub enum ExistingAttestedApp {
     Enabled,
-    Disabled,
+    Disabled { next_probe_at_ms: Option<i64> },
     Conflict,
 }
 
@@ -79,13 +81,15 @@ impl AttestedApp<'_> {
     ) -> Result<Option<ExistingAttestedApp>, cortexkit_store::StoreError> {
         Ok(store
             .github_handle_identity_for_record(&app_reference(self.slug))?
-            .map(|(app_id, agent, enabled)| {
-                if app_id != self.app_id || agent != self.agent {
+            .map(|existing| {
+                if existing.app_id != self.app_id || existing.agent != self.agent {
                     ExistingAttestedApp::Conflict
-                } else if enabled {
+                } else if existing.enabled {
                     ExistingAttestedApp::Enabled
                 } else {
-                    ExistingAttestedApp::Disabled
+                    ExistingAttestedApp::Disabled {
+                        next_probe_at_ms: existing.next_probe_at_ms,
+                    }
                 }
             }))
     }
@@ -102,15 +106,7 @@ impl AttestedApp<'_> {
         now: i64,
         held: &dyn Fn() -> bool,
     ) -> Result<AttestedImport, String> {
-        let item = InventoryHandle {
-            app_handle_id: self.slug.into(),
-            agent_id: self.agent.into(),
-            app_id: self.app_id,
-            installation_id: None,
-            credential_id: app_reference(self.slug),
-            status: "disabled".into(),
-            grants: Vec::new(),
-        };
+        let item = self.inventory_handle();
         let mut handle = import_handle(&item);
         let proven = provider.is_some_and(|provider| {
             resolve_repositories(
@@ -138,6 +134,7 @@ impl AttestedApp<'_> {
                         .collect(),
                     policies: Vec::new(),
                 },
+                (!proven).then(|| now.saturating_add(REPROBE_INTERVAL_MS)),
                 held,
             )
             .map_err(|_| "import_store_failed")??;
@@ -145,6 +142,48 @@ impl AttestedApp<'_> {
             Ok(AttestedImport::Imported { proven })
         } else {
             Ok(AttestedImport::AlreadyImported)
+        }
+    }
+
+    /// Retry an incomplete installation proof whose durable cooldown has elapsed.
+    pub fn reprobe(
+        &self,
+        store: &PlexusStore,
+        provider: &dyn HandleCredentialProvider,
+        reader: &dyn InstallationReader,
+        now: i64,
+        held: &dyn Fn() -> bool,
+    ) -> Result<bool, cortexkit_store::StoreError> {
+        let item = self.inventory_handle();
+        let handle = import_handle(&item);
+        let next = now.saturating_add(REPROBE_INTERVAL_MS);
+        let Some(claim) = store.claim_attested_probe(&handle, now, next, held)? else {
+            return Ok(false);
+        };
+        if resolve_repositories(
+            provider,
+            reader,
+            &item,
+            claim.credential_generation,
+            now,
+            held,
+        )
+        .is_err()
+        {
+            return Ok(false);
+        }
+        store.complete_attested_probe(&handle, claim, now, held)
+    }
+
+    fn inventory_handle(&self) -> InventoryHandle {
+        InventoryHandle {
+            app_handle_id: self.slug.into(),
+            agent_id: self.agent.into(),
+            app_id: self.app_id,
+            installation_id: None,
+            credential_id: app_reference(self.slug),
+            status: "disabled".into(),
+            grants: Vec::new(),
         }
     }
 }

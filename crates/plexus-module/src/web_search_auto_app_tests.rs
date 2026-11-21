@@ -6,6 +6,7 @@ use plexus_core::github::{
     control::{self, InstallationReader, Inventory, InventoryHandle},
     credential::HandleCredentialProvider,
 };
+use std::sync::atomic::AtomicBool;
 
 const SLUG: &str = "attested-vector";
 const RECORD: &str = "github_app:attested-vector";
@@ -35,7 +36,7 @@ impl HandleCredentialProvider for OwnToken {
     fn vendor_status(&self, _: &str, _: i64, _: &str, _: u16) {}
 }
 
-struct Installation(bool);
+struct Installation(AtomicBool);
 
 impl InstallationReader for Installation {
     fn repositories_page(
@@ -45,7 +46,7 @@ impl InstallationReader for Installation {
         _: usize,
     ) -> Result<Value, String> {
         assert_eq!(token.payload(), b"installation-token");
-        if !self.0 {
+        if !self.0.load(Ordering::SeqCst) {
             return Err("test: connection failed".into());
         }
         Ok(
@@ -60,6 +61,7 @@ struct Fixture {
     state: Arc<ModuleState>,
     registry: Arc<StubAgentRegistry>,
     token: Arc<OwnToken>,
+    reader: Arc<Installation>,
     watcher: Reconciler,
 }
 
@@ -75,9 +77,10 @@ impl Fixture {
         let mut runtime = crate::runtime_for_test(store);
         let registry = Arc::new(StubAgentRegistry::with_default_response(lookup));
         let token = Arc::new(OwnToken::default());
+        let reader = Arc::new(Installation(AtomicBool::new(prove)));
         runtime.agent_registry = registry.clone();
         runtime.github_handle_credentials = Some(token.clone());
-        runtime.github_control_reader = Some(Arc::new(Installation(prove)));
+        runtime.github_control_reader = Some(reader.clone());
         Self {
             state: Arc::new(ModuleState {
                 health: Arc::new(crate::health::HealthState::new()),
@@ -85,6 +88,7 @@ impl Fixture {
             }),
             registry,
             token,
+            reader,
             watcher: Reconciler::default(),
         }
     }
@@ -97,6 +101,17 @@ impl Fixture {
 
     fn attest(&mut self) {
         self.reconcile(&vault_case("github_app_attestation"));
+    }
+
+    fn attest_at(&mut self, now: i64) {
+        self.watcher
+            .reconcile(
+                &self.state,
+                &vault_case("github_app_attestation"),
+                now,
+                true,
+            )
+            .unwrap();
     }
 
     fn handle(
@@ -457,4 +472,101 @@ async fn auth_watch_wake_retries_a_pending_app_on_a_fresh_listing() {
     task.await.unwrap();
     assert_eq!(vault.calls.load(Ordering::SeqCst), 2);
     assert_eq!(f.token.0.load(Ordering::SeqCst), 1);
+}
+
+const FIRST_PROBE: i64 = 1_000;
+const PROBE_INTERVAL: i64 = 15 * 60 * 1000;
+
+#[tokio::test]
+async fn a_failed_attested_probe_recovers_at_fifteen_minutes_even_after_watcher_restart() {
+    let mut f = Fixture::new(AgentLookup::Known, false);
+    f.attest_at(FIRST_PROBE);
+    assert_eq!(f.handle().unwrap().0.status, "disabled");
+    f.reader.0.store(true, Ordering::SeqCst);
+    f.watcher = Reconciler::default();
+    f.attest_at(FIRST_PROBE + PROBE_INTERVAL - 1);
+    assert_eq!(f.handle().unwrap().0.status, "disabled");
+    assert_eq!(f.token.0.load(Ordering::SeqCst), 1);
+    assert!(f.watcher.due(FIRST_PROBE + PROBE_INTERVAL));
+    f.attest_at(FIRST_PROBE + PROBE_INTERVAL);
+    let (handle, bindings) = f.handle().unwrap();
+    assert_eq!(
+        handle.status, "enabled",
+        "the attested re-probe should enable the handle"
+    );
+    assert!(handle.proven_at.is_some());
+    assert!(bindings.is_empty());
+    assert_eq!(f.imports()["imported"], json!([SLUG]));
+    assert_eq!(f.token.0.load(Ordering::SeqCst), 2);
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        f.state.health.agent_policy_wake.notified(),
+    )
+    .await
+    .expect("recovery wakes policy apply");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        f.state.runtime.manifest_binding_wake.notified(),
+    )
+    .await
+    .expect("recovery wakes one-tap");
+}
+
+#[test]
+fn every_failed_reprobe_reserves_another_fifteen_minutes() {
+    let mut f = Fixture::new(AgentLookup::Known, false);
+    f.attest_at(FIRST_PROBE);
+    f.attest_at(FIRST_PROBE + PROBE_INTERVAL);
+    assert_eq!(f.token.0.load(Ordering::SeqCst), 2);
+    f.reader.0.store(true, Ordering::SeqCst);
+    f.attest_at(FIRST_PROBE + 2 * PROBE_INTERVAL - 1);
+    assert_eq!(f.token.0.load(Ordering::SeqCst), 2);
+    assert_eq!(f.handle().unwrap().0.status, "disabled");
+    f.attest_at(FIRST_PROBE + 2 * PROBE_INTERVAL);
+    assert_eq!(f.token.0.load(Ordering::SeqCst), 3);
+    assert_eq!(f.handle().unwrap().0.status, "enabled");
+}
+
+#[test]
+fn revoking_the_connection_after_failed_proof_prevents_automatic_recovery() {
+    let mut f = Fixture::new(AgentLookup::Known, false);
+    f.attest_at(FIRST_PROBE);
+    f.state
+        .store()
+        .revoke_connection(OWNER, CONNECTION)
+        .unwrap();
+    f.reader.0.store(true, Ordering::SeqCst);
+    f.watcher = Reconciler::default();
+    f.attest_at(FIRST_PROBE + PROBE_INTERVAL);
+    assert_eq!(f.handle().unwrap().0.status, "disabled");
+    assert_eq!(f.token.0.load(Ordering::SeqCst), 1);
+    assert!(!f.watcher.due(i64::MAX));
+}
+
+#[test]
+fn a_manually_imported_disabled_handle_never_qualifies_for_reprobe() {
+    let mut f = Fixture::new(AgentLookup::Known, true);
+    control::import_listed(
+        f.state.store(),
+        OWNER,
+        &Inventory {
+            version: "github-grant-import.v1".into(),
+            handles: vec![InventoryHandle {
+                app_handle_id: SLUG.into(),
+                agent_id: AGENT.into(),
+                app_id: APP_ID,
+                installation_id: None,
+                credential_id: RECORD.into(),
+                status: "disabled".into(),
+                grants: vec![],
+            }],
+        },
+        &BTreeMap::from([(SLUG.into(), vec![])]),
+        false,
+    )
+    .unwrap();
+    f.attest_at(FIRST_PROBE + PROBE_INTERVAL);
+    assert_eq!(f.handle().unwrap().0.status, "disabled");
+    assert_eq!(f.token.0.load(Ordering::SeqCst), 0);
+    assert!(!f.watcher.due(i64::MAX));
 }
