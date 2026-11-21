@@ -65,8 +65,8 @@ pub(super) fn spawn_background_tasks(
     // events unwritten, which is the correct outcome.
     let (claim_shutdown, mut claim_stop) = mpsc::channel::<()>(1);
     let claim_state = Arc::clone(&state);
-    let policy_wake = Arc::new(tokio::sync::Notify::new());
-    let policy_backstop = Arc::clone(&policy_wake);
+    let policy_wakes = Arc::new(agent_policy::Wakes::default());
+    let policy_maintenance = Arc::clone(&policy_wakes);
     let claim_task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -90,10 +90,14 @@ pub(super) fn spawn_background_tasks(
                         }
                         last_refresh_error = code;
                     }
-                    if last_policy_backstop.elapsed() >= agent_policy::BACKSTOP_INTERVAL {
-                        last_policy_backstop = tokio::time::Instant::now();
-                        if claim_state.runtime.connector_home.held() {
-                            policy_backstop.notify_one();
+                    if claim_state.runtime.connector_home.held() {
+                        if last_policy_backstop.elapsed() >= agent_policy::BACKSTOP_INTERVAL {
+                            last_policy_backstop = tokio::time::Instant::now();
+                            policy_maintenance.read.notify_one();
+                        } else {
+                            // The 15-minute policy.active read also checks the
+                            // catalog, so skip a separate lookup on that pass.
+                            policy_maintenance.catalog.notify_one();
                         }
                     }
                 }
@@ -132,7 +136,7 @@ pub(super) fn spawn_background_tasks(
     let manifest_task = manifest_binding::spawn(Arc::clone(&state), manifest_stop);
 
     let (policy_shutdown, policy_stop) = mpsc::channel::<()>(1);
-    let policy_task = agent_policy::spawn(Arc::clone(&state), policy_stop, policy_wake);
+    let policy_task = agent_policy::spawn(Arc::clone(&state), policy_stop, policy_wakes);
 
     BackgroundTasks {
         shutdown: vec![
