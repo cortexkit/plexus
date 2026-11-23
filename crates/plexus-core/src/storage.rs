@@ -112,6 +112,8 @@ pub use types_store::*;
 
 #[path = "store/connections.rs"]
 mod connections_store;
+#[path = "store/connector_home_generation.rs"]
+mod connector_home_generation;
 use connections_store::{
     connection_admin_grant_on_conn, encode_reference_binding, revoke_connection_on_conn,
     GITHUB_HANDLE_CONNECTION_PREFIX,

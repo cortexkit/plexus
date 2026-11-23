@@ -106,6 +106,8 @@ const TABLES: &[&str] = &[
     // Card refs already acted on. Without them an old answer could mint a
     // permission again on the new store after its row was revoked.
     "federated_processed_cards",
+    // An imported store must not accept a lease generation the source rejected.
+    "connector_home_generation",
 ];
 
 /// Tables of the current schema that `import_store` deliberately does not

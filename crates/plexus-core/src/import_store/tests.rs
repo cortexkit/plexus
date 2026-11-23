@@ -30,6 +30,59 @@ fn route_fact_reports_survive_store_cutover() {
     );
 }
 
+#[test]
+fn connector_home_generation_survives_store_cutover() {
+    let f = Fixture::new();
+    let source = open_sqlite(&descriptor(&f.from).unwrap()).unwrap();
+    source.migrate("plexus", MIGRATIONS).unwrap();
+    source
+        .with_conn(|conn| {
+            // Create the source row even against a binary that predates the journal.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS connector_home_generation (
+                    role TEXT PRIMARY KEY, highest_gen TEXT NOT NULL
+                );
+                INSERT INTO connector_home_generation VALUES ('connector_home', '18446744073709551615');",
+            )
+        })
+        .unwrap();
+    drop(source);
+
+    let report = f.import();
+    let journal = report
+        .iter()
+        .find(|row| row.table == "connector_home_generation")
+        .expect("the generation journal must be included in the import");
+    assert_eq!((journal.read, journal.carried, journal.scrubbed), (1, 1, 0));
+    assert_eq!(
+        scalar::<String>(
+            &f.destination(),
+            "SELECT highest_gen FROM connector_home_generation WHERE role = 'connector_home'"
+        ),
+        u64::MAX.to_string()
+    );
+}
+
+#[test]
+fn connector_home_generation_refuses_regression_after_reopen() {
+    let f = Fixture::new();
+    let descriptor = descriptor(&f.from).unwrap();
+    let store = crate::storage::PlexusStore::open(&descriptor).unwrap();
+    assert!(store
+        .observe_connector_home_generation(u64::MAX - 1)
+        .unwrap());
+    drop(store);
+    let store = crate::storage::PlexusStore::open(&descriptor).unwrap();
+    assert!(!store.observe_connector_home_generation(0).unwrap());
+    assert!(store
+        .observe_connector_home_generation(u64::MAX - 1)
+        .unwrap());
+    assert!(store.observe_connector_home_generation(u64::MAX).unwrap());
+    assert!(!store
+        .observe_connector_home_generation(u64::MAX - 1)
+        .unwrap());
+}
+
 struct Fixture {
     // Under the shared test scratch root, so a killed run's leftovers are swept
     // by age like every other test's and never land in the source tree.
@@ -638,6 +691,7 @@ fn production_v23_round_trip_dispositions_and_routing() {
             | "federated_rows"
             | "federated_card_records"
             | "federated_processed_cards"
+            | "connector_home_generation"
             | "route_fact_outbox" => (0, 0, 0),
             _ => (1, 1, 0),
         };

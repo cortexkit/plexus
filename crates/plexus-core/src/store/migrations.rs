@@ -1218,6 +1218,15 @@ CREATE TRIGGER github_attested_probe_connection_deleted AFTER DELETE ON connecti
 END;
 "#,
     },
+    Migration {
+        version: 66,
+        statements: r#"
+CREATE TABLE connector_home_generation (
+    role TEXT PRIMARY KEY,
+    highest_gen TEXT NOT NULL
+);
+"#,
+    },
 ];
 
 /// Shared with offline store import, whose destination is migrated before
