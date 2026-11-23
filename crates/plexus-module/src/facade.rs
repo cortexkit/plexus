@@ -199,11 +199,9 @@ fn facade_tool_reply_inner(
         return Ok(retired_identity_refusal(field));
     }
     // Broca, the model runner, copies the preset name from the session's plan
-    // ("worker", "reader" or "head") onto every request it sends a provider, the
-    // catalog fetch and each later tool call alike. Accept the presets plexus's
-    // tool catalog serves and refuse any other. Which plexus tools a session gets
-    // is decided by capability tags when the plan is built, and every call is
-    // still authorized on its own, so the preset grants nothing.
+    // onto the catalog fetch and each later tool call. Accept the presets Plexus
+    // lists for discovery. The preset can select catalog definitions, but each
+    // call is still authorized on its own, so the preset grants nothing.
     if let Some(preset) = object.get("preset") {
         if !preset.as_str().is_some_and(tool_provider::serves_preset) {
             return Ok(json!({"error":{"code":"invalid_request", "field":"preset",

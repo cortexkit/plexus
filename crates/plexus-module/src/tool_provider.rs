@@ -25,10 +25,11 @@ fn invalid_request(field: &str, message: impl Into<String>) -> ErrorBody {
 }
 
 /// Advertised in `role.describe` so a consumer sends `params.capabilities`
-/// only to a provider that selects tools by it. Present means preflight and
-/// plan fetch both answer exactly the tools carrying a requested tag, and a
-/// missing or empty list answers no tools.
+/// only to a provider that selects tools by it. A supplied list overrides
+/// preset selection and answers exactly the tools carrying a requested tag.
 pub(crate) const CAPABILITY_FILTER: &str = "tool-catalog-capability-filter/v1";
+
+const PRESETS: [&str; 4] = ["head", "worker", "reader", "flow"];
 
 // Tags describe the tool's contract, not the caller's authority. Keep the
 // mapping explicit so grants can select tools without knowing their names.
@@ -210,13 +211,14 @@ fn wire_tools(tools: &[CatalogTool]) -> Value {
 }
 
 pub(crate) fn serves_preset(preset: &str) -> bool {
-    matches!(preset, "head" | "worker" | "reader")
+    PRESETS.contains(&preset)
 }
 
 fn tools_for(
     preset: Option<&str>,
     params: &Map<String, Value>,
-) -> Result<Vec<&'static str>, ErrorBody> {
+    mut tools: Vec<CatalogTool>,
+) -> Result<Vec<CatalogTool>, ErrorBody> {
     if preset.is_some_and(|preset| !serves_preset(preset)) {
         return Err(invalid_request("preset", "unknown plexus catalog preset"));
     }
@@ -227,7 +229,15 @@ fn tools_for(
         ));
     }
     let Some(capabilities) = params.get("capabilities") else {
-        return Ok(Vec::new());
+        tools.retain(|tool| match preset {
+            Some("head" | "worker" | "reader") => {
+                matches!(tool.name.as_str(), WEB_SEARCH_TOOL | CODE_SEARCH_TOOL)
+            }
+            Some("flow") => serves_call_mode(tool, &CallMode::Flow),
+            // A plan without either selector must not offer tools to a model.
+            _ => false,
+        });
+        return Ok(tools);
     };
     let capabilities = capabilities.as_array().ok_or_else(|| {
         invalid_request(
@@ -265,11 +275,13 @@ fn tools_for(
             })));
         }
     }
-    Ok(TOOL_CAPABILITIES
+    let selected: Vec<_> = TOOL_CAPABILITIES
         .iter()
         .filter(|(_, own)| own.iter().any(|tag| tags.contains(tag)))
         .map(|(name, _)| *name)
-        .collect())
+        .collect();
+    tools.retain(|tool| selected.contains(&tool.name.as_str()));
+    Ok(tools)
 }
 
 #[cfg(test)]
@@ -295,14 +307,15 @@ fn catalog_answer(
     tools: Vec<CatalogTool>,
     generation: String,
 ) -> Result<CatalogAnswer, ErrorBody> {
-    let selected = tools_for(request.preset.as_deref(), &request.params)?;
     // Generation identifies the full advertised definitions, independent of
-    // capability selection; catalog_digest covers the actual answer.
-    let tools = tools
-        .into_iter()
-        .filter(|tool| selected.contains(&tool.name.as_str()))
-        .collect();
+    // tool selection; catalog_digest covers the actual answer.
+    let tools = tools_for(request.preset.as_deref(), &request.params, tools)?;
     let mut answer = CatalogAnswer::new(generation, "").with_tools(tools);
+    // The role permits preset discovery only without a preset. Leave legacy
+    // filtered replies intact, including their catalog digest.
+    if request.preset.is_none() && !request.params.contains_key("capabilities") {
+        answer = answer.with_presets(PRESETS);
+    }
     if let Some(composition) = &request.composition {
         answer.composition_digest = Some(
             cortexkit_role_tool_provider::catalog::composition_digest(&Value::Object(

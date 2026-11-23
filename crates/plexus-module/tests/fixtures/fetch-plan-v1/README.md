@@ -76,10 +76,10 @@ tags, with empty tool lists for text-only and hook-only providers. Broca compare
 fetched tool names and tags with the corresponding composition entry.
 
 The copied plan predates capability-param selection: its Plexus tool item has
-empty `params`. Tests retain those original bytes, verify that they select no
-tools on a plan fetch, and then supply `params.capabilities` for the fixture's
-`github` and `web_search` tools. Plexus keeps the composition opaque and selects
-tools only from the capability params, not from the composition entry.
+empty `params`. Tests retain those original bytes, verify that the `head` preset
+selects only search tools, and then supply `params.capabilities` for the fixture's
+`github` and `web_search` tools. Plexus keeps the composition opaque: capabilities
+override the preset, and the composition entry does not select tools.
 
 This local copy lets the catalog tests run when CI checks out only Plexus.
 

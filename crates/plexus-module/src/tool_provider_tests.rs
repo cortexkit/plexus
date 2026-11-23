@@ -256,8 +256,7 @@ fn fetch(
 }
 
 fn all_capabilities_request() -> CatalogRequest {
-    // Catalog tests that inspect every definition must request that full set;
-    // a missing or empty capability list selects no tools in every mode.
+    // Request every tag to inspect definitions that are not part of any preset.
     let mut capabilities: Vec<_> = TOOL_CAPABILITIES
         .iter()
         .flat_map(|(_, tags)| tags.iter().copied())
@@ -371,11 +370,178 @@ fn catalog_refuses_malformed_or_noncanonical_capability_lists() {
 
 #[test]
 fn catalog_plan_without_capabilities_answers_no_tools() {
-    for params in [json!({}), json!({"capabilities": []})] {
-        let answer = fetch(params, Some(json!({"providers": "opaque"})), Some("reader")).unwrap();
+    let answer = fetch(json!({}), Some(json!({"providers": "opaque"})), None).unwrap();
+    assert!(answer.tools.is_empty());
+    assert_eq!(answer.presets, ["head", "worker", "reader", "flow"]);
+    cortexkit_role_tool_provider::catalog::check_presets(&answer, None).unwrap();
+}
+
+#[test]
+fn catalog_search_presets_return_only_search_tools() {
+    let filtered: Value = serde_json::from_slice(include_bytes!(
+        "../tests/fixtures/tool-catalog/preflight-worker-search.reply.json"
+    ))
+    .unwrap();
+    for preset in ["head", "worker", "reader"] {
+        let request = json!({"preset": preset});
+        let wire = reply(ops::TOOL_CATALOG, request.as_object().unwrap()).unwrap();
+        let answer: CatalogAnswer = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            names(&answer),
+            [WEB_SEARCH_TOOL, CODE_SEARCH_TOOL],
+            "{preset}"
+        );
+        assert_eq!(wire["tools"], filtered["tools"], "{preset}");
+        cortexkit_role_tool_provider::catalog::check_presets(&answer, Some(preset)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn catalog_flow_preset_returns_flow_tools_with_unchanged_metadata() {
+    let frame = send_request(
+        subc_protocol::Principal::Direct,
+        json!({"name": ops::TOOL_CATALOG, "preset": "flow", "arguments": {"preset": "flow"}}),
+    )
+    .await;
+    assert_eq!(frame.header.ty, subc_protocol::FrameType::Response);
+    let wire: Value = serde_json::from_slice(&frame.body).unwrap();
+    let answer: CatalogAnswer = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(
+        names(&answer),
+        [
+            "catalog",
+            "invoke",
+            "github",
+            "github_read",
+            "github_react",
+            "events_get",
+            WEB_SEARCH_TOOL,
+            CODE_SEARCH_TOOL,
+        ]
+    );
+    cortexkit_role_tool_provider::catalog::check_presets(&answer, Some("flow")).unwrap();
+    let request = json!({"params": all_capabilities_request().params});
+    let full = reply(ops::TOOL_CATALOG, request.as_object().unwrap()).unwrap();
+    let flow_tools: Vec<_> = full["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tool| {
+            tool["modes"]
+                .as_array()
+                .is_some_and(|modes| modes.iter().any(|mode| mode == "flow"))
+        })
+        .collect();
+    assert_eq!(wire["tools"], json!(flow_tools));
+    assert_eq!(wire["tools"][4]["emits_events"], false);
+}
+
+#[test]
+fn catalog_presets_keep_legacy_filtered_bytes() {
+    let bytes = include_bytes!("../tests/fixtures/tool-catalog/preflight-worker-search.reply.json");
+    for preset in [
+        None,
+        Some("head"),
+        Some("worker"),
+        Some("reader"),
+        Some("flow"),
+    ] {
+        let mut request =
+            json!({"params": {"capabilities": ["code.search.public/v1", "web.search/v1"]}});
+        if let Some(preset) = preset {
+            request["preset"] = json!(preset);
+        }
+        let wire = reply(ops::TOOL_CATALOG, request.as_object().unwrap()).unwrap();
+        assert_eq!(serde_json::to_vec(&wire).unwrap(), bytes, "{preset:?}");
+
+        let empty = fetch(json!({"capabilities": []}), None, preset).unwrap();
+        assert!(empty.tools.is_empty(), "{preset:?}");
+        assert!(empty.presets.is_empty(), "{preset:?}");
+    }
+}
+
+#[test]
+fn catalog_refuses_unknown_preset_with_or_without_capabilities() {
+    for params in [json!({}), json!({"capabilities": ["web.search/v1"]})] {
+        let error = fetch(params, None, Some("unknown")).unwrap_err();
+        assert_eq!(
+            error.code,
+            cortexkit_role_tool_provider::errors::INVALID_REQUEST
+        );
+        assert_eq!(error.detail.unwrap()["field"], "preset");
+    }
+}
+
+#[tokio::test]
+async fn catalog_preset_wire_vectors_match_reply() {
+    use std::fmt::Write as _;
+
+    let vectors: &[(&str, Option<&str>, &[u8])] = &[
+        (
+            "flow.reply.json",
+            Some("flow"),
+            include_bytes!("../tests/fixtures/tool-catalog-presets/flow.reply.json"),
+        ),
+        (
+            "head.reply.json",
+            Some("head"),
+            include_bytes!("../tests/fixtures/tool-catalog-presets/head.reply.json"),
+        ),
+        (
+            "no-preset.reply.json",
+            None,
+            include_bytes!("../tests/fixtures/tool-catalog-presets/no-preset.reply.json"),
+        ),
+        (
+            "reader.reply.json",
+            Some("reader"),
+            include_bytes!("../tests/fixtures/tool-catalog-presets/reader.reply.json"),
+        ),
+        (
+            "worker.reply.json",
+            Some("worker"),
+            include_bytes!("../tests/fixtures/tool-catalog-presets/worker.reply.json"),
+        ),
+    ];
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/tool-catalog-presets");
+    let regenerate =
+        std::env::var("PLEXUS_REGENERATE_CATALOG_PRESET_FIXTURES").as_deref() == Ok("1");
+    let mut sums = String::new();
+    for &(filename, preset, expected) in vectors {
+        let arguments = preset.map_or_else(|| json!({}), |preset| json!({"preset": preset}));
+        let frame = send_metadata(
+            subc_protocol::Principal::Direct,
+            ops::TOOL_CATALOG,
+            arguments,
+        )
+        .await;
+        assert_eq!(
+            frame.header.ty,
+            subc_protocol::FrameType::Response,
+            "{filename}"
+        );
+        let actual = &frame.body[..];
         assert!(
-            answer.tools.is_empty(),
-            "plan fetch without capabilities must answer no tools"
+            actual.len() < 65_536,
+            "{filename} exceeds the catalog size limit"
+        );
+        writeln!(sums, "{}  {filename}", plexus_core::jcs::sha256_hex(actual)).unwrap();
+        if regenerate {
+            std::fs::write(directory.join(filename), actual).unwrap();
+        } else {
+            assert!(
+                actual == expected,
+                "committed reply bytes for {filename} must equal the response body"
+            );
+        }
+    }
+    if regenerate {
+        std::fs::write(directory.join("SHA256SUMS"), sums).unwrap();
+    } else {
+        assert_eq!(
+            sums,
+            include_str!("../tests/fixtures/tool-catalog-presets/SHA256SUMS")
         );
     }
 }
@@ -529,15 +695,15 @@ fn catalog_broca_head_fixture_selects_names_and_tags_from_params() {
         .find(|item| item["provider"] == "plexus")
         .unwrap();
     let composition = plan["composition"].clone();
-    // The shared vector predates capability selection and has empty params.
-    // A plan fetch with those original params must not expose any tools.
+    // The fixture's Plexus tool item has empty params, so the head preset offers
+    // only search, regardless of the tools listed in the opaque composition.
     let original = fetch(
         item["params"].clone(),
         Some(composition.clone()),
         item["preset"].as_str(),
     )
     .unwrap();
-    assert!(original.tools.is_empty());
+    assert_eq!(names(&original), [WEB_SEARCH_TOOL, CODE_SEARCH_TOOL]);
     let answer = fetch(
         json!({"capabilities": ["plexus:github.facade/v1", "plexus:web.search/v1"]}),
         Some(composition),
@@ -655,6 +821,38 @@ fn catalog_digest_only_matches_full_answer_and_hashes_composition() {
     assert_eq!(other["generation"], full["generation"]);
 }
 
+#[test]
+fn catalog_digest_only_matches_unfiltered_answer() {
+    for preset in [
+        None,
+        Some("head"),
+        Some("worker"),
+        Some("reader"),
+        Some("flow"),
+    ] {
+        let mut arguments = preset.map_or_else(|| json!({}), |preset| json!({"preset": preset}));
+        let mut full = reply(ops::TOOL_CATALOG, arguments.as_object().unwrap()).unwrap();
+        let catalog_digest = full
+            .as_object_mut()
+            .unwrap()
+            .remove("catalog_digest")
+            .unwrap();
+        assert_eq!(
+            catalog_digest,
+            plexus_core::jcs_sha256(&full).unwrap(),
+            "{preset:?}"
+        );
+
+        arguments["digest_only"] = json!(true);
+        let digest = reply(ops::TOOL_CATALOG, arguments.as_object().unwrap()).unwrap();
+        assert_eq!(
+            digest,
+            json!({"generation": full["generation"], "catalog_digest": catalog_digest}),
+            "{preset:?}"
+        );
+    }
+}
+
 async fn send_metadata(
     principal: subc_protocol::Principal,
     name: &str,
@@ -733,7 +931,7 @@ async fn tool_catalog_route_serves_metadata_without_grants() {
         let decoded: CatalogAnswer = serde_json::from_value(body).unwrap();
         assert!(
             decoded.tools.is_empty(),
-            "preflight without capability params must select no tools"
+            "preflight without a preset or capabilities must select no tools"
         );
     }
     let frame = send_metadata(
