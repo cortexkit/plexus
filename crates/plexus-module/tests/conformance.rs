@@ -2151,8 +2151,8 @@ async fn open_management_route(stream: &mut TcpStream) -> (u16, u32) {
 /// Plexus refuses every connector effect (a vendor call, a ticket, a consent
 /// card) as `connector_home_not_held` until it is admitted: it holds
 /// entorhinal's lease or, against an entorhinal without leases like this
-/// fixture's, a `role.read` says this machine holds the role. It starts every
-/// boot `unknown`. The role read can already say `held` while plexus is still
+/// fixture's, a `role.read` says this machine holds the role. Plexus's
+/// connector-home gate starts every boot `unknown`. The role read can already say `held` while plexus is still
 /// switching to the role-read fallback, so this waits for the status reply's
 /// `admitted`, not only its `state`. Its own first read runs on a background task at startup, so a
 /// test that issues an effect straight after plexus registers races that

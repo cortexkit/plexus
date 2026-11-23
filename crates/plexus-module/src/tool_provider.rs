@@ -230,9 +230,12 @@ fn tools_for(
     }
     let Some(capabilities) = params.get("capabilities") else {
         tools.retain(|tool| match preset {
-            Some("head" | "worker" | "reader") => {
+            Some("head" | "worker") => {
                 matches!(tool.name.as_str(), WEB_SEARCH_TOOL | CODE_SEARCH_TOOL)
             }
+            // Read-only lanes (sidekick readers, read-only workers) get code
+            // search alone; a lane that also needs web search asks for `worker`.
+            Some("reader") => tool.name == CODE_SEARCH_TOOL,
             Some("flow") => serves_call_mode(tool, &CallMode::Flow),
             // A plan without either selector must not offer tools to a model.
             _ => false,

@@ -382,7 +382,7 @@ fn catalog_search_presets_return_only_search_tools() {
         "../tests/fixtures/tool-catalog/preflight-worker-search.reply.json"
     ))
     .unwrap();
-    for preset in ["head", "worker", "reader"] {
+    for preset in ["head", "worker"] {
         let request = json!({"preset": preset});
         let wire = reply(ops::TOOL_CATALOG, request.as_object().unwrap()).unwrap();
         let answer: CatalogAnswer = serde_json::from_value(wire.clone()).unwrap();
@@ -394,6 +394,23 @@ fn catalog_search_presets_return_only_search_tools() {
         assert_eq!(wire["tools"], filtered["tools"], "{preset}");
         cortexkit_role_tool_provider::catalog::check_presets(&answer, Some(preset)).unwrap();
     }
+    // Read-only lanes get code search alone.
+    let wire = reply(
+        ops::TOOL_CATALOG,
+        json!({"preset": "reader"}).as_object().unwrap(),
+    )
+    .unwrap();
+    let answer: CatalogAnswer = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(names(&answer), [CODE_SEARCH_TOOL]);
+    let code_search: Vec<_> = filtered["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tool| tool["name"] == CODE_SEARCH_TOOL)
+        .cloned()
+        .collect();
+    assert_eq!(wire["tools"], json!(code_search));
+    cortexkit_role_tool_provider::catalog::check_presets(&answer, Some("reader")).unwrap();
 }
 
 #[tokio::test]
