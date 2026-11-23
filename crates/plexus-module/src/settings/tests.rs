@@ -9,11 +9,25 @@ fn declaration_matches_schema_rules_and_wire_fixture() {
         json!({"audit_retention_days": 30, "catalog_dir": "catalog"})
     );
     assert_eq!(schema.normalized()["unevaluatedProperties"], false);
-    for (field, kind, apply) in [
-        ("audit_retention_days", "integer", "live"),
-        ("catalog_dir", "string", "module_restart"),
+    // The desktop Settings page heads the page with the root title and labels
+    // each setting with its title, falling back to the raw key without one.
+    assert_eq!(declaration.schema["title"], "Plexus");
+    for (field, kind, apply, title) in [
+        (
+            "audit_retention_days",
+            "integer",
+            "live",
+            "Audit record retention (days)",
+        ),
+        (
+            "catalog_dir",
+            "string",
+            "module_restart",
+            "Vendor catalog folder",
+        ),
     ] {
         let property = &declaration.schema["properties"][field];
+        assert_eq!(property["title"], title);
         assert_eq!(property["type"], kind);
         assert_eq!(property["x-ck-apply"], apply);
         assert_eq!(property["x-ck-layers"], json!(["user"]));

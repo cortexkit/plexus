@@ -21,11 +21,13 @@ const FIELDS: [(&str, ApplyKind); 2] = [
 fn settings_schema() -> Value {
     let mut schema = json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Plexus",
         "type": "object",
         "unevaluatedProperties": false,
         "properties": {
             "audit_retention_days": {
                 "type": "integer",
+                "title": "Audit record retention (days)",
                 "description": "Days to keep audit records. The store already keeps at least 7 days, so this setting must be longer than that.",
                 "default": DEFAULT_AUDIT_RETENTION_DAYS,
                 "minimum": MIN_RETENTION_DAYS,
@@ -35,6 +37,7 @@ fn settings_schema() -> Value {
             },
             "catalog_dir": {
                 "type": "string",
+                "title": "Vendor catalog folder",
                 "description": "Directory containing the vendor catalog. Relative paths are resolved from the Plexus data directory.",
                 "default": "catalog",
                 "minLength": 1,
