@@ -2149,9 +2149,12 @@ async fn open_management_route(stream: &mut TcpStream) -> (u16, u32) {
 /// an open management `route`.
 ///
 /// Plexus refuses every connector effect (a vendor call, a ticket, a consent
-/// card) as `connector_home_not_held` until a successful `role.read` from
-/// entorhinal says this machine holds the role, and it starts every boot
-/// `unknown`. Its own first read runs on a background task at startup, so a
+/// card) as `connector_home_not_held` until it is admitted: it holds
+/// entorhinal's lease or, against an entorhinal without leases like this
+/// fixture's, a `role.read` says this machine holds the role. It starts every
+/// boot `unknown`. The role read can already say `held` while plexus is still
+/// switching to the role-read fallback, so this waits for the status reply's
+/// `admitted`, not only its `state`. Its own first read runs on a background task at startup, so a
 /// test that issues an effect straight after plexus registers races that
 /// read: on a Linux CI runner a ticket was refused 7 ms before the read
 /// landed. Every live test that issues an effect must therefore come through
@@ -2187,9 +2190,14 @@ async fn wait_for_connector_home_held(stream: &mut TcpStream, route: (u16, u32))
         } else {
             &value["result"]["connectorHome"]["state"]
         };
+        let admitted = if value["result"].is_null() {
+            &value["connectorHome"]["admitted"]
+        } else {
+            &value["result"]["connectorHome"]["admitted"]
+        };
         match state.as_str() {
-            Some("held") => return,
-            Some("unknown") => {}
+            Some("held") if admitted == &json!(true) => return,
+            Some("held" | "unknown") => {}
             _ => panic!("plexus reported the connector-home claim not held: {value}"),
         }
         assert!(

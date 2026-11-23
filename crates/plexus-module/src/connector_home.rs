@@ -349,11 +349,18 @@ impl ConnectorHome {
         let state = json!({"state":self.refusal_status()["state"]});
         json!({"error":{"code":"connector_home_not_held", "message":format!("connector home not held: {state}"), "connectorHome":state, "transmission":"not_sent"}})
     }
+    /// Answer the operator's status request with a fresh role read, the lease,
+    /// and `admitted`: whether plexus would send an outside effect right now.
+    /// The role read alone can say `held` while plexus still refuses (no lease
+    /// notice acknowledged yet, or a lease that lapsed), so `admitted` is the
+    /// field that answers "is plexus acting".
     pub fn live_status(&self) -> Value {
         let live = self.refresh();
+        let mut status = self.health_status();
+        status["admitted"] = json!(self.held());
         match live {
-            Ok(role) => json!({"result":{"role":role, "connectorHome":self.status()}}),
-            Err(error) => json!({"error":error,"connectorHome":self.status()}),
+            Ok(role) => json!({"result":{"role":role, "connectorHome":status}}),
+            Err(error) => json!({"error":error,"connectorHome":status}),
         }
     }
     /// Development and test helper that admits connector effects; production never calls it.

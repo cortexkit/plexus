@@ -74,7 +74,10 @@ ck roles take connector_home
 ```
 
 Status is answered only to the operator's own local connection (`direct`), not
-to a call carried by another module. It reads `role.read` and prints both the reply and the current gate. `ck-plexus-admin connector-home claim` is
+to a call carried by another module. It reads `role.read` and prints the reply and the current gate, including the
+lease and `admitted`: whether Plexus would send an outside effect right now. The
+role read can say `held` while Plexus still refuses, for example before its first
+lease notice is acknowledged. `ck-plexus-admin connector-home claim` is
 removed and refuses by name, directing the operator to `ck roles take
 connector_home`. Plexus never takes the role: Entorhinal's `role.take` is
 Direct-only with operator confirmation and refuses `reserved:plexus`.
