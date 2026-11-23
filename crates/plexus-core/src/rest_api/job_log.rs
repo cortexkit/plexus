@@ -68,13 +68,13 @@ pub(super) fn api_redirect(
     };
     let headers = build_headers(&config.credential_bindings, credential)
         .map_err(|_| Box::new(local_not_sent()))?;
-    let _leg = gate
-        .enter(deadline)
+    let leg = gate
+        .enter()
         .map_err(|message| Box::new(TransportResponse::connector_home_refusal(message)))?;
     let response = client
         .get(&prepared.url)
         .headers(headers)
-        .timeout(deadline)
+        .timeout(leg.timeout(deadline))
         .send()
         .map_err(|error| {
             Box::new(request_failure_response(
@@ -211,11 +211,15 @@ pub(super) fn download(
     let Some(time) = remaining() else {
         return refused("job_log_read_limit");
     };
-    let head_leg = match gate.enter(time) {
+    let head_leg = match gate.enter() {
         Ok(permit) => permit,
         Err(message) => return TransportResponse::connector_home_refusal(message),
     };
-    let properties = match client.head(url.clone()).timeout(time).send() {
+    let properties = match client
+        .head(url.clone())
+        .timeout(head_leg.timeout(time))
+        .send()
+    {
         Ok(response) => response,
         Err(_) => return refused("job_log_download_failed"),
     };
@@ -232,18 +236,18 @@ pub(super) fn download(
     let Some(time) = remaining() else {
         return refused("job_log_read_limit");
     };
-    let mut storage = client.get(url.clone()).timeout(time);
+    let mut storage = client.get(url.clone());
     if let Some(length) = known_length.filter(|length| *length > 0) {
         storage = storage.header(
             reqwest::header::RANGE,
             format!("bytes={}-", length.saturating_sub(max_bytes as u64)),
         );
     }
-    let _leg = match gate.enter(time) {
+    let leg = match gate.enter() {
         Ok(permit) => permit,
         Err(message) => return TransportResponse::connector_home_refusal(message),
     };
-    let response = match storage.send() {
+    let response = match storage.timeout(leg.timeout(time)).send() {
         Ok(response) => response,
         Err(_) => return refused("job_log_download_failed"),
     };
@@ -366,14 +370,14 @@ fn download_range(
     };
     // A new request, not a copy of the API request: no credential header
     // leaves the API origin.
-    let _leg = match gate.enter(time) {
+    let leg = match gate.enter() {
         Ok(permit) => permit,
         Err(message) => return TransportResponse::connector_home_refusal(message),
     };
     let response = match client
         .get(url.clone())
-        .timeout(time)
         .header(reqwest::header::RANGE, format!("bytes={offset}-{last}"))
+        .timeout(leg.timeout(time))
         .send()
     {
         Ok(response) => response,

@@ -1,13 +1,18 @@
 use super::*;
 use crate::connector_home::RolePeer;
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+use plexus_core::rest_api::RestConfig;
 use plexus_core::test_scratch::Scratch;
+use plexus_core::{
+    McpRemoteTransport, RestTransport, TransmissionState, Transport, TransportRequest,
+};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use subc_protocol::{Flags, Frame, FrameType};
 use subc_transport::{
     authenticate_server, connection_file, generate_daemon_id, generate_key, read_frame,
     write_frame, ConnectionInfo, Endpoint, SCHEMA_VERSION,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
@@ -257,17 +262,20 @@ async fn serving_requires_a_live_notice_and_remaining_transport_budget() {
             "holding":true, "gen":7, "deadline_in_ms":45_000, "handback":false, "yield_pending":false,
         })
     );
-    rig.now.store(115_000, Ordering::SeqCst);
-    assert!(rig.home.begin_act(Duration::from_secs(30)).is_ok());
-    rig.now.store(115_001, Ordering::SeqCst);
+    rig.now.store(140_000, Ordering::SeqCst);
+    assert_eq!(
+        rig.home.begin_act().unwrap().unwrap().1,
+        Duration::from_secs(5)
+    );
+    rig.now.store(140_001, Ordering::SeqCst);
     assert!(rig.home.held());
-    assert!(rig.home.begin_act(Duration::from_secs(30)).is_err());
+    assert!(rig.home.begin_act().is_err());
 
     rig.now.store(144_999, Ordering::SeqCst);
     assert!(rig.home.held());
     let mut changes = rig.home.decisions();
     rig.now.store(145_000, Ordering::SeqCst);
-    assert!(rig.home.begin_act(Duration::ZERO).is_err());
+    assert!(rig.home.begin_act().is_err());
     timeout(LIMIT, changes.wait_for(|holds| !*holds))
         .await
         .unwrap()
@@ -313,7 +321,7 @@ async fn handback_waits_for_an_in_flight_leg_then_yields_on_the_watch_route() {
         let shared = samples("sharing-disabled");
         rig.notice(body(&shared[0], 0)).await;
         rig.decision(true).await;
-        let leg = rig.home.begin_act(Duration::from_secs(2)).unwrap();
+        let leg = rig.home.begin_act().unwrap();
 
         // The handback fixture is addressed to Magic Context. The notices do
         // not carry a role name; retarget its generation to the Plexus yield.
@@ -321,7 +329,7 @@ async fn handback_waits_for_an_in_flight_leg_then_yields_on_the_watch_route() {
         handback["gen"] = json!(1);
         rig.notice(&handback).await;
         rig.decision(false).await;
-        assert!(rig.home.begin_act(Duration::ZERO).is_err());
+        assert!(rig.home.begin_act().is_err());
         let mut peek = [0];
         assert!(
             timeout(Duration::from_millis(50), rig.socket.peek(&mut peek))
@@ -339,7 +347,7 @@ async fn handback_waits_for_an_in_flight_leg_then_yields_on_the_watch_route() {
         rig.now.store(120_000, Ordering::SeqCst);
         rig.notice(&renewal).await;
         assert!(
-            rig.home.begin_act(Duration::ZERO).is_err(),
+            rig.home.begin_act().is_err(),
             "renewal cannot bypass an unsettled yield"
         );
         rig.reply(&request, FrameType::Response, body(&samples(file)[0], 0))
@@ -349,7 +357,7 @@ async fn handback_waits_for_an_in_flight_leg_then_yields_on_the_watch_route() {
             replay["seq"] = json!(5);
             rig.notice(&replay).await;
             assert!(
-                rig.home.begin_act(Duration::ZERO).is_err(),
+                rig.home.begin_act().is_err(),
                 "transferred generation must never resume"
             );
             renewal["seq"] = json!(6);
@@ -439,69 +447,104 @@ async fn not_holding_is_acked_and_wrong_route_ack_never_grants() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn insufficient_lease_refuses_at_real_rest_and_mcp_send_boundaries() {
-    use plexus_core::rest_api::RestConfig;
-    use plexus_core::{McpRemoteTransport, RestTransport, Transport, TransportRequest};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     let mut rig = Rig::new(100_000).await;
     rig.notice(body(&samples("holding")[0], 0)).await;
     rig.decision(true).await;
     let vendor = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", vendor.local_addr().unwrap());
-    let rest_config = {
-        let mut config = RestConfig::new(&endpoint);
-        config.actions.insert(
-            "read".into(),
-            serde_json::from_value(json!({
-                "method":"GET", "path":"/read", "args_schema":{"type":"object"}
-            }))
-            .unwrap(),
-        );
-        config
-    };
-    let rest = RestTransport::new(rest_config).with_vendor_leg_gate(rig.home.vendor_gate());
+    let rest = rest_reader(&rig.home, &endpoint);
     let mcp = McpRemoteTransport::new(plexus_core::McpRemoteConfig::new(&endpoint))
         .with_vendor_leg_gate(rig.home.vendor_gate());
-    let dispatch = |transport: &dyn Transport| {
-        transport.dispatch(
-            TransportRequest {
-                request_id: "lease-bound".into(),
-                connection_id: "fixture".into(),
-                action: "read".into(),
-                args: json!({}),
-                credential_fingerprint: String::new(),
-            },
-            &plexus_core::ResolvedCredential::anonymous(),
-        )
-    };
 
     let endpoint_task = tokio::spawn(async move {
-        loop {
-            let (mut socket, _) = vendor.accept().await.unwrap();
-            let mut bytes = Vec::new();
-            while !bytes.ends_with(b"\r\n\r\n") {
-                bytes.push(socket.read_u8().await.unwrap());
-            }
-            // A mistakenly sent request gets an immediate HTTP response so
-            // the regression fails on its assertion instead of waiting on HTTP.
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
-            if bytes.starts_with(b"GET /read ") {
-                return;
-            }
-        }
+        let (mut socket, request) = vendor_request(&vendor).await;
+        assert!(request.starts_with(b"GET /read "));
+        socket.write_all(VENDOR_OK).await.unwrap();
     });
-    rig.now.store(115_001, Ordering::SeqCst);
+    rig.now.store(141_000, Ordering::SeqCst);
     assert!(rig.home.held());
     for transport in [&rest as &dyn Transport, &mcp] {
-        let reply = blocking_section(|| dispatch(transport));
-        assert_eq!(reply.transmission, plexus_core::TransmissionState::NotSent);
+        let reply = blocking_section(|| dispatch_read(transport));
+        assert_eq!(reply.transmission, TransmissionState::NotSent);
         assert_eq!(reply.error_code.as_deref(), Some("connector_home_not_held"));
+        assert_eq!(
+            reply.error_message.as_deref(),
+            Some(
+                r#"connector home not held: {"checkedAt":null,"code":null,"epoch":null,"holder_name":null,"source":null,"state":"not_held"}"#
+            )
+        );
     }
-    rig.now.store(115_000, Ordering::SeqCst);
-    let reply = blocking_section(|| dispatch(&rest));
+    rig.now.store(119_000, Ordering::SeqCst);
+    let reply = blocking_section(|| dispatch_read(&rest));
     assert_eq!(reply.response, Some(json!({})));
     timeout(LIMIT, endpoint_task).await.unwrap().unwrap();
     rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rest_leg_times_out_when_vendor_replies_after_lease_deadline() {
+    let mut rig = Rig::new(100_000).await;
+    rig.notice(body(&samples("holding")[0], 0)).await;
+    rig.decision(true).await;
+    rig.now.store(119_000, Ordering::SeqCst);
+
+    let vendor = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rest = rest_reader(
+        &rig.home,
+        &format!("http://{}", vendor.local_addr().unwrap()),
+    );
+    let (seen, received) = tokio::sync::oneshot::channel();
+    let endpoint_task = tokio::spawn(async move {
+        let (mut socket, request) = vendor_request(&vendor).await;
+        assert!(request.starts_with(b"GET /read "));
+        seen.send(()).unwrap();
+        // The reply fits within the configured 30 seconds, but not the lease's 26.
+        tokio::time::sleep(Duration::from_secs(27)).await;
+        let _ = socket.write_all(VENDOR_OK).await;
+    });
+    let reply = blocking_section(|| dispatch_read(&rest));
+    assert_eq!(reply.error_code.as_deref(), Some("timeout"));
+    assert_eq!(reply.response, None);
+    timeout(LIMIT, received).await.unwrap().unwrap();
+    timeout(LIMIT, endpoint_task).await.unwrap().unwrap();
+    rig.finish().await;
+}
+
+const VENDOR_OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+
+async fn vendor_request(vendor: &TcpListener) -> (TcpStream, Vec<u8>) {
+    let (mut socket, _) = vendor.accept().await.unwrap();
+    let mut request = Vec::new();
+    while !request.ends_with(b"\r\n\r\n") {
+        request.push(socket.read_u8().await.unwrap());
+    }
+    (socket, request)
+}
+
+fn rest_reader(home: &Arc<ConnectorHome>, endpoint: &str) -> RestTransport {
+    let mut config = RestConfig::new(endpoint);
+    assert_eq!(config.request_timeout, Duration::from_secs(30));
+    config.actions.insert(
+        "read".into(),
+        serde_json::from_value(json!({
+            "method":"GET", "path":"/read", "args_schema":{"type":"object"}
+        }))
+        .unwrap(),
+    );
+    RestTransport::new(config).with_vendor_leg_gate(home.vendor_gate())
+}
+
+fn dispatch_read(transport: &dyn Transport) -> plexus_core::TransportResponse {
+    transport.dispatch(
+        TransportRequest {
+            request_id: "lease-bound".into(),
+            connection_id: "fixture".into(),
+            action: "read".into(),
+            args: json!({}),
+            credential_fingerprint: String::new(),
+        },
+        &plexus_core::ResolvedCredential::anonymous(),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -84,12 +84,12 @@ pub(super) fn download(
         return refused("job_log_read_limit");
     };
     // Fresh request: the API's Authorization and custom credential headers stay behind.
-    let storage = client.get(url.clone()).timeout(time);
-    let leg = match gate.enter(time) {
+    let storage = client.get(url.clone());
+    let leg = match gate.enter() {
         Ok(permit) => permit,
         Err(message) => return TransportResponse::connector_home_refusal(message),
     };
-    let response = match storage.send() {
+    let response = match storage.timeout(leg.timeout(time)).send() {
         Ok(response) => response,
         Err(_) => return refused("job_log_download_failed"),
     };

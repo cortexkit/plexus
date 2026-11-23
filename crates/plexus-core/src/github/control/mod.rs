@@ -169,18 +169,20 @@ impl InstallationReader for GithubApiReader {
         // GitHub REST: https://docs.github.com/en/rest/apps/installations#list-repositories-accessible-to-the-app-installation
         // GET /installation/repositories accepts an installation access token and page/per_page.
         let bearer = std::str::from_utf8(token.payload()).map_err(|_| "credential_invalid")?;
-        let _leg = self
-            .leg_gate
-            .enter(INSTALLATION_READ_BOUND)
-            .map_err(|_| "connector_home_not_held")?;
-        let response = self
+        let request = self
             .client
             .get("https://api.github.com/installation/repositories")
             .query(&[("page", page), ("per_page", per_page)])
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "plexus-github-control")
-            .bearer_auth(bearer)
+            .bearer_auth(bearer);
+        let leg = self
+            .leg_gate
+            .enter()
+            .map_err(|_| "connector_home_not_held")?;
+        let response = request
+            .timeout(leg.timeout(INSTALLATION_READ_BOUND))
             .send()
             .map_err(|_| "installation_read_failed")?;
         if !response.status().is_success() {

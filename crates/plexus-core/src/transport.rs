@@ -9,7 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -17,7 +17,8 @@ use crate::credentials::ResolvedCredential;
 #[cfg(test)]
 use crate::fingerprint;
 
-type AdmitLeg = dyn Fn(Duration) -> Result<Box<dyn Send>, String> + Send + Sync;
+type LeaseAdmission = Option<(Box<dyn Send>, Duration)>;
+type AdmitLeg = dyn Fn() -> Result<LeaseAdmission, String> + Send + Sync;
 
 /// Fence each outbound leg after its local preparation and connection locks.
 /// Dropping the returned permit tells the lease holder the leg has settled.
@@ -25,14 +26,39 @@ type AdmitLeg = dyn Fn(Duration) -> Result<Box<dyn Send>, String> + Send + Sync;
 pub struct VendorLegGate(Option<Arc<AdmitLeg>>);
 
 impl VendorLegGate {
-    pub fn new(
-        admit: impl Fn(Duration) -> Result<Box<dyn Send>, String> + Send + Sync + 'static,
-    ) -> Self {
+    pub fn new(admit: impl Fn() -> Result<LeaseAdmission, String> + Send + Sync + 'static) -> Self {
         Self(Some(Arc::new(admit)))
     }
 
-    pub(crate) fn enter(&self, bound: Duration) -> Result<Option<Box<dyn Send>>, String> {
-        self.0.as_ref().map(|admit| admit(bound)).transpose()
+    pub(crate) fn enter(&self) -> Result<VendorLeg, String> {
+        // Start the budget before asking the gate so admission work cannot extend it.
+        let started = Instant::now();
+        let admission = self.0.as_ref().map(|admit| admit()).transpose()?.flatten();
+        let (permit, deadline) = match admission {
+            Some((permit, remaining)) => (Some(permit), started.checked_add(remaining)),
+            None => (None, None),
+        };
+        Ok(VendorLeg {
+            _permit: permit,
+            deadline,
+        })
+    }
+}
+
+pub(crate) struct VendorLeg {
+    _permit: Option<Box<dyn Send>>,
+    deadline: Option<Instant>,
+}
+
+impl VendorLeg {
+    pub(crate) fn deadline(&self, deadline: Instant) -> Instant {
+        self.deadline.map_or(deadline, |lease| deadline.min(lease))
+    }
+
+    pub(crate) fn timeout(&self, timeout: Duration) -> Duration {
+        self.deadline.map_or(timeout, |lease| {
+            timeout.min(lease.saturating_duration_since(Instant::now()))
+        })
     }
 }
 

@@ -319,18 +319,21 @@ impl ConnectorHome {
         status
     }
 
-    pub(crate) fn begin_act(&self, bound: std::time::Duration) -> Result<Option<gate::Permit>, ()> {
+    pub(crate) fn begin_act(&self) -> Result<Option<(gate::Permit, std::time::Duration)>, ()> {
         if self.gate.legacy() {
             return self.held().then_some(None).ok_or(());
         }
-        self.gate.begin(bound).map(Some).ok_or(())
+        self.gate.begin().map(Some).ok_or(())
     }
 
     pub(crate) fn vendor_gate(self: &Arc<Self>) -> plexus_core::transport::VendorLegGate {
         let home = self.clone();
-        plexus_core::transport::VendorLegGate::new(move |bound| {
-            home.begin_act(bound)
-                .map(|permit| Box::new(permit) as Box<dyn Send>)
+        plexus_core::transport::VendorLegGate::new(move || {
+            home.begin_act()
+                .map(|admission| {
+                    admission
+                        .map(|(permit, remaining)| (Box::new(permit) as Box<dyn Send>, remaining))
+                })
                 .map_err(|()| format!("connector home not held: {}", home.refusal_status()))
         })
     }

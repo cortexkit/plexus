@@ -803,11 +803,8 @@ async fn dial(url: &str, credential: &[u8], home: &Arc<ConnectorHome>) -> Result
         .map_err(|_| Failure::Rejected(RejectionCause::InvalidAuthorizationHeader))?;
     header.set_sensitive(true);
     request.headers_mut().insert("Authorization", header);
-    let _leg = home
-        .begin_act(CONNECT_BOUND)
-        .map_err(|()| Failure::NotHome)?;
     // Do not format transport errors: peer replies may echo the Authorization header.
-    connect_async_with_config(
+    let connect = connect_async_with_config(
         request,
         Some(
             tungstenite::protocol::WebSocketConfig::default()
@@ -815,18 +812,25 @@ async fn dial(url: &str, credential: &[u8], home: &Arc<ConnectorHome>) -> Result
                 .max_frame_size(Some(1_048_576)),
         ),
         false,
-    )
-    .await
-    .map(|(socket, _)| {
-        // The credential id is not secret. Logging it lets an operator match
-        // this connection against the vault's current record and the relay's
-        // list of live credentials when checking a rotation.
-        if let Some(id) = credential_id(credential) {
-            eprintln!(info relay: "relay connection opened with credential id {id}");
-        }
-        socket
-    })
-    .map_err(connection_failure)
+    );
+    let started = tokio::time::Instant::now();
+    let leg = home.begin_act().map_err(|()| Failure::NotHome)?;
+    let connect_timeout = leg.as_ref().map_or(CONNECT_BOUND, |(_, remaining)| {
+        CONNECT_BOUND.min(remaining.saturating_sub(started.elapsed()))
+    });
+    tokio::time::timeout(connect_timeout, connect)
+        .await
+        .map_err(|_| Failure::Reconnecting)?
+        .map(|(socket, _)| {
+            // The credential id is not secret. Logging it lets an operator match
+            // this connection against the vault's current record and the relay's
+            // list of live credentials when checking a rotation.
+            if let Some(id) = credential_id(credential) {
+                eprintln!(info relay: "relay connection opened with credential id {id}");
+            }
+            socket
+        })
+        .map_err(connection_failure)
 }
 
 /// The public id inside a relay credential,

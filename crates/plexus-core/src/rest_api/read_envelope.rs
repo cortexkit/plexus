@@ -113,14 +113,17 @@ pub(super) fn send(
         .checked_add(config.request_timeout)
         .unwrap_or_else(Instant::now);
     let method = reqwest::Method::GET;
-    let _leg = match gate.enter(config.request_timeout.min(Duration::from_secs(30))) {
+    let leg = match gate.enter() {
         Ok(permit) => permit,
         Err(message) => return TransportResponse::connector_home_refusal(message),
     };
-    let response = match with_request_deadline(client.get(&url).headers(headers), deadline).send() {
-        Ok(response) => response,
-        Err(error) => return request_failure_response(error, &method, &path),
-    };
+    let response =
+        match with_request_deadline(client.get(&url).headers(headers), leg.deadline(deadline))
+            .send()
+        {
+            Ok(response) => response,
+            Err(error) => return request_failure_response(error, &method, &path),
+        };
     classify(response, throttle_until, clock, &method, &path, media_type)
 }
 

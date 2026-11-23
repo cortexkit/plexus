@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{watch, Notify};
 
+const MIN_LEG_WINDOW: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub(super) struct Notice {
     pub(super) seq: u64,
@@ -46,12 +48,11 @@ impl State {
         n.remaining(now?)
     }
 
-    fn admits(&self, now: Option<u64>, bound: Duration) -> bool {
-        self.notice.is_some_and(|n| !n.handback)
-            && !self.yield_pending
-            && self
-                .remaining(now)
-                .is_some_and(|ms| Duration::from_millis(ms) >= bound)
+    fn admission_window(&self, now: Option<u64>) -> Option<Duration> {
+        if self.notice?.handback || self.yield_pending {
+            return None;
+        }
+        self.remaining(now).map(Duration::from_millis)
     }
 }
 
@@ -76,7 +77,7 @@ impl Gate {
     }
 
     fn publish(&self, state: &State) {
-        self.publish_decision(state.admits((self.now)(), Duration::ZERO));
+        self.publish_decision(state.admission_window((self.now)()).is_some());
     }
 
     fn publish_decision(&self, admitted: bool) {
@@ -108,7 +109,7 @@ impl Gate {
 
     pub(super) fn held(&self) -> bool {
         let state = self.state.lock().unwrap();
-        let held = state.admits((self.now)(), Duration::ZERO);
+        let held = state.admission_window((self.now)()).is_some();
         if !state.legacy {
             self.publish_decision(held);
         }
@@ -213,17 +214,21 @@ impl Gate {
         self.publish(&state);
     }
 
-    pub(super) fn begin(self: &Arc<Self>, bound: Duration) -> Option<Permit> {
+    pub(super) fn begin(self: &Arc<Self>) -> Option<(Permit, Duration)> {
         let mut state = self.state.lock().unwrap();
-        if !state.admits((self.now)(), bound) {
+        let remaining = state.admission_window((self.now)())?;
+        if remaining < MIN_LEG_WINDOW {
             return None;
         }
         let generation = state.notice?.gen;
         state.in_flight += 1;
-        Some(Permit {
-            gate: self.clone(),
-            _generation: generation,
-        })
+        Some((
+            Permit {
+                gate: self.clone(),
+                _generation: generation,
+            },
+            remaining,
+        ))
     }
 }
 

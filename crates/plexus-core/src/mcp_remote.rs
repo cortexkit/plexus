@@ -845,27 +845,25 @@ impl McpRemoteTransport {
         let deadline = Instant::now()
             .checked_add(config.request_timeout)
             .unwrap_or_else(Instant::now);
-        let responder = SseResponder {
-            client: &state.client,
-            endpoint: &config.endpoint,
-            headers: headers.clone(),
-            deadline,
-            gate: &self.leg_gate,
-        };
         let builder = state
             .client
             .post(&config.endpoint)
-            .headers(headers)
+            .headers(headers.clone())
             .json(body);
-        let _leg = self
-            .leg_gate
-            .enter(config.request_timeout)
-            .map_err(|message| {
-                AttemptError::Local(McpRemoteError::ConnectorHomeNotHeld(message))
-            })?;
+        let leg = self.leg_gate.enter().map_err(|message| {
+            AttemptError::Local(McpRemoteError::ConnectorHomeNotHeld(message))
+        })?;
+        let deadline = leg.deadline(deadline);
         let response = with_request_deadline(builder, deadline)
             .send()
             .map_err(AttemptError::Request)?;
+        let responder = SseResponder {
+            client: &state.client,
+            endpoint: &config.endpoint,
+            headers,
+            deadline,
+            gate: &self.leg_gate,
+        };
         let signals = if body.get("method").and_then(Value::as_str) == Some("tools/call") {
             body.pointer("/params/name")
                 .and_then(Value::as_str)
@@ -906,13 +904,10 @@ impl McpRemoteTransport {
             .post(&config.endpoint)
             .headers(headers)
             .json(body);
-        let _leg = self
-            .leg_gate
-            .enter(config.request_timeout)
-            .map_err(|message| {
-                AttemptError::Local(McpRemoteError::ConnectorHomeNotHeld(message))
-            })?;
-        let response = with_request_deadline(notification_builder, deadline)
+        let leg = self.leg_gate.enter().map_err(|message| {
+            AttemptError::Local(McpRemoteError::ConnectorHomeNotHeld(message))
+        })?;
+        let response = with_request_deadline(notification_builder, leg.deadline(deadline))
             .send()
             .map_err(AttemptError::Request)?;
         let status = response.status().as_u16();
@@ -1513,16 +1508,16 @@ impl SseResponder<'_> {
         };
         // The original request has already reached the server, so preventing
         // a new reply leg cannot turn its outcome into a not-sent result.
-        let _leg = self
-            .gate
-            .enter(remaining)
-            .map_err(|_| AttemptError::Local(McpRemoteError::OutcomeUnknown))?;
-        let response = self
+        let builder = self
             .client
             .post(self.endpoint)
             .headers(self.headers.clone())
-            .timeout(remaining)
-            .json(&body)
+            .json(&body);
+        let leg = self
+            .gate
+            .enter()
+            .map_err(|_| AttemptError::Local(McpRemoteError::OutcomeUnknown))?;
+        let response = with_request_deadline(builder, leg.deadline(self.deadline))
             .send()
             .map_err(AttemptError::Request)?;
         if !response.status().is_success() {

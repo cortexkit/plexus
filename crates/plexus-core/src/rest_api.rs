@@ -711,16 +711,11 @@ impl RestTransport {
         let deadline = Instant::now()
             .checked_add(config.request_timeout)
             .unwrap_or_else(Instant::now);
-        let bound = if github_facade {
-            config.request_timeout.min(Duration::from_secs(30))
-        } else {
-            config.request_timeout
-        };
-        let _leg = match self.leg_gate.enter(bound) {
+        let leg = match self.leg_gate.enter() {
             Ok(permit) => permit,
             Err(message) => return TransportResponse::connector_home_refusal(message),
         };
-        let response = match with_request_deadline(builder, deadline).send() {
+        let response = match with_request_deadline(builder, leg.deadline(deadline)).send() {
             Ok(response) => response,
             Err(error) => {
                 if config.private_endpoint {
