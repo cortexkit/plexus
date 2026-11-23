@@ -4,7 +4,8 @@
 //! manifest, receives the storage descriptor, opens and migrates the store,
 //! loads catalog files, and then serves control and tool-route frames.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(windows), forbid(unsafe_code))]
+#![cfg_attr(windows, deny(unsafe_code))]
 
 // Shadow the standard macro throughout the daemon crate. The fleet event lives in
 // `plexus-core`, which this crate already depends on, so every daemon diagnostic

@@ -38,6 +38,7 @@ pub(super) fn download(
     tail: &crate::manifest::CredentiallessTail,
     request: &TransportRequest,
     credential: &ResolvedCredential,
+    gate: &crate::transport::VendorLegGate,
 ) -> TransportResponse {
     let started = Instant::now();
     let deadline = config.request_timeout.min(job_log::LOG_DEADLINE);
@@ -71,6 +72,7 @@ pub(super) fn download(
         &args,
         credential,
         deadline,
+        gate,
     ) {
         Ok(url) => url,
         Err(response) => return artifact_response(*response),
@@ -83,6 +85,10 @@ pub(super) fn download(
     };
     // Fresh request: the API's Authorization and custom credential headers stay behind.
     let storage = client.get(url.clone()).timeout(time);
+    let leg = match gate.enter(time) {
+        Ok(permit) => permit,
+        Err(message) => return TransportResponse::connector_home_refusal(message),
+    };
     let response = match storage.send() {
         Ok(response) => response,
         Err(_) => return refused("job_log_download_failed"),
@@ -103,6 +109,7 @@ pub(super) fn download(
         Ok(bytes) => bytes,
         Err(code) => return refused(code),
     };
+    drop(leg);
     let (bytes, total) = match extract_tail(archive, path, max_bytes, started, deadline) {
         Ok(result) => result,
         Err(code) => return refused(code),

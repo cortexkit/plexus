@@ -6,14 +6,35 @@
 
 #[cfg(any(test, feature = "test-support"))]
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::credentials::ResolvedCredential;
 #[cfg(test)]
 use crate::fingerprint;
+
+type AdmitLeg = dyn Fn(Duration) -> Result<Box<dyn Send>, String> + Send + Sync;
+
+/// Fence each outbound leg after its local preparation and connection locks.
+/// Dropping the returned permit tells the lease holder the leg has settled.
+#[derive(Clone, Default)]
+pub struct VendorLegGate(Option<Arc<AdmitLeg>>);
+
+impl VendorLegGate {
+    pub fn new(
+        admit: impl Fn(Duration) -> Result<Box<dyn Send>, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Some(Arc::new(admit)))
+    }
+
+    pub(crate) fn enter(&self, bound: Duration) -> Result<Option<Box<dyn Send>>, String> {
+        self.0.as_ref().map(|admit| admit(bound)).transpose()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransmissionState {
@@ -58,6 +79,12 @@ pub struct TransportResponse {
 }
 
 impl TransportResponse {
+    pub(crate) fn connector_home_refusal(message: String) -> Self {
+        let mut refusal = Self::vendor_error("connector_home_not_held").not_sent();
+        refusal.error_message = Some(message);
+        refusal
+    }
+
     /// Return the provider HTTP status encoded by an auth rejection without
     /// exposing any vendor response body. Without a reviewed credential signal,
     /// treat HTTP 403 as a permission refusal; it does not establish that the

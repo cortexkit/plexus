@@ -48,6 +48,7 @@ pub(super) fn send(
     shape: EnvelopeShape,
     request: &TransportRequest,
     credential: &ResolvedCredential,
+    gate: &crate::transport::VendorLegGate,
 ) -> TransportResponse {
     if operation.method != HttpMethod::Get {
         return refused_locally("bot reads are GET only");
@@ -112,6 +113,10 @@ pub(super) fn send(
         .checked_add(config.request_timeout)
         .unwrap_or_else(Instant::now);
     let method = reqwest::Method::GET;
+    let _leg = match gate.enter(config.request_timeout.min(Duration::from_secs(30))) {
+        Ok(permit) => permit,
+        Err(message) => return TransportResponse::connector_home_refusal(message),
+    };
     let response = match with_request_deadline(client.get(&url).headers(headers), deadline).send() {
         Ok(response) => response,
         Err(error) => return request_failure_response(error, &method, &path),

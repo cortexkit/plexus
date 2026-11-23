@@ -54,6 +54,7 @@ const DELIVERY_SILENCE_LIMIT: Duration = Duration::from_secs(900);
 const CLEAN_RECONNECT_WINDOW: Duration = Duration::from_secs(300);
 const PING_PERIOD: Duration = Duration::from_secs(30);
 const RECEIVE_DEADLINE: Duration = Duration::from_secs(60);
+const CONNECT_BOUND: Duration = Duration::from_secs(30);
 // Two minutes before the poll START leaves room for the relay's 60-second
 // receive watchdog plus a 30-second vendor request and 30-second vault read.
 // Pings are not deliveries, and the hosted service promises no delivery SLA:
@@ -787,11 +788,9 @@ fn local_store_failed<T>(
 
 async fn dial(url: &str, credential: &[u8], home: &Arc<ConnectorHome>) -> Result<Socket, Failure> {
     let claim = Arc::clone(home);
-    tokio::task::spawn_blocking(move || {
-        let _ = claim.refresh();
-    })
-    .await
-    .map_err(|_| Failure::Reconnecting)?;
+    tokio::task::spawn_blocking(move || claim.refresh_legacy())
+        .await
+        .map_err(|_| Failure::Reconnecting)?;
     if !home.held() {
         return Err(Failure::NotHome);
     }
@@ -804,6 +803,9 @@ async fn dial(url: &str, credential: &[u8], home: &Arc<ConnectorHome>) -> Result
         .map_err(|_| Failure::Rejected(RejectionCause::InvalidAuthorizationHeader))?;
     header.set_sensitive(true);
     request.headers_mut().insert("Authorization", header);
+    let _leg = home
+        .begin_act(CONNECT_BOUND)
+        .map_err(|()| Failure::NotHome)?;
     // Do not format transport errors: peer replies may echo the Authorization header.
     connect_async_with_config(
         request,
@@ -1160,12 +1162,10 @@ async fn run_connections(
             status.transition(source, State::Reconnecting, None);
         }
         let failure = async {
-            let socket = tokio::time::timeout(
-                Duration::from_secs(30),
-                dial(url, credential.payload(), &home),
-            )
-            .await
-            .map_err(|_| Failure::Reconnecting)??;
+            let socket =
+                tokio::time::timeout(CONNECT_BOUND, dial(url, credential.payload(), &home))
+                    .await
+                    .map_err(|_| Failure::Reconnecting)??;
             Ok::<_, Failure>(consume_source(source, socket, store.clone(), status, &home).await)
         }
         .await
@@ -1191,7 +1191,7 @@ async fn run_connections(
             Failure::Superseded => {
                 status.source_superseded(source);
                 let claim = home.clone();
-                let _ = tokio::task::spawn_blocking(move || claim.refresh()).await;
+                let _ = tokio::task::spawn_blocking(move || claim.refresh_legacy()).await;
                 status.transition(source, State::Reconnecting, None);
                 if !home.held() {
                     delay = CREDENTIAL_RECHECK;

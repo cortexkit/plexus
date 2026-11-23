@@ -393,7 +393,8 @@ async fn consume_changes<W: RegisterWatch + ?Sized>(
 
 async fn refresh_home(state: &Arc<ModuleState>) {
     let state = state.clone();
-    let _ = tokio::task::spawn_blocking(move || state.runtime.connector_home.refresh()).await;
+    let _ =
+        tokio::task::spawn_blocking(move || state.runtime.connector_home.refresh_legacy()).await;
 }
 
 #[cfg(test)]

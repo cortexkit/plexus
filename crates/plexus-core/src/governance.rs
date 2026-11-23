@@ -2176,10 +2176,9 @@ where
         // the write receipt, without consuming an approval. If this machine
         // lost the connector-home role meanwhile, clear that mark and send
         // nothing.
-        if reservation.receipt.is_some() && handle_authority.is_some() {
-            if let Some(outcome) = self.check_dispatch_home(reservation, true) {
-                return outcome;
-            }
+        if let Some(outcome) = self.check_dispatch_home(reservation, reservation.receipt.is_some())
+        {
+            return outcome;
         }
         // Preparing an installation token may outlast the caller's run. The
         // run's expiry was read when the write was admitted; check it again.
@@ -2211,6 +2210,12 @@ where
         } else {
             self.transport.dispatch(request, &credential)
         };
+        if response.transmission == TransmissionState::NotSent
+            && response.error_code.as_deref() == Some("connector_home_not_held")
+        {
+            self.abandon_marked_transmit(reservation);
+            self.abandon_unsent_reservation(reservation);
+        }
         if response.provider_auth_status() == Some(401) {
             if let Some(authority) = handle_authority.as_ref() {
                 self.seams

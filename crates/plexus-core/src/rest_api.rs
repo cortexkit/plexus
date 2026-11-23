@@ -315,6 +315,7 @@ pub struct RestTransport {
     /// Reads idle and throttle time for every pooled entry; see
     /// [`TransportClock`].
     clock: TransportClock,
+    leg_gate: crate::transport::VendorLegGate,
 }
 
 impl RestTransport {
@@ -325,7 +326,13 @@ impl RestTransport {
             entries: Arc::new(Mutex::new(HashMap::new())),
             panic_recoveries: Arc::new(AtomicU64::new(0)),
             clock: TransportClock::real(),
+            leg_gate: Default::default(),
         }
+    }
+
+    pub fn with_vendor_leg_gate(mut self, gate: crate::transport::VendorLegGate) -> Self {
+        self.leg_gate = gate;
+        self
     }
 
     /// Run this transport's idle and throttle bookkeeping on `clock`. Each
@@ -547,7 +554,7 @@ impl RestTransport {
         // the guard is still held keeps the entry usable and lets the caller
         // hear that the request's outcome is unknown.
         let sent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::send_locked(
+            self.send_locked(
                 &mut state,
                 &config,
                 operation,
@@ -576,6 +583,7 @@ impl RestTransport {
 impl RestTransport {
     /// Send one request on a connection whose entry lock the caller holds.
     fn send_locked(
+        &self,
         state: &mut RestConnectionEntry,
         config: &RestConfig,
         operation: &HttpOperation,
@@ -617,6 +625,7 @@ impl RestTransport {
                 shape,
                 request,
                 credential,
+                &self.leg_gate,
             );
         }
         if let Some(tail) = &operation.credentialless_tail {
@@ -634,6 +643,7 @@ impl RestTransport {
                     tail,
                     request,
                     credential,
+                    &self.leg_gate,
                 );
             }
             return job_log::download(
@@ -645,6 +655,7 @@ impl RestTransport {
                 tail,
                 request,
                 credential,
+                &self.leg_gate,
             );
         }
         let prepared = match prepare_request(&config.base_url, operation, &request.args) {
@@ -700,6 +711,15 @@ impl RestTransport {
         let deadline = Instant::now()
             .checked_add(config.request_timeout)
             .unwrap_or_else(Instant::now);
+        let bound = if github_facade {
+            config.request_timeout.min(Duration::from_secs(30))
+        } else {
+            config.request_timeout
+        };
+        let _leg = match self.leg_gate.enter(bound) {
+            Ok(permit) => permit,
+            Err(message) => return TransportResponse::connector_home_refusal(message),
+        };
         let response = match with_request_deadline(builder, deadline).send() {
             Ok(response) => response,
             Err(error) => {

@@ -60,6 +60,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", features = ["sink"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "1", features = ["time"] }
+
 [dev-dependencies]
 plexus-core = { path = "../plexus-core", features = ["test-support"] }
 plexus-module = { path = ".", features = ["test-support"] }

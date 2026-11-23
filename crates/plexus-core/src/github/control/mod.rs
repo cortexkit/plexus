@@ -130,13 +130,16 @@ pub trait InstallationReader {
 
 pub struct GithubApiReader {
     client: reqwest::blocking::Client,
+    leg_gate: crate::transport::VendorLegGate,
 }
+
+const INSTALLATION_READ_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Default for GithubApiReader {
     fn default() -> Self {
         Self {
             client: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(INSTALLATION_READ_BOUND)
                 // Drop idle keep-alive connections well before a server's own
                 // keep-alive timeout could close them; see
                 // `http_support::POOLED_CONNECTION_IDLE_LIMIT`, which the MCP
@@ -144,7 +147,15 @@ impl Default for GithubApiReader {
                 .pool_idle_timeout(crate::http_support::POOLED_CONNECTION_IDLE_LIMIT)
                 .build()
                 .expect("static GitHub client settings"),
+            leg_gate: Default::default(),
         }
+    }
+}
+
+impl GithubApiReader {
+    pub fn with_vendor_leg_gate(mut self, gate: crate::transport::VendorLegGate) -> Self {
+        self.leg_gate = gate;
+        self
     }
 }
 
@@ -158,6 +169,10 @@ impl InstallationReader for GithubApiReader {
         // GitHub REST: https://docs.github.com/en/rest/apps/installations#list-repositories-accessible-to-the-app-installation
         // GET /installation/repositories accepts an installation access token and page/per_page.
         let bearer = std::str::from_utf8(token.payload()).map_err(|_| "credential_invalid")?;
+        let _leg = self
+            .leg_gate
+            .enter(INSTALLATION_READ_BOUND)
+            .map_err(|_| "connector_home_not_held")?;
         let response = self
             .client
             .get("https://api.github.com/installation/repositories")
@@ -207,6 +222,7 @@ fn resolve_repositories(
             }
         })?;
     let started = std::time::Instant::now();
+    let mut lease_refused = false;
     let completed = pagination::walk(
         ListRead::InstallationRepositories,
         now,
@@ -217,10 +233,19 @@ fn resolve_repositories(
             }
             reader
                 .repositories_page(&credential, page.page, page.per_page)
-                .map_err(|_| WalkError::ReadFailed)
+                .map_err(|code| {
+                    lease_refused = code == "connector_home_not_held";
+                    WalkError::ReadFailed
+                })
         },
     )
-    .map_err(|error| format!("installation_repositories_{error:?}"))?;
+    .map_err(|error| {
+        if lease_refused {
+            "connector_home_not_held".into()
+        } else {
+            format!("installation_repositories_{error:?}")
+        }
+    })?;
     let mut repositories = BTreeSet::new();
     for item in completed.items() {
         let name = item

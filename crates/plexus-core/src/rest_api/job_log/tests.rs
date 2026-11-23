@@ -523,6 +523,7 @@ fn credentialed_download_leg_preserves_auth_throttle_and_gateway_failures() {
             &json!({}),
             &ResolvedCredential::anonymous(),
             Duration::from_secs(1),
+            &Default::default(),
         )
         .unwrap_err();
         server.join().unwrap();

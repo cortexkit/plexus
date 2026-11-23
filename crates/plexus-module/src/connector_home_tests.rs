@@ -609,7 +609,7 @@ fn entorhinal_hub_reads_through_real_reader() {
         let home = Arc::new(ConnectorHome::new(peer));
         let (_scratch, state) = fixture(home.clone());
         for (reply, expected_state, may_serve, preserve_snapshot) in steps {
-            let before = home.status();
+            let before = home.health_status();
             assert_eq!(home.refresh().unwrap(), reply);
             assert_eq!(home.held(), may_serve, "{reply}");
             let health = serde_json::to_value(connector_home_health(&state)).unwrap();

@@ -2139,6 +2139,7 @@ dependencies = [
  "plexus-module",
  "plexus-probe",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

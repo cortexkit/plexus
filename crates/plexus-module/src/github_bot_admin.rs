@@ -196,7 +196,13 @@ fn plan(state: &Arc<ModuleState>, principal: &str, params: &Value) -> Result<Pla
         reader.as_ref(),
         plexus_core::storage::now_ms(),
     )
-    .map_err(|code| control_refusal(&code, &id))?;
+    .map_err(|code| {
+        if code == "connector_home_not_held" {
+            state.runtime.connector_home.effect_refusal()
+        } else {
+            control_refusal(&code, &id)
+        }
+    })?;
     let imported_repositories = handle
         .grants
         .iter()

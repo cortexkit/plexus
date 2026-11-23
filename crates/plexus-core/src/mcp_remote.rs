@@ -64,6 +64,7 @@ const GREP_APP_RATE_LIMIT_DELAY: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpRemoteError {
     Configuration,
+    ConnectorHomeNotHeld(String),
     Connection,
     PoisonedLock,
     Timeout,
@@ -93,6 +94,7 @@ impl fmt::Display for McpRemoteError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Configuration => formatter.write_str("MCP transport configuration is invalid"),
+            Self::ConnectorHomeNotHeld(message) => formatter.write_str(message),
             Self::Connection => formatter.write_str("MCP connection failed"),
             Self::PoisonedLock => formatter.write_str(POISONED_LOCK_MESSAGE),
             Self::Timeout => formatter.write_str("MCP request timed out"),
@@ -394,6 +396,7 @@ pub struct McpRemoteTransport {
     /// Reads idle and throttle time for every pooled entry; see
     /// [`TransportClock`].
     clock: TransportClock,
+    leg_gate: crate::transport::VendorLegGate,
     #[cfg(test)]
     lookup_pause: Arc<Mutex<Option<LookupPause>>>,
 }
@@ -414,9 +417,15 @@ impl McpRemoteTransport {
             next_request_id: Arc::new(AtomicU64::new(1)),
             panic_recoveries: Arc::new(AtomicU64::new(0)),
             clock: TransportClock::real(),
+            leg_gate: Default::default(),
             #[cfg(test)]
             lookup_pause: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn with_vendor_leg_gate(mut self, gate: crate::transport::VendorLegGate) -> Self {
+        self.leg_gate = gate;
+        self
     }
 
     /// Run this transport's idle and throttle bookkeeping on `clock`. Each
@@ -841,12 +850,19 @@ impl McpRemoteTransport {
             endpoint: &config.endpoint,
             headers: headers.clone(),
             deadline,
+            gate: &self.leg_gate,
         };
         let builder = state
             .client
             .post(&config.endpoint)
             .headers(headers)
             .json(body);
+        let _leg = self
+            .leg_gate
+            .enter(config.request_timeout)
+            .map_err(|message| {
+                AttemptError::Local(McpRemoteError::ConnectorHomeNotHeld(message))
+            })?;
         let response = with_request_deadline(builder, deadline)
             .send()
             .map_err(AttemptError::Request)?;
@@ -890,6 +906,12 @@ impl McpRemoteTransport {
             .post(&config.endpoint)
             .headers(headers)
             .json(body);
+        let _leg = self
+            .leg_gate
+            .enter(config.request_timeout)
+            .map_err(|message| {
+                AttemptError::Local(McpRemoteError::ConnectorHomeNotHeld(message))
+            })?;
         let response = with_request_deadline(notification_builder, deadline)
             .send()
             .map_err(AttemptError::Request)?;
@@ -1082,6 +1104,9 @@ fn call_error_response(error: McpCallError) -> TransportResponse {
                 .unwrap_or_else(TransportResponse::unknown)
         }
         error => match error.into_remote() {
+            McpRemoteError::ConnectorHomeNotHeld(message) => {
+                TransportResponse::connector_home_refusal(message)
+            }
             McpRemoteError::Timeout => TransportResponse::timeout("MCP"),
             McpRemoteError::Connection => TransportResponse::transient_not_sent(),
             McpRemoteError::PoisonedLock => poisoned_lock_response(),
@@ -1470,6 +1495,7 @@ struct SseResponder<'a> {
     endpoint: &'a str,
     headers: HeaderMap,
     deadline: Instant,
+    gate: &'a crate::transport::VendorLegGate,
 }
 
 impl SseResponder<'_> {
@@ -1485,6 +1511,12 @@ impl SseResponder<'_> {
         } else {
             json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Client method not supported"}})
         };
+        // The original request has already reached the server, so preventing
+        // a new reply leg cannot turn its outcome into a not-sent result.
+        let _leg = self
+            .gate
+            .enter(remaining)
+            .map_err(|_| AttemptError::Local(McpRemoteError::OutcomeUnknown))?;
         let response = self
             .client
             .post(self.endpoint)

@@ -128,15 +128,17 @@ impl ModuleRuntime {
     /// configured and reachable. Missing or unreachable credential routes fail
     /// closed; they never fall back to stubs.
     pub fn production(store: Arc<PlexusStore>, connection_file: &Path) -> Self {
-        let mcp_transport = Arc::new(McpRemoteTransport::default());
-        let rest_transport = Arc::new(RestTransport::default());
+        let connector_home = Arc::new(crate::connector_home::ConnectorHome::production(
+            connection_file,
+        ));
+        let leg_gate = connector_home.vendor_gate();
+        let mcp_transport =
+            Arc::new(McpRemoteTransport::default().with_vendor_leg_gate(leg_gate.clone()));
+        let rest_transport = Arc::new(RestTransport::default().with_vendor_leg_gate(leg_gate));
         let (credentials, vault_peer) = production_credential_source(connection_file);
         let agent_registry = production_agent_registry(connection_file);
         let github_handle_credentials = production_handle_credential_provider(connection_file);
         let consent_cards = production_consent_cards(connection_file);
-        let connector_home = Arc::new(crate::connector_home::ConnectorHome::production(
-            connection_file,
-        ));
         let guard_home = Arc::clone(&connector_home);
         let engine = GovernanceEngine::new(
             Arc::clone(&store),
@@ -150,7 +152,7 @@ impl ModuleRuntime {
             if guard_home.held() {
                 None
             } else {
-                Some(guard_home.status())
+                Some(guard_home.refusal_status())
             }
         }))
         .with_governance_seams(Arc::new(GithubGovernanceSeams {

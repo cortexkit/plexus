@@ -303,6 +303,7 @@ where
     pass_budget: std::time::Duration,
     approval_retry_budget: std::time::Duration,
     stop: Arc<AtomicBool>,
+    connector_home: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     resume_after: Mutex<Option<(String, String)>>,
     last_housekeeping: Mutex<Option<std::time::Instant>>,
     /// Last pass that ran event retention. Separate from `last_housekeeping`
@@ -371,6 +372,7 @@ where
             pass_budget: POLL_PASS_BUDGET,
             approval_retry_budget: WAITING_APPROVAL_RETRY_BUDGET,
             stop: Arc::new(AtomicBool::new(false)),
+            connector_home: None,
             resume_after: Mutex::new(None),
             last_housekeeping: Mutex::new(None),
             last_event_retention: Mutex::new(None),
@@ -397,8 +399,17 @@ where
         self
     }
 
+    pub fn with_connector_home_check(
+        mut self,
+        held: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.connector_home = Some(Arc::new(held));
+        self
+    }
+
     fn stop_requested(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+            || self.connector_home.as_ref().is_some_and(|held| !held())
     }
 
     /// Enable the hourly sweep that revokes grants of agents the registry

@@ -449,6 +449,9 @@ pub(super) async fn handle_management_request(
         }
         _ => unreachable!("management operation was checked above"),
     };
+    if response.pointer("/error/code").and_then(Value::as_str) == Some("connector_home_not_held") {
+        response = state.runtime.connector_home.effect_refusal();
+    }
     if matches!(
         method,
         manifest::GITHUB_IMPORT_OP
@@ -526,7 +529,12 @@ pub(super) fn github_control_reader(
         .runtime
         .github_control_reader
         .clone()
-        .unwrap_or_else(|| Arc::new(plexus_core::github::control::GithubApiReader::default()))
+        .unwrap_or_else(|| {
+            Arc::new(
+                plexus_core::github::control::GithubApiReader::default()
+                    .with_vendor_leg_gate(state.runtime.connector_home.vendor_gate()),
+            )
+        })
 }
 
 /// Register each newly imported handle connection's REST transport from its

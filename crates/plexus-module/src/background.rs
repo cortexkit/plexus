@@ -63,6 +63,19 @@ pub(super) fn spawn_background_tasks(
     // is left to finish or abandoned; `commit_keyed_poll_success` is a single fenced
     // transaction, so an abandoned poll leaves the cursor unadvanced and the
     // events unwritten, which is the correct outcome.
+    let (lease_shutdown, lease_stop) = mpsc::channel::<()>(1);
+    let lease_home = state.runtime.connector_home.clone();
+    let lease_store = state.runtime.store.clone();
+    let lease_connection_file = connection_file.to_owned();
+    let lease_task = tokio::spawn(async move {
+        crate::connector_home::client::run(
+            lease_home,
+            lease_store,
+            &lease_connection_file,
+            lease_stop,
+        )
+        .await;
+    });
     let (claim_shutdown, mut claim_stop) = mpsc::channel::<()>(1);
     let claim_state = Arc::clone(&state);
     let policy_wakes = Arc::clone(&state.health.agent_policy_wakes);
@@ -140,6 +153,7 @@ pub(super) fn spawn_background_tasks(
 
     BackgroundTasks {
         shutdown: vec![
+            lease_shutdown,
             claim_shutdown,
             scheduler_shutdown,
             outbox_shutdown,
@@ -149,6 +163,7 @@ pub(super) fn spawn_background_tasks(
             policy_shutdown,
         ],
         tasks: vec![
+            ("connector-home lease", lease_task, TASK_SHUTDOWN_GRACE),
             ("connector-home refresh", claim_task, TASK_SHUTDOWN_GRACE),
             ("trigger scheduler", scheduler_task, TASK_SHUTDOWN_GRACE),
             ("outbox drain", outbox_task, BUS_SHUTDOWN_GRACE),
@@ -219,6 +234,10 @@ pub(super) fn spawn_trigger_scheduler_every(
     let scheduler =
         plexus_core::Scheduler::new(state.runtime.engine.clone(), audit_retention.window_ms())
             .with_stop_flag(Arc::clone(&stopping))
+            .with_connector_home_check({
+                let home = state.runtime.connector_home.clone();
+                move || home.held()
+            })
             .with_relay_health(state.health.relay.clone())
             .with_ownership_resume(Arc::clone(&state.runtime.ownership_resume))
             .with_agent_registry(Arc::clone(&state.runtime.agent_registry))
@@ -449,7 +468,7 @@ pub(super) fn connector_home_health(state: &ModuleState) -> ModuleControlRespons
         }
         if let Some(metrics) = metrics {
             metrics["ready"] = json!(true);
-            metrics["connectorHome"] = state.runtime.connector_home.status();
+            metrics["connectorHome"] = state.runtime.connector_home.health_status();
             let cached = state
                 .health
                 .store_metrics

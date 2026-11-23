@@ -1,7 +1,7 @@
-//! Fence outside effects to the user's connector-home machine. Entorhinal, the
-//! CortexKit module that records which machine holds each single-holder role,
-//! answers `role.read` for `connector_home`; plexus serves only while it
-//! confirms this machine holds it.
+//! Fence outside effects to the machine holding Entorhinal's connector-home lease.
+pub(crate) mod client;
+mod clock;
+mod gate;
 use plexus_core::SubcPrefrontalRoutePeer;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -186,16 +186,25 @@ pub struct ConnectorHome {
     snapshot: Mutex<Snapshot>,
     read_lane: Mutex<()>,
     peer: Arc<dyn RolePeer>,
-    decision: tokio::sync::watch::Sender<bool>,
+    gate: Arc<gate::Gate>,
 }
 
 impl ConnectorHome {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(peer: Arc<dyn RolePeer>) -> Self {
+        Self::with_gate(peer, true, clock::milliseconds)
+    }
+
+    fn with_gate(
+        peer: Arc<dyn RolePeer>,
+        legacy: bool,
+        now: impl Fn() -> Option<u64> + Send + Sync + 'static,
+    ) -> Self {
         Self {
             snapshot: Mutex::new(Snapshot::default()),
             read_lane: Mutex::new(()),
             peer,
-            decision: tokio::sync::watch::channel(false).0,
+            gate: Arc::new(gate::Gate::new(legacy, now)),
         }
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -203,14 +212,17 @@ impl ConnectorHome {
         Self::new(Arc::new(Unavailable))
     }
     pub fn production(path: &std::path::Path) -> Self {
-        Self::new(Arc::new(EntorhinalPeer {
-            path: path.to_owned(),
-            connection: Mutex::new(None),
-        }))
+        Self::with_gate(
+            Arc::new(EntorhinalPeer {
+                path: path.to_owned(),
+                connection: Mutex::new(None),
+            }),
+            false,
+            clock::milliseconds,
+        )
     }
-    /// Only fresh, well-formed answers replace the last decision. Route failures and
-    /// stale answers preserve it; integrity failures revoke admission immediately.
-    /// Plexus never persists admission, so a restart needs a new confirmed read.
+    /// Refresh the operator's role snapshot. This only changes admission on
+    /// Entorhinal versions that explicitly decline to serve leases.
     pub fn refresh(&self) -> Result<Value, ErrorBody> {
         // Serialize requests and updates so concurrent readers cannot apply answers out of order.
         let _read = self.read_lane.lock().unwrap();
@@ -263,32 +275,75 @@ impl ConnectorHome {
         ) {
             eprintln!(info wire: "connector home: {} -> {} epoch={:?} holder_name={:?}", before.state, next.state, next.epoch, next.holder_name);
         }
-        self.decision.send_if_modified(|held| {
-            let admitted = next.state == "held";
-            let changed = *held != admitted;
-            *held = admitted;
-            changed
-        });
+        self.gate.legacy_decision(next.state == "held");
         reply
     }
+    fn enable_legacy(&self) {
+        let mut next = self.snapshot.lock().unwrap();
+        // The earlier diagnostic snapshot was not an admission check. Obtain
+        // a fresh read under the legacy gate before permitting any effects.
+        *next = Snapshot::default();
+        self.gate.enable_legacy(false);
+    }
+    pub(crate) fn refresh_legacy(&self) {
+        if self.gate.legacy() {
+            let _ = self.refresh();
+        }
+    }
     pub(crate) fn decisions(&self) -> tokio::sync::watch::Receiver<bool> {
-        self.decision.subscribe()
+        let _ = self.held();
+        self.gate.decisions()
     }
     pub fn held(&self) -> bool {
-        self.snapshot.lock().unwrap().state == "held"
+        if self.gate.legacy() {
+            self.snapshot.lock().unwrap().state == "held"
+        } else {
+            self.gate.held()
+        }
     }
     pub fn status(&self) -> Value {
         let s = self.snapshot.lock().unwrap();
         json!({"state":s.state, "epoch":s.epoch, "holder_name":s.holder_name, "code":s.code, "source":s.source, "checkedAt":s.checked_at})
     }
+    pub(crate) fn health_status(&self) -> Value {
+        let mut status = self.status();
+        status["lease"] = self.gate.status();
+        status
+    }
+
+    pub(crate) fn refusal_status(&self) -> Value {
+        let mut status = self.status();
+        if !self.gate.legacy() {
+            status["state"] = json!(self.gate.refusal_state());
+        }
+        status
+    }
+
+    pub(crate) fn begin_act(&self, bound: std::time::Duration) -> Result<Option<gate::Permit>, ()> {
+        if self.gate.legacy() {
+            return self.held().then_some(None).ok_or(());
+        }
+        self.gate.begin(bound).map(Some).ok_or(())
+    }
+
+    pub(crate) fn vendor_gate(self: &Arc<Self>) -> plexus_core::transport::VendorLegGate {
+        let home = self.clone();
+        plexus_core::transport::VendorLegGate::new(move |bound| {
+            home.begin_act(bound)
+                .map(|permit| Box::new(permit) as Box<dyn Send>)
+                .map_err(|()| format!("connector home not held: {}", home.refusal_status()))
+        })
+    }
+
     pub fn refusal(&self) -> Option<Value> {
         if self.held() {
             return None;
         }
-        let state = json!({"state":self.snapshot.lock().unwrap().state});
-        Some(
-            json!({"error":{"code":"connector_home_not_held", "message":format!("connector home not held: {state}"), "connectorHome":state, "transmission":"not_sent"}}),
-        )
+        Some(self.effect_refusal())
+    }
+    pub(crate) fn effect_refusal(&self) -> Value {
+        let state = json!({"state":self.refusal_status()["state"]});
+        json!({"error":{"code":"connector_home_not_held", "message":format!("connector home not held: {state}"), "connectorHome":state, "transmission":"not_sent"}})
     }
     pub fn live_status(&self) -> Value {
         let live = self.refresh();
@@ -306,7 +361,7 @@ impl ConnectorHome {
             epoch: Some(1),
             ..Snapshot::default()
         };
-        home.decision.send_replace(true);
+        home.gate.legacy_decision(true);
         home
     }
 }
