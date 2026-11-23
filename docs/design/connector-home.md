@@ -1,38 +1,71 @@
 # Connector home
 
-Plexus runs connector effects only when Entorhinal's `role.read` with
-`{"role":"connector_home"}` confirms `known: true`, `held_here: true`, and
-`stale: false`. It opens Entorhinal's management surface as `reserved:plexus`,
-using the exact module id `entorhinal`. The daemon starts `unknown`; it does not
-restore admission from disk. A task reads at boot and every 30 seconds. Each
-route connection and call has a three-second deadline (at most six seconds for
-both stages). Entorhinal decides whether the role is held here; Plexus does not
-compare device identifiers.
+Plexus runs connector effects only while it holds Entorhinal's lease on the
+`connector_home` role. It opens one management route to the exact module id
+`entorhinal` as `reserved:plexus` and keeps a watch open on it:
 
-Only fresh, well-formed reads replace the in-memory answer. A confirmed unheld
-role is `not_held` with epoch 0 and no holder; a role held elsewhere reports
-`holder_name`. Transport errors, malformed replies, and **any** `stale: true`
-answer retain the last confirmed answer, whatever `held_here` says. Stale means
-Entorhinal has not verified the cached answer since its own startup. Before the first
-confirmed answer, Plexus refuses effects. `claim_integrity_failed` immediately
-sets `integrity_failed` and records its code, even after a confirmed hold; only a
-fresh read can replace it. Entorhinal keeps integrity failures sticky across its
-own restarts until verified. Unknown reply fields are ignored, but all required
-fields (including nullable ones) must be present and correctly typed.
+```
+{"method":"role.lease","params":{"role":"connector_home"}}
+```
 
-Ownership is not an expiring lease: a confirmed holder intentionally works
-offline. A takeover while the old holder is offline cannot immediately stop it;
-it stops when a fresh read observes the new holder. Health is degraded with
-`connector_home_not_held` unless held. Its `connectorHome` metric includes state
-(`held`, `not_held`, `unknown`, `integrity_failed`), epoch, source, `holder_name`,
-integrity `code`, and `checkedAt`. State transitions are logged.
+Each notice carries `seq`, `gen`, `holding`, `issued_at_ms` and
+`valid_for_ms`, plus `handback: true` when another computer asks for the role
+(a missing `handback` means false). Plexus acks every notice, `holding: false`
+included, with `role.lease.ack {role, seq}` on the same route; Entorhinal renews
+the holder's record only while it receives those acks. Notices arrive about
+every 20 seconds. On the shared hub, `role.read` answers `held_here: true` only
+while such a lease is live, so reading the role without holding the lease is
+never enough.
+
+The acting window ends at `issued_at_ms + valid_for_ms` on the OS boot clock
+Entorhinal uses: `CLOCK_BOOTTIME` on Linux, `CLOCK_MONOTONIC` on macOS and
+`GetTickCount64()` on Windows, in milliseconds. Plexus never uses wall time
+or Rust's `Instant`, which on macOS does not count sleep. A notice admits
+effects only after Plexus has acked it and journaled its generation. The
+highest generation seen is kept in the store's `connector_home_generation`
+table, so a restarted Plexus refuses to act under an older generation.
+
+An act is one outgoing vendor leg (a REST or MCP request, an installation-token
+fetch, a relay connect). Right before a leg is sent, the gate requires a holding
+lease with at least 5 seconds left and takes a permit for the leg's lifetime.
+The leg's timeout is then the smaller of its configured timeout (for example
+the 30-second REST timeout) and the time left on the lease, so no leg outlives
+the acting window. While renewals arrive, the window stays above about 25
+seconds; it only runs down when renewals stop, which is when Plexus must stop. Waiting
+(approval holds, the search chain, gaps between polls) is not an act. The
+relay's established-socket controls (ack, ping, pong, close) are transport
+control, not acts. The relay socket is dropped as soon as the lease stops
+holding.
+
+On `handback: true`, Plexus acks, starts no new leg, waits for in-flight
+permits to settle or for the deadline, then calls
+`role.lease.yield {role, gen}` on the watch's route. `yielded: true` stops
+service at once; `yielded: false` keeps the lease, and service resumes only on a
+fresh holding notice. If the watch ends, a reply is malformed or the store cannot
+journal a generation, Plexus stops admitting and reopens the watch after three
+seconds.
+
+An Entorhinal that answers `role.lease` with `unknown_method` or `unsupported`
+predates leases. Plexus then logs once and falls back, for the rest of the
+process, to the earlier admission rule: `role.read` read at boot and every 30
+seconds, admitting only `known: true`, `held_here: true`, `stale: false`. Any
+other refusal or a transport failure means not holding, never the fallback.
+
+`role.read` still serves `ck-plexus-admin connector-home status` and the
+health report. Health's `connectorHome` metric includes the role-read state
+(`held`, `not_held`, `unknown`, `integrity_failed`), epoch, source,
+`holder_name`, integrity `code` and `checkedAt`, plus
+`lease: {holding, gen, deadline_in_ms, handback, yield_pending}`. Health is
+degraded with `connector_home_not_held` unless the lease is held. State
+transitions are logged.
 
 ## Rollout — pending: run at deploy
 
-Deploy Plexus with this cutover and Entorhinal 0.1.25 or later. Then **the
+Leases need Entorhinal 0.1.82 or later; the earlier role-read rule needs
+0.1.25 or later. Deploy Plexus with this cutover. Then **the
 operator runs `ck roles take connector_home` within the minute**, on the machine
 that should be the connector home; the command asks for operator confirmation. Plexus refuses outside
-effects until a confirmed read lands. Plexus no longer reads or takes claims
+effects until it holds the lease. Plexus no longer reads or takes claims
 through Engram; only Entorhinal serves its connector-home reads.
 
 ```
@@ -51,7 +84,7 @@ Moving connector state still requires carrying `store.db` and
 
 ## Effect-path census
 
-While this machine is not confirmed as the connector home, each entry point below
+While this machine does not hold the connector-home lease, each entry point below
 refuses before doing any work. The refusal is `connector_home_not_held`, with the
 state, epoch and holder name where known, and `transmission: not_sent`:
 
@@ -72,8 +105,7 @@ state, epoch and holder name where known, and `transmission: not_sent`:
 Vendor reads, discovery, handle setup, vault proof and consent-card withdrawal
 are effects too, even when they do not write to a vendor. Core governance checks before reservation,
 approval execution and revalidated dispatch, so a long scheduler pass cannot
-continue reserving or sending governed calls after a fresh role read revokes
-admission. This is an admission fence, not cancellation of a call already sent.
+continue reserving or sending governed calls after the lease stops holding. This is an admission fence, not cancellation of a call already sent.
 
 Store-only operations remain available: connections/catalog/request/event
 list/show, bindings reads, event registration and acknowledgment, grant/policy
@@ -85,8 +117,10 @@ Tests use a peer double for every reply state and failure, and the conformance
 harness supplies an Entorhinal management-surface double over real subc
 RouteBind and route calls. It admits only daemon-attested `reserved:plexus`,
 checks the exact `role.read` wire body, and exercises status and refusal of the
-removed claim operation. A source scan fences removed claim operations with
-planted controls. Entorhinal will publish `role.read` replies produced by its
+removed claim operation. A source scan checks that the removed claim
+operations stay absent, and its own tests prove it catches one put back. Entorhinal's published lease samples (tag `role-lease-v1.4`)
+are vendored byte for byte in `crates/plexus-module/tests/fixtures/role-lease-v1/`
+and driven through plexus's real lease client. Entorhinal will publish `role.read` replies produced by its
 own handler; they go, byte for byte, in
 `crates/plexus-module/tests/fixtures/entorhinal-roles/` so plexus's decoding is
 checked against real output. Until that file exists, the loader test skips with

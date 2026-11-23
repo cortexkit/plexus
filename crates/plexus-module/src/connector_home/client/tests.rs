@@ -323,8 +323,10 @@ async fn handback_waits_for_an_in_flight_leg_then_yields_on_the_watch_route() {
         rig.decision(true).await;
         let leg = rig.home.begin_act().unwrap();
 
-        // The handback fixture is addressed to Magic Context. The notices do
-        // not carry a role name; retarget its generation to the Plexus yield.
+        // Entorhinal recorded its handback sample on another module's role
+        // (a `dreamer.*` role), at a different generation. Notices carry no
+        // role name, so the same body applies to `connector_home` once its
+        // generation matches the lease this test holds.
         let mut handback = body(&samples("handback")[0], 0).clone();
         handback["gen"] = json!(1);
         rig.notice(&handback).await;

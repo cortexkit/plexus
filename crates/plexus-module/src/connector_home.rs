@@ -280,8 +280,9 @@ impl ConnectorHome {
     }
     fn enable_legacy(&self) {
         let mut next = self.snapshot.lock().unwrap();
-        // The earlier diagnostic snapshot was not an admission check. Obtain
-        // a fresh read under the legacy gate before permitting any effects.
+        // While leases decided admission, the stored `role.read` answer only
+        // fed status and health. Clear it so the fallback admits nothing until
+        // a fresh role read confirms this machine holds the role.
         *next = Snapshot::default();
         self.gate.enable_legacy(false);
     }
