@@ -502,78 +502,31 @@ fn entorhinal_role_vectors(file: &str) -> Value {
 #[test]
 fn entorhinal_role_vectors_through_real_reader() {
     let value = entorhinal_role_vectors("records.json");
-    // Plexus's own expectations for each role.read answer: the state it leads to
-    // from a fresh start, and whether plexus may then serve outside effects.
-    let reads = [
-        ("never_read", "unknown", false),
-        ("read_unheld", "not_held", false),
-        ("held_here", "held", true),
-        ("held_elsewhere", "not_held", false),
-        ("stale_after_restart", "unknown", false),
-        ("integrity_failure", "integrity_failed", false),
-    ];
-    // Plexus never calls role.take: the operator takes the role with `ck roles
-    // take`, and Entorhinal refuses `reserved:plexus`. These cases are only
-    // checked to be take requests.
-    let takes = ["take_epoch_moved", "take_reserved_plexus"];
     let mut seen = std::collections::BTreeSet::new();
     for (name, request, reply) in entorhinal_vector_cases(&value) {
-        seen.insert(name.clone());
-        if takes.contains(&name.as_str()) {
-            assert_eq!(request["method"], "role.take", "{name}");
-            continue;
-        }
-        let (_, state, may_serve) = reads
-            .iter()
-            .find(|(case, _, _)| *case == name)
-            .unwrap_or_else(|| panic!("Entorhinal case plexus has no expectation for: {name}"));
-        assert_eq!(request["method"], "role.read", "{name}");
-        // Entorhinal's vectors read a placeholder role named "x". Plexus refuses
-        // an answer about any role but connector_home, so a held-here answer for
-        // "x" must never let it serve; the role is then renamed to test the rest.
-        if let Ok(answer) = &reply {
-            if answer["held_here"] == true {
-                let home = ConnectorHome::new(Double::new(vec![reply.clone()]));
-                let _ = home.refresh();
-                assert!(
-                    !home.held(),
-                    "an answer about another role must not count: {name}"
-                );
+        match name.as_str() {
+            "never_read" => {
+                assert_eq!(request["method"], "role.read");
+                let mut answer = reply.unwrap();
+                assert_eq!(answer["role"], request["params"]["role"]);
+                answer["role"] = json!(connector_home::ROLE);
+                let home = ConnectorHome::new(Double::new(vec![Ok(answer)]));
+                home.refresh().unwrap();
+                assert_eq!(home.status()["state"], "unknown");
+                assert!(!home.held());
             }
+            "take_reserved_plexus" => {
+                assert_eq!(request["method"], "role.take");
+                assert_eq!(reply.unwrap_err().code, "caller_forbidden");
+            }
+            _ => panic!("Entorhinal case Plexus has no expectation for: {name}"),
         }
-        let reply = reply.map(|mut answer| {
-            answer["role"] = json!(crate::connector_home::ROLE);
-            answer
-        });
-        let home = ConnectorHome::new(Double::new(vec![reply.clone()]));
-        let _ = home.refresh();
-        assert_eq!(home.status()["state"], *state, "{name}");
-        assert_eq!(home.held(), *may_serve, "{name}");
-        if name == "stale_after_restart" {
-            // A stale answer that says "held here" must neither start service nor
-            // change an answer plexus already confirmed.
-            let home = ConnectorHome::new(Double::new(vec![
-                held(),
-                reply,
-                Ok(role_answer(true, false, false)),
-            ]));
-            home.refresh().unwrap();
-            let confirmed = home.status();
-            let _ = home.refresh();
-            assert_eq!(
-                home.status(),
-                confirmed,
-                "stale must keep the confirmed answer"
-            );
-            assert!(home.held());
-            home.refresh().unwrap();
-            assert!(!home.held(), "a fresh not-held answer must stop service");
-        }
+        assert!(
+            seen.insert(name.clone()),
+            "duplicate Entorhinal case: {name}"
+        );
     }
-    for (name, _, _) in reads {
-        assert!(seen.contains(name), "missing Entorhinal case: {name}");
-    }
-    for name in takes {
+    for name in ["never_read", "take_reserved_plexus"] {
         assert!(seen.contains(name), "missing Entorhinal case: {name}");
     }
 }
@@ -587,6 +540,15 @@ fn entorhinal_hub_reads_through_real_reader() {
         assert_eq!(record["op"], "role.read");
         let mut not_held = connector_home::role_reply(record["reply"].clone()).unwrap();
         assert_eq!(not_held["role"], record["request"]["role"]);
+        let mut wrong_role = not_held.clone();
+        wrong_role["held_here"] = json!(true);
+        let home = ConnectorHome::new(Double::new(vec![Ok(wrong_role)]));
+        assert_eq!(home.refresh().unwrap_err().code, "peer_protocol_error");
+        assert!(
+            !home.held(),
+            "a hold for another role must not admit effects"
+        );
+
         // The samples are for dreamer roles. Retarget to connector_home, then
         // vary only held_here and stale to exercise the admission transitions.
         not_held["role"] = json!(connector_home::ROLE);
@@ -600,8 +562,9 @@ fn entorhinal_hub_reads_through_real_reader() {
         let steps = [
             (stale_held.clone(), "unknown", false, true),
             (not_held.clone(), "not_held", false, false),
-            (stale_held, "not_held", false, true),
+            (stale_held.clone(), "not_held", false, true),
             (held, "held", true, false),
+            (stale_held, "held", true, true),
             (stale_not_held, "held", true, true),
             (not_held, "not_held", false, false),
         ];

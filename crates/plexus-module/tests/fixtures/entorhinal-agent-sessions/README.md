@@ -1,14 +1,11 @@
 # Entorhinal agent-session vectors
 
 `agent-sessions-v1/` is copied byte for byte from Entorhinal's
-`test-vectors/agent-sessions-v1/` at tag `agent-sessions-v1.12`
-(tag object `3a6447b8b09b1ad44c2186829f8337dc78edf8f8`, commit
-`06bf7f10fe934cd78798e938f77c4b3dafee642e`). This tag retains the off-hub
-`where-holder-box.json` and `where-many-holder-box.json` from `agent-sessions-v1.11`
-unchanged and adds the hub samples, including `where-hub.json`.
+`test-vectors/agent-sessions-v1/` at tag `hub-only-samples-v1` (also tagged
+`agent-sessions-v1.13`), commit `291c1eddafaad4098309a8c28c23d62aaa1e1a64`.
 
 The upstream `SHA256SUMS` has SHA-256
-`d3a5df6c02f8a510780e94b3f6df20d66c4d20010bf23b40fa5edd20b4690e26`.
+`714ce6f9f08e50c4145ad1d4656a2f90b806efff7591062e4e2f28825a85a4ee`.
 All entries were verified before copying, and the whole directory was compared
 byte for byte. Do not edit it; to update, verify and copy a newer upstream
 corpus unchanged and record its tag, commit, and checksum here.

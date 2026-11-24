@@ -27,12 +27,8 @@ entorhinal's dependency graph, so `ref` uses a fixed 32-lowercase-hex value
 sample uses opaque fixed references for its new keys; entorhinal does not
 compute references from the project root or interpret their contents.
 
-Releases after 0.1.44 renamed the fixture's display names from `This Mac` and
-`Other Mac` to `This machine` and `Other machine`, the source machine id in
-`sessions-held-on.json` from `source-mac` to `source-machine`, and the waiting
-message in `where-moving-source.json` to "waiting for the target machine to
-pick up the move". Codes, keys and every other byte are unchanged, but the six
-affected files have new hashes, so consumers that pin them must re-pin.
+The whereabouts samples no longer include replies that came only from
+the legacy agent claim cache. Consumers pinning `where.json` must re-pin.
 
 ## Params schemas
 
@@ -160,29 +156,17 @@ a backfill makes the data local.
   carries `runner: "broca"`), and a missing reference. Releases after 0.1.46
   added the Broca record; the other four records are byte-identical to
   before, but the file has a new hash, so consumers that pin it must re-pin.
-- **`where.json`**: on a machine with sharing on: never-read/unclaimed, locally
-  held, remotely held with a holder name, and unknown agent.
-- **`where-many.json`**: a local and remotely held agent, with an unknown ID
-  between them to pin request order and omission.
+- **`where.json`**: before the hub residence watch is selected, a live agent
+  is unclaimed with `known: false`, and an unknown agent is refused.
 - **`node-self.json`**: this machine's identity-log author, own member name and
   sharing state: sharing disabled (null author and name), enabled with the name
   `Workshop machine`, and enabled with no name. The enabled cases include a
   differently named member so another machine's name cannot stand in for this
   machine's own record.
-- **`where-box-unknown.json`** and **`where-holder-box.json`**: the same
-  `held_elsewhere` claim before and after its author shares a box id. When
-  known, `holder_box` is the daemon's 32-digit lowercase hex id, distinct from
-  `holder` (the engram author); otherwise the field is omitted.
-- **`where-many-holder-box.json`**: a mixed batch with a box id for the remote
-  holder and no known box id for the local holder.
 - **`node-self-box.json`**: `node.self` with the daemon id supplied as `box_id`.
 - **`where-sharing-off.json`**: on a machine that has never turned sharing on, an
   agent with no claim is a verified `unclaimed` (`known: true`), because no
   other machine can hold it.
-- **`where-moving-source.json`**: a locally held agent during the source-side
-  published step, waiting for the receiver to pick up the move.
-- **`where-moving-receiver.json`**: the same locally held agent during the
-  receiver-side claimed step, before activation completes.
 - **`register-session-runner.json`**: a Broca worker registration naming
   runner `broca`; the reply bytes have the same shape as a registration
   without one.
@@ -301,10 +285,7 @@ a backfill makes the data local.
 | `for-session.json` | `dd41914934a9b85b35670a815bef17de84752d8da7d05a1bf8833f3edbd1996b` |
 | `register-session.json` | `588c130a747d1fcbd4fac6d765ae09cac4ab15f8b54328e8562f64379dc90335` |
 | `session-for-ref.json` | `3e9e99950c167a2b2c5b3315fca35d353f50bc29e8ad93afe616c15e7cb703f6` |
-| `where.json` | `faacea127dcaaa7181329562e4de553851aebf700358b3267864e894166b911e` |
-| `where-many.json` | `422b8592c531c3c22e161b7a926f3ac61df6155fca2a9660bb159b1a0054d565` |
-| `where-moving-receiver.json` | `cd7a4e475915787cf1a1680a05ad4421b3da19fe90a0a106c3b878b71064b9a6` |
-| `where-moving-source.json` | `87e6cf886a685406c0f7b51c9e372f2ac781a138372ea19ea926a0095df75bb1` |
+| `where.json` | `cb9931afebf82037605a860ec4133a67782b3a3ac61904469a3a0a97c03d10e4` |
 | `where-sharing-off.json` | `0b8fe82664439e2eb38e0816f900c08f7822bdfe29373a77579cfbbd080c6b63` |
 | `end-session.json` | `7d03afb09ac7a666435b4f0e6d4c47ee5a9219ad0d222c7e7ff7eccad830aff1` |
 | `register-session-runner.json` | `d339d3fb4f05b87b05a779be0a3898cc43f58a2f32ae45bfc7fa17216321745d` |
@@ -320,9 +301,6 @@ a backfill makes the data local.
 | `sessions-watch.json` | `980cd6b43063981601f7b7e325d9108f120aa8e075df67355a2d1b93efb0af1e` |
 | `register-session-head.json` | `38d4b5ac7070f44856422f535fb4ace19c7fe00c9d68c607d71db5a6b907a52f` |
 | `register-session-missing-runner.json` | `7267f45c056a0f4943d7a7f4008782b75d151095ecc8e2f046ed0714b6554d29` |
-| `where-box-unknown.json` | `ee3a137255a9521646bee703d734ad81e5a0c6972f6bfb493132087856a07b22` |
-| `where-holder-box.json` | `42ee303abd2a271d4f8ec5609ec73c401f5fdc3b389e2d1fd5115affef03c74a` |
-| `where-many-holder-box.json` | `1ade6493e2aa6ee6fec5cba2f616e8182ac030d874e807736cebf384af266759` |
 | `node-self-box.json` | `00bcf6099d11a10ce63c551c24cd49f6dfc536d1dd3169d9a4500f0605894efd` |
 | `register-session-delegated.json` | `515608c3f46f5a8ac20a9dca47e7cd9d79cc13c43d2459434694b41bccf6660e` |
 | `sessions-delegated.json` | `b210b3e6b3e0530cf0cb0cf8be597a2ea76ef72dea342a7de3d294abb2511c16` |
@@ -350,7 +328,7 @@ ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked sessio
 ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked served_vectors::session_lookup_cases_match_published_file -- --exact --nocapture
 ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked served_vectors::sessions_head_runners_match_published_file -- --exact --nocapture
 ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked served_vectors::node_self_records_match_published_file -- --exact --nocapture
-ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked served_vectors::member_box_records_match_published_files -- --exact --nocapture
+ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked served_vectors::node_self_box_record_matches_published_file -- --exact --nocapture
 ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked served_vectors_sessions_watch_records_match_published_file -- --nocapture
 ENTO_WRITE_SERVED_VECTORS=1 cargo test --workspace --all-targets --locked session_role_records_match_published_files -- --nocapture
 ```
@@ -362,7 +340,7 @@ python3 - <<'PY'
 import hashlib
 from pathlib import Path
 root = Path('test-vectors/agent-sessions-v1')
-names = ['for-session.json', 'register-session.json', 'session-for-ref.json', 'where.json', 'where-many.json', 'where-moving-receiver.json', 'where-moving-source.json', 'where-sharing-off.json', 'end-session.json', 'register-session-runner.json', 'session-for-runner.json', 'sessions.json', 'set-session-network.json', 'register-session-rekey.json', 'sessions-held-on.json', 'sessions-open.json', 'session-lookup-cases.json', 'sessions-head-runners.json', 'session-for-harness.json', 'node-self.json', 'sessions-watch.json', 'register-session-head.json', 'register-session-missing-runner.json', 'where-box-unknown.json', 'where-holder-box.json', 'where-many-holder-box.json', 'node-self-box.json', 'register-session-delegated.json', 'sessions-delegated.json', 'register-session-unknown-role.json', 'where-hub.json', 'where-many-hub.json']
+names = [line.split()[1] for line in root.joinpath('SHA256SUMS').read_text().splitlines()]
 root.joinpath('SHA256SUMS').write_text(''.join(
     f'{hashlib.sha256(root.joinpath(name).read_bytes()).hexdigest()}  {name}\n'
     for name in names), encoding='utf-8')
@@ -370,7 +348,7 @@ PY
 ```
 
 Without `ENTO_WRITE_SERVED_VECTORS=1`, the non-ignored session, lifecycle,
-re-key, lookup-case, node-self and member-box tests regenerate their JSON from the real handler and
+re-key, lookup-case and node-self tests regenerate their JSON from the real handler and
 compare the bytes against the published files on each run. Verify the new file
 with both Cargo's test runner and nextest:
 

@@ -173,6 +173,12 @@ impl Rig {
     }
 
     async fn notice(&mut self, body: &Value) {
+        let ack = self.send_notice_awaiting_ack(body).await;
+        let response = samples("ack")[0]["frames"][0]["body"].clone();
+        self.reply(&ack, FrameType::Response, &response).await;
+    }
+
+    async fn send_notice_awaiting_ack(&mut self, body: &Value) -> Frame {
         send(
             &mut self.socket,
             FrameType::StreamData,
@@ -183,9 +189,13 @@ impl Rig {
         )
         .await;
         let seq = body["seq"].as_u64().unwrap();
-        let ack = self.unary(format!(r#"{{"method":"role.lease.ack","params":{{"role":"connector_home","seq":{seq}}}}}"#).as_bytes()).await;
-        let response = samples("ack")[0]["frames"][0]["body"].clone();
-        self.reply(&ack, FrameType::Response, &response).await;
+        self.unary(
+            format!(
+                r#"{{"method":"role.lease.ack","params":{{"role":"connector_home","seq":{seq}}}}}"#
+            )
+            .as_bytes(),
+        )
+        .await
     }
 
     async fn unary(&mut self, body: &[u8]) -> Frame {
@@ -288,12 +298,66 @@ async fn serving_requires_a_live_notice_and_remaining_transport_budget() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn engram_renewal_and_non_holding_notices_ack_and_refuse_stale_generation() {
-    let mut rig = Rig::new(140_000).await;
-    let engram = samples("engram-sharing");
-    rig.notice(body(&engram[0], 0)).await;
+async fn hub_first_take_admits_effects_only_after_acking_the_hold() {
+    let records = samples("hub-first-take");
+    let [pending, pending_ack, next_gen, next_gen_ack, holding] = records.as_slice() else {
+        panic!("expected two pending notices and ACKs, then the first hold");
+    };
+    let ack = samples("ack");
+    let mut rig = Rig::new(100_000).await;
+    let decisions = rig.home.decisions();
+    assert!(rig.home.begin_act().is_err());
+    // The live sample watches a dreamer role. Notice bodies carry no role
+    // name, so replay them unchanged on the rig's connector_home watch.
+    for (notice, ack_record, held, gen) in [
+        (pending, pending_ack, false, 0),
+        (next_gen, next_gen_ack, false, 1),
+        // The capture ends at the first hold, before its ACK reply.
+        (holding, &ack[0], true, 1),
+    ] {
+        assert_eq!(notice["op"], "role.lease");
+        assert_eq!(notice["frames"][0]["type"], "StreamData");
+        let notice = body(notice, 0);
+        assert_eq!(notice["holding"], held);
+        assert_eq!(notice["gen"], gen);
+        rig.now
+            .store(notice["issued_at_ms"].as_u64().unwrap(), Ordering::SeqCst);
+        let request = rig.send_notice_awaiting_ack(notice).await;
+        assert!(rig.home.begin_act().is_err(), "before ACK for {notice}");
+        assert!(!decisions.has_changed().unwrap(), "before ACK for {notice}");
+        assert_eq!(ack_record["op"], "role.lease.ack");
+        assert_eq!(ack_record["frames"][0]["type"], "Response");
+        rig.reply(&request, FrameType::Response, body(ack_record, 0))
+            .await;
+        if !held {
+            assert!(rig.home.begin_act().is_err(), "pending notice {notice}");
+        }
+    }
     rig.decision(true).await;
-    rig.notice(body(&engram[0], 1)).await;
+    let (permit, _) = rig.home.begin_act().unwrap().expect("live lease permit");
+    drop(permit);
+    // A missing or zero journal entry would accept 0; a higher one would
+    // reject 1. Neither probe changes the stored generation on success.
+    assert!(!rig.store.observe_connector_home_generation(0).unwrap());
+    assert!(rig.store.observe_connector_home_generation(1).unwrap());
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hub_hold_loss_is_acked_and_stale_generation_is_refused() {
+    let mut rig = Rig::new(140_000).await;
+    let hub = samples("hub-first-take");
+    // Replay a hub hold and then loss of that generation. Use the generation
+    // just below the local-after-hub sample so it can later restore admission.
+    let mut holding = body(&hub[4], 0).clone();
+    holding["gen"] = json!(12);
+    holding["seq"] = json!(5);
+    rig.notice(&holding).await;
+    rig.decision(true).await;
+    let mut lost = body(&hub[2], 0).clone();
+    lost["gen"] = json!(12);
+    lost["seq"] = json!(6);
+    rig.notice(&lost).await;
     rig.decision(false).await;
     let mut old = body(&samples("holding")[0], 0).clone();
     old["seq"] = json!(7);

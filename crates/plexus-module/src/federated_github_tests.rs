@@ -505,9 +505,18 @@ async fn moved_agent_bulk_reads_and_closed_methods_are_still_distinguished() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entorhinal_residence_samples_go_through_the_same_reader() {
     let fixtures = [
-        ("off-hub", include_str!("../tests/fixtures/entorhinal-agent-sessions/agent-sessions-v1/where-holder-box.json")),
-        ("off-hub-many", include_str!("../tests/fixtures/entorhinal-agent-sessions/agent-sessions-v1/where-many-holder-box.json")),
-        ("hub", include_str!("../tests/fixtures/entorhinal-agent-sessions/agent-sessions-v1/where-hub.json")),
+        (
+            "hub",
+            include_str!(
+                "../tests/fixtures/entorhinal-agent-sessions/agent-sessions-v1/where-hub.json"
+            ),
+        ),
+        (
+            "hub-many",
+            include_str!(
+                "../tests/fixtures/entorhinal-agent-sessions/agent-sessions-v1/where-many-hub.json"
+            ),
+        ),
     ];
     for (name, bytes) in fixtures {
         let records: Vec<Value> = serde_json::from_str(bytes).unwrap();
@@ -536,6 +545,38 @@ async fn entorhinal_residence_samples_go_through_the_same_reader() {
             }
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn moved_bot_residence_requires_the_holder_box_and_a_remote_hold() {
+    let fixture = Fixture::new("distinct-holder-box", "aft", false);
+    // This row is synthetic, not an Entorhinal sample. Plexus must trust
+    // holder_box, never holder, when matching the authenticated peer box.
+    *fixture.entorhinal.residence.lock().unwrap() = json!({
+        "status":"held_elsewhere", "known":true, "stale":false, "epoch":1,
+        "holder_box":PEER_BOX, "holder":OTHER_BOX, "read_at_ms":700
+    });
+    let mut wrong_peer = facts(agent(), "aft");
+    wrong_peer["peer_box_id"] = json!(OTHER_BOX);
+    let request = write("holder-not-holder-box");
+    assert_frame_denied(&request, fixture.send(wrong_peer, request.clone()).await);
+    fixture.assert_unsent();
+    fixture.entorhinal.calls.lock().unwrap().clear();
+    assert_admitted(&fixture, facts(agent(), "aft")).await;
+
+    let fixture = Fixture::new("held-here", "aft", false);
+    // This row is synthetic, not an Entorhinal sample. A held_here row must
+    // never admit a moved-bot write, even if holder_box matches the peer.
+    *fixture.entorhinal.residence.lock().unwrap() = json!({
+        "status":"held_here", "known":true, "stale":false, "epoch":1,
+        "holder_box":PEER_BOX, "holder":PEER_BOX, "read_at_ms":700
+    });
+    let request = write("held-here-not-remote");
+    assert_frame_denied(
+        &request,
+        fixture.send(facts(agent(), "aft"), request.clone()).await,
+    );
+    fixture.assert_unsent();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
