@@ -1559,8 +1559,8 @@ fn pr_v2_comment_metadata_reuses_actor_reads_without_extra_calls() {
         "id":"pr-7","number":7,"title":"changed","created_at":"2026-08-20T12:00:00Z","updated_at":"2026-08-20T12:02:00Z"
     }],"next_cursor":"tok-1"})));
     engine.transport().set_response_for_method(PULL_REQUEST_READ,"get_comments",MockResponse::Success(json!([
-        {"created_at":"2026-08-20T12:00:00Z","html_url":"https://github.com/cortexkit/plexus/pull/7#issuecomment-1","user":{"login":"alice"}},
-        {"created_at":"2026-08-20T12:01:00Z","html_url":"https://github.com/cortexkit/plexus/pull/7#issuecomment-2","user":{"login":"bob"}}
+        {"created_at":"2026-08-20T12:00:00Z","html_url":"https://github.com/cortexkit/plexus/pull/7#issuecomment-1","user":{"login":"alice"},"body":"Older comment."},
+        {"created_at":"2026-08-20T12:01:00Z","html_url":"https://github.com/cortexkit/plexus/pull/7#issuecomment-2","user":{"login":"bob"},"body":"Bob's reply.\nMore details follow."}
     ])));
     engine.transport().set_response_for_method(
         PULL_REQUEST_READ,
@@ -1583,6 +1583,7 @@ fn pr_v2_comment_metadata_reuses_actor_reads_without_extra_calls() {
         "https://github.com/cortexkit/plexus/pull/7#issuecomment-2"
     );
     assert_eq!(body["comment_author"], "bob");
+    assert_eq!(body["comment_excerpt"], "Bob's reply.");
     assert_eq!(body["actor_logins"], json!(["alice", "bob"]));
     let requests = engine.transport().requests();
     assert_eq!(

@@ -233,6 +233,18 @@ pub(crate) fn envelope(
             })
             .cloned()
             .unwrap_or(Value::Null);
+        body["comment_excerpt"] = if body["comment_url"].is_null() {
+            Value::Null
+        } else {
+            context
+                .comment
+                .as_ref()
+                .and_then(|comment| comment.get("body"))
+                .and_then(Value::as_str)
+                .and_then(comment_excerpt)
+                .map(Value::String)
+                .unwrap_or(Value::Null)
+        };
         if matches!(event_kind, GithubEventKind::PullRequest) {
             body["draft"] = item["draft"].clone();
             body["merged"] = item["merged"].clone();
@@ -243,6 +255,21 @@ pub(crate) fn envelope(
     crate::jcs::canonicalize_exact_integers(&body)
         .map(|bytes| String::from_utf8(bytes).expect("JCS is UTF-8"))
         .map_err(EventKeyError::Canonicalization)
+}
+
+fn comment_excerpt(text: &str) -> Option<String> {
+    const MAX_BYTES: usize = 280;
+    const ELLIPSIS: &str = "…";
+    let line = text
+        .split(['\r', '\n'])
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    Some(if line.len() <= MAX_BYTES {
+        line.to_owned()
+    } else {
+        let prefix = crate::text::prefix_within_bytes(line, MAX_BYTES - ELLIPSIS.len());
+        format!("{prefix}{ELLIPSIS}")
+    })
 }
 
 /// Stamp normalized v1 notices on insertion, never vendor objects or stored bodies on read.
@@ -674,7 +701,7 @@ mod tests {
             json!({
                 "number":655,"title":"fix(kite): select paper colours and ribbons from the toy workshop","state":"open",
                 "url":"https://github.com/cortexkit/magic-context/pull/655","author":"octo-quartz",
-                "updated_at":"2026-10-10T21:48:03Z","comment_url":null,"comment_author":null
+                "updated_at":"2026-10-10T21:48:03Z","comment_url":null,"comment_author":null,"comment_excerpt":null
             }),
         );
     }
@@ -689,7 +716,7 @@ mod tests {
             json!({
                 "number":658,"title":"Toy lantern warnings race the imaginary workshop bell","state":"open",
                 "url":"https://github.com/cortexkit/magic-context/issues/658","author":"octo-quartz",
-                "updated_at":"2026-10-10T20:37:55Z","comment_url":null,"comment_author":null
+                "updated_at":"2026-10-10T20:37:55Z","comment_url":null,"comment_author":null,"comment_excerpt":null
             }),
         );
     }
@@ -704,7 +731,7 @@ mod tests {
             json!({
                 "number":13,"title":"Workshop only: paper kite checks, ribbon lists and lantern guides","state":"open",
                 "url":"https://github.com/cortexkit/basal/pull/13","author":"basal-alfonso[bot]",
-                "updated_at":"2026-10-11T00:33:09Z","comment_url":null,"comment_author":null,
+                "updated_at":"2026-10-11T00:33:09Z","comment_url":null,"comment_author":null,"comment_excerpt":null,
                 "draft":true,"merged":false,"head_ref":"ci/windows-s10","base_ref":"integration/windows"
             }),
         );
@@ -720,7 +747,7 @@ mod tests {
             json!({
                 "number":13,"title":"Workshop only: paper kite checks, ribbon lists and lantern guides","state":"open",
                 "url":"https://github.com/cortexkit/basal/pull/13","author":"basal-alfonso[bot]",
-                "updated_at":"2026-10-11T00:33:17Z","comment_url":null,"comment_author":null,
+                "updated_at":"2026-10-11T00:33:17Z","comment_url":null,"comment_author":null,"comment_excerpt":null,
                 "draft":true,"merged":false,"head_ref":"ci/windows-s10","base_ref":"integration/windows"
             }),
         );
@@ -978,6 +1005,161 @@ mod tests {
         );
     }
 
+    fn issue_envelope_with_comment(comment: Option<Value>) -> Value {
+        serde_json::from_str(
+            &envelope(
+                KEY,
+                GITHUB_ISSUE_CHANGED,
+                "owner/repo",
+                &json!({"number":3}),
+                &ActorAttribution::NotEnriched,
+                &EnvelopeContext {
+                    comment,
+                    ..Default::default()
+                },
+                OBSERVED_AT_MS,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn comment_excerpt_uses_only_the_trimmed_first_line() {
+        let body = issue_envelope_with_comment(Some(json!({
+            "html_url":"https://github.com/owner/repo/issues/3#issuecomment-1",
+            "body":"  First line. \r\nSecond line."
+        })));
+        assert_eq!(body["comment_excerpt"], "First line.");
+    }
+
+    #[test]
+    fn comment_excerpt_skips_leading_blank_lines() {
+        let body = issue_envelope_with_comment(Some(json!({
+            "url":"https://github.com/owner/repo/issues/3#issuecomment-1",
+            "body":"\r\n\t \n\u{2003}\r  First nonblank line.\rNext line."
+        })));
+        assert_eq!(body["comment_excerpt"], "First nonblank line.");
+    }
+
+    #[test]
+    fn comment_excerpt_caps_utf8_bytes_and_keeps_the_ellipsis_inside_the_limit() {
+        let fits = "é".repeat(140);
+        let overflow = format!("{fits}x");
+        for (text, expected) in [
+            (&fits, fits.clone()),
+            (&overflow, format!("{}…", "é".repeat(138))),
+        ] {
+            let body = issue_envelope_with_comment(Some(json!({
+                "html_url":"https://github.com/owner/repo/issues/3#issuecomment-1",
+                "body":text
+            })));
+            let excerpt = body["comment_excerpt"]
+                .as_str()
+                .expect("a nonempty excerpt");
+            assert_eq!(excerpt, expected);
+            assert!(excerpt.len() <= 280);
+        }
+    }
+
+    #[test]
+    fn comment_excerpt_is_null_without_a_link_or_nonblank_body() {
+        for comment in [
+            None,
+            Some(json!({"body":"No link"})),
+            Some(json!({"html_url":null,"body":"Null link"})),
+            Some(
+                json!({"html_url":"https://github.com/owner/repo/issues/3#issuecomment-1","user":{"login":"alice"}}),
+            ),
+            Some(
+                json!({"html_url":"https://github.com/owner/repo/issues/3#issuecomment-1","body":""}),
+            ),
+            Some(
+                json!({"html_url":"https://github.com/owner/repo/issues/3#issuecomment-1","body":" \r\n \t"}),
+            ),
+        ] {
+            let body = issue_envelope_with_comment(comment);
+            assert_eq!(body.get("comment_excerpt"), Some(&Value::Null), "{body}");
+        }
+    }
+
+    #[test]
+    fn comment_excerpt_samples_match_the_stored_envelope_bytes() {
+        use std::fmt::Write;
+
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/event-envelope-v2/comment-excerpts");
+        let regenerate =
+            std::env::var("PLEXUS_REGENERATE_COMMENT_EXCERPT_FIXTURES").as_deref() == Ok("1");
+        let check = |filename, actual: &str| {
+            let path = directory.join(filename);
+            if regenerate {
+                std::fs::write(path, actual).unwrap();
+            } else {
+                assert_eq!(std::fs::read_to_string(path).unwrap(), actual, "{filename}");
+            }
+        };
+        let repo = "fixture-org/lanterns";
+        let updated_at = "2026-08-20T12:02:00Z";
+        let observed_at_ms =
+            crate::poller::iso8601::parse_to_millis("2026-08-20T12:02:03.456Z").unwrap();
+        let mut checksums = String::new();
+        for (filename, event, segment, number, title, login, source, text) in [
+            (
+                "issue-comment.json",
+                GITHUB_ISSUE_CHANGED,
+                "issues",
+                3,
+                "The lantern flickers",
+                "elliot",
+                EnvelopeSource::Webhook(Some("created".into())),
+                "\r\n  I can reproduce this.\r\nIt happens after dusk.",
+            ),
+            (
+                "pr-comment.json",
+                GITHUB_PR_CHANGED,
+                "pull",
+                7,
+                "Fix the lantern timer",
+                "mira",
+                EnvelopeSource::Poll,
+                "Thanks for the fix!\nI checked it with the old timer too.",
+            ),
+        ] {
+            let url = format!("https://github.com/{repo}/{segment}/{number}");
+            let item = json!({"number":number,"title":title,"state":"open","html_url":url,
+                "user":{"login":"sage"},"created_at":"2026-08-20T12:00:00Z","updated_at":updated_at});
+            let key = derive_event_key(
+                event,
+                &json!({"repo_id":101,"number":number,"updated_at":updated_at}),
+            )
+            .unwrap();
+            let actual = envelope(
+                &key,
+                event,
+                repo,
+                &item,
+                &ActorAttribution::Known(vec![login.into()]),
+                &EnvelopeContext {
+                    source,
+                    comment: Some(json!({"html_url":format!("{url}#issuecomment-1"),
+                        "user":{"login":login},"body":text})),
+                    ci_run: None,
+                },
+                observed_at_ms,
+            )
+            .unwrap();
+            check(filename, &actual);
+            writeln!(
+                checksums,
+                "{}  {filename}",
+                crate::jcs::sha256_hex(actual.as_bytes())
+            )
+            .unwrap();
+        }
+        check("SHA256SUMS", &checksums);
+    }
+
     #[test]
     fn sparse_pr_and_actor_unknown_always_include_nullable_fields() {
         let actor = ActorAttribution::Unknown {
@@ -1003,6 +1185,7 @@ mod tests {
             "updated_at",
             "comment_url",
             "comment_author",
+            "comment_excerpt",
             "draft",
             "merged",
             "head_ref",
