@@ -110,12 +110,13 @@ and it does not change any event key.
 | `actor_unknown` | object | Existing structured unknown-actor reason |
 | `comment_url` | string | URL of an identified conversation comment |
 | `comment_author` | string | Comment author login only |
+| `comment_excerpt` | string | First nonblank line of the same comment, limited to 280 UTF-8 bytes |
 
 For issue and PR envelopes, exactly one of `actor_logins` and `actor_unknown` is
 non-null, including an empty actor list when enrichment knows there were no
 actors. Unbound enrichment uses the existing structured `actor_source_unbound`
 reason in v2 only, with class `unexpected` (`ActorSourceUnbound`); v1 retains its existing both-null representation. CI and
-release envelopes always have both actor fields null. Both comment fields are
+release envelopes always have both actor fields null. The comment fields are
 null for non-comment changes or when the comment cannot be identified. The
 comment's target is the envelope's own `kind` and `number`.
 
@@ -124,9 +125,15 @@ and `head_ref` and `base_ref` (string or null), taken from the source when known
 
 PR conversation-comment webhooks do not directly publish a change; they make the
 PR watch due, preserving exactly one polled `github_pr_changed` notice per
-version. When existing `pull_request_read` actor enrichment reads conversation
-comments in its window, the newest comment supplies `comment_url` and
-`comment_author`. Otherwise both are null. No additional requests are made.
+version. When existing actor enrichment reads conversation comments in its
+window, the newest comment supplies `comment_url`, `comment_author`, and the
+body used for `comment_excerpt`. A direct issue-comment webhook uses the
+comment it already carries. No additional requests are made.
+The excerpt is the first nonblank line after trimming whitespace, without a
+CR or LF. If the line exceeds 280 UTF-8 bytes, it is cut at a character
+boundary with `…` included in the limit. The excerpt is null when `comment_url`
+is null or the body is missing or has no nonblank line. Older stored bodies
+are unchanged; readers must also accept an absent `comment_excerpt`.
 
 ### CI job and CI run
 

@@ -3637,7 +3637,7 @@ mod tests {
                             "created".into(),
                         )),
                         comment: Some(
-                            json!({"html_url":"https://github.com/cortexkit/basal/pull/13#issuecomment-1","user":{"login":"basal-alfonso[bot]"}}),
+                            json!({"html_url":"https://github.com/cortexkit/basal/pull/13#issuecomment-1","user":{"login":"basal-alfonso[bot]"},"body":"The lantern is fixed.\nThe second line stays private."}),
                         ),
                         ci_run: None,
                     };
@@ -3660,6 +3660,11 @@ mod tests {
         let one = winners[0].as_object().unwrap();
         let two = winners[1].as_object().unwrap();
         assert_eq!(
+            one.get("comment_excerpt"),
+            Some(&json!("The lantern is fixed."))
+        );
+        assert_eq!(two.get("comment_excerpt"), Some(&Value::Null));
+        assert_eq!(
             one.keys().collect::<Vec<_>>(),
             two.keys().collect::<Vec<_>>()
         );
@@ -3668,7 +3673,49 @@ mod tests {
             .filter(|key| one[*key] != two[*key])
             .map(String::as_str)
             .collect::<Vec<_>>();
-        assert_eq!(differences, vec!["action", "comment_author", "comment_url"]);
+        assert_eq!(
+            differences,
+            vec!["action", "comment_author", "comment_excerpt", "comment_url"]
+        );
+    }
+
+    #[test]
+    fn older_issue_envelope_without_comment_excerpt_is_served_byte_identical() {
+        let store = store();
+        subscription(&store, "a", "sorted_head");
+        let item = json!({"number":7});
+        let event_headers = headers("owner/repo");
+        commit(&store, "a", &[input(&item, KEY, &event_headers)]);
+        let historical = format!(
+            concat!(
+                r#"{{"action":"updated","actor_logins":null,"actor_unknown":{{"class":"unexpected","reason":"actor_source_unbound"}},"#,
+                r#""author":null,"comment_author":"alice","comment_url":"https://github.com/owner/repo/issues/7#issuecomment-1","#,
+                r#""event_key":"{}","kind":"issue","number":7,"observed_at":"1970-01-01T00:00:00.100Z","repo":"owner/repo","#,
+                r#""state":null,"title":null,"updated_at":null,"url":"https://github.com/owner/repo/issues/7"}}"#,
+            ),
+            KEY
+        );
+        let digest = crate::jcs::sha256_hex(historical.as_bytes());
+        assert_eq!(
+            store
+                .inner
+                .with_conn_fenced(|conn| {
+                    conn.execute(
+                        "UPDATE event_outbox SET envelope_v2=?1,digest_v2=?2 WHERE event_key=?3",
+                        (&historical, &digest, KEY),
+                    )
+                })
+                .unwrap(),
+            1,
+        );
+
+        let served = store.drain_event_outbox_version(10, 2).unwrap();
+        assert_eq!(served.len(), 1);
+        assert_eq!(served[0].envelope_v2.as_deref(), Some(historical.as_str()));
+        assert_eq!(served[0].digest_v2.as_deref(), Some(digest.as_str()));
+        let body: Value = serde_json::from_str(served[0].envelope_v2.as_ref().unwrap()).unwrap();
+        assert_eq!(body["comment_author"], "alice");
+        assert!(body.get("comment_excerpt").is_none());
     }
 
     #[test]
