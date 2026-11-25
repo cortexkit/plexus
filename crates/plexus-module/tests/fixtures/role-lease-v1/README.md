@@ -42,6 +42,10 @@ body is shown as `null`.
   using `role.lease.ack {role, seq}` on the same bound route as the watch. A
   second route with the same principal cannot ack, as marked by the fixture's
   `differentRoute` annotation. Explicit release also requires the original route.
+- `ack-after-watch-ended.json`: after 5 seconds without an ack, the watch ends.
+  A late ack gets `lease_watch_closed`; open a new watch. Release and yield
+  also return `lease_watch_closed` if no watch is open for the role. By contrast,
+  acking on a different route while the watch is still open gets `caller_forbidden`.
 - `refusals.json`: an empty name part, a role assigned to a different module,
   a Direct caller (a local process the daemon admits without a module identity, such as a terminal command) and a flow-scoped caller (marked `flowScoped`) are refused.
 - `sharing-disabled.json`: both admitted consumers get generation 1 locally,

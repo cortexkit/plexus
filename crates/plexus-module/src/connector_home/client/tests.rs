@@ -47,6 +47,8 @@ struct Rig {
     home: Arc<ConnectorHome>,
     store: Arc<PlexusStore>,
     reader: Arc<OldReader>,
+    listener: TcpListener,
+    connection: ConnectionInfo,
     socket: TcpStream,
     stream_corr: u64,
     stop: mpsc::Sender<()>,
@@ -74,6 +76,64 @@ async fn send(
         .await
         .unwrap()
         .unwrap();
+}
+
+async fn accept_route(
+    listener: &TcpListener,
+    connection: &ConnectionInfo,
+    channel: u16,
+) -> TcpStream {
+    let (mut socket, _) = timeout(LIMIT, listener.accept()).await.unwrap().unwrap();
+    authenticate_server(
+        &mut socket,
+        &connection.key,
+        &connection.daemon_id,
+        &connection.daemon_ver,
+        LIMIT,
+    )
+    .await
+    .unwrap();
+
+    let describe = recv(&mut socket).await;
+    assert_eq!(describe.body, br#"{"op":"server.describe"}"#);
+    send(
+        &mut socket, FrameType::Response, 0, 0, describe.header.corr,
+        br#"{"op":"server.describe","protocol_ver":1,"subc_ops":[],"capabilities":[],"connected_clients":1}"#.to_vec(),
+    ).await;
+    let open = recv(&mut socket).await;
+    assert_eq!(open.header.channel, 0);
+    let request: Value = serde_json::from_slice(&open.body).unwrap();
+    assert_eq!(request["op"], "route.open");
+    assert_eq!(
+        request["target"],
+        serde_json::to_value(RouteTarget::ManagementSurface {
+            module_id: "entorhinal".into()
+        })
+        .unwrap()
+    );
+    let body = json!({"op":"route.open","route_channel":channel,"route_epoch":EPOCH,"request_window":3,"watch_window":1});
+    send(
+        &mut socket,
+        FrameType::Response,
+        0,
+        0,
+        open.header.corr,
+        serde_json::to_vec(&body).unwrap(),
+    )
+    .await;
+    socket
+}
+
+async fn accept_watch(listener: &TcpListener, connection: &ConnectionInfo) -> (TcpStream, u64) {
+    let mut socket = accept_route(listener, connection, CHANNEL).await;
+    let watch = recv(&mut socket).await;
+    assert_eq!(watch.header.ty, FrameType::Request);
+    assert_eq!((watch.header.channel, watch.header.epoch), (CHANNEL, EPOCH));
+    assert_eq!(
+        watch.body,
+        br#"{"method":"role.lease","params":{"role":"connector_home"}}"#
+    );
+    (socket, watch.header.corr)
 }
 
 impl Rig {
@@ -115,58 +175,17 @@ impl Rig {
         let task_home = home.clone();
         let task_store = store.clone();
         let task = tokio::spawn(async move { run(task_home, task_store, &path, rx).await });
-        let (mut socket, _) = timeout(LIMIT, listener.accept()).await.unwrap().unwrap();
-        authenticate_server(
-            &mut socket,
-            &connection.key,
-            &connection.daemon_id,
-            &connection.daemon_ver,
-            LIMIT,
-        )
-        .await
-        .unwrap();
-
-        let describe = recv(&mut socket).await;
-        assert_eq!(describe.body, br#"{"op":"server.describe"}"#);
-        send(
-            &mut socket, FrameType::Response, 0, 0, describe.header.corr,
-            br#"{"op":"server.describe","protocol_ver":1,"subc_ops":[],"capabilities":[],"connected_clients":1}"#.to_vec(),
-        ).await;
-        let open = recv(&mut socket).await;
-        assert_eq!(open.header.channel, 0);
-        let request: Value = serde_json::from_slice(&open.body).unwrap();
-        assert_eq!(request["op"], "route.open");
-        assert_eq!(
-            request["target"],
-            serde_json::to_value(RouteTarget::ManagementSurface {
-                module_id: "entorhinal".into()
-            })
-            .unwrap()
-        );
-        let body = json!({"op":"route.open","route_channel":CHANNEL,"route_epoch":EPOCH,"request_window":3,"watch_window":1});
-        send(
-            &mut socket,
-            FrameType::Response,
-            0,
-            0,
-            open.header.corr,
-            serde_json::to_vec(&body).unwrap(),
-        )
-        .await;
-        let watch = recv(&mut socket).await;
-        assert_eq!((watch.header.channel, watch.header.epoch), (CHANNEL, EPOCH));
-        assert_eq!(
-            watch.body,
-            br#"{"method":"role.lease","params":{"role":"connector_home"}}"#
-        );
+        let (socket, stream_corr) = accept_watch(&listener, &connection).await;
         Self {
             _scratch: scratch,
             now,
             home,
             store,
             reader,
+            listener,
+            connection,
             socket,
-            stream_corr: watch.header.corr,
+            stream_corr,
             stop,
             task,
         }
@@ -232,6 +251,85 @@ impl Rig {
             body,
         )
         .await;
+    }
+
+    async fn expect_route_close(&mut self) {
+        let goodbye = timeout(LIMIT, async {
+            loop {
+                let frame = read_frame(&mut self.socket)
+                    .await
+                    .unwrap()
+                    .expect("transport closed before route Goodbye");
+                if frame.header.ty != FrameType::Cancel {
+                    break frame;
+                }
+                assert_eq!(frame.header.corr, self.stream_corr);
+            }
+        })
+        .await
+        .expect("late ack refusal must close the route without waiting for StreamEnd");
+        assert_eq!(goodbye.header.ty, FrameType::Goodbye);
+        assert_eq!(
+            (goodbye.header.channel, goodbye.header.epoch),
+            (CHANNEL, EPOCH)
+        );
+    }
+
+    async fn refuse_ack_on_other_route(&self, record: &Value) {
+        assert_eq!(record["principal"]["differentRoute"], true);
+        assert_eq!(record["op"], "role.lease.ack");
+        assert_eq!(record["frames"][0]["type"], "Error");
+
+        // Open a different route with the same caller identity as the watch.
+        let channel = CHANNEL + 1;
+        let ack_body = request_bytes(
+            "role.lease.ack",
+            json!({"role": ROLE, "seq": record["request"]["seq"]}),
+        );
+        let target = RouteTarget::ManagementSurface {
+            module_id: "entorhinal".into(),
+        };
+        let path = self._scratch.join("connection.json");
+        tokio::join!(
+            async {
+                let consumer = SubcConsumer::connect(&path, Default::default())
+                    .await
+                    .unwrap();
+                let route = consumer
+                    .open_route(
+                        target,
+                        BindIdentity::new("plexus", "module"),
+                        Default::default(),
+                    )
+                    .await
+                    .unwrap();
+                let result = consumer
+                    .request(&route, ack_body.clone(), Default::default())
+                    .await;
+                let Err(CallError::Module(error)) = result else {
+                    panic!("expected a module refusal for the wrong-route ack");
+                };
+                assert_eq!(error.code, "caller_forbidden");
+            },
+            async {
+                let mut other = accept_route(&self.listener, &self.connection, channel).await;
+                let ack = recv(&mut other).await;
+                assert_eq!(ack.header.ty, FrameType::Request);
+                assert_eq!((ack.header.channel, ack.header.epoch), (channel, EPOCH));
+                assert_eq!(ack.body, ack_body);
+                send(
+                    &mut other,
+                    FrameType::Error,
+                    channel,
+                    EPOCH,
+                    ack.header.corr,
+                    serde_json::to_vec(body(record, 0)).unwrap(),
+                )
+                .await;
+                // Keep the socket open until the other consumer reads the refusal.
+                other
+            }
+        );
     }
 
     async fn decision(&self, held: bool) {
@@ -450,6 +548,59 @@ async fn lapse_and_stream_end_never_fall_back() {
     assert!(!rig.home.held());
     assert!(body(&lapse[0], 1).is_null());
     rig.terminal(FrameType::StreamEnd, vec![]).await;
+    assert!(!rig.home.gate.legacy());
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn late_ack_refusal_fences_and_reopens_the_watch() {
+    let records = samples("ack-after-watch-ended");
+    let [ended, late_ack, reopened, wrong_route_ack] = records.as_slice() else {
+        panic!("expected an ended watch and late ack, then a new watch and wrong-route ack");
+    };
+    let pending = body(ended, 0);
+    let now = pending["issued_at_ms"].as_u64().unwrap();
+    let mut rig = Rig::new(now).await;
+    let mut holding = body(&samples("holding")[0], 0).clone();
+    holding["issued_at_ms"] = json!(now);
+    rig.notice(&holding).await;
+    rig.decision(true).await;
+    assert!(rig.home.begin_act().unwrap().is_some());
+
+    // Replay the ended-watch sample on connector_home; notice bodies don't name the role.
+    assert_eq!(ended["frames"][0]["type"], "StreamData");
+    assert_eq!(ended["frames"][1]["type"], "StreamEnd");
+    assert_eq!(late_ack["op"], "role.lease.ack");
+    assert_eq!(late_ack["request"]["seq"], pending["seq"]);
+    let ack = rig.send_notice_awaiting_ack(pending).await;
+    assert!(
+        rig.home.begin_act().is_err(),
+        "non-holding notice must fence at once"
+    );
+    let refusal = body(late_ack, 0);
+    assert_eq!(late_ack["frames"][0]["type"], "Error");
+    assert_eq!(refusal["code"], "lease_watch_closed");
+    // The server has ended the watch, but delay delivery of StreamEnd. Otherwise
+    // the terminal frame would close the route even if the client ignored the ack error.
+    rig.reply(&ack, FrameType::Error, refusal).await;
+    rig.expect_route_close().await;
+    assert!(
+        rig.home.begin_act().is_err(),
+        "ack refusal must leave admission closed"
+    );
+
+    (rig.socket, rig.stream_corr) = accept_watch(&rig.listener, &rig.connection).await;
+    assert_eq!(reopened["op"], "role.lease");
+    assert_eq!(reopened["frames"][0]["type"], "StreamData");
+    let next = body(reopened, 0);
+    rig.now
+        .store(next["issued_at_ms"].as_u64().unwrap(), Ordering::SeqCst);
+    let own_ack = rig.send_notice_awaiting_ack(next).await;
+    assert_eq!(wrong_route_ack["request"]["seq"], next["seq"]);
+    rig.refuse_ack_on_other_route(wrong_route_ack).await;
+    rig.reply(&own_ack, FrameType::Response, body(&samples("ack")[0], 0))
+        .await;
+    assert!(rig.home.begin_act().is_err());
     assert!(!rig.home.gate.legacy());
     rig.finish().await;
 }

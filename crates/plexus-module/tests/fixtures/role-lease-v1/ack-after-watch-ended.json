@@ -1,0 +1,6 @@
+[
+  {"op":"role.lease","request":{"role":"dreamer.pj-fern_01"},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"StreamData","body":{"holding":false,"gen":0,"valid_for_ms":0,"issued_at_ms":145000,"seq":5}},{"type":"StreamEnd","body":null}]},
+  {"op":"role.lease.ack","request":{"role":"dreamer.pj-fern_01","seq":5},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"Error","body":{"code":"lease_watch_closed","message":"no role lease watch is open for this role; it may have ended after an unacknowledged notice. Open a new watch."}}]},
+  {"op":"role.lease","request":{"role":"dreamer.pj-fern_01"},"principal":{"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"StreamData","body":{"holding":false,"gen":0,"valid_for_ms":0,"issued_at_ms":150001,"seq":6}}]},
+  {"op":"role.lease.ack","request":{"role":"dreamer.pj-fern_01","seq":6},"principal":{"differentRoute":true,"kind":"reserved","moduleId":"magic-context"},"frames":[{"type":"Error","body":{"code":"caller_forbidden","message":"use the route that opened the role lease watch"}}]}
+]
