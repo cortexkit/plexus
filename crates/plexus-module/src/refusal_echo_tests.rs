@@ -277,14 +277,6 @@ fn catalog_metadata_keys_and_diagnostics_have_bounded_refusal_echoes() {
             assert!(reply["message"].as_str().unwrap().len() <= MAX_MODEL_VISIBLE_BYTES);
             assert!(legacy_model_visible_bytes(&reply) <= MAX_MODEL_VISIBLE_BYTES);
         }
-        let args = json!({"params":{"capabilities":[name.clone()]}});
-        let reply = serde_json::to_value(
-            tool_provider::reply(ops::TOOL_CATALOG, args.as_object().unwrap()).unwrap_err(),
-        )
-        .unwrap();
-        assert_echo(reply["detail"]["capability"].as_str().unwrap(), &name);
-        assert_eq!(reply["code"], "invalid_request");
-        assert!(legacy_model_visible_bytes(&reply) <= MAX_MODEL_VISIBLE_BYTES);
         let args = json!({"digest_only":name});
         let reply = serde_json::to_value(
             tool_provider::reply(ops::TOOL_CATALOG, args.as_object().unwrap()).unwrap_err(),

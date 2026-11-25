@@ -14,20 +14,10 @@ fn catalog_matches_every_advertised_definition() {
             _ => Vec::new(),
         })
         .collect();
-    // Ask for all served tags explicitly; absent capabilities select no tools in preflight.
-    let mut capabilities: Vec<_> = TOOL_CAPABILITIES
-        .iter()
-        .flat_map(|(_, tags)| tags.iter().copied())
-        .collect();
-    capabilities.sort_unstable();
-    capabilities.dedup();
-    let arguments = json!({"params": {"capabilities": capabilities}});
-    let answer: CatalogAnswer =
-        serde_json::from_value(reply(ops::TOOL_CATALOG, arguments.as_object().unwrap()).unwrap())
-            .unwrap();
-    assert_eq!(answer.tools.len(), 11);
-    assert_eq!(answer.tools.len(), advertised.len());
-    for (tool, definition) in answer.tools.iter().zip(advertised) {
+    let tools = catalog_tools(&advertised_tools());
+    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), advertised.len());
+    for (tool, definition) in tools.iter().zip(advertised) {
         assert_eq!(tool.name, definition.name);
         assert_eq!(tool.description, definition.description);
         assert_eq!(tool.input_schema, definition.schema);
@@ -37,32 +27,19 @@ fn catalog_matches_every_advertised_definition() {
         );
         cortexkit_role_tool_provider::catalog::check_flat_schema(&tool.input_schema).unwrap();
     }
-    assert!(answer.tools.iter().all(|tool| !tool.name.contains('.')));
+    assert!(tools.iter().all(|tool| !tool.name.contains('.')));
 }
 
-// Call the lint directly because the conformance kit exposes only run_suite,
-// which needs a real daemon route and harness.
-#[tokio::test]
-async fn catalog_schemas_portable() {
+#[test]
+fn catalog_schemas_portable() {
     use std::collections::BTreeSet;
-    use subc_protocol::{FrameType, Principal};
 
-    let description = send_metadata(Principal::Direct, ops::ROLE_DESCRIBE, json!({})).await;
-    assert_eq!(description.header.ty, FrameType::Response);
-    let description: RoleDescribe = serde_json::from_slice(&description.body).unwrap();
-    let frame = send_metadata(
-        Principal::Direct,
-        ops::TOOL_CATALOG,
-        json!({"params": {"capabilities": description.tool_capabilities}}),
-    )
-    .await;
-    assert_eq!(frame.header.ty, FrameType::Response);
-    let answer: CatalogAnswer = serde_json::from_slice(&frame.body).unwrap();
-    let declared: BTreeSet<_> = advertised_tools()
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect();
-    let linted: BTreeSet<_> = answer.tools.iter().map(|tool| tool.name.clone()).collect();
+    // No single preset serves every tool. Lint the complete definitions before
+    // preset selection so tools omitted from the presets are checked too.
+    let definitions = advertised_tools();
+    let tools = catalog_tools(&definitions);
+    let declared: BTreeSet<_> = definitions.iter().map(|tool| tool.name.as_str()).collect();
+    let linted: BTreeSet<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
     assert!(
         !declared.is_empty(),
         "the declared tool list must not be empty"
@@ -71,14 +48,9 @@ async fn catalog_schemas_portable() {
         linted, declared,
         "lint every declared tool, not a filtered subset"
     );
-    assert_eq!(
-        answer.tools.len(),
-        linted.len(),
-        "tool names must be unique"
-    );
+    assert_eq!(tools.len(), linted.len(), "tool names must be unique");
 
-    let findings: Vec<_> = answer
-        .tools
+    let findings: Vec<_> = tools
         .iter()
         .flat_map(|tool| {
             cortexkit_role_tool_provider::lint_input_schema(&tool.input_schema)
@@ -91,8 +63,7 @@ async fn catalog_schemas_portable() {
 
 #[test]
 fn only_search_tools_opt_into_tool_result_v1() {
-    let answer = catalog(&all_capabilities_request(), &advertised_tools()).unwrap();
-    for tool in &answer.tools {
+    for tool in catalog_tools(&advertised_tools()) {
         let expected = if matches!(tool.name.as_str(), "web_search" | "code_search") {
             Some(cortexkit_role_tool_provider::result::ResultFormat::ToolResultV1)
         } else {
@@ -121,8 +92,7 @@ fn only_search_tools_opt_into_tool_result_v1() {
 
 #[test]
 fn catalog_modes_match_every_tool_contract() {
-    let answer = catalog(&all_capabilities_request(), &advertised_tools()).unwrap();
-    for tool in &answer.tools {
+    for tool in &catalog_tools(&advertised_tools()) {
         check_modes(tool).unwrap();
         assert!(serves_call_mode(tool, &CallMode::Classic));
         assert_eq!(
@@ -146,20 +116,8 @@ fn catalog_modes_match_every_tool_contract() {
 /// `emits_events: false`, and the served digest covers that member.
 #[test]
 fn catalog_emits_events_is_false_on_github_react_only() {
-    let mut capabilities: Vec<_> = TOOL_CAPABILITIES
-        .iter()
-        .flat_map(|(_, tags)| tags.iter().copied())
-        .collect();
-    capabilities.sort_unstable();
-    capabilities.dedup();
-    let wire = reply(
-        ops::TOOL_CATALOG,
-        json!({"params": {"capabilities": capabilities}})
-            .as_object()
-            .unwrap(),
-    )
-    .unwrap();
-    let tools = wire["tools"].as_array().unwrap();
+    let all_tools = wire_tools(&catalog_tools(&advertised_tools()));
+    let tools = all_tools.as_array().unwrap();
     assert_eq!(tools.len(), 11);
     for tool in tools {
         if tool["name"] == "github_react" {
@@ -177,6 +135,12 @@ fn catalog_emits_events_is_false_on_github_react_only() {
             );
         }
     }
+    let wire = reply(
+        ops::TOOL_CATALOG,
+        json!({"preset": "flow"}).as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(wire["tools"][4]["emits_events"], false);
     let mut content = wire.clone();
     content.as_object_mut().unwrap().remove("catalog_digest");
     assert_eq!(
@@ -208,9 +172,9 @@ fn catalog_capability_table_matches_every_advertised_tool() {
         TOOL_CAPABILITIES, expected,
         "capability table must name truthful tags"
     );
-    let answer = catalog(&all_capabilities_request(), &advertised_tools()).unwrap();
-    assert_eq!(answer.tools.len(), expected.len());
-    for tool in &answer.tools {
+    let tools = catalog_tools(&advertised_tools());
+    assert_eq!(tools.len(), expected.len());
+    for tool in &tools {
         let (_, tags) = expected
             .iter()
             .find(|(name, _)| *name == tool.name)
@@ -228,11 +192,7 @@ fn catalog_capability_table_matches_every_advertised_tool() {
     }
     for (name, _) in TOOL_CAPABILITIES {
         assert_eq!(
-            answer
-                .tools
-                .iter()
-                .filter(|tool| tool.name == *name)
-                .count(),
+            tools.iter().filter(|tool| tool.name == *name).count(),
             1,
             "capability table must name each advertised tool exactly once"
         );
@@ -255,121 +215,79 @@ fn fetch(
         .map(|wire| serde_json::from_value(wire).unwrap())
 }
 
-fn all_capabilities_request() -> CatalogRequest {
-    // Request every tag to inspect definitions that are not part of any preset.
-    let mut capabilities: Vec<_> = TOOL_CAPABILITIES
-        .iter()
-        .flat_map(|(_, tags)| tags.iter().copied())
-        .collect();
-    capabilities.sort_unstable();
-    capabilities.dedup();
-    serde_json::from_value(json!({"params": {"capabilities": capabilities}})).unwrap()
-}
-
 fn names(answer: &CatalogAnswer) -> Vec<&str> {
     answer.tools.iter().map(|tool| tool.name.as_str()).collect()
 }
 
-#[test]
-fn catalog_reader_capabilities_select_only_search_in_manifest_order() {
-    for tags in [
-        json!(["plexus:code.search/v1", "plexus:web.search/v1"]),
+#[tokio::test]
+async fn tool_catalog_route_ignores_capabilities_without_a_preset() {
+    use subc_protocol::{FrameType, Principal};
+
+    for capabilities in [
         json!(["code.search.public/v1", "web.search/v1"]),
+        json!(["plexus:unserved/v1"]),
+        json!(["web.search/v1", "code.search.public/v1"]),
+        json!(["web.search/v1", "web.search/v1"]),
+        json!([4]),
+        json!("web.search/v1"),
+        json!(null),
+        json!([]),
     ] {
-        for preset in [None, Some("head"), Some("worker"), Some("reader")] {
-            let answer = fetch(json!({"capabilities": tags}),
-                Some(json!({"providers": [{"provider": "another-id", "tools": [{"name": "invoke"}]}]})),
-                preset).unwrap();
-            assert_eq!(
-                names(&answer),
-                ["web_search", "code_search"],
-                "reader capabilities must select only search tools in manifest order"
-            );
-            assert_eq!(
-                answer.tools[0].capabilities,
-                ["plexus:web.search/v1", "web.search/v1"]
-            );
-            assert_eq!(
-                answer.tools[1].capabilities,
-                ["code.search.public/v1", "plexus:code.search/v1"]
-            );
-        }
-    }
-}
-
-#[test]
-fn catalog_github_capabilities_select_only_the_named_facade() {
-    for (tag, name) in [
-        ("github.read/v1", "github_read"),
-        ("plexus:github.read/v1", "github_read"),
-        ("plexus:github.facade/v1", "github"),
-        ("plexus:github.react/v1", "github_react"),
-    ] {
-        let answer = fetch(
-            json!({"capabilities": [tag]}),
-            Some(json!({})),
-            Some("reader"),
+        let frame = send_metadata(
+            Principal::Reserved {
+                module_id: "prefrontal".to_owned(),
+            },
+            ops::TOOL_CATALOG,
+            json!({"params": {"capabilities": capabilities}}),
         )
-        .unwrap();
-        assert_eq!(names(&answer), [name]);
-        let expected = if name == "github_read" {
-            vec!["github.read/v1", "plexus:github.read/v1"]
-        } else if name == "github_react" {
-            vec!["plexus:github.react/v1"]
-        } else {
-            vec!["plexus:github.facade/v1"]
-        };
-        assert_eq!(answer.tools[0].capabilities, expected);
+        .await;
+        assert_eq!(frame.header.ty, FrameType::Response, "{capabilities}");
+        let answer: CatalogAnswer = serde_json::from_slice(&frame.body).unwrap();
+        assert!(answer.tools.is_empty(), "{capabilities}");
+        assert_eq!(answer.presets, ["head", "worker", "reader", "flow"]);
     }
 }
 
-#[test]
-fn catalog_refuses_unserved_capability_by_name() {
-    for tag in ["plexus:unserved/v1", "code.search/v1"] {
-        let error = fetch(
-            json!({"capabilities": [tag]}),
-            Some(json!({})),
-            Some("reader"),
+#[tokio::test]
+async fn tool_catalog_route_uses_preset_despite_capabilities() {
+    use subc_protocol::{FrameType, Principal};
+
+    let expected = send_metadata(
+        Principal::Direct,
+        ops::TOOL_CATALOG,
+        json!({"preset": "reader"}),
+    )
+    .await;
+    assert_eq!(expected.header.ty, FrameType::Response);
+    let answer: CatalogAnswer = serde_json::from_slice(&expected.body).unwrap();
+    assert_eq!(names(&answer), ["code_search"]);
+
+    for capabilities in [json!(["web.search/v1"]), json!([]), json!(false)] {
+        let frame = send_metadata(
+            Principal::Direct,
+            ops::TOOL_CATALOG,
+            json!({"preset": "reader", "params": {"capabilities": capabilities}}),
         )
-        .unwrap_err();
-        assert_eq!(
-            error.code,
-            cortexkit_role_tool_provider::errors::INVALID_REQUEST
-        );
-        assert!(error.message.contains(tag));
-        let detail = error.detail.unwrap();
-        assert_eq!(detail["field"], "params.capabilities[0]");
-        assert_eq!(detail["capability"], tag);
+        .await;
+        assert_eq!(frame.header.ty, FrameType::Response, "{capabilities}");
+        assert_eq!(frame.body, expected.body, "{capabilities}");
     }
 }
 
-#[test]
-fn catalog_refuses_malformed_or_noncanonical_capability_lists() {
-    for (capabilities, field) in [
-        (
-            json!(["plexus:web.search/v1", "plexus:code.search/v1"]),
-            "params.capabilities",
-        ),
-        (
-            json!(["plexus:web.search/v1", "plexus:web.search/v1"]),
-            "params.capabilities",
-        ),
-        (json!(["plexus:web.search/v1", 4]), "params.capabilities[1]"),
-        (json!("plexus:web.search/v1"), "params.capabilities"),
-        (json!(null), "params.capabilities"),
-    ] {
-        let error =
-            fetch(json!({"capabilities": capabilities}), Some(json!({})), None).unwrap_err();
-        assert_eq!(
-            error.code,
-            cortexkit_role_tool_provider::errors::INVALID_REQUEST
-        );
-        assert_eq!(error.detail.unwrap()["field"], field);
-    }
+#[tokio::test]
+async fn role_describe_route_retains_tool_tags_without_advertising_filter() {
+    use subc_protocol::{FrameType, Principal};
+
+    let frame = send_metadata(Principal::Direct, ops::ROLE_DESCRIBE, json!({})).await;
+    assert_eq!(frame.header.ty, FrameType::Response);
+    let body: Value = serde_json::from_slice(&frame.body).unwrap();
+    assert_eq!(body["tool_capabilities"], json!(tool_capability_union()));
+    assert_eq!(body["capabilities"], json!(["plexus:github.read.bulk/v1"]));
+    cortexkit_role_tool_provider::describe::check_describe(&body).unwrap();
 }
 
 #[test]
-fn catalog_plan_without_capabilities_answers_no_tools() {
+fn catalog_plan_without_a_preset_answers_no_tools() {
     let answer = fetch(json!({}), Some(json!({"providers": "opaque"})), None).unwrap();
     assert!(answer.tools.is_empty());
     assert_eq!(answer.presets, ["head", "worker", "reader", "flow"]);
@@ -378,38 +296,18 @@ fn catalog_plan_without_capabilities_answers_no_tools() {
 
 #[test]
 fn catalog_search_presets_return_only_search_tools() {
-    let filtered: Value = serde_json::from_slice(include_bytes!(
-        "../tests/fixtures/tool-catalog/preflight-worker-search.reply.json"
-    ))
-    .unwrap();
     for preset in ["head", "worker"] {
-        let request = json!({"preset": preset});
-        let wire = reply(ops::TOOL_CATALOG, request.as_object().unwrap()).unwrap();
-        let answer: CatalogAnswer = serde_json::from_value(wire.clone()).unwrap();
+        let answer = fetch(json!({}), None, Some(preset)).unwrap();
         assert_eq!(
             names(&answer),
             [WEB_SEARCH_TOOL, CODE_SEARCH_TOOL],
             "{preset}"
         );
-        assert_eq!(wire["tools"], filtered["tools"], "{preset}");
         cortexkit_role_tool_provider::catalog::check_presets(&answer, Some(preset)).unwrap();
     }
     // Read-only lanes get code search alone.
-    let wire = reply(
-        ops::TOOL_CATALOG,
-        json!({"preset": "reader"}).as_object().unwrap(),
-    )
-    .unwrap();
-    let answer: CatalogAnswer = serde_json::from_value(wire.clone()).unwrap();
+    let answer = fetch(json!({}), None, Some("reader")).unwrap();
     assert_eq!(names(&answer), [CODE_SEARCH_TOOL]);
-    let code_search: Vec<_> = filtered["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|tool| tool["name"] == CODE_SEARCH_TOOL)
-        .cloned()
-        .collect();
-    assert_eq!(wire["tools"], json!(code_search));
     cortexkit_role_tool_provider::catalog::check_presets(&answer, Some("reader")).unwrap();
 }
 
@@ -437,9 +335,8 @@ async fn catalog_flow_preset_returns_flow_tools_with_unchanged_metadata() {
         ]
     );
     cortexkit_role_tool_provider::catalog::check_presets(&answer, Some("flow")).unwrap();
-    let request = json!({"params": all_capabilities_request().params});
-    let full = reply(ops::TOOL_CATALOG, request.as_object().unwrap()).unwrap();
-    let flow_tools: Vec<_> = full["tools"]
+    let full = wire_tools(&catalog_tools(&advertised_tools()));
+    let flow_tools: Vec<_> = full
         .as_array()
         .unwrap()
         .iter()
@@ -451,30 +348,6 @@ async fn catalog_flow_preset_returns_flow_tools_with_unchanged_metadata() {
         .collect();
     assert_eq!(wire["tools"], json!(flow_tools));
     assert_eq!(wire["tools"][4]["emits_events"], false);
-}
-
-#[test]
-fn catalog_presets_keep_legacy_filtered_bytes() {
-    let bytes = include_bytes!("../tests/fixtures/tool-catalog/preflight-worker-search.reply.json");
-    for preset in [
-        None,
-        Some("head"),
-        Some("worker"),
-        Some("reader"),
-        Some("flow"),
-    ] {
-        let mut request =
-            json!({"params": {"capabilities": ["code.search.public/v1", "web.search/v1"]}});
-        if let Some(preset) = preset {
-            request["preset"] = json!(preset);
-        }
-        let wire = reply(ops::TOOL_CATALOG, request.as_object().unwrap()).unwrap();
-        assert_eq!(serde_json::to_vec(&wire).unwrap(), bytes, "{preset:?}");
-
-        let empty = fetch(json!({"capabilities": []}), None, preset).unwrap();
-        assert!(empty.tools.is_empty(), "{preset:?}");
-        assert!(empty.presets.is_empty(), "{preset:?}");
-    }
 }
 
 #[test]
@@ -582,26 +455,31 @@ fn catalog_preflight_matches_plan_selection() {
 
 #[test]
 fn catalog_core_wire_vectors_match_reply() {
-    let vectors: &[(&str, &[u8], &[u8])] = &[
+    type Vector<'a> = (&'a str, &'a [u8], &'a [u8], &'a [&'a str]);
+    let vectors: &[Vector<'_>] = &[
         (
             "preflight-reader-search",
             include_bytes!("../tests/fixtures/tool-catalog/preflight-reader-search.request.json"),
             include_bytes!("../tests/fixtures/tool-catalog/preflight-reader-search.reply.json"),
+            &[CODE_SEARCH_TOOL],
         ),
         (
             "preflight-worker-search",
             include_bytes!("../tests/fixtures/tool-catalog/preflight-worker-search.request.json"),
             include_bytes!("../tests/fixtures/tool-catalog/preflight-worker-search.reply.json"),
+            &[WEB_SEARCH_TOOL, CODE_SEARCH_TOOL],
         ),
         (
             "plan-reader-search",
             include_bytes!("../tests/fixtures/tool-catalog/plan-reader-search.request.json"),
             include_bytes!("../tests/fixtures/tool-catalog/plan-reader-search.reply.json"),
+            &[CODE_SEARCH_TOOL],
         ),
         (
             "preflight-github",
             include_bytes!("../tests/fixtures/tool-catalog/preflight-github.request.json"),
             include_bytes!("../tests/fixtures/tool-catalog/preflight-github.reply.json"),
+            &[CODE_SEARCH_TOOL],
         ),
         (
             "preflight-unknown-capability",
@@ -611,51 +489,22 @@ fn catalog_core_wire_vectors_match_reply() {
             include_bytes!(
                 "../tests/fixtures/tool-catalog/preflight-unknown-capability.reply.json"
             ),
+            &[CODE_SEARCH_TOOL],
         ),
         (
             "preflight-github-read",
             include_bytes!("../tests/fixtures/tool-catalog/preflight-github-read.request.json"),
             include_bytes!("../tests/fixtures/tool-catalog/preflight-github-read.reply.json"),
+            &[CODE_SEARCH_TOOL],
         ),
     ];
 
-    for (index, (name, request_bytes, reply_bytes)) in vectors.iter().enumerate() {
+    for (name, request_bytes, reply_bytes, expected_tools) in vectors {
         let request: Value = serde_json::from_slice(request_bytes).unwrap();
-        let response = reply(ops::TOOL_CATALOG, request.as_object().unwrap());
-        let actual = match response {
-            Ok(answer) => {
-                let decoded: CatalogAnswer = serde_json::from_value(answer.clone()).unwrap();
-                if index < 3 {
-                    assert_eq!(names(&decoded), ["web_search", "code_search"]);
-                    assert!(decoded
-                        .tools
-                        .iter()
-                        .all(|tool| !tool.capabilities.iter().any(|capability| matches!(
-                            capability.as_str(),
-                            "plexus:github.facade/v1" | "plexus:connector.invoke/v1"
-                        ))));
-                } else if index == 3 {
-                    assert_eq!(names(&decoded), ["github"]);
-                } else if index == 5 {
-                    assert_eq!(names(&decoded), ["github_read"]);
-                } else {
-                    panic!("unknown capability vector must be refused");
-                }
-                answer
-            }
-            Err(error) => {
-                assert_eq!(index, 4, "only the unknown-capability vector is an error");
-                assert_eq!(
-                    error.code,
-                    cortexkit_role_tool_provider::errors::INVALID_REQUEST
-                );
-                assert_eq!(
-                    error.detail.as_ref().unwrap()["field"],
-                    "params.capabilities[0]"
-                );
-                serde_json::to_value(error).unwrap()
-            }
-        };
+        let actual = reply(ops::TOOL_CATALOG, request.as_object().unwrap()).unwrap();
+        let decoded: CatalogAnswer = serde_json::from_value(actual.clone()).unwrap();
+        assert_eq!(names(&decoded), *expected_tools, "{name}");
+        assert!(decoded.presets.is_empty(), "{name}");
         let actual_bytes = serde_json::to_vec(&actual).unwrap();
         if std::env::var("PLEXUS_REGENERATE_CATALOG_FIXTURES").as_deref() == Ok("1") {
             if actual_bytes.as_slice() != *reply_bytes {
@@ -678,14 +527,15 @@ fn catalog_core_wire_vectors_match_reply() {
 #[test]
 fn catalog_composition_is_opaque_and_does_not_select_definitions() {
     let params = json!({"capabilities": ["plexus:code.search/v1", "plexus:web.search/v1"]});
-    let definitions = fetch(params.clone(), Some(json!({})), None).unwrap();
+    let definitions = fetch(params.clone(), Some(json!({})), Some("head")).unwrap();
+    assert_eq!(names(&definitions), [WEB_SEARCH_TOOL, CODE_SEARCH_TOOL]);
     for composition in [
         json!({"providers": [{"provider": "plexus", "tools": [{"name": "unknown", "capabilities": ["wrong"]}]}]}),
         json!({"providers": [{"provider": "plexus", "tools": []}]}),
         json!({"providers": [{"provider": "another-id", "tools": [{"name": "github"}]}]}),
         json!({"providers": "not an array", "scope": "irrelevant", "agent": "irrelevant"}),
     ] {
-        let answer = fetch(params.clone(), Some(composition.clone()), None).unwrap();
+        let answer = fetch(params.clone(), Some(composition.clone()), Some("head")).unwrap();
         assert_eq!(answer.tools, definitions.tools);
         assert_eq!(answer.generation, definitions.generation);
         assert_eq!(
@@ -696,7 +546,7 @@ fn catalog_composition_is_opaque_and_does_not_select_definitions() {
 }
 
 #[test]
-fn catalog_broca_head_fixture_selects_names_and_tags_from_params() {
+fn catalog_broca_head_fixture_uses_preset_and_hashes_opaque_composition() {
     let plan: Value = serde_json::from_str(include_str!(
         "../tests/fixtures/fetch-plan-v1/broca-head-plexus-direct.json"
     ))
@@ -727,77 +577,62 @@ fn catalog_broca_head_fixture_selects_names_and_tags_from_params() {
         item["preset"].as_str(),
     )
     .unwrap();
-    assert_eq!(names(&answer), ["github", "web_search"]);
+    assert_eq!(answer, original);
     assert_eq!(
         answer.composition_digest.unwrap(),
         plan["composition_digest"]
     );
-    let entry = plan["composition"]["providers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["provider"] == "plexus")
-        .unwrap();
-    for (tool, planned) in answer.tools.iter().zip(entry["tools"].as_array().unwrap()) {
-        assert_eq!(tool.name, planned["name"]);
-        let mut expected = planned["capabilities"].as_array().unwrap().clone();
-        if tool.name == "web_search" {
-            expected.push(json!("web.search/v1"));
-        }
-        assert_eq!(
-            serde_json::to_value(&tool.capabilities).unwrap(),
-            json!(expected)
-        );
-    }
 }
 
 #[test]
-fn catalog_generation_is_full_set_and_digest_covers_filtered_answer() {
-    let full = fetch(json!({}), None, None).unwrap();
-    let filtered = fetch(
-        json!({"capabilities": ["plexus:code.search/v1"]}),
-        Some(json!({})),
-        Some("reader"),
-    )
-    .unwrap();
-    assert_eq!(names(&filtered), ["code_search"]);
-    assert_eq!(filtered.generation, full.generation);
-    assert_ne!(filtered.catalog_digest, full.catalog_digest);
-    let mut content = serde_json::to_value(&filtered).unwrap();
+fn catalog_generation_is_full_set_and_digest_covers_preset_answer() {
+    let discovery = fetch(json!({}), None, None).unwrap();
+    let preset = fetch(json!({}), None, Some("reader")).unwrap();
+    assert_eq!(names(&preset), ["code_search"]);
+    assert_eq!(preset.generation, discovery.generation);
+    assert_ne!(preset.catalog_digest, discovery.catalog_digest);
+    let mut content = serde_json::to_value(&preset).unwrap();
     content.as_object_mut().unwrap().remove("catalog_digest");
     assert_eq!(
-        filtered.catalog_digest,
+        preset.catalog_digest,
         plexus_core::jcs_sha256(&content).unwrap()
     );
-    content["tools"] = serde_json::to_value(&full.tools).unwrap();
+    content["tools"] = serde_json::to_value(&discovery.tools).unwrap();
     assert_ne!(
-        filtered.catalog_digest,
+        preset.catalog_digest,
         plexus_core::jcs_sha256(&content).unwrap()
     );
 }
 
 #[test]
 fn catalog_generation_is_stable_and_tracks_descriptions() {
-    // This test follows every advertised definition, so request all tags
-    // instead of treating a missing capability list as an implicit wildcard.
-    let request = all_capabilities_request();
+    let request = serde_json::from_value(json!({"preset": "reader"})).unwrap();
     let definitions = advertised_tools();
     let first = catalog(&request, &definitions).unwrap();
     let second = catalog(&request, &advertised_tools()).unwrap();
     assert_eq!(first, second);
     let mut changed = definitions.clone();
-    changed[0].description = Some("Changed facade description".to_owned());
+    let unselected = changed
+        .iter_mut()
+        .find(|tool| tool.name == "connections")
+        .unwrap();
+    unselected.description = Some("Changed unselected facade description".to_owned());
     let changed = catalog(&request, &changed).unwrap();
     assert_ne!(
         first.generation, changed.generation,
-        "generation must cover descriptions"
+        "generation must cover descriptions outside the selected preset"
     );
     assert_ne!(first.catalog_digest, changed.catalog_digest);
     assert_eq!(first.tools[0].schema_digest, changed.tools[0].schema_digest);
     let mut changed = definitions;
-    changed[0].schema["description"] = json!("Changed schema description");
+    let selected = changed
+        .iter_mut()
+        .find(|tool| tool.name == CODE_SEARCH_TOOL)
+        .unwrap();
+    selected.schema["description"] = json!("Changed schema description");
     let changed = catalog(&request, &changed).unwrap();
     assert_ne!(first.generation, changed.generation);
+    assert_ne!(first.catalog_digest, changed.catalog_digest);
     assert_eq!(first.tools[0].schema_digest, changed.tools[0].schema_digest);
 }
 
@@ -806,20 +641,20 @@ fn catalog_digest_only_matches_full_answer_and_hashes_composition() {
     let composition = json!({"secret": "opaque composition data", "nested": [1, 2]});
     let full = reply(
         ops::TOOL_CATALOG,
-        json!({"composition": composition, "params": {"capabilities": ["plexus:web.search/v1"]}})
+        json!({"composition": composition, "preset": "reader"})
             .as_object()
             .unwrap(),
     )
     .unwrap();
     let digest = reply(
             ops::TOOL_CATALOG,
-            json!({"composition": composition, "params": {"capabilities": ["plexus:web.search/v1"]}, "digest_only": true})
+            json!({"composition": composition, "preset": "reader", "params": {"capabilities": ["plexus:web.search/v1"]}, "digest_only": true})
                 .as_object()
                 .unwrap(),
         )
         .unwrap();
     assert_eq!(full["tools"].as_array().unwrap().len(), 1);
-    assert_eq!(full["tools"][0]["name"], "web_search");
+    assert_eq!(full["tools"][0]["name"], CODE_SEARCH_TOOL);
     assert_eq!(digest.as_object().unwrap().len(), 2);
     assert_eq!(digest["generation"], full["generation"]);
     assert_eq!(digest["catalog_digest"], full["catalog_digest"]);
@@ -828,18 +663,18 @@ fn catalog_digest_only_matches_full_answer_and_hashes_composition() {
         cortexkit_role_tool_provider::catalog::composition_digest(&composition).unwrap()
     );
     let other = reply(
-            ops::TOOL_CATALOG,
-            json!({"composition": {"nested": [2, 1]}, "params": {"capabilities": ["plexus:web.search/v1"]}})
-                .as_object()
-                .unwrap(),
-        )
-        .unwrap();
+        ops::TOOL_CATALOG,
+        json!({"composition": {"nested": [2, 1]}, "preset": "reader"})
+            .as_object()
+            .unwrap(),
+    )
+    .unwrap();
     assert_ne!(other["catalog_digest"], full["catalog_digest"]);
     assert_eq!(other["generation"], full["generation"]);
 }
 
 #[test]
-fn catalog_digest_only_matches_unfiltered_answer() {
+fn catalog_digest_only_matches_full_preset_or_discovery_answer() {
     for preset in [
         None,
         Some("head"),
@@ -948,7 +783,7 @@ async fn tool_catalog_route_serves_metadata_without_grants() {
         let decoded: CatalogAnswer = serde_json::from_value(body).unwrap();
         assert!(
             decoded.tools.is_empty(),
-            "preflight without a preset or capabilities must select no tools"
+            "preflight without a preset must select no tools"
         );
     }
     let frame = send_metadata(
@@ -961,28 +796,12 @@ async fn tool_catalog_route_serves_metadata_without_grants() {
     let body: Value = serde_json::from_slice(&frame.body).unwrap();
     assert_eq!(body.as_object().unwrap().len(), 2);
     assert_eq!(body["generation"], expected["generation"]);
-    let frame = send_metadata(
-            Principal::Direct,
-            ops::TOOL_CATALOG,
-            json!({"preset": "reader", "params": {"capabilities": ["plexus:code.search/v1", "plexus:web.search/v1"]}, "composition": {"providers": []}}),
-        ).await;
-    assert_eq!(frame.header.ty, FrameType::Response);
-    let answer: CatalogAnswer = serde_json::from_slice(&frame.body).unwrap();
-    assert_eq!(names(&answer), ["web_search", "code_search"]);
 }
 
-/// A provider that advertises the capability filter must list, in
-/// `role.describe`, exactly the union of tags its catalog tools carry, sorted
-/// bytewise with no repeats. Consumers on role crate 0.9.0 refuse a
-/// description that advertises the filter without that list.
+/// Consumers discover providers by the complete set of tool tags in `role.describe`.
 #[test]
 fn role_describe_lists_every_catalog_tool_tag() {
     let describe = reply(ops::ROLE_DESCRIBE, &Map::new()).unwrap();
-    assert!(describe["capabilities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|capability| capability == CAPABILITY_FILTER));
     let listed: Vec<String> =
         serde_json::from_value(describe["tool_capabilities"].clone()).unwrap();
     assert!(
@@ -991,40 +810,15 @@ fn role_describe_lists_every_catalog_tool_tag() {
             .all(|pair| pair[0].as_bytes() < pair[1].as_bytes()),
         "tool_capabilities must be sorted bytewise with no repeats: {listed:?}"
     );
-    let answer = catalog(&all_capabilities_request(), &advertised_tools()).unwrap();
-    let mut served: Vec<String> = answer
-        .tools
-        .iter()
-        .flat_map(|tool| tool.capabilities.clone())
+    let mut served: Vec<String> = catalog_tools(&advertised_tools())
+        .into_iter()
+        .flat_map(|tool| tool.capabilities)
         .collect();
     served.sort_unstable();
     served.dedup();
     assert_eq!(
         listed, served,
         "tool_capabilities must equal the union of catalog tool tags"
-    );
-}
-
-/// Prefrontal registers a head's plexus tools with exactly these bytes: its head
-/// tag list intersected with the tags plexus declares, sorted, with no preset.
-/// Heads must receive the two search tools and nothing that writes.
-#[tokio::test]
-async fn tool_catalog_route_serves_core_head_registration_request() {
-    use subc_protocol::{FrameType, Principal};
-    let frame = send_metadata(
-        Principal::Reserved {
-            module_id: "prefrontal".to_owned(),
-        },
-        ops::TOOL_CATALOG,
-        json!({"params":{"capabilities":["code.search.public/v1","web.search/v1"]}}),
-    )
-    .await;
-    assert_eq!(frame.header.ty, FrameType::Response);
-    let answer: CatalogAnswer = serde_json::from_slice(&frame.body).unwrap();
-    assert_eq!(
-        names(&answer),
-        ["web_search", "code_search"],
-        "a head registration must receive exactly the two search tools"
     );
 }
 
@@ -1036,10 +830,6 @@ async fn tool_catalog_route_refuses_unknown_or_unsupported_fields() {
         (json!({"preset": "unknown"}), "preset"),
         (json!({"system_text": {"preset": "unknown"}}), "system_text"),
         (json!({"composition": []}), "arguments"),
-        (
-            json!({"params": {"capabilities": ["plexus:unserved/v1"]}}),
-            "params.capabilities[0]",
-        ),
         (json!({"digest_only": "true"}), "arguments"),
     ] {
         let frame = send_metadata(
@@ -1074,14 +864,6 @@ async fn role_describe_route_lists_required_ops_and_is_cacheable() {
     let body = serde_json::from_slice(&first.body).unwrap();
     let description = cortexkit_role_tool_provider::describe::check_describe(&body).unwrap();
     assert!(description.major("tool-provider/v1").unwrap().holds_calls());
-    assert_eq!(
-        body["capabilities"],
-        json!([
-            "tool-catalog-capability-filter/v1",
-            "plexus:github.read.bulk/v1"
-        ]),
-        "role.describe must advertise capability-tag selection and the non-tool bulk read"
-    );
     assert!(description
         .major("tool-provider/v1")
         .unwrap()
@@ -1101,8 +883,12 @@ fn frozen_catalog_request(preset: &str) -> Value {
 }
 
 #[tokio::test]
-async fn frozen_catalog_presets_return_exactly_both_search_tools() {
-    for preset in ["worker", "reader", "head"] {
+async fn frozen_catalog_presets_return_their_search_tools() {
+    for (preset, tools) in [
+        ("worker", &[WEB_SEARCH_TOOL, CODE_SEARCH_TOOL][..]),
+        ("reader", &[CODE_SEARCH_TOOL][..]),
+        ("head", &[WEB_SEARCH_TOOL, CODE_SEARCH_TOOL][..]),
+    ] {
         let frame = send_request(
             subc_protocol::Principal::Direct,
             frozen_catalog_request(preset),
@@ -1115,7 +901,7 @@ async fn frozen_catalog_presets_return_exactly_both_search_tools() {
             frame.body
         );
         let answer: CatalogAnswer = serde_json::from_slice(&frame.body).unwrap();
-        assert_eq!(names(&answer), ["web_search", "code_search"], "{preset}");
+        assert_eq!(names(&answer), tools, "{preset}");
     }
 }
 
@@ -1228,7 +1014,7 @@ async fn provider_refusals_warn_once_without_request_values() {
             .collect();
         assert_eq!(
             lines.len(),
-            7,
+            6,
             "each refusal must warn exactly once: {stderr}"
         );
         for secret in [
@@ -1250,7 +1036,6 @@ async fn provider_refusals_warn_once_without_request_values() {
             "role.describe takes no arguments",
             "unknown or malformed plexus preset",
             "unknown or malformed plexus preset",
-            "plexus serves no requested capability (value redacted)",
             "malformed catalog arguments (values redacted)",
             "unknown or malformed plexus preset",
         ];
@@ -1292,7 +1077,6 @@ async fn provider_refusals_warn_once_without_request_values() {
         json!({"name": ops::ROLE_DESCRIBE, "preset":"reader", "arguments":{"unknown":"argument-secret"}}),
         json!({"name": WEB_SEARCH_TOOL, "preset":"mason", "arguments":{}}),
         json!({"name": WEB_SEARCH_TOOL, "preset":"malformed.secret", "arguments":{}}),
-        json!({"name": ops::TOOL_CATALOG, "arguments":{"params":{"capabilities":["capability-secret"]}}}),
         json!({"name": ops::TOOL_CATALOG, "arguments":{"digest_only":"serde-secret"}}),
         json!({"name": ops::ROLE_DESCRIBE, "preset":{"secret":"object-secret"}, "arguments":{}}),
     ] {
@@ -1301,4 +1085,11 @@ async fn provider_refusals_warn_once_without_request_values() {
         let error = body.get("error").unwrap_or(&body);
         assert_eq!(error["code"], "invalid_request");
     }
+    let frame = send_metadata(
+        subc_protocol::Principal::Direct,
+        ops::TOOL_CATALOG,
+        json!({"params":{"capabilities":["capability-secret"]}}),
+    )
+    .await;
+    assert_eq!(frame.header.ty, subc_protocol::FrameType::Response);
 }

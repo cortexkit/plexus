@@ -24,15 +24,10 @@ fn invalid_request(field: &str, message: impl Into<String>) -> ErrorBody {
     )
 }
 
-/// Advertised in `role.describe` so a consumer sends `params.capabilities`
-/// only to a provider that selects tools by it. A supplied list overrides
-/// preset selection and answers exactly the tools carrying a requested tag.
-pub(crate) const CAPABILITY_FILTER: &str = "tool-catalog-capability-filter/v1";
-
 const PRESETS: [&str; 4] = ["head", "worker", "reader", "flow"];
 
 // Tags describe the tool's contract, not the caller's authority. Keep the
-// mapping explicit so grants can select tools without knowing their names.
+// mapping explicit so consumers can discover providers by capability.
 const TOOL_CAPABILITIES: &[(&str, &[&str])] = &[
     ("connections", &["plexus:connections/v1"]),
     ("catalog", &["plexus:catalog.read/v1"]),
@@ -169,9 +164,7 @@ fn generation(tools: &[CatalogTool]) -> String {
 /// `false` promises that no call to the tool, whatever its arguments, makes
 /// plexus emit a bus event, either directly or by relaying an upstream
 /// notification the call caused. Absent means plexus makes no promise either
-/// way. Role crate 0.9.1 adds this member as `CatalogTool.emits_events`; the
-/// crate version plexus pins predates it, so [`wire_tools`] adds it to the
-/// served entries until plexus can move to that crate.
+/// way.
 fn emits_events(name: &str) -> Option<bool> {
     match name {
         // github_react only adds a reaction, through the bot request path,
@@ -222,68 +215,25 @@ fn tools_for(
     if preset.is_some_and(|preset| !serves_preset(preset)) {
         return Err(invalid_request("preset", "unknown plexus catalog preset"));
     }
+    // Older callers may still send capabilities. Ignore the member regardless
+    // of its value, but keep refusing other unsupported parameters.
     if let Some(field) = params.keys().find(|field| field.as_str() != "capabilities") {
         return Err(invalid_request(
             &format!("params.{field}"),
             "unknown plexus catalog parameter",
         ));
     }
-    let Some(capabilities) = params.get("capabilities") else {
-        tools.retain(|tool| match preset {
-            Some("head" | "worker") => {
-                matches!(tool.name.as_str(), WEB_SEARCH_TOOL | CODE_SEARCH_TOOL)
-            }
-            // Read-only lanes (sidekick readers, read-only workers) get code
-            // search alone; a lane that also needs web search asks for `worker`.
-            Some("reader") => tool.name == CODE_SEARCH_TOOL,
-            Some("flow") => serves_call_mode(tool, &CallMode::Flow),
-            // A plan without either selector must not offer tools to a model.
-            _ => false,
-        });
-        return Ok(tools);
-    };
-    let capabilities = capabilities.as_array().ok_or_else(|| {
-        invalid_request(
-            "params.capabilities",
-            "capabilities must be an array of tags",
-        )
-    })?;
-    let tags: Vec<_> = capabilities
-        .iter()
-        .enumerate()
-        .map(|(index, tag)| {
-            tag.as_str().ok_or_else(|| {
-                invalid_request(
-                    &format!("params.capabilities[{index}]"),
-                    "capability tag must be a string",
-                )
-            })
-        })
-        .collect::<Result<_, _>>()?;
-    if tags.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(invalid_request(
-            "params.capabilities",
-            "capability tags must be sorted bytewise with no repeats",
-        ));
-    }
-    for (index, tag) in tags.iter().enumerate() {
-        if !TOOL_CAPABILITIES.iter().any(|(_, own)| own.contains(tag)) {
-            return Err(invalid_request(
-                &format!("params.capabilities[{index}]"),
-                format!("plexus serves no capability {}", refusal_echo(tag)),
-            )
-            .with_detail(serde_json::json!({
-                "field": format!("params.capabilities[{index}]"),
-                "capability": refusal_echo(tag),
-            })));
+    tools.retain(|tool| match preset {
+        Some("head" | "worker") => {
+            matches!(tool.name.as_str(), WEB_SEARCH_TOOL | CODE_SEARCH_TOOL)
         }
-    }
-    let selected: Vec<_> = TOOL_CAPABILITIES
-        .iter()
-        .filter(|(_, own)| own.iter().any(|tag| tags.contains(tag)))
-        .map(|(name, _)| *name)
-        .collect();
-    tools.retain(|tool| selected.contains(&tool.name.as_str()));
+        // Read-only lanes get code search alone; a lane that also needs web
+        // search asks for `worker`.
+        Some("reader") => tool.name == CODE_SEARCH_TOOL,
+        Some("flow") => serves_call_mode(tool, &CallMode::Flow),
+        // A request without a preset is for discovery, not tool selection.
+        _ => false,
+    });
     Ok(tools)
 }
 
@@ -314,9 +264,7 @@ fn catalog_answer(
     // tool selection; catalog_digest covers the actual answer.
     let tools = tools_for(request.preset.as_deref(), &request.params, tools)?;
     let mut answer = CatalogAnswer::new(generation, "").with_tools(tools);
-    // The role permits preset discovery only without a preset. Leave legacy
-    // filtered replies intact, including their catalog digest.
-    if request.preset.is_none() && !request.params.contains_key("capabilities") {
+    if request.preset.is_none() {
         answer = answer.with_presets(PRESETS);
     }
     if let Some(composition) = &request.composition {
@@ -342,9 +290,6 @@ pub(crate) fn reply(name: &str, arguments: &Map<String, Value>) -> Result<Value,
         if let Some(field) = arguments.keys().next() {
             return Err(invalid_request(field, "role.describe takes no arguments"));
         }
-        // tool-provider/v1 requires a provider that advertises the capability
-        // filter to list every tag its catalog tools carry, so a consumer can
-        // pick the tags to ask for before fetching the catalog.
         let describe = RoleDescribe::new(
             vec![Major {
                 version: PROVIDES.to_owned(),
@@ -358,10 +303,7 @@ pub(crate) fn reply(name: &str, arguments: &Map<String, Value>) -> Result<Value,
             }],
             env!("CARGO_PKG_VERSION"),
         )
-        .with_capabilities(vec![
-            CAPABILITY_FILTER.to_owned(),
-            "plexus:github.read.bulk/v1".to_owned(),
-        ])
+        .with_capabilities(vec!["plexus:github.read.bulk/v1".to_owned()])
         .with_tool_capabilities(tool_capability_union());
         return Ok(serde_json::to_value(describe).expect("role description serializes"));
     }

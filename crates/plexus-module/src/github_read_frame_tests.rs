@@ -435,7 +435,7 @@ async fn unscoped_basal_can_read_tool_metadata_but_no_real_tool() {
     let catalog = send_facade_frame(
         runtime.clone(),
         cortexkit_role_tool_provider::ops::TOOL_CATALOG,
-        json!({"params": {"capabilities": ["plexus:github.react/v1"]}}),
+        json!({"preset": "flow"}),
         "basal",
         None,
     )

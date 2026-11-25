@@ -75,11 +75,10 @@ any members. The upstream fixture README's Composition section defines
 tags, with empty tool lists for text-only and hook-only providers. Broca compares
 fetched tool names and tags with the corresponding composition entry.
 
-The copied plan predates capability-param selection: its Plexus tool item has
-empty `params`. Tests retain those original bytes, verify that the `head` preset
-selects only search tools, and then supply `params.capabilities` for the fixture's
-`github` and `web_search` tools. Plexus keeps the composition opaque: capabilities
-override the preset, and the composition entry does not select tools.
+The copied plan's Plexus tool item has empty `params`. Tests retain those
+original bytes and verify that the `head` preset selects only search tools even
+if a replay supplies the retired `params.capabilities` member. Plexus hashes the
+composition as supplied; the tools listed in it do not select the reply's tools.
 
 This local copy lets the catalog tests run when CI checks out only Plexus.
 
@@ -99,4 +98,6 @@ The AFT composition item and `step_transform_items` are unchanged. `system_text`
 is dropped because Plexus serves no system text and prefrontal-core gives it none. The
 request retains `preset`, `params`, and `composition`. Tests copy the request's
 preset to the top-level tool-call envelope, as Broca's catalog fetch does, and
-reuse the composition for the reader preset.
+reuse the composition for the reader preset. Plexus ignores the legacy
+capability selector; `worker` and `head` return both search tools, and `reader`
+returns only code search.

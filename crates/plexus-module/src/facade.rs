@@ -113,11 +113,9 @@ fn log_tool_provider_refusal(
         .filter(|preset| subc_protocol::tool_call::validate_preset(preset).is_ok())
         .map(|preset| format!(" preset={preset}"))
         .unwrap_or_default();
-    // Catalog errors may echo a capability or a malformed JSON value to the
-    // caller. Logs retain the reason but must not copy those request values.
-    let message = if error["detail"].get("capability").is_some() {
-        "plexus serves no requested capability (value redacted)"
-    } else if error["detail"]["field"] == "arguments" {
+    // Catalog decoding errors may include malformed JSON values. Keep those
+    // values out of the logs.
+    let message = if error["detail"]["field"] == "arguments" {
         "malformed catalog arguments (values redacted)"
     } else {
         error["message"].as_str().unwrap_or("request refused")
