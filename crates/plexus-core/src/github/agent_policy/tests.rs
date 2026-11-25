@@ -218,12 +218,53 @@ fn active_rejects_malformed_rollout() {
 }
 
 #[test]
-fn active_rejects_rollout_without_an_active_pair() {
+fn active_accepts_rollout_beside_an_all_null_pair_as_no_active_policy() {
+    // The vault names a stored newer pair before any pair is ready. Plexus still
+    // has no active policy to apply, but the rollout's own values must be valid.
     let reply = active_reply_with_rollout(
         "policy.active.none",
         json!({"manifest_version":42,"policy_version":3}),
     );
-    assert_eq!(decode_active(reply).unwrap_err(), ReadFailure::Unreadable);
+    assert!(decode_active(reply).unwrap().is_none());
+    for rollout in [
+        json!({"manifest_version":0,"policy_version":3}),
+        json!({"manifest_version":42,"policy_version":0}),
+        json!({"manifest_version":42,"policy_version":3,"extra":true}),
+    ] {
+        let reply = active_reply_with_rollout("policy.active.none", rollout);
+        assert_eq!(decode_active(reply).unwrap_err(), ReadFailure::Unreadable);
+    }
+}
+
+/// Replies captured from the vault's real `policy.active` handler, vendored
+/// byte for byte in `tests/fixtures/vault-wire/agent-policy-handler-v1/`.
+#[test]
+fn vault_handler_rollout_samples_decode() {
+    let ready: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/vault-wire/agent-policy-handler-v1/policy.active.ready.json"
+    ))
+    .unwrap();
+    let rollout: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/vault-wire/agent-policy-handler-v1/policy.active.rollout.json"
+    ))
+    .unwrap();
+    let unready: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/vault-wire/agent-policy-handler-v1/policy.active.rollout-unready.json"
+    ))
+    .unwrap();
+    assert!(decode_active(unready).unwrap().is_none());
+    let ready = decode_active(ready).unwrap().unwrap();
+    assert_eq!(ready.rollout, None);
+    let rolling = decode_active(rollout).unwrap().unwrap();
+    assert_eq!(rolling.manifest_version, ready.manifest_version);
+    assert_eq!(rolling.policy_sha256, ready.policy_sha256);
+    assert_eq!(
+        rolling.rollout,
+        Some(PolicyRollout {
+            manifest_version: 42,
+            policy_version: 2,
+        })
+    );
 }
 
 #[test]

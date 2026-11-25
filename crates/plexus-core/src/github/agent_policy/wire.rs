@@ -68,7 +68,15 @@ pub(super) fn decode_active(reply: Value) -> Result<Option<ActivePolicy>, ReadFa
         result.manifest_version,
         result.policy_text,
     ) {
-        (None, None, None, None) if result.rollout.is_none() => Ok(None),
+        // A vault that has stored a newer pair before any pair is ready names it
+        // in `rollout` beside an all-null active pair. There is still no active
+        // policy to apply; only the rollout's own values are checked.
+        (None, None, None, None) => match result.rollout {
+            Some(rollout) if rollout.manifest_version == 0 || rollout.policy_version == 0 => {
+                Err(ReadFailure::Unreadable)
+            }
+            _ => Ok(None),
+        },
         (Some(version), Some(policy_sha256), Some(manifest_version), Some(text))
             if (1..=MAX_INTEGER).contains(&manifest_version) =>
         {
