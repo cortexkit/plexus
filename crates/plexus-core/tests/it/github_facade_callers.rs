@@ -461,6 +461,7 @@ fn policy_grant_replacement_fences_a_planned_bot_write() {
         policy: AgentPolicy::parse(&policy_text).unwrap(),
         policy_sha256: format!("{:x}", Sha256::digest(&policy_text)),
         manifest_version: 1,
+        rollout: None,
     };
     let checked = check_github(&active.policy, &github_manifest().manifest.actions_baseline);
     let nonce = "planned-before-policy";

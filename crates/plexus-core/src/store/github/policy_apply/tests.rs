@@ -150,6 +150,7 @@ fn policy(
             policy,
             policy_sha256: format!("{:x}", Sha256::digest(&text)),
             manifest_version: 41,
+            rollout: None,
         },
         checked,
     )

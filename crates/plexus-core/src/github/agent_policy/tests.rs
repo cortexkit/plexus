@@ -104,6 +104,7 @@ fn vault_active_and_watch_goldens_decode() {
         .unwrap();
     assert_eq!(active.policy.version, 1);
     assert_eq!(active.manifest_version, 41);
+    assert_eq!(active.rollout, None);
     assert_eq!(active.policy.bindings[0].identity, "github_app:agent");
     assert_eq!(active.policy.bindings[0].resources, ["org/r"]);
     let initial = WatchNotice::decode(golden("policy.watch.initial")).unwrap();
@@ -121,6 +122,121 @@ fn vault_active_and_watch_goldens_decode() {
     assert_eq!(
         changed.policy_sha256.as_deref(),
         Some(active.policy_sha256.as_str())
+    );
+}
+
+// These rollout replies are stand-in inputs until samples from the vault handler arrive.
+fn active_reply_with_rollout(golden_name: &str, rollout: Value) -> Value {
+    let mut reply = golden(golden_name);
+    reply["result"]["rollout"] = rollout;
+    reply
+}
+
+#[test]
+fn active_accepts_rollout_without_replacing_the_active_pair() {
+    let baseline = decode_active(golden("policy.active.ready"))
+        .unwrap()
+        .unwrap();
+    let reply = active_reply_with_rollout(
+        "policy.active.ready",
+        json!({"manifest_version":42,"policy_version":3}),
+    );
+    let active = decode_active(reply).unwrap().unwrap();
+    assert_eq!(active.manifest_version, baseline.manifest_version);
+    assert_eq!(active.policy.version, baseline.policy.version);
+    assert_eq!(active.policy_sha256, baseline.policy_sha256);
+    assert_eq!(active.policy.bindings[0].identity, "github_app:agent");
+    assert_eq!(active.policy.bindings[0].resources, ["org/r"]);
+    assert_eq!(
+        active.rollout,
+        Some(PolicyRollout {
+            manifest_version: 42,
+            policy_version: 3,
+        })
+    );
+}
+
+#[test]
+fn active_rejects_malformed_rollout() {
+    for (case, rollout) in [
+        (
+            "unknown field",
+            json!({"manifest_version":42,"policy_version":3,"extra":true}),
+        ),
+        ("missing manifest version", json!({"policy_version":3})),
+        ("missing policy version", json!({"manifest_version":42})),
+        ("non-object", json!([42, 3])),
+        ("null", json!(null)),
+        (
+            "fractional manifest version",
+            json!({"manifest_version":42.5,"policy_version":3}),
+        ),
+        (
+            "fractional policy version",
+            json!({"manifest_version":42,"policy_version":3.5}),
+        ),
+        (
+            "string manifest version",
+            json!({"manifest_version":"42","policy_version":3}),
+        ),
+        (
+            "string policy version",
+            json!({"manifest_version":42,"policy_version":"3"}),
+        ),
+        (
+            "zero manifest version",
+            json!({"manifest_version":0,"policy_version":3}),
+        ),
+        (
+            "zero policy version",
+            json!({"manifest_version":42,"policy_version":0}),
+        ),
+        (
+            "negative manifest version",
+            json!({"manifest_version":-42,"policy_version":3}),
+        ),
+        (
+            "negative policy version",
+            json!({"manifest_version":42,"policy_version":-3}),
+        ),
+        (
+            "equal manifest version",
+            json!({"manifest_version":41,"policy_version":3}),
+        ),
+        (
+            "older manifest version",
+            json!({"manifest_version":40,"policy_version":3}),
+        ),
+    ] {
+        let reply = active_reply_with_rollout("policy.active.ready", rollout);
+        assert_eq!(
+            decode_active(reply).unwrap_err(),
+            ReadFailure::Unreadable,
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn active_rejects_rollout_without_an_active_pair() {
+    let reply = active_reply_with_rollout(
+        "policy.active.none",
+        json!({"manifest_version":42,"policy_version":3}),
+    );
+    assert_eq!(decode_active(reply).unwrap_err(), ReadFailure::Unreadable);
+}
+
+#[test]
+fn rollout_does_not_relax_other_vault_reply_shapes() {
+    let rollout = json!({"manifest_version":42,"policy_version":3});
+    let mut active = active_reply_with_rollout("policy.active.ready", rollout.clone());
+    active["result"]["extra"] = json!(true);
+    assert_eq!(decode_active(active).unwrap_err(), ReadFailure::Unreadable);
+    let mut watch = golden("policy.watch.changed");
+    watch["rollout"] = rollout;
+    assert_eq!(
+        WatchNotice::decode(watch).unwrap_err(),
+        ReadFailure::Unreadable
     );
 }
 

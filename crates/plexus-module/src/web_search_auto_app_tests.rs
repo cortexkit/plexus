@@ -423,6 +423,7 @@ fn an_imported_app_is_bound_only_when_policy_apply_is_enabled() {
         policy: serde_json::from_value(text).unwrap(),
         policy_sha256: "0".repeat(64),
         manifest_version: 1,
+        rollout: None,
     };
     f.attest();
     let store = f.state.store();

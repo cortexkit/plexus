@@ -15,6 +15,14 @@ pub struct ActivePolicy {
     pub policy: AgentPolicy,
     pub policy_sha256: String,
     pub manifest_version: i64,
+    pub rollout: Option<PolicyRollout>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyRollout {
+    pub manifest_version: u64,
+    pub policy_version: u64,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +42,7 @@ struct ActiveFields {
     manifest_version: Option<i64>,
     #[serde(deserialize_with = "Deserialize::deserialize")]
     policy_text: Option<String>,
+    rollout: Option<PolicyRollout>,
 }
 
 pub fn read_active(peer: &dyn CkcredRoutePeer) -> Result<Option<ActivePolicy>, ReadFailure> {
@@ -43,7 +52,13 @@ pub fn read_active(peer: &dyn CkcredRoutePeer) -> Result<Option<ActivePolicy>, R
 
 pub(super) fn decode_active(reply: Value) -> Result<Option<ActivePolicy>, ReadFailure> {
     refuse(&reply)?;
-    if !reply.get("result").is_some_and(Value::is_object) {
+    let Some(fields) = reply.get("result").and_then(Value::as_object) else {
+        return Err(ReadFailure::Unreadable);
+    };
+    if fields
+        .get("rollout")
+        .is_some_and(|value| !value.is_object())
+    {
         return Err(ReadFailure::Unreadable);
     }
     let Reply { result } = serde_json::from_value(reply).map_err(|_| ReadFailure::Unreadable)?;
@@ -53,10 +68,16 @@ pub(super) fn decode_active(reply: Value) -> Result<Option<ActivePolicy>, ReadFa
         result.manifest_version,
         result.policy_text,
     ) {
-        (None, None, None, None) => Ok(None),
+        (None, None, None, None) if result.rollout.is_none() => Ok(None),
         (Some(version), Some(policy_sha256), Some(manifest_version), Some(text))
             if (1..=MAX_INTEGER).contains(&manifest_version) =>
         {
+            if result.rollout.is_some_and(|rollout| {
+                rollout.manifest_version <= manifest_version.cast_unsigned()
+                    || rollout.policy_version == 0
+            }) {
+                return Err(ReadFailure::Unreadable);
+            }
             let policy = AgentPolicy::parse(&text).map_err(|_| ReadFailure::Unreadable)?;
             if version != policy.version || policy_sha256 != format!("{:x}", Sha256::digest(text)) {
                 return Err(ReadFailure::Unreadable);
@@ -65,6 +86,7 @@ pub(super) fn decode_active(reply: Value) -> Result<Option<ActivePolicy>, ReadFa
                 policy,
                 policy_sha256,
                 manifest_version,
+                rollout: result.rollout,
             }))
         }
         _ => Err(ReadFailure::Unreadable),

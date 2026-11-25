@@ -8,7 +8,7 @@ mod wire;
 pub use check::{check_github, CheckedGitHub, Unserved};
 pub use model::{AgentPolicy, MAX_POLICY_BYTES};
 pub use plan::{AgentChange, ApplyPlan, PolicyConflict};
-pub use wire::{read_active, ActivePolicy, ReadFailure, WatchNotice};
+pub use wire::{read_active, ActivePolicy, PolicyRollout, ReadFailure, WatchNotice};
 
 #[cfg(test)]
 mod tests;

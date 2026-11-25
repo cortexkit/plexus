@@ -208,6 +208,80 @@ fn a_transport_error_keeps_the_checked_policy_and_same_version_recovers() {
 }
 
 #[test]
+fn rollout_logs_only_changed_pairs_from_accepted_active_replies() {
+    use tracing_subscriber::prelude::*;
+
+    let state = runtime(Arc::new(crate::test_support::open_memory_store(
+        "policy-rollout",
+    )));
+    let active = ready(8);
+    let vault = Vault::new(active.clone());
+    let rolling = |manifest_version, policy_version| {
+        // Stand-in input until samples from the vault handler arrive.
+        let mut reply = active.clone();
+        reply["result"]["rollout"] =
+            json!({"manifest_version":manifest_version,"policy_version":policy_version});
+        reply
+    };
+    let started = rolling(42, 9);
+    let mut inconsistent = active.clone();
+    inconsistent["result"]["manifest_version"] = json!(42);
+    let mut promoted = ready(10);
+    promoted["result"]["manifest_version"] = json!(43);
+
+    let logs = Scratch::directory("policy-rollout-log");
+    let mut config = cortexkit_log::Config::in_dir("plexus", logs.path());
+    config.spec = Some("info".into());
+    let (layer, handle) = crate::bus::safe_log_layer(config).unwrap();
+    tracing::subscriber::with_default(tracing_subscriber::Registry::default().with(layer), || {
+        refresh(&state, &vault);
+        let loaded = assert_loaded(&state, 8, &active);
+        for reply in [
+            started.clone(),
+            started.clone(),
+            ready(7),
+            inconsistent,
+            no_policy(),
+            json!({"code":"unknown_method"}),
+            started,
+            rolling(43, 9),
+            rolling(43, 10),
+        ] {
+            vault.reply(reply);
+            refresh(&state, &vault);
+        }
+        assert_eq!(health(&state), loaded);
+        vault.reply(promoted.clone());
+        refresh(&state, &vault);
+        refresh(&state, &vault);
+        assert_loaded(&state, 10, &promoted);
+    });
+
+    let text = std::fs::read_to_string(handle.path()).unwrap();
+    let messages: Vec<_> = text
+        .lines()
+        .filter_map(|line| {
+            let (prefix, message) = line.split_once(": policy rollout ")?;
+            let record =
+                cortexkit_log::parse_line(line).expect("fleet-formatted rollout diagnostic");
+            assert_eq!(record.level, cortexkit_log::ParsedLevel::Info);
+            assert_eq!(record.logger, "plexus.governance", "{prefix}");
+            Some(message)
+        })
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "in progress: active manifest 41 policy 8, newest manifest 42 policy 9",
+            "in progress: active manifest 41 policy 8, newest manifest 43 policy 9",
+            "in progress: active manifest 41 policy 8, newest manifest 43 policy 10",
+            "cleared",
+        ],
+        "{text}"
+    );
+}
+
+#[test]
 fn seeded_policy_follows_deployed_catalog_hash_without_a_vault_read() {
     let store = Arc::new(crate::test_support::open_memory_store(
         "policy-deployed-catalog",

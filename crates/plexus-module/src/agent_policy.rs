@@ -4,7 +4,8 @@ use crate::{blocking_section, ModuleState};
 use plexus_core::credentials::{CkcredRoutePeer, CkcredWatch};
 use plexus_core::diag;
 use plexus_core::github::agent_policy::{
-    check_github, read_active, ActivePolicy, ApplyPlan, CheckedGitHub, ReadFailure, WatchNotice,
+    check_github, read_active, ActivePolicy, ApplyPlan, CheckedGitHub, PolicyRollout, ReadFailure,
+    WatchNotice,
 };
 use plexus_core::manifest::AppManifest;
 use serde::Serialize;
@@ -86,6 +87,7 @@ pub(crate) struct Snapshot {
     catalog_unreadable: bool,
     logged_absence: bool,
     last_reply_was_none: bool,
+    last_rollout: Option<PolicyRollout>,
     current_reply: bool,
     apply: Option<Value>,
     apply_failed: bool,
@@ -176,6 +178,7 @@ impl Snapshot {
                         if active.policy_sha256 == previous.policy_sha256
                             && active.manifest_version == previous.manifest_version
                         {
+                            self.observe_rollout(&active);
                             self.observation = Observation::Loaded;
                             self.current_reply = true;
                         } else {
@@ -185,6 +188,7 @@ impl Snapshot {
                     }
                 }
                 if let Some(catalog) = catalog {
+                    self.observe_rollout(&active);
                     self.checked = Some(Checked::new(active, Arc::clone(catalog)));
                     self.observation = Observation::Loaded;
                     self.current_reply = true;
@@ -194,6 +198,19 @@ impl Snapshot {
                     self.observation = Observation::Unreadable;
                 }
             }
+        }
+    }
+
+    fn observe_rollout(&mut self, active: &ActivePolicy) {
+        let previous = std::mem::replace(&mut self.last_rollout, active.rollout);
+        if active.rollout == previous {
+            return;
+        }
+        if let Some(newest) = active.rollout {
+            diag!(info governance: "policy rollout in progress: active manifest {} policy {}, newest manifest {} policy {}",
+                active.manifest_version, active.policy.version, newest.manifest_version, newest.policy_version);
+        } else {
+            diag!(info governance: "policy rollout cleared");
         }
     }
 
