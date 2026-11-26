@@ -18,8 +18,9 @@ node_modules/
 dist/
 
 # CortexKit layout: .cortexkit/ holds local tool state and internal documents,
-# which are never committed. Only these shared, publishable paths are tracked.
-# scripts/check-cortexkit-layout.sh enforces this.
+# which are never committed. Only these shared, publishable paths are tracked, plus
+# top-level project settings files (.cortexkit/<module>.jsonc) if one is ever
+# added deliberately. scripts/check-cortexkit-layout.sh enforces this.
 /.cortexkit/*
 !/.cortexkit/release-notes/
 !/.cortexkit/skills/

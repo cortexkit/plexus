@@ -472,6 +472,31 @@ class CortexkitLayoutTests(Scratch):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(".cortexkit/notes/ledger.md", result.stderr)
 
+    def test_a_file_un_ignored_by_a_stray_rule_is_named(self):
+        # A `!` rule makes the private file trackable without force-adding it,
+        # so it is tracked but not ignored; a check that lists only ignored
+        # tracked files would miss it.
+        self.write(".gitignore", LAYOUT_BLOCK + "!/.cortexkit/notes/\n")
+        self.write(".cortexkit/notes/ledger.md")
+        self.git("add", ".gitignore", ".cortexkit")
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(".cortexkit/notes/ledger.md", result.stderr)
+
+    def test_a_top_level_settings_file_may_be_tracked_but_not_a_nested_one(self):
+        self.write(".gitignore", LAYOUT_BLOCK)
+        self.write(".cortexkit/plexus.jsonc", "{}\n")
+        self.git("add", ".gitignore")
+        self.git("add", "-f", ".cortexkit/plexus.jsonc")
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.write(".cortexkit/notes/old.jsonc", "{}\n")
+        self.git("add", "-f", ".cortexkit/notes/old.jsonc")
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(".cortexkit/notes/old.jsonc", result.stderr)
+        self.assertNotIn("plexus.jsonc", result.stderr)
+
     def test_a_missing_ignore_block_is_blind_not_clean(self):
         # Without the block nothing under .cortexkit/ is ignored, so a tracked
         # internal file would not show up as an ignored one; the script must

@@ -1,5 +1,10 @@
 # plexus
 
+> [!WARNING]
+> **Alpha.** plexus is in early development and is not yet released for general use.
+> Breaking changes will happen between versions, including changes to its settings,
+> stored data and interfaces. Pin an exact version if you depend on it.
+
 plexus is the connectors plane for CortexKit. It gives agents structured,
 credentialed access to external services such as GitHub, Linear, Notion, Exa
 and Google Calendar, without ever handing them a credential. It runs as
