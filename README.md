@@ -39,6 +39,20 @@ computer and browser plane, for services with no structured interface.
 [STRUCTURE.md](STRUCTURE.md) says where new code goes, and
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the pipeline and its invariants.
 
+## Install
+
+On supported macOS and Linux targets, install the module, `ck-plexus-admin`
+operator client and reviewed vendor catalog with:
+
+```sh
+ck setup plexus
+```
+
+Setup uses the public CortexKit release index. The first release must be
+published and indexed before this command can install plexus. Setup copies the
+vendor manifests into `catalog/` under the module's data directory. Windows
+release archives are not published until the native test suite passes there.
+
 ## Prerequisites
 
 - Rust 1.95 or newer, with `rustfmt` and `clippy`. The repository has no
@@ -58,7 +72,7 @@ Rust target; `scripts/build-probe-guest.sh` fetches and verifies the pinned
 WASI SDK. The checked-in guest module is used otherwise, so ordinary builds do
 not need either.
 
-## Build and test
+## Build and test from source
 
 ```sh
 scripts/prepush.sh
@@ -90,6 +104,26 @@ cargo build --locked -p plexus-conformance --bin plexus-conformance
 target/debug/plexus-conformance list
 target/debug/plexus-conformance run --fixture <name>
 ```
+
+## Release
+
+`scripts/release-build.sh` builds both release binaries in `target/release/`
+from the committed lockfile and the checked-in probe guest. It refuses a dirty
+tree and checks that both binaries report the source commit. This is separate
+from the maintainer's local macOS staging and deployment scripts.
+
+The GitHub Release workflow accepts a `v<version>` tag matching the
+`plexus-module` crate version. The commit must already be on `main`, with a
+successful push CI run that ran `Test (ubuntu)`. Set `PLEXUS_REQUIRES_CORE` in the
+workflow to the oldest public core that accepts plexus's registration before
+tagging. A manual workflow run rehearses the lane without publishing a release
+and can run before the core floor is set.
+
+The workflow signs the macOS binaries with Developer ID and notarizes their
+ZIPs. Each published target gets both binary ZIPs and a catalog ZIP with the
+reviewed manifests from the same commit. The catalog ZIP bytes are identical
+across targets; each ZIP has its own SHA-256 sidecar. The workflow verifies the
+files downloaded from a draft release before publishing it.
 
 ## Running against a local subconscious daemon
 

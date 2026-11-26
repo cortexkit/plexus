@@ -114,6 +114,7 @@ fn write_catalog(data_directory: &Path) -> io::Result<WriteOutcome> {
 }
 
 fn create_temporary_file(data_directory: &Path) -> io::Result<(PathBuf, fs::File)> {
+    #[cfg(unix)]
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     for _ in 0..100 {
@@ -124,9 +125,13 @@ fn create_temporary_file(data_directory: &Path) -> io::Result<(PathBuf, fs::File
             sequence
         ));
         let mut options = OpenOptions::new();
-        options.write(true).create_new(true).mode(0o600);
+        options.write(true).create_new(true);
+        // On Windows the file inherits protection from the user's profile folder ACLs.
+        #[cfg(unix)]
+        options.mode(0o600);
         match options.open(&temporary_path) {
             Ok(file) => {
+                #[cfg(unix)]
                 if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
                     drop(file);
                     let _ = fs::remove_file(&temporary_path);
@@ -149,7 +154,10 @@ fn create_temporary_file(data_directory: &Path) -> io::Result<(PathBuf, fs::File
 mod tests {
     use super::{data_directory, write_best_effort, write_catalog, WriteOutcome, CATALOG_BYTES};
     use plexus_core::test_scratch::Scratch;
-    use std::fs::{self, File};
+    use std::fs;
+    #[cfg(unix)]
+    use std::fs::File;
+    #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::Path;
 
@@ -161,12 +169,16 @@ mod tests {
 
         assert_eq!(write_catalog(directory).unwrap(), WriteOutcome::Written);
         assert_eq!(fs::read(&destination).unwrap(), CATALOG_BYTES);
-        let first_metadata = fs::metadata(&destination).unwrap();
-        assert_eq!(first_metadata.permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        let first_inode = {
+            let metadata = fs::metadata(&destination).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+            metadata.ino()
+        };
 
         assert_eq!(write_catalog(directory).unwrap(), WriteOutcome::Unchanged);
-        let second_metadata = fs::metadata(&destination).unwrap();
-        assert_eq!(first_metadata.ino(), second_metadata.ino());
+        #[cfg(unix)]
+        assert_eq!(first_inode, fs::metadata(&destination).unwrap().ino());
         assert_eq!(fs::read(&destination).unwrap(), CATALOG_BYTES);
     }
 
@@ -267,13 +279,16 @@ mod tests {
         let scratch = Scratch::directory("engram-catalog-atomic");
         let destination = scratch.path().join(super::FILE_NAME);
         fs::write(&destination, b"previous catalog").unwrap();
+        #[cfg(unix)]
         let previous = File::open(&destination).unwrap();
+        #[cfg(unix)]
         let previous_inode = previous.metadata().unwrap().ino();
 
         assert_eq!(
             write_catalog(scratch.path()).unwrap(),
             WriteOutcome::Written
         );
+        #[cfg(unix)]
         assert_ne!(
             fs::metadata(&destination).unwrap().ino(),
             previous_inode,

@@ -1,0 +1,257 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # A manual run rehearses the same build, signing and verification without
+  # writing to GitHub Releases, even when the core floor is not set yet.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Set to the oldest public core that accepts Plexus's registration.
+  PLEXUS_REQUIRES_CORE: ''
+  # Turn on only after the suite has passed natively on Windows. Missing
+  # Windows archives make ck setup report release-incomplete on that target.
+  PLEXUS_PUBLISH_WINDOWS: 'false'
+
+jobs:
+  verify:
+    name: Verify release version and source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      revision: ${{ steps.source.outputs.revision }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Compare the tag against the plexus-module crate version
+        id: source
+        shell: bash
+        run: |
+          revision=$(git rev-parse HEAD)
+          [[ "$revision" == "$(git rev-parse --verify "${GITHUB_SHA}^{commit}")" ]]
+          version=$(cargo metadata --locked --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "plexus-module"))')
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the plexus-module crate version $version"
+            exit 1
+          fi
+          printf 'revision=%s\nversion=%s\n' "$revision" "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Require a core floor and green push CI for a publishable tag
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          REVISION: ${{ steps.source.outputs.revision }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release/assets.py check-floor
+          if ! git merge-base --is-ancestor "$REVISION" origin/main; then
+            echo "::error::$REVISION has not landed on origin/main"
+            exit 1
+          fi
+          runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$REVISION" \
+            --event push --status success --limit 100 --json databaseId,headBranch \
+            --jq '.[] | select(.headBranch == "main" or (.headBranch | startswith("train/"))) | .databaseId')
+          for run in $runs; do
+            # Inspect the same run for the test job; a skipped job can leave
+            # the workflow conclusion green without ever exercising the suite.
+            green=$(gh run view "$run" --repo "$GITHUB_REPOSITORY" --json status,conclusion,jobs \
+              --jq '[select(.status == "completed" and .conclusion == "success") | .jobs[] | select(.name == "Test (ubuntu)") | .conclusion] == ["success"]')
+            if [[ "$green" == true ]]; then
+              echo "Verified push CI run $run for $REVISION"
+              exit 0
+            fi
+          done
+          echo "::error::no successful ci.yml push run on main/train for $REVISION ran Test (ubuntu) successfully"
+          exit 1
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-latest
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: linux-x64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: windows-x64
+            runner: windows-latest
+    env:
+      RELEASE_TARGET: ${{ matrix.target }}
+      RELEASE_REVISION: ${{ needs.verify.outputs.revision }}
+      RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.verify.outputs.revision }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build and stamp both binaries
+        run: |
+          case "${RELEASE_TARGET##*-}:$RUNNER_ARCH" in
+            arm64:ARM64|x64:X64) ;;
+            *) echo "::error::$RELEASE_TARGET cannot be built natively on $RUNNER_ARCH"; exit 1 ;;
+          esac
+          bash scripts/release-build.sh
+
+      - name: Import Developer ID certificate
+        if: runner.os == 'macOS'
+        env:
+          DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64 }}
+          DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+        run: |
+          : "${DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64:?missing Developer ID certificate}"
+          : "${DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD:?missing Developer ID certificate password}"
+          umask 077
+          keychain="$RUNNER_TEMP/developer-id.keychain-db"
+          password=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')
+          export CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
+          python -c 'import base64,os; open(os.environ["CERTIFICATE_PATH"], "wb").write(base64.b64decode(os.environ["DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64"]))'
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$CERTIFICATE_PATH" -k "$keychain" -P "$DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD" -A
+          security list-keychain -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          rm -f "$CERTIFICATE_PATH"
+
+      - name: Sign, package and notarize both macOS archives
+        if: runner.os == 'macOS'
+        env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          : "${APP_STORE_CONNECT_API_KEY:?missing App Store Connect API key}"
+          export APP_STORE_CONNECT_API_KEY_PATH="$RUNNER_TEMP/notary-key.p8"
+          umask 077
+          printf '%s' "$APP_STORE_CONNECT_API_KEY" > "$APP_STORE_CONNECT_API_KEY_PATH"
+          unset APP_STORE_CONNECT_API_KEY
+          bash scripts/release/macos-sign-notarize.sh target/release target/release-assets "$RELEASE_TARGET"
+
+      - name: Remove signing credentials
+        if: always() && runner.os == 'macOS'
+        run: |
+          rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/notary-key.p8"
+          keychain="$RUNNER_TEMP/developer-id.keychain-db"
+          if [[ -f "$keychain" ]]; then
+            security delete-keychain "$keychain"
+          fi
+
+      - name: Package Linux and Windows archives
+        if: runner.os != 'macOS'
+        run: |
+          for binary in ck-plexus ck-plexus-admin; do
+            python scripts/release/assets.py pack target/release target/release-assets "$RELEASE_TARGET" "$binary"
+          done
+
+      - name: Verify packaged binaries and checksum final ZIPs
+        run: python scripts/release/assets.py verify-target target/release-assets "$RELEASE_TARGET" "$RELEASE_VERSION" "$RELEASE_REVISION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: target/release-assets/
+          if-no-files-found: error
+
+  assemble:
+    name: Verify all assets and generate the release manifest
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.verify.outputs.revision }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: built-assets
+          merge-multiple: true
+
+      - name: Verify inventory and checksums, then package the catalog and manifest
+        shell: bash
+        env:
+          RELEASE_REVISION: ${{ needs.verify.outputs.revision }}
+        run: |
+          flags=()
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            flags+=(--dry-run)
+          fi
+          if [[ "$PLEXUS_PUBLISH_WINDOWS" == true ]]; then
+            flags+=(--publish-windows)
+          fi
+          python3 scripts/release/assets.py assemble built-assets release-assets "$RELEASE_REVISION" "${flags[@]}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets/
+          if-no-files-found: error
+
+  publish:
+    name: Verify uploaded draft and publish release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [verify, assemble]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Upload to a draft, verify remote bytes, then publish
+        shell: bash
+        env:
+          RELEASE_REVISION: ${{ needs.verify.outputs.revision }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-assets/* --draft --verify-tag \
+            --title "Plexus $GITHUB_REF_NAME" --generate-notes
+          gh release download "$GITHUB_REF_NAME" --pattern '*' --dir draft-assets
+          diff -r release-assets draft-assets
+          tag_revision=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_REF_NAME" --jq .sha)
+          if [[ "$tag_revision" != "$RELEASE_REVISION" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME no longer refers to $RELEASE_REVISION; leaving the release as a draft"
+            exit 1
+          fi
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
