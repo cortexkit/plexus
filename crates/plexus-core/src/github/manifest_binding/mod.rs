@@ -67,6 +67,7 @@ pub trait BindingCards {
 pub struct Progress {
     disabled_logged_at: Option<i64>,
     logged: BTreeSet<String>,
+    stopped_agents: BTreeSet<String>,
     stopped: bool,
 }
 
@@ -157,6 +158,14 @@ impl ApprovalPass<'_> {
                         ),
                         failure.code(),
                     );
+                }
+            }
+            Remedy::StopAgent => {
+                if let Some(record) = record
+                    .filter(|record| self.progress.stopped_agents.insert(record.agent_id.clone()))
+                {
+                    crate::diag!(error governance: "manifest binding stopped for {}: {}",
+                        record.app_handle_id, failure.code());
                 }
             }
             Remedy::Stop => {
@@ -356,15 +365,30 @@ impl ApprovalPass<'_> {
                 if self.card_settlement(&mut record)? {
                     continue;
                 }
+                if self.progress.stopped_agents.contains(&record.agent_id) {
+                    continue;
+                }
                 // Proposals share a base manifest version, so approving one
                 // supersedes the others. Keep one owner decision outstanding;
                 // the store orders existing waiters by handle and repository.
+                // A stopped agent's unfiled proposal cannot reach the owner,
+                // but a filed or conflicted card can still settle.
                 let waiting = self
                     .store
                     .github_manifest_bindings()
                     .map_err(|_| "store_error")?
                     .into_iter()
-                    .find(|r| r.present && matches!(r.state.as_str(), "pending" | "card_conflict"));
+                    .find(|r| {
+                        r.present
+                            && match r.state.as_str() {
+                                "card_conflict" => true,
+                                "pending" => {
+                                    r.card_id.is_some()
+                                        || !self.progress.stopped_agents.contains(&r.agent_id)
+                                }
+                                _ => false,
+                            }
+                    });
                 if waiting.is_some_and(|r| {
                     r.app_handle_id != record.app_handle_id || r.repository != record.repository
                 }) {

@@ -9,6 +9,7 @@ use serde_json::Value;
 pub enum Remedy {
     Retry,
     TerminalRepository,
+    StopAgent,
     Stop,
 }
 
@@ -39,9 +40,9 @@ impl Refusal {
             "not_installed" | "installation_all" | "bound_to_other_agent" | "expired" => {
                 ("permanent", Remedy::TerminalRepository)
             }
+            "identity_mismatch" => ("permanent", Remedy::StopAgent),
             "not_found"
             | "manifest_setup_incomplete"
-            | "identity_mismatch"
             | "installation_unusable"
             | "installation_too_large"
             | "not_reproducible"

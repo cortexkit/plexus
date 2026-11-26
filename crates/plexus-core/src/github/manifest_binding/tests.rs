@@ -41,7 +41,7 @@ fn producer_samples_pin_every_decoder_and_refusal_remedy() {
         ("expired", Remedy::TerminalRepository),
         ("github_unavailable", Remedy::Retry),
         ("home_unavailable", Remedy::Retry),
-        ("identity_mismatch", Remedy::Stop),
+        ("identity_mismatch", Remedy::StopAgent),
         ("identity_unavailable", Remedy::Retry),
         ("installation_all", Remedy::TerminalRepository),
         ("installation_too_large", Remedy::Stop),
@@ -271,6 +271,7 @@ fn unknown_or_malformed_commitments_fail_closed() {
 struct Vault {
     calls: Mutex<Vec<(String, Value)>>,
     reply: Mutex<Value>,
+    agent_replies: Mutex<BTreeMap<String, Value>>,
     repository_replies: Mutex<BTreeMap<String, Value>>,
     status: Mutex<Value>,
 }
@@ -279,6 +280,7 @@ impl Vault {
         Self {
             calls: Mutex::new(vec![]),
             reply: Mutex::new(sample("propose.reply")),
+            agent_replies: Mutex::new(BTreeMap::new()),
             repository_replies: Mutex::new(BTreeMap::new()),
             status: Mutex::new(sample("active_status.not_ready")),
         }
@@ -291,6 +293,12 @@ impl Vault {
             .filter(|(m, _)| m == "manifest.propose_binding")
             .count()
     }
+    fn refuse_agent(&self, handle: &GithubHandle, fixture: &str) {
+        self.agent_replies
+            .lock()
+            .unwrap()
+            .insert(handle.agent_id.clone(), sample(fixture));
+    }
 }
 impl CkcredRoutePeer for Vault {
     fn call(&self, method: &str, params: Value) -> Result<Value, CkcredRouteError> {
@@ -299,6 +307,14 @@ impl CkcredRoutePeer for Vault {
             .unwrap()
             .push((method.into(), params.clone()));
         Ok(if method == "manifest.propose_binding" {
+            if let Some(reply) = self
+                .agent_replies
+                .lock()
+                .unwrap()
+                .get(params["agent_id"].as_str().unwrap())
+            {
+                return Ok(reply.clone());
+            }
             self.repository_replies
                 .lock()
                 .unwrap()
@@ -566,6 +582,25 @@ impl Fixture {
         for (index, repository) in repositories.iter().enumerate() {
             self.proposal_for(&handle(), repository, 28, index);
         }
+    }
+
+    fn add_earlier_handle(&self) -> GithubHandle {
+        let mut earlier = handle();
+        earlier.app_handle_id = "aaa".into();
+        earlier.agent_id = "agent_5555555555555555".into();
+        earlier.credential_reference = "github_app:aaa".into();
+        earlier.connection_id = "earlier-handle-connection".into();
+        self.store
+            .insert_connection(
+                "direct",
+                &earlier.connection_id,
+                "github_rest",
+                "active",
+                &json!({}),
+            )
+            .unwrap();
+        self.store.put_github_handle(&earlier).unwrap();
+        earlier
     }
 
     fn proposal_for(
@@ -907,21 +942,7 @@ fn five_existing_waiters_only_repropose_the_first_by_handle_then_repository() {
             "octo-owner/z",
         ];
         f.repositories(&repositories);
-        let mut earlier = handle();
-        earlier.app_handle_id = "aaa".into();
-        earlier.agent_id = "agent_5555555555555555".into();
-        earlier.credential_reference = "github_app:aaa".into();
-        earlier.connection_id = "earlier-handle-connection".into();
-        f.store
-            .insert_connection(
-                "direct",
-                &earlier.connection_id,
-                "github_rest",
-                "active",
-                &json!({}),
-            )
-            .unwrap();
-        f.store.put_github_handle(&earlier).unwrap();
+        let earlier = f.add_earlier_handle();
         let current = handle();
         // Insert in reverse order so neither insertion nor listing order selects the slot.
         for (index, repository) in repositories.iter().enumerate().rev() {
@@ -1418,7 +1439,7 @@ fn claim_loss_during_listing_prevents_proposal_and_local_progress() {
 }
 
 #[test]
-fn supersession_reproposes_on_next_pass_but_bad_identity_stops() {
+fn supersession_reproposes_on_next_pass() {
     let mut f = Fixture::new();
     *f.vault.reply.lock().unwrap() = sample("refusal.superseded");
     f.discover();
@@ -1427,12 +1448,96 @@ fn supersession_reproposes_on_next_pass_but_bad_identity_stops() {
     *f.vault.reply.lock().unwrap() = sample("propose.reply");
     f.discover();
     assert_eq!(f.cards.filed.get(), 1);
-    *f.vault.reply.lock().unwrap() = sample("refusal.identity_mismatch");
+}
+
+#[test]
+fn identity_mismatch_stops_proposals_for_only_that_agent() {
+    let mut f = Fixture::new();
+    let earlier = f.add_earlier_handle();
+    f.repositories(&[REPO, "octo-owner/second"]);
+    f.vault.refuse_agent(&earlier, "refusal.identity_mismatch");
+
+    f.discover();
+    assert_eq!(f.cards.filed.get(), 1, "the other bot can still propose");
+    assert!(!f.progress.stopped());
+    f.discover();
+
+    let calls = f.vault.calls.lock().unwrap();
+    let targets: Vec<_> = calls
+        .iter()
+        .map(|(method, params)| {
+            assert_eq!(method, "manifest.propose_binding");
+            (
+                params["agent_id"].as_str().unwrap(),
+                params["repo"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            (earlier.agent_id.as_str(), REPO),
+            (AGENT, REPO),
+            (AGENT, REPO)
+        ]
+    );
+}
+
+#[test]
+fn identity_mismatch_preserves_only_live_owner_decisions() {
+    for has_card in [true, false] {
+        let mut f = Fixture::new();
+        let earlier = f.add_earlier_handle();
+        let waiting_repo = "octo-owner/second";
+        f.repositories(&[REPO, waiting_repo]);
+        let mut pending = f.seed_waiting(&earlier, waiting_repo, 2);
+        let card = pending.card_id.clone().unwrap();
+        if !has_card {
+            pending.card_id = None;
+            assert!(f
+                .store
+                .save_github_manifest_binding(&pending, None)
+                .unwrap());
+        }
+        f.vault.refuse_agent(&earlier, "refusal.identity_mismatch");
+
+        f.discover();
+        if has_card {
+            assert_eq!(f.vault.proposals(), 1, "the live card occupies the slot");
+            assert_eq!(f.cards.filed.get(), 0);
+            f.discover();
+            assert_eq!(
+                f.cards.checked.borrow().as_slice(),
+                [card.as_str(), card.as_str()]
+            );
+            assert_eq!(f.vault.proposals(), 1, "the stopped bot does not retry");
+
+            f.cards
+                .states
+                .borrow_mut()
+                .insert(card, CardState::Declined);
+            f.discover();
+            assert_eq!(f.record_for(&earlier, waiting_repo).state, "declined");
+        }
+        assert_eq!(f.cards.filed.get(), 1, "B can propose once no card is live");
+        assert_eq!(f.vault.proposals(), 2);
+        assert_eq!(f.vault.calls.lock().unwrap()[1].1["agent_id"], AGENT);
+    }
+}
+
+#[test]
+fn global_refusal_still_stops_proposals_for_all_agents() {
+    let mut f = Fixture::new();
+    let earlier = f.add_earlier_handle();
+    f.vault
+        .refuse_agent(&earlier, "refusal.manifest_setup_incomplete");
+
     f.discover();
     assert!(f.progress.stopped());
     let before = f.reader.calls.get();
     f.discover();
     assert_eq!(f.reader.calls.get(), before);
+    assert_eq!(f.vault.proposals(), 1);
 }
 
 #[test]
