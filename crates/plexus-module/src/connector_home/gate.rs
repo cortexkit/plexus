@@ -32,10 +32,12 @@ struct State {
     legacy: bool,
     known: bool,
     notice: Option<Notice>,
+    highest_received_seq: Option<u64>,
     confirmed: bool,
     in_flight: usize,
     yield_pending: bool,
     yield_attempt: Option<(u64, u64)>,
+    unsettled_yield_after: Option<u64>,
     transferred_gen: Option<u64>,
 }
 
@@ -60,7 +62,16 @@ pub(super) struct Gate {
     state: Mutex<State>,
     now: Box<dyn Fn() -> Option<u64> + Send + Sync>,
     decision: watch::Sender<bool>,
+    #[cfg(test)]
+    yield_progress: watch::Sender<YieldProgress>,
     pub(super) drained: Notify,
+}
+
+#[cfg(test)]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct YieldProgress {
+    pub confirmed_seq: Option<u64>,
+    pub in_flight: bool,
 }
 
 impl Gate {
@@ -72,12 +83,32 @@ impl Gate {
             }),
             now: Box::new(now),
             decision: watch::channel(false).0,
+            #[cfg(test)]
+            yield_progress: watch::channel(YieldProgress::default()).0,
             drained: Notify::new(),
         }
     }
 
     fn publish(&self, state: &State) {
         self.publish_decision(state.admission_window((self.now)()).is_some());
+        #[cfg(test)]
+        self.yield_progress.send_if_modified(|progress| {
+            let next = YieldProgress {
+                confirmed_seq: state
+                    .notice
+                    .filter(|_| state.confirmed)
+                    .map(|notice| notice.seq),
+                in_flight: state.yield_attempt.is_some(),
+            };
+            let changed = *progress != next;
+            *progress = next;
+            changed
+        });
+    }
+
+    #[cfg(test)]
+    pub(super) fn yield_progress(&self) -> watch::Receiver<YieldProgress> {
+        self.yield_progress.subscribe()
     }
 
     fn publish_decision(&self, admitted: bool) {
@@ -139,6 +170,11 @@ impl Gate {
     pub(super) fn receive(&self, notice: Notice) {
         let mut state = self.state.lock().unwrap();
         state.known = true;
+        state.highest_received_seq = Some(
+            state
+                .highest_received_seq
+                .map_or(notice.seq, |seq| seq.max(notice.seq)),
+        );
         // A normal renewal of the same generation need not interrupt service
         // while its acknowledgement is in flight. Other changes fence at once.
         state.confirmed = state.confirmed
@@ -157,8 +193,15 @@ impl Gate {
     pub(super) fn confirm(&self, notice: Notice) {
         let mut state = self.state.lock().unwrap();
         state.confirmed = true;
-        if notice.holding && !notice.handback && state.yield_attempt.is_none() {
+        if notice.holding
+            && !notice.handback
+            && state.yield_attempt.is_none()
+            && state
+                .unsettled_yield_after
+                .is_none_or(|seq| notice.seq > seq)
+        {
             state.yield_pending = false;
+            state.unsettled_yield_after = None;
         }
         self.publish(&state);
     }
@@ -166,9 +209,11 @@ impl Gate {
     pub(super) fn disconnect(&self) {
         let mut state = self.state.lock().unwrap();
         state.notice = None;
+        state.highest_received_seq = None;
         state.confirmed = false;
         state.yield_pending = false;
         state.yield_attempt = None;
+        state.unsettled_yield_after = None;
         if !state.legacy {
             self.publish(&state);
         }
@@ -209,7 +254,13 @@ impl Gate {
                         .notice
                         .is_some_and(|n| n.seq > seq && n.holding && !n.handback)
             }
-            None => true,
+            None => {
+                // An acknowledgment can arrive after the unresolved yield
+                // reply even if its notice arrived first. That notice cannot
+                // reopen admission.
+                state.unsettled_yield_after = Some(state.highest_received_seq.unwrap_or(seq));
+                true
+            }
         };
         self.publish(&state);
     }
@@ -245,5 +296,47 @@ impl Drop for Permit {
         if state.in_flight == 0 {
             self.gate.drained.notify_one();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unresolved_yield_cannot_be_cleared_by_an_ack_for_an_earlier_notice() {
+        let gate = Arc::new(Gate::new(false, || Some(100_000)));
+        let handback = Notice {
+            seq: 3,
+            gen: 1,
+            holding: true,
+            issued_at_ms: 100_000,
+            valid_for_ms: 60_000,
+            handback: true,
+        };
+        gate.receive(handback);
+        gate.confirm(handback);
+        assert_eq!(gate.wait_for_yield(), Some(1));
+        let renewal = Notice {
+            seq: 4,
+            handback: false,
+            ..handback
+        };
+        gate.receive(renewal);
+        gate.finish_yield(None);
+        gate.confirm(renewal);
+        assert!(
+            gate.begin().is_none(),
+            "an old notice's ACK must not reopen admission"
+        );
+
+        let fresh = Notice { seq: 5, ..renewal };
+        gate.receive(fresh);
+        assert!(
+            gate.begin().is_none(),
+            "the fresh notice still needs an ACK"
+        );
+        gate.confirm(fresh);
+        assert!(gate.begin().is_some());
     }
 }

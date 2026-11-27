@@ -1,7 +1,8 @@
 use super::*;
 use crate::manifest::CredentiallessTail;
 use serde_json::json;
-use std::net::TcpListener;
+use std::io::{self, Write};
+use std::net::{Shutdown, TcpListener};
 use std::sync::atomic::AtomicBool;
 
 // Public test-only TLS identity; it is never used by a deployed connection.
@@ -51,6 +52,9 @@ impl Storage {
             while !stopped.load(Ordering::Relaxed) && Instant::now() < deadline {
                 match listener.accept() {
                     Ok((socket, _)) => {
+                        // On Windows, the socket can inherit the listener's nonblocking mode.
+                        // TLS uses blocking I/O with the timeouts below.
+                        socket.set_nonblocking(false).unwrap();
                         socket
                             .set_read_timeout(Some(Duration::from_secs(2)))
                             .unwrap();
@@ -65,18 +69,35 @@ impl Storage {
                         while !request.ends_with(b"\r\n\r\n") && request.len() < 16_384 {
                             match stream.read(&mut byte) {
                                 Ok(1) => request.push(byte[0]),
-                                _ => break,
+                                Ok(_) => break,
+                                Err(error) => {
+                                    std::eprintln!("read credentialless storage fixture: {error}");
+                                    break;
+                                }
                             }
                         }
-                        let request = String::from_utf8_lossy(&request).into_owned();
-                        if !request.is_empty() {
-                            observed.lock().unwrap().push(request.clone());
-                            let reply = handler(&request);
-                            use std::io::Write;
-                            let _ = stream.write_all(&reply);
-                            stream.conn.send_close_notify();
-                            let _ = stream.flush();
+                        // The fixture accepts bodyless GET and HEAD requests;
+                        // never reply to a partial header after an I/O error.
+                        if !request.ends_with(b"\r\n\r\n") {
+                            continue;
                         }
+                        let request = String::from_utf8_lossy(&request).into_owned();
+                        assert!(request.starts_with("GET ") || request.starts_with("HEAD "));
+                        observed.lock().unwrap().push(request.clone());
+                        let reply = handler(&request);
+                        if let Err(error) = stream.write_all(&reply) {
+                            std::eprintln!("write credentialless storage fixture: {error}");
+                            continue;
+                        }
+                        stream.conn.send_close_notify();
+                        if let Err(error) = stream.flush() {
+                            std::eprintln!("close credentialless storage fixture TLS: {error}");
+                            continue;
+                        }
+                        // Signal EOF before dropping the socket. Drain any
+                        // final peer alert under the socket's read timeout.
+                        let _ = stream.sock.shutdown(Shutdown::Write);
+                        let _ = io::copy(&mut (&mut stream.sock).take(16_384), &mut io::sink());
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::park_timeout(Duration::from_millis(2))

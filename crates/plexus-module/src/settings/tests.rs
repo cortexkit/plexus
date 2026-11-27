@@ -2,7 +2,8 @@ use super::*;
 
 #[test]
 fn declaration_matches_schema_rules_and_wire_fixture() {
-    let declaration = config_declaration(Path::new("/operator/config"), "plexus").unwrap();
+    let config_home = Scratch::directory("settings-declaration");
+    let declaration = config_declaration(config_home.path(), "plexus").unwrap();
     let schema = Schema::new(declaration.schema.clone()).unwrap();
     assert_eq!(
         schema.defaults(),
@@ -36,10 +37,15 @@ fn declaration_matches_schema_rules_and_wire_fixture() {
             .is_some_and(|s| !s.is_empty()));
     }
     let expected = include_str!("../../tests/fixtures/settings/config-declare.json");
-    assert_eq!(
-        serde_json::to_string(&declaration).unwrap(),
-        expected.trim_end()
+    let user_file = config_home.join("cortexkit").join("plexus.jsonc");
+    let user_file = serde_json::to_string(user_file.to_str().unwrap()).unwrap();
+    // Substitute only the platform-specific path; compare the rest byte for byte.
+    let expected = expected.trim_end().replacen(
+        r#""/operator/config/cortexkit/plexus.jsonc""#,
+        &user_file,
+        1,
     );
+    assert_eq!(serde_json::to_string(&declaration).unwrap(), expected);
 }
 
 fn review(bytes: &[u8], base: Option<ConfigView>) -> ConfigReviewReply {
@@ -150,13 +156,13 @@ fn applied_retention_reaches_the_running_schedulers_next_pass() {
             vec![],
             ConfigStatus::Pending,
         );
+        let module_data = scratch.owned_directory();
         let live = LiveSettings {
-            catalog_dir: PathBuf::from("/module-data/catalog"),
+            catalog_dir: module_data.join("catalog"),
             audit_retention: window,
             pending_report: None,
         };
-        live.apply(&delivered, Some(Path::new("/module-data")))
-            .unwrap();
+        live.apply(&delivered, Some(module_data)).unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let count = store.list_audit("direct").unwrap().len();

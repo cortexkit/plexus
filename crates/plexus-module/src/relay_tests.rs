@@ -1551,19 +1551,30 @@ async fn unknown_source_http_is_not_credential_rejection() {
     let url = format!("ws://{}/v1/relay/github/ws", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let (mut socket, _) = bounded(listener.accept()).await.unwrap();
+        // The upgrade GET has no body. Consume all its headers so closing
+        // the rejection does not reset a socket with unread request bytes.
+        let request = bounded(async {
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                assert!(request.len() < 16_384, "upgrade headers are too large");
+                request.push(socket.read_u8().await.unwrap());
+            }
+            request
+        })
+        .await;
+        assert!(request.starts_with(b"GET /v1/relay/github/ws HTTP/1.1\r\n"));
         let body = vector["body"].as_str().unwrap();
         socket.write_all(format!("HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        socket.shutdown().await.unwrap();
     });
+    let result = bounded(dial(
+        &url,
+        b"secret",
+        &Arc::new(ConnectorHome::test_admitted()),
+    ))
+    .await;
     assert!(
-        matches!(
-            bounded(dial(
-                &url,
-                b"secret",
-                &Arc::new(ConnectorHome::test_admitted())
-            ))
-            .await,
-            Err(Failure::SourceNotServed)
-        ),
+        matches!(result, Err(Failure::SourceNotServed)),
         "unknown source must not be classified as a credential refusal"
     );
     bounded(server).await.unwrap();

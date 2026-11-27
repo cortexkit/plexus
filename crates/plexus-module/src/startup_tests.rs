@@ -394,17 +394,10 @@ async fn delayed_startup_serves_warming_then_registers_before_polling() {
 
     // The first scheduler health pass is blocked on the held outbox-cache
     // lock, but cached control health must remain responsive and unsampled.
-    tokio::time::timeout(RESPONSE_DEADLINE, async {
-        loop {
-            let ModuleControlResponse::HealthCheck { metrics, .. } = health.report() else {
-                unreachable!()
-            };
-            if !metrics.unwrap()["connections"].is_null() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+    tokio::time::timeout(
+        RESPONSE_DEADLINE,
+        health.connection_probe_observed.notified(),
+    )
     .await
     .expect("first connection probe before store refresh");
     write_frame(
@@ -415,14 +408,24 @@ async fn delayed_startup_serves_warming_then_registers_before_polling() {
     .unwrap();
     let response = reply(&mut responses, 82).await;
     let ModuleControlResponse::HealthCheck {
-        status, metrics, ..
+        status,
+        detail,
+        metrics,
     } = serde_json::from_slice(&response.body).unwrap()
     else {
         panic!("expected ready health")
     };
-    assert_eq!(status, HealthStatus::Ok);
+    assert_eq!(
+        status,
+        HealthStatus::Ok,
+        "ready health degraded: {detail:?}; {metrics:?}"
+    );
     let metrics = metrics.unwrap();
     assert_eq!(metrics["ready"], true);
+    assert!(
+        !metrics["connections"].is_null(),
+        "connection probe must have published"
+    );
     assert_unsampled(&metrics);
 
     unlock.send(()).unwrap();

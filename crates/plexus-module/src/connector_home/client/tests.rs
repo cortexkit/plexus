@@ -798,3 +798,66 @@ async fn unsettled_yield_needs_another_fresh_notice() {
     rig.decision(true).await;
     rig.finish().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unsettled_yield_fences_an_earlier_renewal_in_both_reply_orders() {
+    for ack_first in [true, false] {
+        let mut rig = Rig::new(100_000).await;
+        let shared = samples("sharing-disabled");
+        rig.notice(body(&shared[0], 0)).await;
+        rig.decision(true).await;
+        let mut handback = body(&samples("handback")[0], 0).clone();
+        handback["gen"] = json!(1);
+        rig.notice(&handback).await;
+        let yielding = rig
+            .unary(br#"{"method":"role.lease.yield","params":{"gen":1,"role":"connector_home"}}"#)
+            .await;
+
+        rig.now.store(120_000, Ordering::SeqCst);
+        let mut renewal = body(&shared[0], 1).clone();
+        renewal["seq"] = json!(4);
+        let ack = rig.send_notice_awaiting_ack(&renewal).await;
+        let mut progress = rig.home.gate.yield_progress();
+        assert!(progress.borrow().in_flight);
+        let ack_reply = samples("ack")[0]["frames"][0]["body"].clone();
+        if ack_first {
+            rig.reply(&ack, FrameType::Response, &ack_reply).await;
+            timeout(
+                LIMIT,
+                progress.wait_for(|state| state.confirmed_seq == Some(4)),
+            )
+            .await
+            .expect("renewal ACK processed first")
+            .unwrap();
+        }
+        rig.reply(
+            &yielding,
+            FrameType::Error,
+            &json!({"code":"outcome_unknown","message":"yield unsettled"}),
+        )
+        .await;
+        timeout(LIMIT, progress.wait_for(|state| !state.in_flight))
+            .await
+            .expect("unsettled yield reply processed")
+            .unwrap();
+        if !ack_first {
+            rig.reply(&ack, FrameType::Response, &ack_reply).await;
+            timeout(
+                LIMIT,
+                progress.wait_for(|state| state.confirmed_seq == Some(4)),
+            )
+            .await
+            .expect("renewal ACK processed after the yield reply")
+            .unwrap();
+        }
+        assert!(
+            !rig.home.held(),
+            "earlier renewal admitted work (ack_first={ack_first})"
+        );
+        assert_eq!(rig.home.health_status()["lease"]["yield_pending"], true);
+        renewal["seq"] = json!(5);
+        rig.notice(&renewal).await;
+        rig.decision(true).await;
+        rig.finish().await;
+    }
+}

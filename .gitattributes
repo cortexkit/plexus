@@ -1,0 +1,2 @@
+# Tests and release checks compare exact bytes; preserve blobs on every checkout.
+* -text

@@ -131,6 +131,8 @@ pub struct HealthState {
     /// the dispatch loop, and the report is a freshness check on that very
     /// loop.
     connections_observed: AtomicBool,
+    #[cfg(test)]
+    pub(crate) connection_probe_observed: tokio::sync::Notify,
     connections_total: AtomicU64,
     connections_degraded: AtomicU64,
     /// When the scheduler last began a pass. Reported as a metric only, never
@@ -291,6 +293,8 @@ impl HealthState {
             last_heartbeat_ms: AtomicU64::new(now),
             scheduler_alive: AtomicBool::new(true),
             connections_observed: AtomicBool::new(false),
+            #[cfg(test)]
+            connection_probe_observed: tokio::sync::Notify::new(),
             connections_total: AtomicU64::new(0),
             connections_degraded: AtomicU64::new(0),
             last_scheduler_pass_ms: AtomicU64::new(now),
@@ -353,6 +357,8 @@ impl HealthState {
         // written, never a total from this probe beside a degraded count from
         // the previous one.
         self.connections_observed.store(true, Ordering::Release);
+        #[cfg(test)]
+        self.connection_probe_observed.notify_one();
     }
 
     /// Record that the scheduler began a pass.
