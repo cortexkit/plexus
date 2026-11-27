@@ -243,6 +243,17 @@ fn own_crate_names_match_workspace_cargo_targets() {
                 .into_iter()
                 .flatten()
                 .filter_map(|target| {
+                    // Test-only targets never ship or configure Plexus logging.
+                    if target["required-features"]
+                        .as_array()
+                        .is_some_and(|features| {
+                            features
+                                .iter()
+                                .any(|feature| feature.as_str() == Some("test-support"))
+                        })
+                    {
+                        return None;
+                    }
                     let kinds = target["kind"].as_array()?;
                     let is_crate = kinds
                         .iter()
@@ -265,7 +276,7 @@ fn own_crate_names_match_workspace_cargo_targets() {
     );
     assert_eq!(
         actual, expected,
-        "own crate list must match workspace crate targets"
+        "own crate list must match shipped workspace crate targets"
     );
 }
 

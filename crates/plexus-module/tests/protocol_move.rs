@@ -2,10 +2,12 @@
 
 #[path = "support/daemon_client.rs"]
 mod daemon_client;
+#[path = "support/fixture_launcher.rs"]
+mod fixture_launcher;
 
 use plexus_core::test_scratch::Scratch;
 use serde_json::{json, Value};
-use std::{fs, time::Duration};
+use std::{fs, path::Path, time::Duration};
 use subc_protocol::{Frame, FrameType, PROTOCOL_VERSION};
 use subc_transport::{connection_file, read_frame, write_frame};
 use tokio::{net::TcpStream, time::timeout};
@@ -116,17 +118,19 @@ async fn published_daemon_supports_federated_scopes_stamps_carriers_and_describe
     let scratch = Scratch::directory("protocol-move-daemon");
     let connection_path = scratch.join("connection.json");
     let config_path = scratch.join("subc.jsonc");
+    let built = Path::new(env!("CARGO_BIN_EXE_ckdev-plexus-test-launcher"));
+    let launcher = fixture_launcher::launcher(built);
     let mut modules = serde_json::Map::new();
     for module_id in [OWNER, PROVIDER, CONSENT] {
-        // The supervised shell writes its descriptor-delivered launch nonce
+        // The supervised fixture writes its launch nonce
         // to a file so this test can register the corresponding module double.
         // No production binary or operator data is used.
         let nonce_path = scratch.join(format!("{module_id}.nonce"));
         modules.insert(
             module_id.into(),
             json!({
-                "program":"/bin/sh",
-                "args":["-c", "dd status=none <&3 > \"$1\"; exec sleep 120", "probe", nonce_path],
+                "program":launcher,
+                "args":["nonce", nonce_path],
                 "reserved":true
             }),
         );
@@ -141,7 +145,7 @@ async fn published_daemon_supports_federated_scopes_stamps_carriers_and_describe
         .unwrap(),
     )
     .unwrap();
-    let config = subc_daemon::bootstrap::BootstrapConfig::new(&connection_path, 0)
+    let config = fixture_launcher::daemon_config(&connection_path, built)
         .with_daemon_config_path(&config_path)
         .unwrap();
     let daemon = Daemon(tokio::spawn(subc_daemon::bootstrap::run_with_config(

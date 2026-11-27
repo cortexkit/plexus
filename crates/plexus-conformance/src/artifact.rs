@@ -111,16 +111,18 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), b"previous");
     }
 
-    #[cfg(unix)]
     #[test]
     fn publication_replaces_symlinks_and_detaches_existing_readers() {
         use std::io::Read;
-        use std::os::unix::fs::{symlink, PermissionsExt};
+        #[cfg(unix)]
+        use std::os::unix::fs::{symlink as symlink_file, PermissionsExt};
+        #[cfg(windows)]
+        use std::os::windows::fs::symlink_file;
         let dir = Scratch::directory_in(&std::env::temp_dir()).unwrap();
         let victim = dir.join("victim");
         fs::write(&victim, b"untouched").unwrap();
         let path = dir.join("output");
-        symlink(&victim, &path).unwrap();
+        symlink_file(&victim, &path).unwrap();
         write_owner_only(&path, b"first").unwrap();
         assert_eq!(fs::read(&victim).unwrap(), b"untouched");
         let mut earlier = File::open(&path).unwrap();
@@ -129,6 +131,7 @@ mod tests {
         earlier.read_to_string(&mut old).unwrap();
         assert_eq!(old, "first");
         assert_eq!(fs::read(&path).unwrap(), b"second");
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600

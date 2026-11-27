@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::shell::single_quoted;
+use crate::fixture_launcher;
 use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 use plexus_core::consent_card::*;
 use plexus_core::scope::{CallScope, ScopeDescription, ScopeReadError, ScopeReader, ScopeStatus};
@@ -81,11 +81,11 @@ impl Daemon {
         let connection = scratch.join("connection.json");
         let home = scratch.join("home");
         fs::create_dir_all(&home).unwrap();
-        let executable = single_quoted(std::env::current_exe().unwrap());
-        let launcher = scratch.join("module.sh");
-        fs::write(&launcher, format!("exec {executable} --exact consent_requester::cingulate_module_fixture --nocapture\n")).unwrap();
+        let built = Path::new(env!("CARGO_BIN_EXE_ckdev-plexus-test-launcher"));
+        let launcher = fixture_launcher::launcher(built);
+        let executable = cortexkit_test_support::ckdev_binary(std::env::current_exe().unwrap());
         let module = |id: &str| {
-            json!({"program":"/bin/sh", "args":[launcher], "reserved":true,
+            json!({"program":launcher, "args":["test", executable, "consent_requester::cingulate_module_fixture"], "reserved":true,
             "env":{"HOME":home, "XDG_DATA_HOME":home, "CONSENT_FIXTURE_CONNECTION":connection, "CONSENT_FIXTURE_ROOT":scratch.path(), "CONSENT_FIXTURE_MODULE":id}})
         };
         let config_path = scratch.join("daemon.jsonc");
@@ -96,7 +96,7 @@ impl Daemon {
             "modules":{"cingulate":module("cingulate"), "prefrontal":module("prefrontal"), "plexus":module("plexus")}}),
         );
         atomic_json(&scratch.join("behavior.json"), &json!({"answer":"pending"}));
-        let config = subc_daemon::bootstrap::BootstrapConfig::new(&connection, 0)
+        let config = fixture_launcher::daemon_config(&connection, built)
             .with_capture_logs_dir(scratch.join("logs"))
             .with_daemon_config_path(&config_path)
             .unwrap();

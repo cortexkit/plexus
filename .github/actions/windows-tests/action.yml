@@ -1,0 +1,45 @@
+name: Native Windows tests
+description: Verify the native Rust host, install pinned NATS, and test the workspace.
+runs:
+  using: composite
+  steps:
+    - name: Check native Rust architecture and install pinned nats-server
+      shell: pwsh
+      run: |
+        $version = '2.15.0'
+        # GitHub's nats-io/nats-server v2.15.0 release asset digests.
+        switch ($env:RUNNER_ARCH) {
+          X64 {
+            $rustArch = 'x86_64'
+            $natsArch = 'amd64'
+            $digest = '2d0861dc2ca3567d17f7d19611d7b346cc2ccbd7086a0a77cc957a2c71663200'
+          }
+          ARM64 {
+            $rustArch = 'aarch64'
+            $natsArch = 'arm64'
+            $digest = 'd468fa3f0ac953bed2219e37a2b5977d87cb8d705d5bbdc70b9f960e12fb7c38'
+          }
+          default { throw "Unsupported Windows runner architecture: $env:RUNNER_ARCH" }
+        }
+        if ((rustc -vV) -notcontains "host: $rustArch-pc-windows-msvc") {
+          throw "Rust is not native to this Windows $env:RUNNER_ARCH runner"
+        }
+        $asset = "nats-server-v$version-windows-$natsArch"
+        $archive = Join-Path $env:RUNNER_TEMP "$asset.zip"
+        Invoke-WebRequest "https://github.com/nats-io/nats-server/releases/download/v$version/$asset.zip" -OutFile $archive
+        if ((Get-FileHash -Algorithm SHA256 $archive).Hash -ne $digest) {
+          throw "Unexpected checksum for $asset.zip"
+        }
+        Expand-Archive $archive $env:RUNNER_TEMP
+        $binDir = Join-Path $env:RUNNER_TEMP $asset
+        & (Join-Path $binDir 'nats-server.exe') --version
+        if ($LASTEXITCODE -ne 0) { throw 'Could not run pinned nats-server' }
+        $binDir >> $env:GITHUB_PATH
+
+    - name: Run the full workspace suite
+      shell: pwsh
+      env:
+        CARGO_PROFILE_DEV_DEBUG: '0'
+        CARGO_PROFILE_TEST_DEBUG: '0'
+        CARGO_INCREMENTAL: '0'
+      run: cargo test --locked --workspace --no-fail-fast

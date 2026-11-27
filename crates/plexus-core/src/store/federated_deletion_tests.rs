@@ -453,12 +453,15 @@ fn malformed_complete_journal_refuses_boot_before_creating_or_changing_database(
 
 #[test]
 fn boot_creates_owner_only_journal_and_honours_parseable_final_deletion() {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let (scratch, descriptor) = fixture("federated-journal-boot");
     let id;
     {
         let store = PlexusStore::open(&descriptor).unwrap();
         let path = scratch.join(federated_journal::NAME);
+        assert!(path.is_file(), "boot must create the deletion journal");
+        #[cfg(unix)]
         assert_eq!(
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600

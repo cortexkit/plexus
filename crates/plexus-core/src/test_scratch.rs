@@ -371,6 +371,11 @@ fn timestamp(metadata: &fs::Metadata) -> Option<SystemTime> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink as symlink_dir;
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_dir;
+
     #[test]
     fn store_paths_isolate_databases_and_contain_leases() {
         use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
@@ -420,7 +425,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn sweep_refuses_a_symlink_root_without_deleting_its_target() {
         let holder = isolated_root("root-link-holder");
@@ -430,7 +434,7 @@ mod tests {
         fs::create_dir(&child).unwrap();
         fs::write(child.join("source.rs"), b"keep").unwrap();
         let link = holder.join("root-link");
-        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        symlink_dir(&victim, &link).unwrap();
         assert_eq!(
             sweep(&link, SystemTime::now() + ORPHAN_AGE * 2, ORPHAN_AGE),
             0,
@@ -645,7 +649,7 @@ mod tests {
         let harness = isolated_root("sweep-symlink");
         let outside = Scratch::directory("sweep-symlink-target");
         let link = harness.join("plexus-link-1234-1-0");
-        std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
+        symlink_dir(outside.path(), &link).expect("symlink");
 
         let an_hour_from_now = SystemTime::now() + Duration::from_secs(60 * 60);
         let removed = sweep(&harness, an_hour_from_now, Duration::from_secs(60));

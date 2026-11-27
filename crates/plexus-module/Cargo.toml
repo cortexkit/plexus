@@ -24,6 +24,12 @@ path = "src/main.rs"
 name = "ck-plexus-admin"
 path = "src/bin/ck-plexus-admin.rs"
 
+[[bin]]
+name = "ckdev-plexus-test-launcher"
+path = "tests/support/fixture_main.rs"
+required-features = ["test-support"]
+test = false
+
 [dependencies]
 cortexkit-log = { workspace = true }
 # The tool-provider role crate defines tool.catalog, capability tags, call

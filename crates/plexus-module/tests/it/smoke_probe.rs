@@ -63,7 +63,7 @@ fn sign_hardened(_: &Path) {}
 
 fn copy_of_shipped(scratch: &Scratch) -> PathBuf {
     let shipped = ckdev_binary(env!("CARGO_BIN_EXE_ck-plexus"));
-    let copy = scratch.path().join("ckdev-plexus");
+    let copy = scratch.path().join(shipped.file_name().unwrap());
     fs::copy(&shipped, &copy).expect("copy ckdev-plexus");
     // Publication is read-only; only this private copy may be patched or re-signed.
     let mut permissions = fs::metadata(&copy)

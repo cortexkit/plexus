@@ -21,8 +21,8 @@
 mod bounded;
 #[path = "support/daemon_client.rs"]
 mod daemon_client;
-#[path = "support/shell.rs"]
-mod shell;
+#[path = "support/fixture_launcher.rs"]
+mod fixture_launcher;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,7 +38,6 @@ use plexus_core::test_scratch::Scratch;
 use plexus_module::scope_reader::{DaemonScopeReader, PendingControlReplies};
 use plexus_module::{manifest, wire};
 use serde_json::{json, Value};
-use shell::single_quoted;
 use subc_protocol::session::{ModuleControlRequestFromModule, ModuleControlResponseToModule};
 use subc_protocol::{Frame, FrameType, ModuleHelloAckBody, PROTOCOL_VERSION};
 use subc_transport::{connection_file, read_frame, write_frame};
@@ -397,22 +396,13 @@ async fn start_daemon() -> Daemon {
     fs::create_dir_all(&home).expect("create isolated data home");
     let connection_file_path = directory.join("subc-connection.json");
     let results_path = directory.join("owner-results.json");
-    let test_binary = single_quoted(std::env::current_exe().unwrap());
-    // The supervisor launches each module with `--subc <connection file>`
-    // appended to its configured arguments, and the Rust test runner would
-    // reject `--subc` as an unknown flag. So each fixture runs this shell
-    // script, which execs this test binary to run only `scope_owner_fixture`
-    // and does not pass the appended arguments on.
-    let launcher = directory.join("scope-owner-fixture.sh");
-    fs::write(
-        &launcher,
-        format!("exec {test_binary} --exact scope_owner_fixture --nocapture\n"),
-    )
-    .unwrap();
+    let built = Path::new(env!("CARGO_BIN_EXE_ckdev-plexus-test-launcher"));
+    let launcher = fixture_launcher::launcher(built);
+    let test_binary = cortexkit_test_support::ckdev_binary(std::env::current_exe().unwrap());
     let fixture = |mode: &str| {
         json!({
-            "program": "/bin/sh",
-            "args": [launcher],
+            "program": launcher,
+            "args": ["test", test_binary, "scope_owner_fixture"],
             "env": {
                 "HOME": home,
                 "XDG_DATA_HOME": home.join(".local/share"),
@@ -445,7 +435,7 @@ async fn start_daemon() -> Daemon {
     // logs of real modules.
     let capture_logs = directory.join("run-logs");
     fs::create_dir_all(&capture_logs).unwrap();
-    let config = subc_daemon::bootstrap::BootstrapConfig::new(&connection_file_path, 0)
+    let config = fixture_launcher::daemon_config(&connection_file_path, built)
         .with_capture_logs_dir(&capture_logs)
         .with_daemon_config_path(&daemon_config_path)
         .expect("load daemon config");

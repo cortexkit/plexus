@@ -10,7 +10,7 @@ from test_scripts import SCRIPTS, Scratch, git, run, write_executable
 
 ASSETS = SCRIPTS / "release" / "assets.py"
 BINARIES = ("ck-plexus", "ck-plexus-admin")
-TARGETS = ("darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64", "windows-x64")
+TARGETS = ("darwin-arm64", "linux-x64", "linux-arm64", "windows-x64", "windows-arm64")
 VERSION = "0.1.0"
 REVISION = "a" * 40
 DIGEST = "b" * 64
@@ -49,7 +49,7 @@ class ReleaseAssetsTests(Scratch):
         built.mkdir()
         for target in TARGETS:
             for binary in BINARIES:
-                member = binary + (".exe" if target == "windows-x64" else "")
+                member = binary + (".exe" if target.startswith("windows-") else "")
                 executable = write_executable(self.tmp / member, "placeholder")
                 path = built / f"{binary}-{target}.zip"
                 with ZipFile(path, "w") as archive:
@@ -58,7 +58,7 @@ class ReleaseAssetsTests(Scratch):
                 path.with_suffix(".zip.sha256").write_text(f"{digest}  {path.name}\n")
 
         cases = [
-            ("publish", (), "1.2.3", TARGETS[:-1]),
+            ("publish", (), "1.2.3", ("darwin-arm64", "linux-x64", "linux-arm64")),
             ("publish-windows", ("--publish-windows",), "1.2.3", TARGETS),
             ("rehearse", ("--dry-run",), "", TARGETS),
         ]
@@ -123,11 +123,11 @@ class ReleaseAssetsTests(Scratch):
         self.assertFalse(list(output.glob("*.sha256")))
 
     def test_darwin_checksums_both_final_archives_after_successful_probes(self):
-        verified, output = self.verify_archives("darwin-x64")
+        verified, output = self.verify_archives("darwin-arm64")
         self.assertEqual(verified.returncode, 0, verified.stderr)
         self.assertIn("sandbox guest returned 42", verified.stdout)
         for binary in BINARIES:
-            self.assert_checksum(output / f"{binary}-darwin-x64.zip")
+            self.assert_checksum(output / f"{binary}-darwin-arm64.zip")
 
     def test_linux_requires_the_admin_crate_version_without_running_the_smoke_probe(self):
         verified, output = self.verify_archives("linux-x64", admin_version="9.9.9")

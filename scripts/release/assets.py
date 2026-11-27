@@ -14,7 +14,7 @@ from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
 
 BINARIES = ("ck-plexus", "ck-plexus-admin")
-TARGETS = ("darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64", "windows-x64")
+TARGETS = ("darwin-arm64", "linux-x64", "linux-arm64", "windows-x64", "windows-arm64")
 CATALOG = "ck-plexus-catalog"
 TRIPLET = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 
@@ -152,7 +152,7 @@ def assemble(args):
     if actual != files:
         raise ValueError(f"wrong asset inventory: missing {sorted(files - actual)}; unexpected {sorted(actual - files)}")
     args.output.mkdir(parents=True)
-    publish_targets = [target for target in TARGETS if target != "windows-x64" or args.dry_run or args.publish_windows]
+    publish_targets = [target for target in TARGETS if not target.startswith("windows-") or args.dry_run or args.publish_windows]
     for target in TARGETS:
         for binary in BINARIES:
             path = archive_path(args.directory, target, binary)

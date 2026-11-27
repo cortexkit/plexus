@@ -8,13 +8,12 @@
 mod bounded;
 #[path = "support/daemon_client.rs"]
 mod daemon_client;
+#[path = "support/fixture_launcher.rs"]
+mod fixture_launcher;
 #[path = "support/operator_confirmation.rs"]
 mod operator_confirmation_peer;
-#[path = "support/shell.rs"]
-mod shell;
 
 use bounded::recv_within;
-use shell::single_quoted;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -322,12 +321,9 @@ async fn live_daemon_federated_consent_denial_worker_run_and_unpair() {
         }}],
         "defaults":{"ask_first_risk":["write"],"rate_limit":{"calls_per_min":30}},"availability":"ga"
     })).unwrap()).unwrap();
-    let (mut daemon, connection) = start_live_daemon_with_federation(
-        catalog.path().to_path_buf(),
-        NonceHandoff::DescriptorAndEnvironment,
-        true,
-    )
-    .await;
+    let (mut daemon, connection) =
+        start_live_daemon_with_federation(catalog.path().to_path_buf(), NonceHandoff::Legacy, true)
+            .await;
     let (mut owner, nonce) =
         register_federated_fixture(&connection, &daemon.directory, "callosum").await;
     let (cingulate, _) =
@@ -1673,18 +1669,16 @@ async fn start_live_daemon() -> (LiveDaemonGuard, subc_transport::ConnectionInfo
 async fn start_live_daemon_with_catalog(
     catalog: PathBuf,
 ) -> (LiveDaemonGuard, subc_transport::ConnectionInfo) {
-    start_live_daemon_with(catalog, NonceHandoff::DescriptorAndEnvironment).await
+    start_live_daemon_with(catalog, NonceHandoff::Legacy).await
 }
 
 /// How the supervised modules receive their launch nonce.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NonceHandoff {
-    /// As the daemon hands it over today: the pipe on descriptor 3 named by
-    /// `SUBC_LAUNCH_NONCE_FD`, plus the `SUBC_LAUNCH_NONCE` environment copy.
-    DescriptorAndEnvironment,
-    /// The pipe only. Each module is launched through a shell that unsets the
-    /// environment copy and then execs the module, which keeps descriptor 3.
-    /// This is what a module sees once the daemon stops setting the copy.
+    /// The nonce-only TCP registration path, using each platform's handoff.
+    Legacy,
+    /// Ensure the Unix child can only read the nonce from descriptor 3.
+    #[cfg(unix)]
     DescriptorOnly,
     /// Plexus runs directly on the daemon's private registration channel.
     RegistrationChannel,
@@ -1729,47 +1723,26 @@ async fn start_live_daemon_with_federation(
     let confirmation_file = directory.join("confirmation-peer.json");
     let confirmation_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let binary = ckdev_binary(env!("CARGO_BIN_EXE_ck-plexus"));
-    assert_eq!(
-        binary.file_name().and_then(|name| name.to_str()),
-        Some("ckdev-plexus")
-    );
-    let binary_path = binary;
-    // The supervisor appends module CLI flags; the Rust test runner does not
-    // accept those flags, so this wrapper selects only the vault fixture test.
-    let vault_launcher = directory.join("vault-fixture.sh");
-    let test_binary = single_quoted(std::env::current_exe().unwrap());
-    // Empty, or the line that removes the environment copy of the nonce
-    // before a launcher execs its module.
-    let unset_nonce = match nonce_handoff {
-        NonceHandoff::DescriptorAndEnvironment | NonceHandoff::RegistrationChannel => "",
-        NonceHandoff::DescriptorOnly => "unset SUBC_LAUNCH_NONCE\n",
+    let expected_binary_name = format!("ckdev-plexus{}", std::env::consts::EXE_SUFFIX);
+    assert_eq!(binary.file_name().unwrap(), expected_binary_name.as_str());
+    let built = Path::new(env!("CARGO_BIN_EXE_ckdev-plexus-test-launcher"));
+    let launcher = fixture_launcher::launcher(built);
+    let test_binary = ckdev_binary(std::env::current_exe().unwrap());
+    let (vault_mode, confirmation_mode) = match nonce_handoff {
+        NonceHandoff::Legacy | NonceHandoff::RegistrationChannel => ("legacy-test", "confirmation"),
+        #[cfg(unix)]
+        NonceHandoff::DescriptorOnly => ("legacy-test-fd", "confirmation-fd"),
     };
-    // These legacy launchers must use the nonce-only TCP connection, including
-    // its fake confirmation peer. Close the daemon's channel handoff at fd 4
-    // before exec; the RegistrationChannel case launches the binary directly.
-    let legacy_handoff = "exec 4<&-\nunset SUBC_REGISTRATION_FD SUBC_REGISTRATION_PIPE\n";
-    fs::write(
-        &vault_launcher,
-        format!("{legacy_handoff}{unset_nonce}exec {test_binary} --exact vault_route_fixture --nocapture\n"),
-    )
-    .unwrap();
-    let entorhinal_launcher = directory.join("entorhinal-fixture.sh");
-    fs::write(
-        &entorhinal_launcher,
-        format!("{legacy_handoff}{unset_nonce}exec {test_binary} --exact vault_route_fixture --nocapture\n"),
-    )
-    .unwrap();
-    // Only the module's supervisor connection uses the fake confirmation peer.
-    // The daemon publishes its key before this harness can publish the peer's
-    // connection file, so the launcher waits with a bounded startup deadline.
-    let launcher = directory.join("plexus-confirmation-peer.sh");
-    let quoted_binary = single_quoted(&binary_path);
-    let quoted_connection = single_quoted(&confirmation_file);
-    fs::write(&launcher, format!("{legacy_handoff}{unset_nonce}attempts=0\nwhile [ ! -f {quoted_connection} ]; do\n  attempts=$((attempts + 1))\n  [ \"$attempts\" -lt 3000 ] || exit 1\n  sleep 0.01\ndone\nexec {quoted_binary} --subc {quoted_connection}\n")).unwrap();
+    let vault_args = json!([vault_mode, test_binary, "vault_route_fixture"]);
+    // Only Plexus uses the fake confirmation peer. Its registration-channel
+    // tests instead start the binary directly with the daemon's real endpoint.
     let (plexus_program, plexus_args) = if nonce_handoff == NonceHandoff::RegistrationChannel {
-        (binary_path, json!([]))
+        (&binary, json!([]))
     } else {
-        (PathBuf::from("/bin/sh"), json!([launcher]))
+        (
+            &launcher,
+            json!([confirmation_mode, binary, confirmation_file]),
+        )
     };
     let daemon_config_path = directory.join("subc.jsonc");
     let mut config = json!({
@@ -1798,14 +1771,14 @@ async fn start_live_daemon_with_federation(
                 "reserved": true
             },
             "entorhinal": {
-                "program": "/bin/sh",
-                "args": [entorhinal_launcher],
+                "program": launcher,
+                "args": vault_args,
                 "env": {"TEST_VAULT_CONNECTION": connection_file_path, "TEST_ROLE_SERVICE": "1"},
                 "reserved": true
             },
             "claustrum": {
-                "program": "/bin/sh",
-                "args": [vault_launcher],
+                "program": launcher,
+                "args": vault_args,
                 "env": {"TEST_VAULT_CONNECTION": connection_file_path},
                 "reserved": true
             }
@@ -1819,8 +1792,8 @@ async fn start_live_daemon_with_federation(
             // The test registers these stand-ins with the supervisor's nonce,
             // so their reserved principals are attested by the real daemon.
             config["modules"][id] = json!({
-                "program":"/bin/sh",
-                "args":["-c", "dd status=none <&3 > \"$1\"; exec sleep 120", "federated-fixture", directory.join(format!("{id}.nonce"))],
+                "program":launcher,
+                "args":["nonce", directory.join(format!("{id}.nonce"))],
                 "reserved":true
             });
         }
@@ -1848,7 +1821,7 @@ async fn start_live_daemon_with_federation(
     // daemon run at a time, so the lines recorded from here on are all from
     // the daemon this call starts.
     clear_daemon_trace();
-    let daemon_config = subc_daemon::bootstrap::BootstrapConfig::new(&connection_file_path, 0)
+    let daemon_config = fixture_launcher::daemon_config(&connection_file_path, built)
         .with_capture_logs_dir(&capture_logs)
         .with_daemon_config_path(&daemon_config_path)
         .expect("load daemon config");
@@ -2696,6 +2669,7 @@ async fn every_shipped_manifest_is_reachable_through_the_operator_ceremony() {
 /// has read the nonce; a reader that consumed the pipe for itself would leave
 /// the route open without an identity, and the test vault refuses a read that
 /// is not attested as `reserved:plexus`.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn descriptor_nonce_reaches_hello_provenance_and_a_later_vault_read() {
     let (mut daemon, connection) =

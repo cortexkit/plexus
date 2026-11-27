@@ -11,6 +11,9 @@ use tokio::{
     time::{sleep, timeout},
 };
 
+#[path = "../tests/support/fixture_launcher.rs"]
+mod fixture_launcher;
+
 const LIMIT: Duration = Duration::from_secs(60);
 /// Bound for `flow.audience` calls the fixture answers. Generous on purpose:
 /// it only has to catch a fixture that never answers, and the call travels
@@ -21,6 +24,24 @@ const ANSWERED_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// mid-request (tests/conformance.rs serializes its daemons for the same
 /// reason), so the fixtures here start their daemons one at a time.
 static DAEMON_BOOT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn unit_test_launcher() -> PathBuf {
+    // Cargo gives integration tests the binary path directly. Unit tests can
+    // read the profile from <profile>/build/<package>/out. With a separate
+    // Cargo build directory, the executable is in the target directory instead.
+    let profile = Path::new(env!("OUT_DIR"))
+        .ancestors()
+        .find(|dir| dir.file_name().is_some_and(|name| name == "build"))
+        .and_then(Path::parent)
+        .expect("Cargo build profile directory");
+    let directory = std::env::var_os("CARGO_TARGET_DIR")
+        .map(|target| Path::new(&target).join(profile.file_name().unwrap()))
+        .unwrap_or_else(|| profile.to_path_buf());
+    directory.join(format!(
+        "ckdev-plexus-test-launcher{}",
+        std::env::consts::EXE_SUFFIX
+    ))
+}
 
 fn atomic_json(path: &Path, value: &Value) {
     let temporary = path.with_extension("partial");
@@ -51,14 +72,11 @@ impl Core {
         let connection = scratch.join("connection.json");
         let home = scratch.join("home");
         fs::create_dir_all(&home).unwrap();
-        let executable = std::env::current_exe()
-            .unwrap()
-            .to_string_lossy()
-            .replace('\'', "'\"'\"'");
-        let launcher = scratch.join("module.sh");
-        fs::write(&launcher, format!("exec '{executable}' --exact flow_audience::tests::core_module_fixture --nocapture\n")).unwrap();
+        let built = unit_test_launcher();
+        let launcher = fixture_launcher::launcher(&built);
+        let executable = cortexkit_test_support::ckdev_binary(std::env::current_exe().unwrap());
         let module = |id| {
-            json!({"program":"/bin/sh","args":[launcher],"reserved":true,
+            json!({"program":launcher,"args":["test",executable,"flow_audience::tests::core_module_fixture"],"reserved":true,
             "env":{"HOME":home,"XDG_DATA_HOME":home,"AUDIENCE_FIXTURE_CONNECTION":connection,
             "AUDIENCE_FIXTURE_ROOT":scratch.path(),"AUDIENCE_FIXTURE_MODULE":id}})
         };
@@ -69,7 +87,7 @@ impl Core {
             "modules":{(core_module):module(core_module),"plexus":module("plexus")}}),
         );
         atomic_json(&scratch.join("behavior.json"), &json!({"reply":reply}));
-        let config = subc_daemon::bootstrap::BootstrapConfig::new(&connection, 0)
+        let config = fixture_launcher::daemon_config(&connection, &built)
             .with_capture_logs_dir(scratch.join("logs"))
             .with_daemon_config_path(&config_path)
             .unwrap();
