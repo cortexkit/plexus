@@ -37,6 +37,8 @@ fn poll_store() -> Arc<PlexusStore> {
     store
 }
 
+pub(super) const POLL_CREDENTIAL_HANDLE: &[u8] = b"test:poll";
+
 pub(super) fn seed_poll_store(store: &PlexusStore) {
     let schema = json!({"type": "object"});
     // REST discovery uses the reviewed schema locally, so the scheduler's
@@ -67,7 +69,7 @@ pub(super) fn seed_poll_store(store: &PlexusStore) {
         )
         .unwrap();
     let ticket = store
-        .create_binding_ticket("direct", "poll-connection", b"test:poll")
+        .create_binding_ticket("direct", "poll-connection", POLL_CREDENTIAL_HANDLE)
         .unwrap();
     store
         .connect_with_ticket("direct", &ticket.ticket_id)

@@ -273,16 +273,30 @@ async fn delayed_startup_serves_warming_then_registers_before_polling() {
             move |store, _| {
                 crate::rest_pool_tests::seed_poll_store(&store);
                 let mut runtime = runtime_for_test(Arc::clone(&store));
+                // Only the mock vendor has a credential. A default success
+                // would hand a bogus token to background relay tasks, which
+                // connect to the real relay rather than the mock transport.
+                let credentials = StubCredentialSource::default();
+                credentials.set_success(
+                    crate::rest_pool_tests::POLL_CREDENTIAL_HANDLE,
+                    b"poll-key".to_vec(),
+                    None,
+                    1,
+                );
                 runtime.engine = GovernanceEngine::new(
                     store,
-                    Arc::new(StubCredentialSource::with_default_success(
-                        b"poll-key".to_vec(),
-                    )) as Arc<dyn CredentialSource>,
+                    Arc::new(credentials) as Arc<dyn CredentialSource>,
                     Arc::new(FirstPoll {
                         rest: Arc::clone(&runtime.rest_transport),
                         polled: polls,
                     }),
                 );
+                for id in ["relay:github", "relay:github-apps"] {
+                    assert!(
+                        runtime.credential_source().get_by_id(id).is_err(),
+                        "startup fixture must not supply a credential to the external relay"
+                    );
+                }
                 composed.send(()).unwrap();
                 released
                     .recv_timeout(Duration::from_secs(20))

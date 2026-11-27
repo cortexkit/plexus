@@ -25,6 +25,13 @@ mod fixed;
 pub(crate) use crate::bounded;
 pub(crate) use fixed::FixedRequestServer;
 
+/// Make the socket timeouts apply even if accept inherited nonblocking mode.
+pub(crate) fn configure_blocking_io(stream: &TcpStream, timeout: Duration) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))
+}
+
 /// Read one HTTP request from the stream, headers and body.
 ///
 /// The loop exists because a body may span TCP segments: reading once returns
@@ -233,6 +240,11 @@ mod tests {
         });
 
         let (mut accepted, _) = listener.accept().expect("accept");
+        // Exercise the mode an accepted Windows socket can start in.
+        accepted
+            .set_nonblocking(true)
+            .expect("simulate inherited mode");
+        configure_blocking_io(&accepted, Duration::from_secs(2)).expect("configure test socket");
         let request = read_mock_request(&mut accepted, "split").expect("read the request");
         sender.join().expect("sender finishes");
 

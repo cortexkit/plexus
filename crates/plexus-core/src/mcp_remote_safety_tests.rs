@@ -295,12 +295,8 @@ fn cr_only_sse_requests_receive_an_error_before_the_tool_result() {
             loop {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(2)))
-                            .unwrap();
-                        stream
-                            .set_write_timeout(Some(Duration::from_secs(2)))
-                            .unwrap();
+                        crate::test_http::configure_blocking_io(&stream, Duration::from_secs(2))
+                            .expect("configure SSE safety test socket");
                         return stream;
                     }
                     Err(error)

@@ -35,12 +35,8 @@ fn server(
         loop {
             match listener.accept() {
                 Ok((mut socket, _)) => {
-                    socket
-                        .set_read_timeout(Some(Duration::from_secs(2)))
-                        .unwrap();
-                    socket
-                        .set_write_timeout(Some(Duration::from_secs(2)))
-                        .unwrap();
+                    crate::test_http::configure_blocking_io(&socket, Duration::from_secs(2))
+                        .expect("configure bounds test socket");
                     let wire = crate::test_http::read_mock_request(&mut socket, "bounds").unwrap();
                     let response = handler(wire);
                     let _ = socket.write_all(response.as_bytes());
@@ -205,12 +201,8 @@ fn trickle(mcp: bool) -> (String, std::thread::JoinHandle<()>) {
         loop {
             match listener.accept() {
                 Ok((mut socket, _)) => {
-                    socket
-                        .set_read_timeout(Some(Duration::from_secs(2)))
-                        .unwrap();
-                    socket
-                        .set_write_timeout(Some(Duration::from_secs(2)))
-                        .unwrap();
+                    crate::test_http::configure_blocking_io(&socket, Duration::from_secs(2))
+                        .expect("configure trickle test socket");
                     let wire = crate::test_http::read_mock_request(&mut socket, "trickle").unwrap();
                     if mcp && index < 2 {
                         let rpc: Value =
