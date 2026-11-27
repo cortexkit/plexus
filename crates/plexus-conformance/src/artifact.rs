@@ -91,6 +91,9 @@ fn write_with(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> i
     fs::rename(&temporary, path)?;
     #[cfg(unix)]
     File::open(parent)?.sync_all()?;
+    #[cfg(windows)]
+    // FlushFileBuffers persists the rename through a directory handle.
+    plexus_core::sync_directory(parent)?;
     Ok(())
 }
 

@@ -266,9 +266,12 @@ pub fn import_store(from: &Path, to: &Path) -> Result<Vec<TableSummary>> {
         .map_err(|e| format!("publish {} without overwriting: {e}", to.display()))?;
     std::fs::remove_file(&staged)
         .map_err(|e| format!("remove staging link {}: {e}", staged.display()))?;
-    std::fs::File::open(&parent)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| format!("sync destination directory: {e}"))?;
+    #[cfg(not(windows))]
+    let synced = std::fs::File::open(&parent).and_then(|f| f.sync_all());
+    #[cfg(windows)]
+    // FlushFileBuffers syncs the newly published name via a directory handle.
+    let synced = crate::sync_directory(&parent);
+    synced.map_err(|e| format!("sync destination directory: {e}"))?;
     Ok(summary)
 }
 

@@ -105,12 +105,19 @@ pub(crate) fn ensure(path: &Path) -> std::io::Result<()> {
     }
     options.open(path)?.sync_all()?;
     // Persist the directory entry as well as the empty file before advertising it.
-    File::open(
-        path.parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new(".")),
-    )?
-    .sync_all()
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    #[cfg(windows)]
+    {
+        // Use a writable directory handle and FlushFileBuffers, not File::open.
+        crate::sync_directory(parent)
+    }
+    #[cfg(not(windows))]
+    {
+        File::open(parent)?.sync_all()
+    }
 }
 
 pub(crate) fn append(path: &Path, entry: &Revocation) -> rusqlite::Result<()> {

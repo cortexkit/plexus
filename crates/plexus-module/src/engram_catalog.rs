@@ -105,6 +105,9 @@ fn write_catalog(data_directory: &Path) -> io::Result<WriteOutcome> {
         temporary_file.sync_all()?;
         drop(temporary_file);
         fs::rename(&temporary_path, &destination)?;
+        #[cfg(windows)]
+        // FlushFileBuffers persists the rename through a directory handle.
+        plexus_core::sync_directory(data_directory)?;
         Ok(WriteOutcome::Written)
     })();
     if result.is_err() {

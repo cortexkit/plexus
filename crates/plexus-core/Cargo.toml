@@ -48,6 +48,9 @@ subc-protocol = { workspace = true }
 tokio = { workspace = true }
 plexus-probe = { path = "../plexus-probe" }
 
+[target.'cfg(windows)'.dependencies]
+cortexkit-lease = "=0.1.4"
+
 [dev-dependencies]
 subc-jsonc = { workspace = true }
 # TLS loopback storage server for credentialless job-log redirect tests.

@@ -199,6 +199,9 @@ pub mod github_identity;
 pub mod github_watch;
 pub mod governance;
 mod grant_journal;
+/// Flush directory metadata through a Windows directory handle and `FlushFileBuffers`.
+#[cfg(windows)]
+pub use cortexkit_lease::sync_dir as sync_directory;
 pub mod import_store;
 pub mod instance_url;
 pub mod jcs;

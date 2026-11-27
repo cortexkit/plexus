@@ -2085,6 +2085,7 @@ dependencies = [
  "base64",
  "chrono",
  "cortexkit-agent-identity",
+ "cortexkit-lease",
  "cortexkit-log",
  "cortexkit-project-identity",
  "cortexkit-store",
