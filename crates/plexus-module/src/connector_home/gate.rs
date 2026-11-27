@@ -255,9 +255,11 @@ impl Gate {
                         .is_some_and(|n| n.seq > seq && n.holding && !n.handback)
             }
             None => {
-                // An acknowledgment can arrive after the unresolved yield
-                // reply even if its notice arrived first. That notice cannot
-                // reopen admission.
+                // Our acknowledgment of a lease notice can complete after the
+                // unresolved yield reply, even when that notice reached us
+                // before the yield. Fence at the highest notice received so
+                // far, so confirming that earlier notice cannot reopen
+                // admission; only a notice with a later seq can.
                 state.unsettled_yield_after = Some(state.highest_received_seq.unwrap_or(seq));
                 true
             }
