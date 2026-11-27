@@ -826,6 +826,24 @@ fn entorhinal_enumeration_ignores_unknown_extra_members() {
 }
 
 #[test]
+fn entorhinal_enumeration_ignores_unused_workspace_approval() {
+    let baseline = owned_enumeration("owner", "repo");
+    let expected: EnumerateReply = serde_json::from_value(baseline.clone()).unwrap();
+    for approval in [json!({"state":"unapproved"}), json!(false)] {
+        let mut reply = baseline.clone();
+        reply["workspaces"] = json!([{
+            "workspaceId":"workspace", "name":"test", "root":"/test", "approval":approval
+        }]);
+        let (adapter, _) = wire_registry(Ok(found_reply("project")), Ok(json!({"result":reply})));
+        let decoded = adapter.enumerate().unwrap_or_else(|| {
+            panic!("unused workspace approval must not reject projects: {approval}")
+        });
+        assert_eq!(decoded.projects, expected.projects);
+        assert_eq!(decoded.workspaces[0].workspace_id, "workspace");
+    }
+}
+
+#[test]
 fn entorhinal_enumeration_refusal_is_unanswered() {
     for code in ["invalid_params", "future_value"] {
         assert_enumeration_unanswered(Ok(json!({"code":code,"message":"refused","detail":null})));

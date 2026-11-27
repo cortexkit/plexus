@@ -9,7 +9,8 @@ use cortexkit_project_identity::{
 };
 use cortexkit_store::StoreError;
 #[cfg(test)]
-use serde_json::{json, Value};
+use serde_json::json;
+use serde_json::Value;
 
 use crate::github_identity::PrefrontalRoutePeer;
 use crate::storage::PlexusStore;
@@ -71,13 +72,23 @@ impl RepositoryRegistry for EntorhinalRepositoryRegistry {
     }
     fn enumerate(&self) -> Option<EnumerateReply> {
         let request = Request::new("enumerate", EnumerateParams::new(None));
-        let reply = self
+        let mut reply = self
             .peer
             .call(
                 &request.method,
                 serde_json::to_value(request.params).expect("enumerate params serialize"),
             )
             .ok()?;
+        // Workspace approval is not used to resolve repository ownership. An
+        // unexpected value there must not invalidate the project snapshot.
+        if let Some(workspaces) = reply
+            .pointer_mut("/result/workspaces")
+            .and_then(Value::as_array_mut)
+        {
+            for workspace in workspaces.iter_mut().filter_map(Value::as_object_mut) {
+                workspace.remove("approval");
+            }
+        }
         match serde_json::from_value::<Outcome<EnumerateReply>>(reply).ok()? {
             Outcome::Success(reply) => Some(reply.result),
             _ => None,

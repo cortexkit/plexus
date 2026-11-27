@@ -485,6 +485,8 @@ async fn hello(
         protocol_ver: PROTOCOL_VERSION,
         control_ops: Some(vec!["route.bind".into()]),
         launch_nonce,
+        module_capabilities: None,
+        resume_token: None,
     };
     let frame = Frame::build(
         FrameType::Hello,

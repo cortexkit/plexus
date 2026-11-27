@@ -3074,6 +3074,8 @@ async fn vault_route_fixture() {
         launch_nonce: subc_client_rs::launch_nonce()
             .expect("vault fixture launch nonce")
             .map(|nonce| nonce.value().to_string()),
+        module_capabilities: None,
+        resume_token: None,
     };
     let hello = Frame::build(
         FrameType::Hello,
