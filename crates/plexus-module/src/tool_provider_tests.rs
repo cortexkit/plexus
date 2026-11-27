@@ -15,7 +15,7 @@ fn catalog_matches_every_advertised_definition() {
         })
         .collect();
     let tools = catalog_tools(&advertised_tools());
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 12);
     assert_eq!(tools.len(), advertised.len());
     for (tool, definition) in tools.iter().zip(advertised) {
         assert_eq!(tool.name, definition.name);
@@ -94,7 +94,10 @@ fn only_search_tools_opt_into_tool_result_v1() {
 fn catalog_modes_match_every_tool_contract() {
     for tool in &catalog_tools(&advertised_tools()) {
         check_modes(tool).unwrap();
-        assert!(serves_call_mode(tool, &CallMode::Classic));
+        assert_eq!(
+            serves_call_mode(tool, &CallMode::Classic),
+            tool.name != manifest::GITHUB_WATCH_TOOL
+        );
         assert_eq!(
             serves_call_mode(tool, &CallMode::Codemode),
             matches!(
@@ -118,7 +121,7 @@ fn catalog_modes_match_every_tool_contract() {
 fn catalog_emits_events_is_false_on_github_react_only() {
     let all_tools = wire_tools(&catalog_tools(&advertised_tools()));
     let tools = all_tools.as_array().unwrap();
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 12);
     for tool in tools {
         if tool["name"] == "github_react" {
             assert_eq!(
@@ -160,6 +163,7 @@ fn catalog_capability_table_matches_every_advertised_tool() {
         ("github", &["plexus:github.facade/v1"]),
         ("github_read", &["github.read/v1", "plexus:github.read/v1"]),
         ("github_react", &["plexus:github.react/v1"]),
+        ("github_watch", &["plexus:github.watch/v1"]),
         ("events_get", &["plexus:events.get/v1"]),
         ("events", &["plexus:events/v1"]),
         ("web_search", &["plexus:web.search/v1", "web.search/v1"]),
@@ -329,6 +333,7 @@ async fn catalog_flow_preset_returns_flow_tools_with_unchanged_metadata() {
             "github",
             "github_read",
             "github_react",
+            "github_watch",
             "events_get",
             WEB_SEARCH_TOOL,
             CODE_SEARCH_TOOL,

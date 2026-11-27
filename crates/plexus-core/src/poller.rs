@@ -2122,6 +2122,23 @@ where
         };
         let name = format!("{owner}/{repo}").to_lowercase();
         let at_ms = now_ms();
+        if let Some(outside) = store
+            .outside_watch_poll(&subscription.subscription_id, at_ms)
+            .map_err(store_failure)?
+        {
+            return outside
+                .repo_id
+                .map(|repo_id| {
+                    Some(PollRepository {
+                        name,
+                        event_name,
+                        repo_id: Some(repo_id),
+                    })
+                })
+                .ok_or_else(|| PollCycle::NotEligible {
+                    reason: "outside_public_check_stale".into(),
+                });
+        }
         let cache_entry = store.repo_id_cache(&name).map_err(store_failure)?;
         let cached = cache_entry.as_ref().and_then(|entry| entry.repo_id);
         // Claim read authority for the `get_repository` call BEFORE the shared
@@ -2648,6 +2665,17 @@ where
                 late_rows > 0,
                 observed_at_ms,
             );
+        }
+        match store.outside_watch_poll(&subscription.subscription_id, now_ms()) {
+            Ok(Some(outside)) => advance
+                .events
+                .retain(|event| outside.admits(item_kind, &event.payload)),
+            Ok(None) => {}
+            Err(error) => {
+                return PollCycle::StoreFailed {
+                    reason: error.to_string(),
+                }
+            }
         }
         retain_changed_replay_candidates(&mut advance.events, &mut advance.dropped, |candidates| {
             store.unchanged_event_payloads(principal, &subscription.subscription_id, candidates).inspect_err(|error| {

@@ -45,6 +45,11 @@ pub(crate) const CONNECTION_KEYED_TABLES: &[(&str, &str)] = &[
     ),
     ("trigger_events", "principal = ?1 AND connection_id = ?2"),
     (
+        "github_outside_watches",
+        "subscription_id IN (SELECT subscription_id FROM trigger_subscriptions
+                             WHERE principal = ?1 AND connection_id = ?2)",
+    ),
+    (
         "trigger_subscriptions",
         "principal = ?1 AND connection_id = ?2",
     ),

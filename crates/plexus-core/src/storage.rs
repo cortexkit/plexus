@@ -132,8 +132,11 @@ pub(crate) use catalog_store::{
     seed_catalog_actions_from_manifest_on_conn, seed_catalog_from_manifest_on_conn, SeedMode,
 };
 
+#[path = "store/github_outside_watches.rs"]
+mod github_outside_watches_store;
 #[path = "store/subscriptions.rs"]
 mod subscriptions_store;
+use github_outside_watches_store::outside_watch_poll_on_conn;
 #[cfg(test)]
 use subscriptions_store::{validate_fixed_args, DUE_SUBSCRIPTIONS_SELECT};
 

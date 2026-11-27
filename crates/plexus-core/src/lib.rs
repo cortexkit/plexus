@@ -196,6 +196,7 @@ mod federated_journal;
 pub mod fingerprint;
 pub mod github;
 pub mod github_identity;
+pub mod github_watch;
 pub mod governance;
 mod grant_journal;
 pub mod import_store;

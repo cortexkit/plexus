@@ -549,6 +549,8 @@ pub(super) async fn handle_tool_request_with_reply_guard(
             github_read_tool::shape_tail(action, reply),
             reads_tool_result_v1,
         )
+    } else if tool == Some(manifest::GITHUB_WATCH_TOOL) {
+        reply
     } else if federated_search_pending {
         // Keep the full search error envelope. The legacy access_pending branch
         // in with_call_tool_result_for_route rebuilds structuredContent and

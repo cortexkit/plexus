@@ -804,14 +804,16 @@ pub(super) fn event_get_reply(
     // Who may see the event decides which reader is used:
     // - a flow run by Basal (the flow module) whose session the daemon stamped
     //   with an agent reads as that agent, so it sees only events from
-    //   repositories bound to that agent's GitHub bot;
+    //   repositories bound to that agent's GitHub bot and items watched by
+    //   that exact flow;
     // - every other caller, Prefrontal core included, reads only through its own
     //   events_consume grants, even on a route that carries an agent, so an
     //   agent's scope never widens a module's access.
-    let reader = if let Some(agent_id) =
-        plexus_core::scope::basal_flow_read_agent(principal_key, route_scope)
-    {
-        EventReader::Agent { agent_id }
+    let reader = if let (Some(agent_id), Some(flow_id)) = (
+        plexus_core::scope::basal_flow_read_agent(principal_key, route_scope),
+        route_scope.and_then(|scope| scope.flow_id.as_deref()),
+    ) {
+        EventReader::AgentFlow { agent_id, flow_id }
     } else {
         EventReader::Consumer {
             principal: principal_key,

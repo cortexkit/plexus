@@ -593,6 +593,22 @@ impl PlexusStore {
         let (outcomes, activity) = self
             .inner
             .with_conn_fenced(|conn| {
+                if let Some(outside) = outside_watch_poll_on_conn(conn, subscription_id, now_ms())?
+                {
+                    // The flow may have ended or the repository's public check
+                    // may have gone stale while GitHub was answering. Do not
+                    // commit that page.
+                    if outside.repo_id.is_none()
+                        || events.iter().any(|event| {
+                            event
+                                .identity
+                                .is_none_or(|identity| Some(identity.repo_id) != outside.repo_id)
+                                || !outside.admits(event.event.item_kind, event.event.payload)
+                        })
+                    {
+                        return Ok(None);
+                    }
+                }
                 let advanced = conn.execute(
                     "UPDATE trigger_subscriptions
                  SET cursor_state = ?1, last_success_at_ms = ?2,

@@ -187,6 +187,8 @@ where
         let args_snapshot_hash = args_hash.clone();
         let connection = match if request.federated_caller.is_some() {
             self.store.connection("direct", &request.connection_id)
+        } else if let Some(owner) = &request.poll_connection_owner {
+            self.store.connection(owner, &request.connection_id)
         } else if request.authority_kind == AUTHORITY_INVOKE {
             self.store
                 .connection_for_invoke(&request.principal, &request.connection_id)

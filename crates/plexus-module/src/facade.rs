@@ -255,6 +255,7 @@ fn facade_tool_reply_inner(
             | manifest::INVOKE_TOOL
             | manifest::GITHUB_TOOL
             | manifest::GITHUB_READ_TOOL
+            | manifest::GITHUB_WATCH_TOOL
             | manifest::GITHUB_REACT_TOOL
             | manifest::EVENTS_GET_TOOL
             | manifest::REQUESTS_TOOL
@@ -313,6 +314,15 @@ fn facade_tool_reply_inner(
             "message": "github.read.bulk is reserved for AFT",
             "transmission": "not_sent",
         }}));
+    }
+    if name == manifest::GITHUB_WATCH_TOOL {
+        return Ok(github_watch_reply(
+            state,
+            arguments,
+            &principal_key,
+            route_scope.as_ref(),
+            &mode,
+        ));
     }
     // Run claims carry attribution only. Reuse the local codemode refusal
     // for bot writes even if the remote carrier requested another mode.
@@ -1162,6 +1172,45 @@ fn bot_read_reply(result: Result<Value, plexus_core::github::reads::bot::BotRead
             "GitHub returned an unusable read response",
             "sent",
         ),
+    }
+}
+
+fn github_watch_reply(
+    state: &ModuleState,
+    args: &serde_json::Map<String, Value>,
+    principal: &str,
+    scope: Option<&CallScope>,
+    mode: &CallMode,
+) -> Value {
+    use plexus_core::github_watch::{self, WatchError};
+
+    let refusal = |error: WatchError| {
+        json!({"error":{"code":error.code(),
+        "message":error.message(),"transmission":"not_sent","retryable":error.retryable()}})
+    };
+    if *mode != CallMode::Flow
+        || plexus_core::scope::basal_flow_read_agent(principal, scope).is_none()
+    {
+        let error = WatchError::AgentIdentityRequired;
+        return github_watch::audit_refusal(state.store(), args, principal, scope, error.code())
+            .map_or_else(refusal, |()| refusal(error));
+    }
+    if let Some(mut reply) = state.runtime.connector_home.refusal() {
+        if let Err(error) = github_watch::audit_refusal(
+            state.store(),
+            args,
+            principal,
+            scope,
+            "connector_home_not_held",
+        ) {
+            return refusal(error);
+        }
+        reply["error"]["retryable"] = json!(true);
+        return reply;
+    }
+    match github_watch::call(&state.runtime.engine, args, principal, scope) {
+        Ok(result) => json!({"result":result}),
+        Err(error) => refusal(error),
     }
 }
 

@@ -714,10 +714,12 @@ const PAIRED_WATCHES: &str = "
         FROM trigger_subscriptions s JOIN connections c ON c.principal=s.principal AND c.connection_id=s.connection_id
         WHERE s.status='active' AND c.status='active' AND c.app_key='github'
         AND s.action IN ('list_issues','list_pull_requests')
+        AND NOT EXISTS (SELECT 1 FROM github_outside_watches w WHERE w.subscription_id=s.subscription_id)
         AND EXISTS (SELECT 1 FROM trigger_subscriptions p JOIN connections pc
             ON pc.principal=p.principal AND pc.connection_id=p.connection_id
             WHERE p.principal=s.principal AND p.project_id IS s.project_id AND p.status='active'
             AND pc.status='active' AND pc.app_key='github'
+            AND NOT EXISTS (SELECT 1 FROM github_outside_watches w WHERE w.subscription_id=p.subscription_id)
             AND p.action=CASE s.action WHEN 'list_issues' THEN 'list_pull_requests' ELSE 'list_issues' END
             AND lower(json_extract(p.fixed_args,'$.owner') || '/' || json_extract(p.fixed_args,'$.repo'))
                 = lower(json_extract(s.fixed_args,'$.owner') || '/' || json_extract(s.fixed_args,'$.repo')))";

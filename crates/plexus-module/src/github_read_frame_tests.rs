@@ -6,6 +6,8 @@ mod bot_read_tests;
 mod bot_read_vector_tests;
 #[path = "ci_read_tests.rs"]
 mod ci_read_tests;
+#[path = "github_watch_tests.rs"]
+mod github_watch_tests;
 #[path = "issue_flow_read_tests.rs"]
 mod issue_flow_tests;
 #[path = "job_log_read_tests.rs"]

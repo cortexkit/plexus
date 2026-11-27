@@ -120,6 +120,7 @@ pub struct AuthorizationRequest {
     /// every N seconds" can live — no gate reads `actor`, so attribution
     /// alone cannot express it.
     authority_kind: String,
+    poll_connection_owner: Option<String>,
     /// The daemon scope the call's route was bound under. Written on the
     /// call's audit rows and on any approval request it raises.
     scope: Option<CallScope>,
@@ -297,6 +298,7 @@ impl AuthorizationRequest {
             expected_schema_hash: None,
             approved_request_id: None,
             authority_kind: AUTHORITY_INVOKE.to_string(),
+            poll_connection_owner: None,
             scope: None,
             scope_grants_agent: false,
             requires_session_consent: false,
@@ -1766,6 +1768,35 @@ where
 
     pub fn transport(&self) -> &Arc<T> {
         &self.transport
+    }
+
+    pub(crate) fn github_watch_read_request(
+        &self,
+        connection: &str,
+        action: &str,
+        args: Value,
+        schema_hash: &str,
+        scope: Option<&CallScope>,
+    ) -> Result<AuthorizationRequest, PollAuthorizationRefusal> {
+        use crate::github_watch::{BASAL, OWNER};
+        let mut request = self
+            .poll_authorization_request(
+                OWNER,
+                connection,
+                action,
+                args,
+                "github-watch",
+                schema_hash,
+            )?
+            .without_per_call_approval()
+            .with_diagnostic_tool("github_watch");
+        if let Some(scope) = scope {
+            request.principal = BASAL.into();
+            request.actor = BASAL.into();
+            request.poll_connection_owner = Some(OWNER.into());
+            request = request.with_scope_attribution_only(scope.clone());
+        }
+        Ok(request)
     }
 
     pub fn credential_source(&self) -> &Arc<C> {

@@ -588,6 +588,11 @@ where
             return PassReport::default();
         }
         if housekeeping_due {
+            if let Err(error) = crate::github_watch::housekeeping(&self.engine, now_ms, || {
+                self.stop_requested() || std::time::Instant::now() >= deadline
+            }) {
+                crate::diag!(warn scheduler: "outside GitHub watch housekeeping failed: {}", error.code());
+            }
             if let Err(error) = self.store.prune_sent_text(now_ms) {
                 eprintln!(warn scheduler: "sent text retention pass failed: {error}");
             }

@@ -91,6 +91,26 @@ struct Fixture {
     to: PathBuf,
 }
 
+#[test]
+fn outside_watch_moves_with_subscription_and_public_check() {
+    let f = Fixture::new();
+    let source = open_sqlite(&descriptor(&f.from).unwrap()).unwrap();
+    source.migrate("plexus", MIGRATIONS).unwrap();
+    drop(source);
+    f.mutate_source(
+        "INSERT INTO github_outside_watches VALUES
+        ('flow-a','agent-x','outside/repo','issue',7,100,'sub',1,2,3,101)",
+    );
+    f.import();
+    let watch: (String, i64, i64, i64) = f.destination().query_row(
+        "SELECT s.subscription_id, w.number, w.last_public_check_at_ms, w.last_public_attempt_at_ms
+         FROM github_outside_watches w JOIN trigger_subscriptions s ON s.subscription_id=w.subscription_id
+         WHERE w.flow_id='flow-a' AND w.agent_id='agent-x' AND w.repository='outside/repo'",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).unwrap();
+    assert_eq!(watch, ("sub".into(), 7, 2, 3));
+}
+
 impl Fixture {
     fn new() -> Self {
         let directory = crate::test_scratch::Scratch::directory("import-store");
@@ -682,6 +702,7 @@ fn production_v23_round_trip_dispositions_and_routing() {
             | "web_search_allowance_counts"
             | "elicitation_answers_cursor"
             | "github_repo_id_cache"
+            | "github_outside_watches"
             | "github_actions_quota"
             | "event_outbox_counters"
             | "gmail_accounts"

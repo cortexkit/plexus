@@ -1227,6 +1227,28 @@ CREATE TABLE connector_home_generation (
 );
 "#,
     },
+    Migration {
+        version: 67,
+        statements: r#"
+CREATE TABLE github_outside_watches (
+    flow_id                   TEXT NOT NULL,
+    agent_id                  TEXT NOT NULL,
+    repository                TEXT NOT NULL CHECK(repository = lower(repository)),
+    kind                      TEXT NOT NULL,
+    number                    INTEGER NOT NULL,
+    expires_at_ms             INTEGER NOT NULL,
+    subscription_id           TEXT NOT NULL REFERENCES trigger_subscriptions(subscription_id) ON DELETE CASCADE,
+    created_at_ms             INTEGER NOT NULL,
+    last_public_check_at_ms   INTEGER NOT NULL,
+    last_public_attempt_at_ms INTEGER NOT NULL,
+    repo_id                   INTEGER NOT NULL,
+    PRIMARY KEY (flow_id, repository, kind, number),
+    CHECK ((kind = 'release' AND number = 0) OR (kind IN ('issue', 'pull_request') AND number > 0))
+);
+CREATE INDEX idx_github_outside_watches_subscription ON github_outside_watches (subscription_id);
+CREATE INDEX idx_github_outside_watches_repository ON github_outside_watches (repository, kind);
+"#,
+    },
 ];
 
 /// Shared with offline store import, whose destination is migrated before

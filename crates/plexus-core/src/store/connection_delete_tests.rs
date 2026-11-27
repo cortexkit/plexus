@@ -204,6 +204,14 @@ fn seed_connection(
          VALUES ('subscription-' || ?1, 'probe', '[\"mock.read\"]', '', '{}', 'always', ?2)",
         params![c, principal],
     )?;
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='github_outside_watches')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? {
+        conn.execute("INSERT INTO github_outside_watches VALUES
+            ('flow-' || ?1, 'agent-x', 'outside/repo', 'issue', 7, 100, 'subscription-' || ?1, 1, 2, 3, 101)", [c])?;
+    }
     conn.execute(
         "INSERT INTO trigger_events (event_id, principal, connection_id, subscription_id,
              vendor_event_id, payload_hash, payload, kind, observed_at_ms, created_at_ms)

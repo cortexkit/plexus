@@ -29,6 +29,7 @@ pub const CATALOG_TOOL: &str = "catalog";
 pub const INVOKE_TOOL: &str = "invoke";
 pub const GITHUB_TOOL: &str = "github";
 pub const GITHUB_READ_TOOL: &str = "github_read";
+pub const GITHUB_WATCH_TOOL: &str = "github_watch";
 /// Adds one reaction to an issue or pull request as the acting agent's own
 /// bot, and nothing else. It is the `github` tool's `bot_request` narrowed to
 /// reactions, so a flow can be given it without every other bot write.
@@ -319,6 +320,7 @@ pub fn build_with_launch_nonce_source(
                 ),
                 github_read_tool(),
                 github_react_tool(),
+                github_watch_tool(),
                 events_get_tool(),
                 events_tool(),
                 web_search_tool(),
@@ -549,6 +551,25 @@ fn github_read_tool() -> Tool {
             },
             "required": ["action"],
             "additionalProperties": false
+        }),
+    }
+}
+
+fn github_watch_tool() -> Tool {
+    Tool {
+        name: GITHUB_WATCH_TOOL.into(),
+        description: Some("Ensure or end this flow's watch on a GitHub issue, pull request or latest release. Only agent-stamped Basal flows can call it. Issue and pull request watches require a number; release watches forbid it. Ensure requires a future expiry, at most 30 days away for a new outside watch. An existing fleet watch of the same kind needs no outside subscription.".into()),
+        execution_mode: ExecutionMode::Mutating,
+        schema: json!({
+            "type":"object", "additionalProperties":false,
+            "properties":{
+                "action":{"type":"string","enum":["ensure","end"]},
+                "repository":{"type":"string","description":"GitHub owner/name"},
+                "kind":{"type":"string","enum":["issue","pull_request","release"]},
+                "number":{"type":"integer","minimum":1},
+                "expires_at_ms":{"type":"integer","description":"Unix milliseconds; required for ensure"}
+            },
+            "required":["action","repository","kind"]
         }),
     }
 }

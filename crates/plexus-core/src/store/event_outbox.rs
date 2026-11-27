@@ -126,6 +126,7 @@ pub enum EventLookupOutcome {
 /// binding, not the event's stored project or the repository-id cache.
 pub enum EventReader<'a> {
     Agent { agent_id: &'a str },
+    AgentFlow { agent_id: &'a str, flow_id: &'a str },
     Consumer { principal: &'a str },
 }
 
@@ -393,6 +394,19 @@ const AGENT_EVENT_VISIBILITY_SQL: &str = "SELECT EXISTS(
     JOIN github_app_handle h ON h.app_handle_id = b.app_handle_id
     WHERE lower(b.repository) = lower(?1) AND h.agent_id = ?2 AND h.status = 'enabled')";
 
+const OUTSIDE_FLOW_EVENT_VISIBILITY_SQL: &str = "SELECT EXISTS(
+    SELECT 1 FROM github_outside_watches w JOIN trigger_subscriptions s ON s.subscription_id=w.subscription_id
+    JOIN event_outbox o ON o.event_key=?1 JOIN trigger_events e ON e.event_id=o.event_id
+    WHERE w.flow_id=?2 AND w.agent_id=?3 AND w.expires_at_ms>?4 AND w.last_public_check_at_ms>?5
+      AND s.status='active' AND w.repository=lower(o.repo) AND w.repo_id=o.repo_id
+      AND CASE o.event_name
+        WHEN 'github_release_published' THEN w.kind='release'
+        WHEN 'github_issue_changed' THEN w.kind='issue' AND w.number=COALESCE(
+            json_extract(o.envelope_v2,'$.number'), CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.number') END)
+        WHEN 'github_pr_changed' THEN w.kind='pull_request' AND w.number=COALESCE(
+            json_extract(o.envelope_v2,'$.number'), CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.number') END)
+        ELSE 0 END)";
+
 fn canonical_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalEvent> {
     let body: String = row.get::<_, Option<String>>(11)?.unwrap_or_default();
     let digest = if body.is_empty() {
@@ -508,6 +522,12 @@ impl PlexusStore {
             let visible = match reader {
                 EventReader::Agent { agent_id } => conn.query_row(AGENT_EVENT_VISIBILITY_SQL,
                     (&repo, agent_id), |r| r.get::<_, bool>(0))?,
+                EventReader::AgentFlow { agent_id, flow_id } => {
+                    let bot_bound = conn.query_row(AGENT_EVENT_VISIBILITY_SQL, (&repo, agent_id), |r| r.get::<_, bool>(0))?;
+                    let watching = conn.query_row(OUTSIDE_FLOW_EVENT_VISIBILITY_SQL,
+                        (key, flow_id, agent_id, now, now.saturating_sub(crate::github_watch::HOUR_MS)), |r| r.get::<_, bool>(0))?;
+                    bot_bound || watching
+                }
                 EventReader::Consumer { principal } => {
                     let mut query = conn.prepare("SELECT g.action_selectors, s.action FROM grants g
                         JOIN trigger_subscriptions s ON s.subscription_id = ?1

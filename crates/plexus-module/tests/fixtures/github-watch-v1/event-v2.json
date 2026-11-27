@@ -1,0 +1,21 @@
+{
+  "action": "updated",
+  "actor_logins": null,
+  "actor_unknown": {
+    "class": "unexpected",
+    "reason": "actor_source_unbound"
+  },
+  "author": null,
+  "comment_author": null,
+  "comment_excerpt": null,
+  "comment_url": null,
+  "event_key": "cccd6422820cd5741395fd9459d118a145821ec175edee5fd187c1b8d51dea98",
+  "kind": "issue",
+  "number": 7,
+  "observed_at": "2026-11-27T16:24:41.595Z",
+  "repo": "outside/repo",
+  "state": "open",
+  "title": "watched",
+  "updated_at": "2026-10-07T00:00:01Z",
+  "url": "https://github.com/outside/repo/issues/7"
+}

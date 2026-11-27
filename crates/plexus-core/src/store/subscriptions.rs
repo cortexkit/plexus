@@ -96,7 +96,7 @@ fn subscription_authority_from_grants(
 /// snapshot, treating a retired app as disabled without rewriting its actions.
 /// A scripted probe may call several vendor actions and pins its own return
 /// schema, so only an ordinary single-action watch has a vendor-schema pin.
-fn recheck_watch_preconditions(
+pub(super) fn recheck_watch_preconditions(
     conn: &Connection,
     principal: &str,
     connection_id: &str,

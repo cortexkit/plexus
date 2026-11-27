@@ -403,7 +403,7 @@ fn manifest_events_pin_the_serialized_wire_json() {
 }
 
 #[test]
-fn manifest_advertises_eleven_tools_including_read_facades_and_search() {
+fn manifest_advertises_read_facades_watches_and_search() {
     let manifest = build("plexus");
     let ProviderRole::ToolProvider { tools, .. } = &manifest.provides[0] else {
         panic!("plexus must expose a ToolProvider role");
@@ -421,6 +421,7 @@ fn manifest_advertises_eleven_tools_including_read_facades_and_search() {
             GITHUB_TOOL,
             GITHUB_READ_TOOL,
             GITHUB_REACT_TOOL,
+            GITHUB_WATCH_TOOL,
             EVENTS_GET_TOOL,
             EVENTS_TOOL,
             WEB_SEARCH_TOOL,
@@ -434,13 +435,14 @@ fn manifest_advertises_eleven_tools_including_read_facades_and_search() {
         json!(["bot_request", "bindings.read", "bindings.read_for_agent"]),
         "the github facade only advertises bot requests and binding reads"
     );
-    assert_eq!(tools[9].execution_mode, ExecutionMode::Pure);
+    assert_eq!(tools[7].execution_mode, ExecutionMode::Mutating);
+    assert_eq!(tools[10].execution_mode, ExecutionMode::Pure);
     assert_eq!(
-        tools[9].schema["required"],
+        tools[10].schema["required"],
         json!(["query"]),
         "web_search takes flat arguments with only the query required"
     );
-    let events_schema = &tools[8].schema;
+    let events_schema = &tools[9].schema;
     assert!(
         events_schema["properties"]["op"]["enum"]
             .as_array()

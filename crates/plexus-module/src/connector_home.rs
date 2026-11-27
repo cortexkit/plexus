@@ -407,6 +407,9 @@ pub const TOOL_EFFECTS: &[(&str, ToolEffect)] = &[
     ("github_read", ToolEffect::Except(&["github.bindings.list"])),
     // Every call posts a reaction on GitHub as the agent's bot.
     ("github_react", ToolEffect::Always),
+    // Ensuring a watch can dispatch reads and start background polls. Ending
+    // one also updates the shared subscription on the home store.
+    ("github_watch", ToolEffect::Always),
     ("connections", ToolEffect::Ops(&["connect"])),
     ("requests", ToolEffect::Ops(&["approve", "deny"])),
     ("tool.withdraw", ToolEffect::Always),

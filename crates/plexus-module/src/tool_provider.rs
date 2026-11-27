@@ -36,6 +36,7 @@ const TOOL_CAPABILITIES: &[(&str, &[&str])] = &[
     ("github", &["plexus:github.facade/v1"]),
     ("github_read", &["github.read/v1", "plexus:github.read/v1"]),
     ("github_react", &["plexus:github.react/v1"]),
+    (manifest::GITHUB_WATCH_TOOL, &["plexus:github.watch/v1"]),
     ("events_get", &["plexus:events.get/v1"]),
     ("events", &["plexus:events/v1"]),
     (WEB_SEARCH_TOOL, &["plexus:web.search/v1", "web.search/v1"]),
@@ -47,6 +48,7 @@ const TOOL_CAPABILITIES: &[(&str, &[&str])] = &[
 
 fn modes_for(name: &str) -> Vec<CallMode> {
     match name {
+        manifest::GITHUB_WATCH_TOOL => vec![CallMode::Flow],
         WEB_SEARCH_TOOL
         | CODE_SEARCH_TOOL
         | "github_read"

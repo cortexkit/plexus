@@ -1,0 +1,234 @@
+[
+  {
+    "case": "ensure_outside",
+    "reply": {
+      "result": {
+        "expires_at_ms": 1795883081502,
+        "kind": "issue",
+        "number": 7,
+        "repository": "outside/repo",
+        "watch": "outside"
+      }
+    },
+    "request": {
+      "arguments": {
+        "action": "ensure",
+        "expires_at_ms": 1795883081502,
+        "kind": "issue",
+        "number": 7,
+        "repository": "Outside/Repo"
+      },
+      "name": "github_watch"
+    }
+  },
+  {
+    "case": "end",
+    "reply": {
+      "result": {
+        "ended": true
+      }
+    },
+    "request": {
+      "arguments": {
+        "action": "end",
+        "kind": "issue",
+        "number": 7,
+        "repository": "outside/repo"
+      },
+      "name": "github_watch"
+    }
+  },
+  {
+    "case": "ensure_existing",
+    "reply": {
+      "result": {
+        "expires_at_ms": null,
+        "kind": "issue",
+        "number": 7,
+        "repository": "fleet/repo",
+        "watch": "existing"
+      }
+    },
+    "request": {
+      "arguments": {
+        "action": "ensure",
+        "expires_at_ms": 1795883081502,
+        "kind": "issue",
+        "number": 7,
+        "repository": "fleet/repo"
+      },
+      "name": "github_watch"
+    }
+  },
+  {
+    "case": "invalid_request",
+    "reply": {
+      "error": {
+        "code": "invalid_request",
+        "message": "Expected ensure or end, an owner/name repository and kind, a positive number only for issues and pull requests, and a future expiry for ensure (at most 30 days for an outside watch).",
+        "retryable": false,
+        "transmission": "not_sent"
+      }
+    },
+    "request": {
+      "arguments": {
+        "action": "ensure",
+        "expires_at_ms": 1798561481502,
+        "kind": "issue",
+        "number": 7,
+        "repository": "outside/repo"
+      },
+      "name": "github_watch"
+    }
+  },
+  {
+    "case": "agent_identity_required",
+    "reply": {
+      "error": {
+        "code": "agent_identity_required",
+        "message": "GitHub watches require reserved:basal on an agent-stamped flow route.",
+        "retryable": false,
+        "transmission": "not_sent"
+      }
+    },
+    "request": {
+      "arguments": {
+        "action": "ensure",
+        "expires_at_ms": 1795883081502,
+        "kind": "issue",
+        "number": 7,
+        "repository": "Outside/Repo"
+      },
+      "name": "github_watch"
+    }
+  },
+  {
+    "case": "repository_not_public",
+    "reply": {
+      "error": {
+        "code": "repository_not_public",
+        "message": "The GitHub repository is private, missing, or not confirmed public.",
+        "retryable": false,
+        "transmission": "not_sent"
+      }
+    },
+    "request": {
+      "arguments": {
+        "action": "ensure",
+        "expires_at_ms": 1795883081502,
+        "kind": "issue",
+        "number": 7,
+        "repository": "Outside/Repo"
+      },
+      "name": "github_watch"
+    }
+  },
+  {
+    "case": "item_not_found",
+    "reply": {
+      "error": {
+        "code": "item_not_found",
+        "message": "The GitHub item was not found.",
+        "retryable": false,
+        "transmission": "not_sent"
+      }
+    },
+    "request": {
+      "arguments": {
+        "action": "ensure",
+        "expires_at_ms": 1795883081502,
+        "kind": "issue",
+        "number": 7,
+        "repository": "Outside/Repo"
+      },
+      "name": "github_watch"
+    }
+  },
+  {
+    "case": "read_dispatch_failed",
+    "reply": {
+      "error": {
+        "code": "read_dispatch_failed",
+        "message": "GitHub refused the item read; the item may not exist, or GitHub failed. Check the repository and number, then retry.",
+        "retryable": true,
+        "transmission": "not_sent"
+      }
+    },
+    "request": {
+      "arguments": {
+        "action": "ensure",
+        "expires_at_ms": 1795883081502,
+        "kind": "issue",
+        "number": 7,
+        "repository": "Outside/Repo"
+      },
+      "name": "github_watch"
+    }
+  },
+  {
+    "case": "outside_watch_limit",
+    "reply": {
+      "error": {
+        "code": "outside_watch_limit",
+        "message": "Outside GitHub watches are limited to 5 per agent and 25 overall.",
+        "retryable": false,
+        "transmission": "not_sent"
+      }
+    },
+    "request": {
+      "arguments": {
+        "action": "ensure",
+        "expires_at_ms": 1795883081502,
+        "kind": "issue",
+        "number": 7,
+        "repository": "Outside/Repo"
+      },
+      "name": "github_watch"
+    }
+  },
+  {
+    "case": "grant_missing",
+    "reply": {
+      "error": {
+        "code": "grant_missing",
+        "message": "Basal needs the read-only poll grants for this GitHub watch.",
+        "retryable": false,
+        "transmission": "not_sent"
+      }
+    },
+    "request": {
+      "arguments": {
+        "action": "ensure",
+        "expires_at_ms": 1795883081502,
+        "kind": "issue",
+        "number": 7,
+        "repository": "Outside/Repo"
+      },
+      "name": "github_watch"
+    }
+  },
+  {
+    "case": "connector_home_not_held",
+    "reply": {
+      "error": {
+        "code": "connector_home_not_held",
+        "connectorHome": {
+          "state": "unknown"
+        },
+        "message": "connector home not held: {\"state\":\"unknown\"}",
+        "retryable": true,
+        "transmission": "not_sent"
+      }
+    },
+    "request": {
+      "arguments": {
+        "action": "ensure",
+        "expires_at_ms": 1795883081502,
+        "kind": "issue",
+        "number": 7,
+        "repository": "Outside/Repo"
+      },
+      "name": "github_watch"
+    }
+  }
+]

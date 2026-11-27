@@ -33,6 +33,7 @@ const TABLES: &[&str] = &[
     "catalog_actions",
     "probe_subscriptions",
     "trigger_subscriptions",
+    "github_outside_watches",
     "trigger_events",
     // Publishing markers for the events carried above, so an unacked event
     // that was not yet published is still published from the new store.
