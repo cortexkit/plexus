@@ -26,6 +26,52 @@ async fn registration_channel_hello_omits_nonce_and_stays_warming() {
         body["manifest"]["provides"],
         serde_json::to_value(provides).unwrap()
     );
+
+    // Pin the old registration HELLO bytes. Build provenance changes with
+    // the checkout and dependency pins, so mask just its value in the raw JSON.
+    let body: ModuleHelloBody = serde_json::from_slice(&frame.body).unwrap();
+    let raw = std::str::from_utf8(&frame.body).unwrap();
+    let provenance = format!(
+        "\"provenance\":{}",
+        serde_json::to_string(&body.manifest.provenance).unwrap()
+    );
+    assert_eq!(raw.matches(&provenance).count(), 1);
+    let comparable = raw.replacen(&provenance, "\"provenance\":null", 1);
+    assert_eq!(
+        plexus_core::jcs::sha256_hex(comparable.as_bytes()),
+        "b353e9378196ae97a5e93af978b9d69b3a5f70bce862a35b74e420795dd32948",
+        "registration HELLO bytes outside build provenance changed"
+    );
+}
+
+#[tokio::test]
+async fn warming_ignores_upgrade_and_unknown_control_pushes() {
+    let (writer, mut responses) = mpsc::channel(2);
+    let health = health::HealthState::new();
+    let upgrade = frame(
+        FrameType::Push,
+        0,
+        0,
+        json!({"op": "module.upgrading", "reconnect_by_ms": 1000}),
+    );
+    assert_eq!(
+        serde_json::from_slice::<ModuleControlCommand>(&upgrade.body).unwrap(),
+        ModuleControlCommand::Upgrading {
+            reconnect_by_ms: 1000,
+        }
+    );
+    let unknown = frame(FrameType::Push, 0, 0, json!({"op": "module.future"}));
+    for notice in [upgrade, unknown] {
+        assert!(startup::handle_warming_frame(notice, &writer, &health)
+            .await
+            .unwrap());
+        assert_eq!(responses.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    }
+    assert!(
+        !startup::handle_warming_frame(stop_notice(), &writer, &health)
+            .await
+            .unwrap()
+    );
 }
 
 struct ObservedReader {
@@ -138,6 +184,7 @@ async fn hello_ack(input: &mut tokio::io::DuplexStream, storage: Option<Value>) 
                 subc_capabilities: vec![],
                 machine_id: None,
                 storage,
+                resume_token: None,
             })
             .unwrap(),
         ),
@@ -697,6 +744,7 @@ async fn managed_settings_are_reviewed_while_warming_and_applied_before_readines
         subc_capabilities: vec![CONFIG_GATE_CAPABILITY.into()],
         machine_id: None,
         storage: Some(serde_json::to_value(descriptor).unwrap()),
+        resume_token: None,
     };
     write_frame(
         &mut input,

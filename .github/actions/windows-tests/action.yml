@@ -35,8 +35,6 @@ runs:
         $nats = Join-Path $binDir 'nats-server.exe'
         & $nats --version
         if ($LASTEXITCODE -ne 0) { throw 'Could not run pinned nats-server' }
-        # The Rust bus testkit's PATH lookup does not append .exe.
-        "CK_NATS_SERVER_BIN=$nats" >> $env:GITHUB_ENV
         $binDir >> $env:GITHUB_PATH
 
     - name: Run the full workspace suite

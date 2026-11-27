@@ -494,6 +494,9 @@ pub(super) async fn send_hello(
             subc_client_rs::config::CONFIG_REVIEW_OP.to_string(),
         ]),
         launch_nonce: launch_nonce.map(|nonce| nonce.value().to_string()),
+        // Plexus starts a fresh registration after a disconnect; it does not resume.
+        module_capabilities: None,
+        resume_token: None,
     };
     let body = serde_json::to_vec(&hello).map_err(ModuleError::Json)?;
     let frame = Frame::build(

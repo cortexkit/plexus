@@ -20,7 +20,7 @@ test = true
 
 [dependencies]
 cortexkit-log = { workspace = true }
-cortexkit-project-identity = "=0.1.5"
+cortexkit-project-identity = "=0.1.6"
 cortexkit-agent-identity = "=0.1.3"
 tracing = { workspace = true }
 serde = { workspace = true }

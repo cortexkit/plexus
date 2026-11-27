@@ -235,6 +235,8 @@ async fn cingulate_module_fixture() {
         protocol_ver: PROTOCOL_VERSION,
         control_ops: Some(vec!["route.bind".into()]),
         launch_nonce: Some(nonce.clone()),
+        module_capabilities: None,
+        resume_token: None,
     };
     let frame = Frame::build(
         FrameType::Hello,
