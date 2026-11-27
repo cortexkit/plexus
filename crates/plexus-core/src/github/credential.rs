@@ -67,7 +67,26 @@ pub trait GithubPolicyTokens: Send + Sync {
         repository: &str,
     ) -> Result<Option<ResolvedCredential>, &'static str>;
 
-    fn record_leg(&self, narrowed: bool);
+    fn prepare_repo_get_suffix(
+        &self,
+        agent: &str,
+        identity: &str,
+        repository: &str,
+        args: &serde_json::Value,
+    ) -> Result<RepoGetToken, &'static str>;
+
+    fn record_leg(&self, narrowed: bool, broad_suffix: Option<BroadSuffix>);
+}
+
+pub enum RepoGetToken {
+    Narrowed(ResolvedCredential),
+    Broad(BroadSuffix),
+}
+
+pub struct BroadSuffix {
+    /// Redacted route label, not the request path.
+    pub template: String,
+    pub unmatched: bool,
 }
 
 /// An injectable clock keeps cache expiry independent of wall-clock tests.

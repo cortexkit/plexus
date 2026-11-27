@@ -82,6 +82,149 @@ fn checked(document: &Value) -> CheckedGitHub {
     check_github(&document, &catalog().actions_baseline)
 }
 
+#[test]
+fn draft_suffix_kinds_are_served_by_repo_get() {
+    let draft = include_str!(
+        "../../../tests/fixtures/agent_policy/github-rules-revision-2-kinds.draft.json"
+    );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(draft)),
+        "394f278e7470b0bab27e4275632673995dbdb5641c89ed12523ac283b5f27486"
+    );
+    let entries: Vec<Value> = serde_json::from_str(draft).unwrap();
+    let mut document = signed_document();
+    document["rule_sets"]["github"]["kinds"]
+        .as_array_mut()
+        .unwrap()
+        .extend(entries.iter().cloned());
+    let result = checked(&document);
+    for entry in entries {
+        let name = entry["kind"].as_str().unwrap();
+        assert!(result.serves_kind(name), "{name}: {:?}", result.unserved);
+    }
+    refused(&result, "node_repository", "policy_kind_not_catalogued");
+}
+
+#[test]
+fn suffix_match_checks_repository_whole_path_and_query() {
+    let mut document = signed_document();
+    let read = kind(&mut document, "github.issue.get");
+    read["requests"][0]["rest"]["query"] = json!({"optional":["page"]});
+    let mut overlap = read.clone();
+    overlap["kind"] = json!("fixture.other_kind");
+
+    let args = json!({"owner":"Org_EMU", "repo":"Repo.Name", "path":"issues/7",
+        "query":{"page":"9"}});
+    let policy = AgentPolicy::parse(&document.to_string()).unwrap();
+    assert_eq!(
+        policy.match_repo_get_suffix("org_emu/repo.name", &args),
+        SuffixMatch::Unique("github.issue.get")
+    );
+    for repository in ["other/repo.name", "org_emu/other"] {
+        assert_eq!(
+            policy.match_repo_get_suffix(repository, &args),
+            SuffixMatch::None
+        );
+    }
+    let mut bad = args.clone();
+    bad["query"] = json!({"per_page":"9"});
+    assert_eq!(
+        policy.match_repo_get_suffix("org_emu/repo.name", &bad),
+        SuffixMatch::None
+    );
+    for path in [
+        "issues/7/unmatched",
+        "issues/7/",
+        "issues//7",
+        "issues/%2e%2e/7",
+        "issues/7%2Fextra",
+        "issues/7%5C",
+        "issues/7%00",
+    ] {
+        bad["query"] = json!({});
+        bad["path"] = json!(path);
+        assert_eq!(
+            policy.match_repo_get_suffix("org_emu/repo.name", &bad),
+            SuffixMatch::None,
+            "{path}"
+        );
+    }
+    document["rule_sets"]["github"]["kinds"]
+        .as_array_mut()
+        .unwrap()
+        .push(overlap);
+    let policy = AgentPolicy::parse(&document.to_string()).unwrap();
+    assert_eq!(
+        policy.match_repo_get_suffix("org_emu/repo.name", &args),
+        SuffixMatch::Ambiguous
+    );
+}
+
+#[test]
+fn suffix_match_uses_decoded_and_bounded_extractor_types() {
+    let mut document = signed_document();
+    let rest = kind(&mut document, "github.issue.get")["requests"][0]["rest"].clone();
+    let distinct = [
+        ("number-test", "{number}"),
+        ("id-test", "{id}"),
+        ("sha-test", "{sha}"),
+        ("name-test", "{name}"),
+        ("tail-test", "{path*}"),
+    ];
+    for (route, segment) in distinct {
+        let mut request = rest.clone();
+        request["path"] = json!(format!("/repos/{{owner}}/{{repo}}/{route}/{segment}"));
+        let mut entry = kind(&mut document, "github.issue.get").clone();
+        entry["kind"] = json!(route);
+        entry["requests"] = json!([{"rest":request}]);
+        document["rule_sets"]["github"]["kinds"]
+            .as_array_mut()
+            .unwrap()
+            .push(entry);
+    }
+    let policy = AgentPolicy::parse(&document.to_string()).unwrap();
+    let expect = |route, path: &str, matched| {
+        let args = json!({"owner":"org","repo":"repo","path":format!("{route}/{path}")});
+        assert_eq!(
+            policy.match_repo_get_suffix("org/repo", &args),
+            if matched {
+                SuffixMatch::Unique(route)
+            } else {
+                SuffixMatch::None
+            },
+            "{route}/{path}"
+        );
+    };
+    for (route, value, matched) in [
+        ("number-test", "%37", true),
+        ("number-test", "2147483647", true),
+        ("number-test", "2147483648", false),
+        ("number-test", "07", false),
+        ("id-test", "9007199254740991", true),
+        ("id-test", "9007199254740992", false),
+        ("id-test", "0", false),
+        ("id-test", "+7", false),
+        ("sha-test", "cafef00d", false),
+        ("name-test", "release%20notes", true),
+        ("name-test", "%C3%A9", true),
+        ("name-test", "%FF", false),
+        ("name-test", "nested/path", false),
+        ("tail-test", "nested/path", true),
+        ("tail-test", "", false),
+    ] {
+        expect(route, value, matched);
+    }
+    expect("sha-test", &"a".repeat(40), true);
+    expect("sha-test", &"a".repeat(64), true);
+    expect("sha-test", &"A".repeat(40), false);
+    expect("name-test", &"a".repeat(255), true);
+    expect("name-test", &"a".repeat(256), false);
+    let full_tail = format!("{0}/{0}/{0}/{0}/a", "a".repeat(254));
+    assert_eq!(full_tail.len(), 1021);
+    expect("tail-test", &format!("{full_tail}aaa"), true);
+    expect("tail-test", &format!("{full_tail}aaaa"), false);
+}
+
 fn refused(result: &CheckedGitHub, name: &str, reason: &str) {
     assert!(!result.served.iter().any(|served| served == name));
     assert!(

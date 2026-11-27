@@ -160,7 +160,8 @@ fn null_policy_reads_as_none_and_unknown_method_reads_as_absent() {
         health(&state),
         json!({"state":"none","version":null,"policy_sha256":null,"served":[],"unserved":[],
             "apply":{"enabled":false,"applied_version":null,"plan":{"agents":[],"unchanged_agents":0}},
-            "imports":{"imported":[],"pending":[],"conflicts":[]},"token_legs":{"broad":0,"narrowed":0}})
+            "imports":{"imported":[],"pending":[],"conflicts":[]},"token_legs":{"broad":0,"narrowed":0},
+            "broad_suffix_legs":{},"broad_suffix_legs_overflow":0})
     );
     vault.reply(json!({"code":"unknown_method"}));
     assert!(!refresh(&state, &vault));
@@ -168,7 +169,8 @@ fn null_policy_reads_as_none_and_unknown_method_reads_as_absent() {
         health(&state),
         json!({"state":"absent","version":null,"policy_sha256":null,"served":[],"unserved":[],
             "apply":{"enabled":false,"applied_version":null,"plan":{"agents":[],"unchanged_agents":0}},
-            "imports":{"imported":[],"pending":[],"conflicts":[]},"token_legs":{"broad":0,"narrowed":0}})
+            "imports":{"imported":[],"pending":[],"conflicts":[]},"token_legs":{"broad":0,"narrowed":0},
+            "broad_suffix_legs":{},"broad_suffix_legs_overflow":0})
     );
 }
 

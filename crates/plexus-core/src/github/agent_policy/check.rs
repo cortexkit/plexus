@@ -1,6 +1,7 @@
 use super::model::{
     AgentPolicy, Approval, Class, Kind, Operation, OwnershipCheck, Request, RuleSet,
 };
+use super::suffix::is_suffix_get;
 use crate::github::facade::effects::{
     effects_for_kind, optional_effect, reads_for_kind, REQUEST_KINDS,
 };
@@ -46,7 +47,11 @@ pub(super) fn check_rule_set(rules: &RuleSet, catalog: &[ActionBaseline]) -> Che
     let mut checked = CheckedGitHub::default();
     let mut matching_kinds = BTreeSet::new();
     for kind in &rules.kinds {
-        match kind_reason(kind, catalog.get(kind.kind.as_str()).copied()) {
+        match kind_reason(
+            kind,
+            catalog.get(kind.kind.as_str()).copied(),
+            catalog.get("github.repo.get").copied(),
+        ) {
             Some(reason) => checked.unserved.push(Unserved {
                 name: kind.kind.clone(),
                 reason,
@@ -73,11 +78,24 @@ pub(super) fn check_rule_set(rules: &RuleSet, catalog: &[ActionBaseline]) -> Che
     checked
 }
 
-fn kind_reason(kind: &Kind, http: Option<&HttpOperation>) -> Option<&'static str> {
+fn kind_reason(
+    kind: &Kind,
+    http: Option<&HttpOperation>,
+    repo_get: Option<&HttpOperation>,
+) -> Option<&'static str> {
     if kind.class == Class::Denied {
         return Some("policy_kind_denied");
     }
     let Some(http) = http else {
+        if kind.class == Class::Read
+            && repo_get.is_some_and(|http| {
+                http.method == HttpMethod::Get && http.path == "/repos/{owner}/{repo}"
+            })
+            && !kind.requests.is_empty()
+            && kind.requests.iter().all(is_suffix_get)
+        {
+            return (kind.approval == Approval::Once).then_some("policy_approval_unsupported");
+        }
         return Some("policy_kind_not_catalogued");
     };
     if kind.class == Class::Read && kind.approval == Approval::Once {

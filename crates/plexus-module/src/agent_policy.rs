@@ -93,6 +93,7 @@ pub(crate) struct Snapshot {
     apply_failed: bool,
     logged_conflicts: BTreeSet<String>,
     token_legs: tokens::LegCounts,
+    broad_suffix_legs: tokens::SuffixLegCounts,
     pub(crate) imports: ImportStatus,
 }
 
@@ -126,6 +127,8 @@ impl Snapshot {
             "apply": self.apply.clone().unwrap_or_else(empty_apply_status),
             "imports": self.imports,
             "token_legs": self.token_legs,
+            "broad_suffix_legs": self.broad_suffix_legs.templates,
+            "broad_suffix_legs_overflow": self.broad_suffix_legs.overflow,
         })
     }
 

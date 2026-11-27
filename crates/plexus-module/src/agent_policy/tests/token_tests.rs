@@ -8,6 +8,25 @@ const REPO: &str = "org/repo";
 const IDENTITY: &str = "github_app:app-fixture";
 const FIXTURE: &str =
     include_str!("../../../../plexus-core/tests/fixtures/vault-policy-token-v1/cases.json");
+const DRAFT: &str = include_str!(
+    "../../../../plexus-core/tests/fixtures/agent_policy/github-rules-revision-2-kinds.draft.json"
+);
+
+fn draft_policy() -> Value {
+    let mut reply = ready_for(2, AGENT, IDENTITY, REPO);
+    let mut policy: Value =
+        serde_json::from_str(reply["result"]["policy_text"].as_str().unwrap()).unwrap();
+    let rules = &mut policy["rule_sets"]["github"];
+    rules["revision"] = json!(2);
+    rules["kinds"]
+        .as_array_mut()
+        .unwrap()
+        .extend(serde_json::from_str::<Vec<Value>>(DRAFT).unwrap());
+    let text = policy.to_string();
+    reply["result"]["policy_sha256"] = json!(format!("{:x}", Sha256::digest(&text)));
+    reply["result"]["policy_text"] = json!(text);
+    reply
+}
 
 fn vector(name: &str) -> Value {
     serde_json::from_str::<Value>(FIXTURE).unwrap()["cases"]
@@ -65,8 +84,13 @@ struct Fixture {
 
 impl Fixture {
     fn new(apply: bool) -> Self {
+        Self::with_policy(apply, ready_for(1, AGENT, IDENTITY, REPO))
+    }
+
+    fn with_policy(apply: bool, active: Value) -> Self {
+        let version = active["result"]["version"].clone();
         let vault = Arc::new(TokenVault {
-            active: Vault::new(ready_for(1, AGENT, IDENTITY, REPO)),
+            active: Vault::new(active),
             reply: Mutex::new(Ok(vector("issue_none_kind"))),
             calls: Mutex::default(),
         });
@@ -83,6 +107,7 @@ impl Fixture {
                 "add_issue_comment",
                 "github.repo.get",
                 "github.search.code",
+                "github.issue_timeline.list",
             ],
             provider,
         );
@@ -103,7 +128,7 @@ impl Fixture {
         assert!(refresh(&state, vault.as_ref()));
         if apply {
             let status = health(&state);
-            assert_eq!(status["apply"]["applied_version"], 1, "{status}");
+            assert_eq!(status["apply"]["applied_version"], version, "{status}");
         }
         transport.set_response_for_method(
             "github.issue.get",
@@ -149,12 +174,110 @@ impl Fixture {
     }
 
     async fn read_root(&self, path: &str) -> Value {
+        self.read_repo(REPO, path, json!({})).await
+    }
+
+    async fn read_repo(&self, repository: &str, path: &str, query: Value) -> Value {
         self.send(
             "github_read",
-            json!({"repository":REPO,"action":"github.repo.get","args":{"path":path}}),
+            json!({"repository":repository,"action":"github.repo.get","args":{"path":path,"query":query}}),
         )
         .await
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn draft_suffix_reads_narrow_to_their_concrete_kinds() {
+    let f = Fixture::with_policy(true, draft_policy());
+    let sha = "a4ac141eb425b37be8767bec0288378eac16e9b5f1";
+    for (path, query) in [
+        (
+            format!("commits/{sha}/check-runs"),
+            json!({"filter":"latest"}),
+        ),
+        ("git/matching-refs/heads/feature/x".into(), json!({})),
+        ("actions/runs/123/jobs".into(), json!({"per_page":"100"})),
+        ("issues/7".into(), json!({})),
+        ("pulls/8".into(), json!({})),
+        ("actions/jobs/123".into(), json!({})),
+    ] {
+        let reply = f.read_repo(REPO, &path, query).await;
+        assert!(reply.get("result").is_some(), "{path}: {reply}");
+    }
+    let refused = f.read_repo("org/other", "issues/7", json!({})).await;
+    assert_eq!(refused["error"]["code"], "repository_not_visible");
+    assert_eq!(
+        f.vault.calls(),
+        [
+            narrowed("github.commit.check_runs", 2),
+            narrowed("github.git.matching_refs", 2),
+            narrowed("github.actions.run.jobs", 2),
+            narrowed("github.issue.get", 2),
+            narrowed("github.pull_request.get", 2),
+            narrowed("github.actions.job.get", 2),
+        ]
+    );
+    assert_eq!(
+        health(&f.state)["token_legs"],
+        json!({"narrowed":6,"broad":0})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn draft_suffix_broad_legs_count_only_redacted_templates() {
+    let f = Fixture::with_policy(true, draft_policy());
+    for (path, query) in [
+        ("branches/main/protection", json!({})),
+        ("issues/7/timeline", json!({"unlisted":"query-value"})),
+        ("issues/8/timeline", json!({"unlisted":"other-value"})),
+    ] {
+        let reply = f.read_repo(REPO, path, query).await;
+        assert!(reply.get("result").is_some(), "{path}: {reply}");
+    }
+    assert_eq!(f.vault.calls(), [broad()]);
+    let status = health(&f.state);
+    assert_eq!(status["token_legs"], json!({"narrowed":0,"broad":3}));
+    assert_eq!(
+        status["broad_suffix_legs"],
+        json!({"{}/{}/{}":1,"issues/{}/timeline":2})
+    );
+
+    let unapplied = Fixture::with_policy(false, draft_policy());
+    let reply = unapplied.read_root("git/matching-refs/heads/issues").await;
+    assert!(reply.get("result").is_some(), "{reply}");
+    assert_eq!(unapplied.vault.calls(), [broad()]);
+    assert_eq!(
+        health(&unapplied.state)["broad_suffix_legs"],
+        json!({"git/matching-refs/{}/{}":1})
+    );
+}
+
+#[test]
+fn draft_timeline_narrows_as_a_named_catalog_leg() {
+    let f = Fixture::with_policy(true, draft_policy());
+    let engine = &f.state.runtime.engine;
+    let action = "github.issue_timeline.list";
+    let request = plexus_core::AuthorizationRequest::new(
+        "reserved:aft",
+        "conn-react",
+        action,
+        json!({"owner":"org","repo":"repo","issue_number":7,"page":1}),
+    );
+    let dispatch = engine
+        .authorize_and_dispatch_github_leg_for_test(request, AGENT, REPO)
+        .unwrap();
+    assert!(
+        matches!(
+            dispatch.outcome,
+            plexus_core::TransportOutcome::Completed { .. }
+        ),
+        "{:?}",
+        dispatch.outcome
+    );
+    assert_eq!(f.vault.calls(), [narrowed(action, 2)]);
+    let status = health(&f.state);
+    assert_eq!(status["token_legs"], json!({"narrowed":1,"broad":0}));
+    assert_eq!(status["broad_suffix_legs"], json!({}));
 }
 
 fn issue_edit() -> Value {
@@ -216,7 +339,7 @@ async fn each_write_leg_uses_its_own_kind_only_while_apply_is_enabled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repo_get_root_narrows_but_a_suffix_keeps_the_scoped_path() {
+async fn repo_get_root_uses_its_kind_and_a_v1_suffix_uses_its_matching_kind() {
     let f = Fixture::new(true);
     for path in ["issues/42", "", ""] {
         let reply = f.read_root(path).await;
@@ -225,14 +348,14 @@ async fn repo_get_root_narrows_but_a_suffix_keeps_the_scoped_path() {
     assert_eq!(
         f.vault.calls(),
         [
-            broad(),
+            narrowed("github.issue.get", 1),
             narrowed("github.repo.get", 1),
             narrowed("github.repo.get", 1)
         ]
     );
     assert_eq!(
         health(&f.state)["token_legs"],
-        json!({"narrowed":2,"broad":1})
+        json!({"narrowed":3,"broad":0})
     );
 }
 

@@ -1887,6 +1887,22 @@ where
         self.dispatch_reserved(reservation, run_deadline_ms, Some((agent, repository)))
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn authorize_and_dispatch_github_leg_for_test(
+        &self,
+        request: AuthorizationRequest,
+        agent: &str,
+        repository: &str,
+    ) -> Result<DispatchOutcome, Denial> {
+        let reservation = self.authorize(
+            request
+                .with_resolved_repository(repository)
+                .with_attributed_agent(agent),
+        )?;
+        Ok(self.revalidate_and_dispatch_github_leg(&reservation, agent, repository, None))
+    }
+
     fn dispatch_reserved(
         &self,
         reservation: &Reservation,
@@ -2119,27 +2135,42 @@ where
             None => None,
         };
         let mut narrowed = false;
+        let mut broad_suffix = None;
         let credential = match (handle_authority.as_ref(), handle.as_ref()) {
             (Some(authority), _) => {
                 let mut prepare = || {
                     if let (Some(tokens), Some((agent, repository))) =
                         (&self.github_policy_tokens, github_leg)
                     {
-                        // The policy's repo.get kind covers only the exact root.
                         let suffix = reservation.action == "github.repo.get"
                             && reservation
                                 .args
                                 .get("path")
                                 .is_some_and(|path| path.as_str() != Some(""));
-                        if !suffix {
-                            let identity = std::str::from_utf8(&authority.credential_reference)
-                                .map_err(|_| crate::github::credential::UNRESOLVABLE_PERMANENT)?;
-                            if let Some(token) =
-                                tokens.prepare(agent, identity, &reservation.action, repository)?
-                            {
-                                narrowed = true;
-                                return Ok(token);
+                        let identity = std::str::from_utf8(&authority.credential_reference)
+                            .map_err(|_| crate::github::credential::UNRESOLVABLE_PERMANENT)?;
+                        let token = if suffix {
+                            use crate::github::credential::RepoGetToken;
+                            // The repo.get kind itself covers only the root;
+                            // select a suffix kind on the policy being minted.
+                            match tokens.prepare_repo_get_suffix(
+                                agent,
+                                identity,
+                                repository,
+                                &reservation.args,
+                            )? {
+                                RepoGetToken::Narrowed(token) => Some(token),
+                                RepoGetToken::Broad(suffix) => {
+                                    broad_suffix = Some(suffix);
+                                    None
+                                }
                             }
+                        } else {
+                            tokens.prepare(agent, identity, &reservation.action, repository)?
+                        };
+                        if let Some(token) = token {
+                            narrowed = true;
+                            return Ok(token);
                         }
                     }
                     self.seams
@@ -2190,7 +2221,7 @@ where
         }
         if github_leg.is_some() && handle_authority.is_some() {
             if let Some(tokens) = &self.github_policy_tokens {
-                tokens.record_leg(narrowed);
+                tokens.record_leg(narrowed, broad_suffix);
             }
         }
         let response = if connection.app_key == "gmail" && reservation.action == "gmail.send" {
