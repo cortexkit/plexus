@@ -85,7 +85,7 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: verify
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ startsWith(matrix.target, 'windows-') && 75 || 60 }}
     strategy:
       fail-fast: false
       matrix:

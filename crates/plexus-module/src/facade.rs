@@ -1026,11 +1026,8 @@ pub(super) fn fresh_request_id() -> String {
     static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = NONCE.get_or_init(|| {
-        use std::io::Read;
         let mut bytes = [0u8; 16];
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut file| file.read_exact(&mut bytes))
-            .expect("request identity requires operating-system randomness");
+        getrandom::fill(&mut bytes).expect("request identity requires operating-system randomness");
         bytes
             .iter()
             .map(|byte| format!("{byte:02x}"))

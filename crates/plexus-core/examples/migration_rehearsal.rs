@@ -208,29 +208,40 @@ fn backup_live(live: &str) {
 
 fn backup_live_with_seed(live: &str, seed: bool) {
     let copy = private_source_copy(live);
-    println!(
-        "  rehearsing sqlite3 .backup copy: {}",
-        copy.path().display()
-    );
+    println!("  rehearsing SQLite backup copy: {}", copy.path().display());
     run_with(copy.path().to_str().expect("UTF-8 scratch copy"), seed);
 }
 
 fn private_source_copy(live: &str) -> plexus_core::test_scratch::Scratch {
+    use rusqlite::backup::{Backup, StepResult};
+    use std::time::{Duration, Instant};
+
     let source = open_existing(live).expect("source must be an existing readable SQLite store");
-    drop(source);
     let copy = plexus_core::test_scratch::Scratch::database("migration45-live-backup");
     prepare_backup(&copy);
-    let output = bounded_output(
-        std::process::Command::new("sqlite3")
-            .arg("-readonly")
-            .arg(live)
-            .arg(format!(".backup '{}'", copy.path().display())),
-    );
-    assert!(
-        output.status.success(),
-        "sqlite3 .backup: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let mut destination =
+        rusqlite::Connection::open(copy.path()).expect("open private backup output");
+    // Use the online backup API so the snapshot includes committed WAL pages.
+    // Retry briefly if a concurrent writer holds a lock, but bound the rehearsal.
+    source
+        .busy_timeout(Duration::ZERO)
+        .expect("set source busy timeout");
+    destination
+        .busy_timeout(Duration::ZERO)
+        .expect("set backup busy timeout");
+    let backup = Backup::new(&source, &mut destination).expect("start SQLite backup");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "SQLite backup did not finish in 30 seconds"
+        );
+        match backup.step(100).expect("copy SQLite pages") {
+            StepResult::Done => break,
+            StepResult::More => {}
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
     copy
 }
 
@@ -553,10 +564,12 @@ fn row_snapshot(
     (columns, rows)
 }
 
+#[cfg(test)]
 #[path = "../tests/support/bounded.rs"]
 mod bounded_child;
 
 /// A stuck backup or child test is a failed rehearsal, not an unbounded wait.
+#[cfg(test)]
 fn bounded_output(command: &mut std::process::Command) -> std::process::Output {
     bounded_child::child_output(
         command,
@@ -617,10 +630,11 @@ mod tests {
         let connection = rusqlite::Connection::open(source.path()).unwrap();
         connection
             .execute_batch(
-                "CREATE TABLE sentinel (value TEXT); INSERT INTO sentinel VALUES ('original');",
+                "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+                 CREATE TABLE sentinel (value TEXT); INSERT INTO sentinel VALUES ('original');",
             )
             .unwrap();
-        drop(connection);
+        // Keep the source open so the backup must read committed WAL pages.
         let copy = private_source_copy(source.path().to_str().unwrap());
         let writable = rusqlite::Connection::open(copy.path()).unwrap();
         writable

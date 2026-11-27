@@ -11,6 +11,18 @@ pub(super) fn refused(code: &str) -> TransportResponse {
     TransportResponse::vendor_error(code)
 }
 
+pub(super) fn storage_request_failed(
+    _error: reqwest::Error,
+    _config: &RestConfig,
+) -> TransportResponse {
+    #[cfg(test)]
+    if _config.test_root_certificate.is_some() {
+        // Show the transport error only for the local TLS fixture, without its URL.
+        std::eprintln!("credentialless storage fixture: {:?}", _error.without_url());
+    }
+    refused("job_log_download_failed")
+}
+
 pub(super) fn storage_failure(status: u16, _url: &reqwest::Url) -> TransportResponse {
     // Unlike a reviewed API endpoint, even the path of a signed storage URL can
     // be a credential. Keep the entire destination out of operator diagnostics.
@@ -221,7 +233,7 @@ pub(super) fn download(
         .send()
     {
         Ok(response) => response,
-        Err(_) => return refused("job_log_download_failed"),
+        Err(error) => return storage_request_failed(error, config),
     };
     if properties.status().is_redirection() {
         return refused("job_log_redirect_refused");
@@ -249,7 +261,7 @@ pub(super) fn download(
     };
     let response = match storage.timeout(leg.timeout(time)).send() {
         Ok(response) => response,
-        Err(_) => return refused("job_log_download_failed"),
+        Err(error) => return storage_request_failed(error, config),
     };
     if response.status().is_redirection() {
         return refused("job_log_redirect_refused");

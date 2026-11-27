@@ -153,7 +153,9 @@ jobs:
     needs: plan
     if: needs.plan.outputs.skip-test != 'true'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    # Both architectures reached the module suite in 45 minutes; leave room
+    # for the remaining integration tests and a slower hosted machine.
+    timeout-minutes: 70
     strategy:
       fail-fast: false
       matrix:

@@ -2584,9 +2584,10 @@ async fn every_shipped_manifest_is_reachable_through_the_operator_ceremony() {
     drop(client);
 
     let admin_binary = ckdev_binary(env!("CARGO_BIN_EXE_ck-plexus-admin"));
+    let expected_admin_name = format!("ckdev-plexus-admin{}", std::env::consts::EXE_SUFFIX);
     assert_eq!(
-        admin_binary.file_name().and_then(|name| name.to_str()),
-        Some("ckdev-plexus-admin")
+        admin_binary.file_name().unwrap(),
+        expected_admin_name.as_str()
     );
     let mut failures = Vec::new();
 
@@ -2723,9 +2724,10 @@ async fn descriptor_nonce_reaches_hello_provenance_and_a_later_vault_read() {
     drop(client);
 
     let admin_binary = ckdev_binary(env!("CARGO_BIN_EXE_ck-plexus-admin"));
+    let expected_admin_name = format!("ckdev-plexus-admin{}", std::env::consts::EXE_SUFFIX);
     assert_eq!(
-        admin_binary.file_name().and_then(|name| name.to_str()),
-        Some("ckdev-plexus-admin")
+        admin_binary.file_name().unwrap(),
+        expected_admin_name.as_str()
     );
     let binary = admin_binary;
     let connection_file = daemon.connection_file_path.clone();

@@ -470,9 +470,16 @@ mod tests {
         let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(directory)
             .expect("read store directory")
             .filter(|entry| {
-                !entry
-                    .as_ref()
-                    .is_ok_and(|entry| entry.file_name().to_string_lossy().ends_with("-shm"))
+                !entry.as_ref().is_ok_and(|entry| {
+                    let name = entry.file_name();
+                    // A held lease's byte-range lock prevents raw reads on Windows.
+                    // The lease coordinates writers; it does not hold store contents.
+                    (cfg!(windows)
+                        && Path::new(&name)
+                            .extension()
+                            .is_some_and(|ext| ext == "lease"))
+                        || name.to_string_lossy().ends_with("-shm")
+                })
             })
             .map(|entry| {
                 let entry = entry.expect("directory entry");

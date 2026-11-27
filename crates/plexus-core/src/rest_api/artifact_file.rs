@@ -91,7 +91,7 @@ pub(super) fn download(
     };
     let response = match storage.timeout(leg.timeout(time)).send() {
         Ok(response) => response,
-        Err(_) => return refused("job_log_download_failed"),
+        Err(error) => return artifact_response(job_log::storage_request_failed(error, config)),
     };
     if response.status().is_redirection() {
         return refused("job_log_redirect_refused");

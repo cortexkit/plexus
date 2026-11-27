@@ -372,6 +372,7 @@ async fn selection_health_scenario(scenario: &str) {
         );
     }
     drop(conn);
+    drop(store);
     std::fs::remove_file(path).unwrap();
 }
 

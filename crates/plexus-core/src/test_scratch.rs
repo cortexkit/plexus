@@ -562,7 +562,21 @@ mod tests {
     /// Push one entry's modification time back, so the sweep sees the age an
     /// orphan from a killed run would really have.
     fn backdate(path: &Path, by: Duration) {
+        #[cfg(not(windows))]
         let file = fs::File::open(path).expect("open for backdating");
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+
+            // SetFileTime needs write access, and opening a directory needs
+            // FILE_FLAG_BACKUP_SEMANTICS rather than the regular-file defaults.
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+                .expect("open for backdating")
+        };
         let when = SystemTime::now() - by;
         file.set_times(fs::FileTimes::new().set_modified(when))
             .expect("backdate");

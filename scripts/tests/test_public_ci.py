@@ -68,7 +68,7 @@ class PublicCiTests(unittest.TestCase):
             {"target": "windows-arm64", "runner": "windows-11-arm"},
         ])
         self.assertEqual(job["strategy"]["fail-fast"], "false")
-        self.assertEqual(job["timeout-minutes"], "45")
+        self.assertEqual(job["timeout-minutes"], "70")
         self.assertNotIn("continue-on-error", job)
         uses = [step.get("uses", "") for step in job["steps"]]
         checkout = next(i for i, action in enumerate(uses) if action.startswith("actions/checkout@"))

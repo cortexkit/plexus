@@ -243,7 +243,12 @@ pub fn import_store(from: &Path, to: &Path) -> Result<Vec<TableSummary>> {
         })
         .map_err(|e| e.to_string())?;
     drop(destination);
-    std::fs::File::open(&staged)
+    #[cfg(not(windows))]
+    let staged_file = std::fs::File::open(&staged);
+    #[cfg(windows)]
+    // A read-only handle cannot flush file data with FlushFileBuffers.
+    let staged_file = std::fs::OpenOptions::new().write(true).open(&staged);
+    staged_file
         .and_then(|f| f.sync_all())
         .map_err(|e| e.to_string())?;
     // Persist the union before publishing the database. A later restore in this

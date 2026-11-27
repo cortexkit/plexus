@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/cortexkit/plexus"
 
 [features]
-test-support = ["dep:rustix"]
+test-support = ["dep:rustix", "rusqlite/backup"]
 
 [[example]]
 name = "migration_rehearsal"
