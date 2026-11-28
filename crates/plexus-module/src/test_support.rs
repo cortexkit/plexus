@@ -394,18 +394,7 @@ pub(crate) async fn send_tool_call(
     serde_json::from_slice(&reply.body).expect("tool reply JSON")
 }
 
-/// A migrated store in the SQLite database file at `path`, namespaced by that
-/// path, the way most fixtures open theirs.
-pub(crate) fn open_file_store(path: &std::path::Path) -> plexus_core::PlexusStore {
-    let location = path.to_string_lossy().into_owned();
-    plexus_core::PlexusStore::open(&cortexkit_store_types::StorageDescriptor {
-        module_id: crate::DEFAULT_MODULE_ID.to_string(),
-        storage_namespace: location.clone(),
-        isolation: cortexkit_store_types::Isolation::Module,
-        backend: cortexkit_store_types::StorageBackend::Sqlite { path: location },
-    })
-    .expect("open the test store file")
-}
+pub(crate) use crate::test_fixtures::open_file_store;
 
 /// A migrated store in a fresh private scratch directory.
 pub(crate) fn open_memory_store(namespace: impl Into<String>) -> plexus_core::PlexusStore {

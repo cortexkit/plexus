@@ -12,6 +12,10 @@
   you changed. Also run tests your change can break by name, for example the
   manifest, catalog-fixture or `gh_shim_wire` contract tests when you touch
   those surfaces.
+- For flow audience changes, run both targeted filters:
+  `cargo test --locked -p plexus-module --lib flow_audience` and
+  `cargo test --locked -p plexus-module --test flow_audience flow_audience::`.
+  The integration target builds the launcher for cases with supervised peers.
 - Run `scripts/prepush.sh --fast` locally. It compiles nothing and takes seconds.
 - For a bug fix, show once that the new regression test fails without the fix.
 - Never run a whole crate or workspace suite, `scripts/prepush.sh --full`,

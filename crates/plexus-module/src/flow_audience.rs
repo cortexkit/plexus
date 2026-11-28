@@ -385,6 +385,11 @@ pub(crate) fn check_call(
     Ok(())
 }
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[path = "flow_audience_test_support.rs"]
+pub mod test_support;
+
 #[cfg(test)]
 #[path = "flow_audience_tests.rs"]
 mod tests;

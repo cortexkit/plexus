@@ -88,6 +88,8 @@ pub mod scope_reader;
 mod search_declarations;
 pub mod smoke;
 mod startup;
+#[cfg(any(test, feature = "test-support"))]
+mod test_fixtures;
 #[cfg(test)]
 #[path = "../../plexus-core/tests/support/http_server.rs"]
 mod test_http;
