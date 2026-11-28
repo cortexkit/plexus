@@ -16,16 +16,16 @@ use std::{
 use async_trait::async_trait;
 use cortexkit_bus_client::{BusClient, BusClientOptions};
 use cortexkit_bus_naming::AccountNames;
-use cortexkit_bus_nats::NatsConnection;
+use cortexkit_bus_nats::{NatsConnection, NatsConnectionState};
 use cortexkit_bus_trait::{BusError, ContentDigest, Headers, PublishReceipt, Stream};
 use plexus_core::storage::event_outbox::{OutboxCursor, OutboxVersion};
 use plexus_core::{event_key::PUBLISHED_EVENTS, storage::now_ms, EventHeaders, PlexusStore};
 use subc_client_rs::{ConsumerOptions, SubcConsumer};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use tracing_subscriber::layer::SubscriberExt;
 
-use crate::ModuleState;
+use crate::{health::HealthState, ModuleState};
 
 const OUTBOX_BATCH: usize = 50;
 const OUTBOX_IDLE: Duration = Duration::from_secs(30);
@@ -719,6 +719,96 @@ async fn wait_for_outbox(store: &PlexusStore, delay: Duration, failures: u32) {
     }
 }
 
+struct BusConnectionWatch {
+    client: Arc<BusClient>,
+    replacements: watch::Receiver<u64>,
+    transport: watch::Receiver<NatsConnectionState>,
+}
+
+impl BusConnectionWatch {
+    fn new(client: Arc<BusClient>) -> Self {
+        let replacements = client.connection_changes();
+        let mut transport = client.connection().connection_state();
+        transport.mark_changed();
+        Self {
+            client,
+            replacements,
+            transport,
+        }
+    }
+
+    // Drive the observation alongside the drain's wait and work, so it cannot
+    // miss an outage just because there are no outbox rows. There is no detached
+    // observer to report a disconnect after Plexus drops the session itself.
+    async fn during<F: Future>(
+        this: &mut Option<Self>,
+        health: &HealthState,
+        work: F,
+    ) -> F::Output {
+        let Some(this) = this else {
+            return work.await;
+        };
+        tokio::select! {
+            biased;
+            never = watch_bus_connection(
+                &mut this.replacements,
+                &mut this.transport,
+                || this.client.connection().connection_state(),
+                health,
+            ) => match never {},
+            result = work => result,
+        }
+    }
+}
+
+async fn watch_bus_connection(
+    replacements: &mut watch::Receiver<u64>,
+    transport: &mut watch::Receiver<NatsConnectionState>,
+    snapshot: impl Fn() -> watch::Receiver<NatsConnectionState>,
+    health: &HealthState,
+) -> std::convert::Infallible {
+    loop {
+        tokio::select! {
+            biased;
+            replaced = replacements.changed() => {
+                if replaced.is_err() {
+                    health.note_bus_connect_failed();
+                    // The drain will try opening a fresh session on its next pass.
+                    break;
+                }
+                health.note_bus_connected();
+                *transport = snapshot();
+                transport.mark_changed();
+            }
+            status = async {
+                if transport.changed().await.is_err() {
+                    // The old transport has gone away; wait for the replacement.
+                    return std::future::pending().await;
+                }
+                *transport.borrow_and_update()
+            } => match status {
+                NatsConnectionState::Connected => health.note_bus_connected(),
+                NatsConnectionState::Disconnected | NatsConnectionState::Closed => {
+                    health.note_bus_connect_failed();
+                }
+                _ => {}
+            },
+        }
+    }
+    std::future::pending().await
+}
+
+enum OutboxPassError {
+    Connect(String),
+    Work(String),
+}
+
+impl From<String> for OutboxPassError {
+    fn from(error: String) -> Self {
+        Self::Work(error)
+    }
+}
+
 /// Run the publisher until shutdown, cancelling in-flight work on claim loss.
 pub(crate) fn spawn_outbox_drain(
     state: Arc<ModuleState>,
@@ -731,22 +821,28 @@ pub(crate) fn spawn_outbox_drain(
         let _liveness = crate::health::OutboxDrainLiveness::new(Arc::clone(&state.health));
         let unpublishable = UnpublishableRows::default();
         let mut session: Option<BusSession> = None;
+        let mut connection_watch = None;
         let mut delay = Duration::ZERO;
         let mut failures = 0u32;
-        let mut wake_setup_logged = false;
+        let mut connect_failure_logged = false;
         let mut claim = state.runtime.connector_home.decisions();
         loop {
             tokio::select! {
                 biased;
                 _ = stop.recv() => break,
                 _ = claim.changed() => {},
-                _ = wait_for_outbox(state.store(), delay, failures) => {}
+                _ = BusConnectionWatch::during(
+                    &mut connection_watch,
+                    &state.health,
+                    wait_for_outbox(state.store(), delay, failures),
+                ) => {}
             }
             delay = OUTBOX_IDLE;
             if let Err(error) = refresh_unpublishable_count(&state).await {
                 state.health.record_publish_error(error);
             }
             if !state.runtime.connector_home.held() {
+                connection_watch = None;
                 session = None;
                 continue;
             }
@@ -758,13 +854,14 @@ pub(crate) fn spawn_outbox_drain(
                 #[cfg(test)]
                 factory.observe_pass();
                 if session.is_none() {
-                    session = Some(factory.open().await.map_err(|error| {
-                        if pending {
-                            error
-                        } else {
-                            "wake_only_bus_unavailable".into()
+                    match factory.open().await {
+                        Ok(opened) => {
+                            state.health.note_bus_connected();
+                            connection_watch = opened.client.clone().map(BusConnectionWatch::new);
+                            session = Some(opened);
                         }
-                    })?);
+                        Err(error) => return Err(OutboxPassError::Connect(error)),
+                    }
                 }
                 let active = session.as_mut().expect("opened session");
                 if active
@@ -772,7 +869,7 @@ pub(crate) fn spawn_outbox_drain(
                     .as_ref()
                     .is_some_and(|client| client.connection_changes().has_changed().is_err())
                 {
-                    return Err("ckbus_maintenance_stopped".into());
+                    return Err(OutboxPassError::Connect("ckbus_maintenance_stopped".into()));
                 }
                 if active.wakes.is_none() {
                     // Share the held session and its claim-loss teardown. Loss wakes
@@ -789,27 +886,32 @@ pub(crate) fn spawn_outbox_drain(
                         )?);
                     }
                 }
-                let result = drain_pass_skipping(
-                    state.store(),
-                    &active.account,
-                    active.publisher.as_ref(),
-                    OUTBOX_BATCH,
-                    &|| state.runtime.connector_home.held(),
-                    &unpublishable,
-                )
-                .await;
-                let route_result = state
-                    .runtime
-                    .web_search
-                    .drain_route_facts(state.store(), OUTBOX_BATCH)
+                BusConnectionWatch::during(&mut connection_watch, &state.health, async {
+                    let result = drain_pass_skipping(
+                        state.store(),
+                        &active.account,
+                        active.publisher.as_ref(),
+                        OUTBOX_BATCH,
+                        &|| state.runtime.connector_home.held(),
+                        &unpublishable,
+                    )
                     .await;
-                refresh_unpublishable_count(&state).await?;
-                result.and_then(|count| route_result.map(|routes| count + routes))
+                    let route_result = state
+                        .runtime
+                        .web_search
+                        .drain_route_facts(state.store(), OUTBOX_BATCH)
+                        .await;
+                    refresh_unpublishable_count(&state).await?;
+                    result
+                        .and_then(|count| route_result.map(|routes| count + routes))
+                        .map_err(|error| classify_pass_error(active.client.as_deref(), error))
+                })
+                .await
             };
             let result = tokio::select! {
                 biased;
                 _ = stop.recv() => break,
-                _ = wait_for_claim_loss(&state) => Err("connector_home_not_held".into()),
+                _ = wait_for_claim_loss(&state) => Err(OutboxPassError::Work("connector_home_not_held".into())),
                 result = work => result,
             };
             match result {
@@ -827,21 +929,26 @@ pub(crate) fn spawn_outbox_drain(
                     };
                 }
                 Err(error) => {
+                    let error = match error {
+                        OutboxPassError::Connect(error) => {
+                            state.health.note_bus_connect_failed();
+                            if !connect_failure_logged {
+                                plexus_core::diag!(info bus: "shared bus session unavailable ({error}); timers remain active");
+                                connect_failure_logged = true;
+                            }
+                            None
+                        }
+                        OutboxPassError::Work(error) => Some(error),
+                    };
                     // Dropping a session terminates its transport tasks without
                     // flushing queued messages. Timeouts and auth errors also
                     // require a fresh gated session, not an autonomous retry.
-                    if !session_reusable(&error) {
+                    if error.as_deref().is_none_or(|code| !session_reusable(code)) {
+                        connection_watch = None;
                         session = None;
                     }
-                    if error != "connector_home_not_held" {
-                        if error == "wake_only_bus_unavailable" {
-                            // Optional wakes cannot degrade an idle publisher's health.
-                            state.health.clear_publish_error();
-                            if !wake_setup_logged {
-                                plexus_core::diag!(info bus: "change watch setup unavailable; timers remain active");
-                                wake_setup_logged = true;
-                            }
-                        } else {
+                    if error.as_deref() != Some("connector_home_not_held") {
+                        if let Some(error) = error {
                             state.health.record_publish_error(error);
                         }
                         failures = failures.saturating_add(1);
@@ -852,6 +959,22 @@ pub(crate) fn spawn_outbox_drain(
         }
         drop(session);
     })
+}
+
+fn classify_pass_error(client: Option<&BusClient>, error: String) -> OutboxPassError {
+    if matches!(
+        error.as_str(),
+        "nats_publish_failed" | "route_fact_publish_failed"
+    ) && client.is_some_and(|client| {
+        matches!(
+            *client.connection().connection_state().borrow(),
+            NatsConnectionState::Disconnected | NatsConnectionState::Closed
+        ) || client.connection_changes().has_changed().is_err()
+    }) {
+        OutboxPassError::Connect(error)
+    } else {
+        OutboxPassError::Work(error)
+    }
 }
 
 #[cfg(test)]

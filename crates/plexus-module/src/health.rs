@@ -14,6 +14,7 @@ use subc_protocol::session::{HealthStatus, ModuleControlResponse};
 /// success outage long before it can run for hours.
 const SCHEDULER_STALL_CADENCES: u64 = 3;
 const MILLIS_PER_SECOND: u64 = 1_000;
+const BUS_UNREACHABLE_AFTER_SECS: u64 = 60;
 /// Smallest wall-versus-monotonic divergence accepted as a host suspension.
 ///
 /// While the process is running the two clocks advance together, so a healthy
@@ -240,6 +241,7 @@ pub struct HealthState {
     outbox_drain_stopped: AtomicBool,
     /// Outbox rows the drain found it can never publish and now skips.
     outbox_unpublishable: AtomicU64,
+    bus_outage_since: std::sync::Mutex<Option<tokio::time::Instant>>,
     /// Origin for the monotonic half of the sample above. Never used as a wall
     /// clock: it deliberately does not count suspended time. Verdict stamps use
     /// the same elapsed clock, anchored numerically at `started_at_ms` so tests
@@ -277,6 +279,20 @@ impl HealthState {
             .clone()
     }
 
+    pub(crate) fn note_bus_connect_failed(&self) {
+        self.bus_outage_since
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_or_insert_with(tokio::time::Instant::now);
+    }
+
+    pub(crate) fn note_bus_connected(&self) {
+        *self
+            .bus_outage_since
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
     pub fn new() -> Self {
         let monotonic_origin = Instant::now();
         let now = now_ms();
@@ -289,6 +305,7 @@ impl HealthState {
             outbox_health: std::sync::Mutex::new(None),
             web_search: std::sync::Mutex::new(None),
             publish_error: std::sync::Mutex::new(None),
+            bus_outage_since: std::sync::Mutex::new(None),
             started_at_ms: now,
             last_heartbeat_ms: AtomicU64::new(now),
             scheduler_alive: AtomicBool::new(true),
@@ -737,6 +754,18 @@ impl HealthState {
         }
         if self.last_publish_error().is_some() {
             failures.push("event notice publishing is failing; see lastPublishError".into());
+        }
+        let bus_outage_secs = self
+            .bus_outage_since
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .map(|since| since.elapsed().as_secs());
+        if let Some(seconds) =
+            bus_outage_secs.filter(|seconds| *seconds >= BUS_UNREACHABLE_AFTER_SECS)
+        {
+            failures.push(format!(
+                "bus_unreachable: the shared outbox, route fact, and wake reader connection has been unreachable for {seconds} s"
+            ));
         }
         if outbox_unpublishable > 0 {
             failures.push(format!(

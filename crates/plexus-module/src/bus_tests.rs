@@ -880,57 +880,35 @@ async fn idle_reader_setup_failure_keeps_publisher_healthy() {
     task.await.unwrap();
 }
 
-#[tokio::test]
-async fn idle_without_a_bus_is_healthy_pending_failure_degrades_and_publish_recovers() {
+#[tokio::test(start_paused = true)]
+async fn bus_unreachable_degrades_at_sixty_seconds_and_clears_on_connect() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use subc_protocol::session::HealthStatus;
+
     struct OutageSessions {
-        ready: std::sync::atomic::AtomicBool,
-        opens: std::sync::atomic::AtomicUsize,
-        publisher: MockPublisher,
+        ready: AtomicBool,
+        attempts: mpsc::UnboundedSender<bool>,
     }
     #[async_trait]
     impl SessionFactory for OutageSessions {
         async fn open(&self) -> Result<BusSession, String> {
-            self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if !self.ready.load(std::sync::atomic::Ordering::SeqCst) {
+            let ready = self.ready.load(Ordering::SeqCst);
+            self.attempts.send(ready).unwrap();
+            if !ready {
                 return Err("nats_connect_failed".into());
             }
             Ok(BusSession {
                 wakes: None,
                 client: None,
                 account: AccountNames::derive("box_test").unwrap(),
-                publisher: Box::new(self.publisher.clone()),
+                publisher: Box::new(MockPublisher::default()),
                 _transport: None,
             })
         }
     }
+
     let (_scratch, store) = test_store("demand-health-boundary");
     let sub = seed_connection_and_subscription(&store, "conn-1");
-    let state = Arc::new(ModuleState {
-        runtime: crate::runtime_for_test(store.clone()),
-        health: Arc::new(crate::health::HealthState::new()),
-    });
-    state.health.record_publish_error("waiting_for_idle_pass");
-    let factory = Arc::new(OutageSessions {
-        ready: std::sync::atomic::AtomicBool::new(false),
-        opens: std::sync::atomic::AtomicUsize::new(0),
-        publisher: MockPublisher::default(),
-    });
-    let (shutdown, stop) = mpsc::channel(1);
-    let task = spawn_outbox_drain(state.clone(), stop, factory.clone());
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while state.health.last_publish_error().is_some() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .expect("idle without a bus must finish healthy");
-    assert_eq!(factory.opens.load(std::sync::atomic::Ordering::SeqCst), 0);
-    let subc_protocol::session::ModuleControlResponse::HealthCheck { status, .. } =
-        current_health(&state)
-    else {
-        panic!("health")
-    };
-    assert_eq!(status, subc_protocol::session::HealthStatus::Ok);
     insert_test_event(
         &store,
         &sub,
@@ -939,40 +917,106 @@ async fn idle_without_a_bus_is_healthy_pending_failure_degrades_and_publish_reco
         "owner/repo",
         &json!({}),
     );
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while state.health.last_publish_error().is_none() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let subc_protocol::session::ModuleControlResponse::HealthCheck {
-        status, metrics, ..
-    } = current_health(&state)
-    else {
-        panic!("health")
+    let state = Arc::new(ModuleState {
+        runtime: crate::runtime_for_test(store.clone()),
+        health: Arc::new(crate::health::HealthState::new()),
+    });
+    let (attempts, mut results) = mpsc::unbounded_channel();
+    let factory = Arc::new(OutageSessions {
+        ready: AtomicBool::new(false),
+        attempts,
+    });
+    let (shutdown, stop) = mpsc::channel(1);
+    let task = spawn_outbox_drain(state.clone(), stop, factory.clone());
+    let check = || {
+        let subc_protocol::session::ModuleControlResponse::HealthCheck { status, detail, .. } =
+            current_health(&state)
+        else {
+            panic!("health")
+        };
+        (status, detail)
     };
-    assert_eq!(status, subc_protocol::session::HealthStatus::Degraded);
-    assert_eq!(metrics.unwrap()["lastPublishError"], "nats_connect_failed");
-    factory
-        .ready
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while state.health.last_publish_error().is_some() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(factory.publisher.published.lock().unwrap().len(), 2);
-    let subc_protocol::session::ModuleControlResponse::HealthCheck { status, .. } =
-        current_health(&state)
-    else {
-        panic!("health")
-    };
-    assert_eq!(status, subc_protocol::session::HealthStatus::Ok);
+
+    assert_eq!(
+        tokio::time::timeout(OUTBOX_DRAIN_DEADLINE, results.recv())
+            .await
+            .expect("initial connection attempt"),
+        Some(false)
+    );
+    tokio::time::advance(Duration::from_secs(59)).await;
+    assert_eq!(
+        check(),
+        (HealthStatus::Ok, None),
+        "a short outage is healthy"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let (status, detail) = check();
+    assert_eq!(status, HealthStatus::Degraded);
+    let detail = detail.unwrap();
+    assert!(detail.starts_with("bus_unreachable:"), "{detail}");
+    assert!(detail.contains("60 s"), "{detail}");
+    assert!(detail.contains("outbox"), "{detail}");
+    assert_eq!(store.drain_event_outbox(50).unwrap().len(), 1);
+
+    factory.ready.store(true, Ordering::SeqCst);
+    while !tokio::time::timeout(OUTBOX_DRAIN_DEADLINE, results.recv())
+        .await
+        .expect("drain attempted to reconnect")
+        .expect("drain task is still running")
+    {}
+    assert_eq!(check(), (HealthStatus::Ok, None));
     drop(shutdown);
-    task.await.unwrap();
+    tokio::time::timeout(OUTBOX_DRAIN_DEADLINE, task)
+        .await
+        .expect("drain stopped")
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn bus_state_signals_report_transport_loss_until_recovery_but_ignore_idle_close() {
+    use futures_util::FutureExt;
+    use subc_protocol::session::{HealthStatus, ModuleControlResponse};
+
+    let health = HealthState::new();
+    let (replacements, mut ready) = watch::channel(0);
+    let (old, mut transport) = watch::channel(NatsConnectionState::Connected);
+    let (new, _) = watch::channel(NatsConnectionState::Connected);
+    let status = || {
+        let ModuleControlResponse::HealthCheck { status, .. } = health.report() else {
+            panic!("health")
+        };
+        status
+    };
+
+    {
+        let mut observe = std::pin::pin!(watch_bus_connection(
+            &mut ready,
+            &mut transport,
+            || new.subscribe(),
+            &health,
+        ));
+        old.send_replace(NatsConnectionState::Disconnected);
+        assert!(observe.as_mut().now_or_never().is_none());
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(status(), HealthStatus::Degraded);
+
+        old.send_replace(NatsConnectionState::Connected);
+        assert!(observe.as_mut().now_or_never().is_none());
+        assert_eq!(status(), HealthStatus::Ok);
+
+        old.send_replace(NatsConnectionState::Disconnected);
+        assert!(observe.as_mut().now_or_never().is_none());
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(status(), HealthStatus::Degraded);
+        replacements.send_replace(1);
+        assert!(observe.as_mut().now_or_never().is_none());
+        assert_eq!(status(), HealthStatus::Ok);
+    }
+
+    // Plexus stops observing before closing its own session.
+    new.send_replace(NatsConnectionState::Closed);
+    tokio::time::advance(Duration::from_secs(61)).await;
+    assert_eq!(status(), HealthStatus::Ok);
 }
 
 #[tokio::test]

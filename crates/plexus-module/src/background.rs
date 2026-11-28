@@ -463,8 +463,13 @@ pub(super) fn connector_home_health(state: &ModuleState) -> ModuleControlRespons
     } = &mut report
     {
         if !state.runtime.connector_home.held() {
-            *status = subc_protocol::session::HealthStatus::Degraded;
-            *detail = Some("connector_home_not_held".into());
+            if *status == subc_protocol::session::HealthStatus::Ok {
+                *status = subc_protocol::session::HealthStatus::Degraded;
+            }
+            match detail {
+                Some(detail) => detail.push_str("; connector_home_not_held"),
+                None => *detail = Some("connector_home_not_held".into()),
+            }
         }
         if let Some(metrics) = metrics {
             metrics["ready"] = json!(true);

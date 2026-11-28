@@ -237,6 +237,33 @@ fn health_reports_unknown_degraded_and_held_state() {
     assert_eq!(value["metrics"]["connectorHome"]["source"], "cloud");
     assert!(value["metrics"]["connectorHome"]["checkedAt"].is_i64());
 }
+
+#[tokio::test(start_paused = true)]
+async fn health_reports_bus_outage_alongside_other_degraded_reasons() {
+    let home = Arc::new(ConnectorHome::new(Double::new(vec![held()])));
+    let (_scratch, state) = fixture(home);
+    state.health.note_bus_connect_failed();
+    state.health.record_publish_error("nats_publish_failed");
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    let value = serde_json::to_value(connector_home_health(&state)).unwrap();
+    assert_eq!(value["status"], "degraded");
+    let detail = value["detail"].as_str().unwrap();
+    assert!(detail.contains("bus_unreachable:"), "{detail}");
+    assert!(detail.contains("connector_home_not_held"), "{detail}");
+    assert!(
+        detail.contains("event notice publishing is failing"),
+        "{detail}"
+    );
+
+    state.health.note_bus_connected();
+    let value = serde_json::to_value(connector_home_health(&state)).unwrap();
+    assert_eq!(value["status"], "degraded");
+    assert_eq!(
+        value["detail"],
+        "event notice publishing is failing; see lastPublishError; connector_home_not_held"
+    );
+}
+
 /// Report panic-recovery counts for the runtime's MCP and REST transports in
 /// `connector_home_health`. Expect zero for both because neither has panicked.
 #[test]
