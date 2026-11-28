@@ -16,7 +16,7 @@ concurrency:
 
 env:
   # Set to the oldest public core that accepts Plexus's registration.
-  PLEXUS_REQUIRES_CORE: ''
+  PLEXUS_REQUIRES_CORE: '0.24.8'
   # Each Windows build must pass its native suite before uploading assets.
   PLEXUS_PUBLISH_WINDOWS: 'true'
 
