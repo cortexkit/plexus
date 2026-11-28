@@ -1,35 +1,38 @@
 //! Self-claim minting on the registration connection owned by Plexus's reader.
 
 use crate::{scope_reader::PendingControlReplies, wire, ModuleError};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::Duration;
 use subc_client_rs::registration::{ClaimError, ClaimMinter};
 use subc_protocol::claim::{ClaimMintReply, ClaimMintRequest, ClaimRateLimitedDetail};
 use subc_protocol::{ErrorBody, Frame, FrameType};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 const MINT_BUDGET: Duration = Duration::from_secs(5);
 
-struct Minter {
+pub(super) struct Minter {
     writer: mpsc::WeakSender<Frame>,
     pending: Arc<PendingControlReplies>,
-    active: Arc<AtomicBool>,
+    stopping: watch::Sender<bool>,
     version: u8,
 }
 
-/// Marks the installed minter unavailable when its registration loop ends.
+/// Marks the installed minter unavailable when its registration loop shuts down.
 /// The installed minter holds no strong writer, so it cannot keep shutdown open.
 pub(super) struct Lifetime {
-    active: Arc<AtomicBool>,
+    stopping: watch::Sender<bool>,
     pending: Arc<PendingControlReplies>,
+}
+
+impl Lifetime {
+    pub(super) fn begin_shutdown(&self) {
+        self.stopping.send_replace(true);
+    }
 }
 
 impl Drop for Lifetime {
     fn drop(&mut self) {
-        self.active.store(false, Ordering::Release);
+        self.begin_shutdown();
         self.pending.clear();
     }
 }
@@ -39,15 +42,11 @@ pub(super) fn install(
     version: u8,
     pending: Arc<PendingControlReplies>,
 ) -> Result<Lifetime, ModuleError> {
-    let active = Arc::new(AtomicBool::new(true));
-    subc_client_rs::registration::install_claim_minter(Arc::new(Minter {
-        writer: writer.downgrade(),
-        pending: Arc::clone(&pending),
-        active: Arc::clone(&active),
-        version,
-    }))
-    .map_err(|error| ModuleError::Message(format!("install registration claim minter: {error}")))?;
-    Ok(Lifetime { active, pending })
+    let (minter, lifetime) = Minter::new(writer, version, pending);
+    subc_client_rs::registration::install_claim_minter(Arc::new(minter)).map_err(|error| {
+        ModuleError::Message(format!("install registration claim minter: {error}"))
+    })?;
+    Ok(lifetime)
 }
 
 struct PendingMint<'a> {
@@ -63,8 +62,27 @@ impl Drop for PendingMint<'_> {
 }
 
 impl Minter {
-    async fn call(&self, request: &ClaimMintRequest) -> Result<Frame, ClaimError> {
-        if !self.active.load(Ordering::Acquire) {
+    pub(super) fn new(
+        writer: &mpsc::Sender<Frame>,
+        version: u8,
+        pending: Arc<PendingControlReplies>,
+    ) -> (Self, Lifetime) {
+        let (stopping, _) = watch::channel(false);
+        let minter = Self {
+            writer: writer.downgrade(),
+            pending: Arc::clone(&pending),
+            stopping: stopping.clone(),
+            version,
+        };
+        (minter, Lifetime { stopping, pending })
+    }
+
+    async fn call(
+        &self,
+        request: &ClaimMintRequest,
+        stopping: &mut watch::Receiver<bool>,
+    ) -> Result<Frame, ClaimError> {
+        if *stopping.borrow() {
             return Err(ClaimError::Unavailable);
         }
         let writer = self.writer.upgrade().ok_or(ClaimError::Unavailable)?;
@@ -76,11 +94,6 @@ impl Minter {
             pending: &self.pending,
             correlation,
         };
-        // Close may race registration in the reply table. Never send after the
-        // lifetime guard has invalidated the owner, even if a writer still lives.
-        if !self.active.load(Ordering::Acquire) {
-            return Err(ClaimError::Unavailable);
-        }
         let frame = Frame::build_with_version(
             self.version,
             FrameType::Request,
@@ -91,10 +104,20 @@ impl Minter {
             serde_json::to_vec(request).map_err(|_| ClaimError::Protocol)?,
         )
         .map_err(|_| ClaimError::Protocol)?;
-        writer
-            .send(frame)
-            .await
-            .map_err(|_| ClaimError::Unavailable)?;
+        let permit = tokio::select! {
+            biased;
+            _ = stopping.wait_for(|&stopping| stopping) => return Err(ClaimError::Unavailable),
+            permit = writer.reserve() => permit.map_err(|_| ClaimError::Unavailable)?,
+        };
+        {
+            // Hold the read guard only while enqueuing, so shutdown cannot
+            // start between the final check and the send.
+            let stopping = stopping.borrow();
+            if *stopping {
+                return Err(ClaimError::Unavailable);
+            }
+            permit.send(frame);
+        }
         tokio::task::spawn_blocking(move || replies.recv())
             .await
             .map_err(|_| ClaimError::Unavailable)?
@@ -105,8 +128,9 @@ impl Minter {
         &self,
         request: ClaimMintRequest,
     ) -> Result<ClaimMintReply, ClaimError> {
+        let mut stopping = self.stopping.subscribe();
         loop {
-            let reply = self.call(&request).await?;
+            let reply = self.call(&request, &mut stopping).await?;
             if reply.header.ty == FrameType::Error {
                 let error: ErrorBody =
                     serde_json::from_slice(&reply.body).map_err(|_| ClaimError::Protocol)?;
@@ -114,13 +138,12 @@ impl Minter {
                     let detail: ClaimRateLimitedDetail =
                         serde_json::from_value(error.detail.ok_or(ClaimError::Protocol)?)
                             .map_err(|_| ClaimError::Protocol)?;
-                    tokio::time::sleep(Duration::from_millis(detail.retry_after_ms)).await;
-                    continue;
+                    tokio::select! {
+                        biased;
+                        _ = stopping.wait_for(|&stopping| stopping) => {}
+                        _ = tokio::time::sleep(Duration::from_millis(detail.retry_after_ms)) => continue,
+                    }
                 }
-                // The error names the failed step, without logging claims or
-                // daemon-authored bodies. Never authenticate an outbound
-                // connection with the launch nonce after claim minting fails.
-                plexus_core::diag!(warn wire: "registration claim.mint refused: {}", error.code);
                 return Err(ClaimError::Refused { code: error.code });
             }
             if reply.header.ty != FrameType::Response {
@@ -137,7 +160,22 @@ impl ClaimMinter for Minter {
         let result = tokio::time::timeout(MINT_BUDGET, self.mint_with_budget(request))
             .await
             .unwrap_or(Err(ClaimError::Timeout));
-        if result.is_err() {
+        // Use one shutdown-state check for both warnings so a refusal racing
+        // with shutdown is classified at just one log level.
+        let stopping = self.stopping.borrow();
+        if *stopping {
+            if let Err(ClaimError::Refused { code }) = &result {
+                plexus_core::diag!(debug wire: "registration claim.mint refused during shutdown: {code}");
+            }
+            // subc-client-rs stops the current reconnect loop on Unavailable.
+            // Neither a fresh claim nor a retryable refusal should escape shutdown.
+            return Err(ClaimError::Unavailable);
+        }
+        if let Err(error) = &result {
+            // Report the code, never the daemon-authored error body or claim.
+            if let ClaimError::Refused { code } = error {
+                plexus_core::diag!(warn wire: "registration claim.mint refused: {code}");
+            }
             plexus_core::diag!(warn wire: "registration claim.mint failed; outbound connection refused");
         }
         result

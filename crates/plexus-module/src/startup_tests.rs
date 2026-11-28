@@ -635,6 +635,92 @@ async fn stop_while_waiting_for_readiness_ack_closes_without_retry() {
     assert_writer_closed(&mut responses).await;
 }
 
+#[tokio::test]
+async fn draining_fences_claim_mint_and_logs_racing_refusal_once_at_debug() {
+    use subc_client_rs::registration::{ClaimError, ClaimMinter};
+    use subc_protocol::claim::{ClaimMintRequest, ClaimPurpose};
+    use subc_protocol::error_codes::CLAIM_UNREDEEMED_LIMIT;
+    use tracing_subscriber::prelude::*;
+
+    let logs = plexus_core::test_scratch::Scratch::directory("draining-claim-mint-log");
+    let mut log_config = cortexkit_log::Config::in_dir("plexus", logs.path());
+    log_config.spec = Some("debug".into());
+    let (layer, handle) = crate::bus::safe_log_layer(log_config).unwrap();
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::Registry::default().with(layer));
+
+    let (mut input, mut reader) = tokio::io::duplex(8192);
+    let (writer, mut responses) = mpsc::channel(8);
+    let bindings = Arc::new(RouteBindings::new());
+    let pending = Arc::clone(&bindings.control_replies);
+    let (minter, registration) = registration::Minter::new(&writer, PROTOCOL_VERSION, pending);
+    let request = || ClaimMintRequest::new(ClaimPurpose::SelfConnection);
+    let dispatcher = dispatch_loop_starting(
+        &mut reader,
+        writer.clone(),
+        Arc::new(health::HealthState::new()),
+        Arc::clone(&bindings),
+        Arc::clone(&bindings.control_replies),
+        std::future::pending(),
+        Some(DispatchSettings {
+            connection_file: Path::new("unused-startup-fixture-connection"),
+            managed: None,
+            registration: Some(&registration),
+        }),
+    );
+    let daemon = async {
+        let mint = recv_within(responses.recv(), RESPONSE_DEADLINE, "claim.mint request").await;
+        assert_eq!(mint.header.ty, FrameType::Request);
+        assert_eq!((mint.header.channel, mint.header.epoch), (0, 0));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&mint.body).unwrap()["op"],
+            "claim.mint"
+        );
+        let refusal = frame(
+            FrameType::Error,
+            0,
+            mint.header.corr,
+            json!({"code": CLAIM_UNREDEEMED_LIMIT, "message": "refused"}),
+        );
+        // Queue both frames together. The current-thread dispatch loop handles
+        // Draining before the woken mint future can process its refusal.
+        let mut incoming = Vec::new();
+        write_frame(&mut incoming, &refusal).await.unwrap();
+        write_frame(&mut incoming, &stop_notice()).await.unwrap();
+        input.write_all(&incoming).await.unwrap();
+    };
+    let (stopped, (), raced) = tokio::time::timeout(RESPONSE_DEADLINE, async {
+        tokio::join!(dispatcher, daemon, minter.mint(request()))
+    })
+    .await
+    .expect("drain and racing mint finish");
+    stopped.unwrap();
+
+    // Keep the writer and lifetime alive, just as they can be while background
+    // tasks unwind. A new mint must refuse locally rather than enqueue a frame.
+    let fenced = tokio::select! {
+        biased;
+        result = minter.mint(request()) => matches!(result, Err(ClaimError::Unavailable)),
+        _ = responses.recv() => false,
+    };
+    let no_extra_mints =
+        fenced && matches!(responses.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+
+    let log = std::fs::read_to_string(handle.path()).unwrap();
+    let mint_lines: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("registration claim.mint"))
+        .collect();
+    assert!(matches!(raced, Err(ClaimError::Unavailable)) && no_extra_mints && mint_lines.len() == 1,
+        "Draining must stop retries and log the refusal once; racing result: {raced:?}; no extra mints: {no_extra_mints}; mint logs: {mint_lines:?}");
+    test_logging::assert_diagnostic(
+        mint_lines[0],
+        cortexkit_log::ParsedLevel::Debug,
+        "plexus.wire",
+        &format!("registration claim.mint refused during shutdown: {CLAIM_UNREDEEMED_LIMIT}"),
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_notice_during_warmup_exits_without_waiting_for_startup() {
     let (composed, composing) = oneshot::channel();

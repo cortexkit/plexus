@@ -5,18 +5,15 @@ use subc_protocol::claim::{Claim, ClaimPurpose};
 
 fn seam() -> (Arc<Minter>, mpsc::Receiver<Frame>, Lifetime) {
     let (writer, frames) = mpsc::channel(4);
-    let pending = Arc::new(PendingControlReplies::default());
-    let active = Arc::new(AtomicBool::new(true));
-    let minter = Arc::new(Minter {
-        writer: writer.downgrade(),
-        pending: Arc::clone(&pending),
-        active: Arc::clone(&active),
-        version: subc_protocol::PROTOCOL_VERSION,
-    });
+    let (minter, lifetime) = Minter::new(
+        &writer,
+        subc_protocol::PROTOCOL_VERSION,
+        Arc::new(PendingControlReplies::default()),
+    );
     // The test's registration connection owns the sender, not the minter.
     // Keep it alive until the receiver closes, as drain_writer does in run().
     tokio::spawn(async move { writer.closed().await });
-    (minter, frames, Lifetime { active, pending })
+    (Arc::new(minter), frames, lifetime)
 }
 
 async fn next_frame(frames: &mut mpsc::Receiver<Frame>) -> Frame {

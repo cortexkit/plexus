@@ -211,7 +211,7 @@ where
     let hello_ack = expect_hello_ack(reader).await?;
     let negotiated_ver = hello_ack.negotiated_ver;
     let control_replies = Arc::clone(&route_bindings.control_replies);
-    let _registration = if config.registration_channel {
+    let registration = if config.registration_channel {
         Some(registration::install(
             &writer,
             negotiated_ver,
@@ -289,6 +289,7 @@ where
         Some(DispatchSettings {
             connection_file: &config.connection_file_path,
             managed,
+            registration: registration.as_ref(),
         }),
     )
     .await
@@ -319,12 +320,13 @@ where
     .await
 }
 
-struct DispatchSettings<'a> {
-    connection_file: &'a Path,
-    managed: Option<&'a ConfigConnection>,
+pub(super) struct DispatchSettings<'a> {
+    pub(super) connection_file: &'a Path,
+    pub(super) managed: Option<&'a ConfigConnection>,
+    pub(super) registration: Option<&'a registration::Lifetime>,
 }
 
-async fn dispatch_loop_starting<R>(
+pub(super) async fn dispatch_loop_starting<R>(
     reader: &mut R,
     writer: mpsc::Sender<Frame>,
     health: Arc<health::HealthState>,
@@ -420,6 +422,11 @@ where
         }
       }
     }.await;
+    // Stop minting before awaiting background shutdown. Work that is already
+    // unwinding can still use its existing consumer connections.
+    if let Some(registration) = settings.and_then(|settings| settings.registration) {
+        registration.begin_shutdown();
+    }
     drop(reviews);
     if let Some(background) = background {
         background.stop().await;
