@@ -13,7 +13,7 @@ fn main() {
     // positional arguments, so none of those flags reach the Rust test runner.
     match args[0].to_str() {
         Some("test" | "legacy-test" | "legacy-test-fd") => {
-            let mut command = Command::new(&args[1]);
+            let mut command = fixture_command(Path::new(&args[1]));
             command.arg("--exact").arg(&args[2]).arg("--nocapture");
             if args[0] != "test" {
                 legacy_handoff(&mut command, args[0] == "legacy-test-fd");
@@ -21,6 +21,7 @@ fn main() {
             launch(command);
         }
         Some("confirmation" | "confirmation-fd") => {
+            let mut command = fixture_command(Path::new(&args[1]));
             // The test daemon publishes its key before the fake confirmation
             // peer can write a connection file. Bound the startup wait.
             let connection = Path::new(&args[2]);
@@ -29,7 +30,6 @@ fn main() {
                 assert!(Instant::now() < end, "confirmation file was not written");
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let mut command = Command::new(&args[1]);
             command.arg("--subc").arg(connection);
             legacy_handoff(&mut command, args[0] == "confirmation-fd");
             launch(command);
@@ -43,6 +43,8 @@ fn main() {
                 .expect("fixture launch nonce");
             #[cfg(unix)]
             assert_eq!(nonce.source(), subc_os::LaunchNonceSource::Fd);
+            #[cfg(windows)]
+            assert_eq!(nonce.source(), subc_os::LaunchNonceSource::Pipe);
             let output = Path::new(&args[1]);
             let temporary = output.with_extension("partial");
             std::fs::write(&temporary, nonce.value()).expect("write fixture nonce");
@@ -69,10 +71,30 @@ fn launch(mut command: Command) -> ! {
 }
 
 #[cfg(windows)]
+fn fixture_command(program: &Path) -> Command {
+    // The daemon binds the pipe to the wrapper's PID. This test-only wrapper
+    // reads it and passes the nonce to its single fixture child through the
+    // environment; a directly supervised module reads the pipe itself.
+    let mut command = Command::new(program);
+    if std::env::var_os(subc_os::LAUNCH_NONCE_PIPE_ENV).is_some() {
+        let nonce = subc_os::launch_nonce()
+            .expect("read test launcher nonce pipe")
+            .expect("test launcher nonce pipe returned no nonce");
+        command.env(subc_os::LAUNCH_NONCE_ENV, nonce.value());
+    }
+    command
+        .env_remove(subc_os::LAUNCH_NONCE_PIPE_ENV)
+        .env_remove(subc_os::LAUNCH_NONCE_PIPE_FALLBACK_ENV);
+    command
+}
+
+#[cfg(not(windows))]
+fn fixture_command(program: &Path) -> Command {
+    Command::new(program)
+}
+
+#[cfg(windows)]
 fn launch(mut command: Command) -> ! {
-    // The supervisor's nonce pipe authenticates the wrapper's PID, not its
-    // child. The legacy peer uses the environment copy instead.
-    command.env_remove(subc_os::LAUNCH_NONCE_PIPE_ENV);
     let status = command.status().expect("run fixture");
     process::exit(status.code().unwrap_or(1));
 }

@@ -8,9 +8,13 @@ use tokio::net::TcpStream;
 /// Connect to the daemon's first endpoint and authenticate as a client.
 pub async fn connect_client(connection: &subc_transport::ConnectionInfo) -> TcpStream {
     let endpoint = connection.endpoints.first().expect("daemon endpoint");
-    let mut stream = TcpStream::connect(format!("{}:{}", endpoint.host, endpoint.port))
-        .await
-        .expect("connect daemon");
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
+    )
+    .await
+    .expect("connect to daemon endpoint within 5s")
+    .expect("connect daemon");
     authenticate_client(&mut stream, connection, Duration::from_secs(5))
         .await
         .expect("authenticate daemon client");

@@ -87,7 +87,7 @@ async fn register_federated_fixture(
         }
     })
     .await
-    .expect("supervised stand-in nonce");
+    .unwrap_or_else(|_| panic!("supervised fixture {id} did not publish its nonce within 10s"));
     let mut module = manifest::build(id);
     module
         .provides
@@ -1680,6 +1680,9 @@ enum NonceHandoff {
     /// Ensure the Unix child can only read the nonce from descriptor 3.
     #[cfg(unix)]
     DescriptorOnly,
+    /// Start Plexus itself under the daemon to exercise its PID-bound nonce pipe.
+    #[cfg(windows)]
+    PipeDirect,
     /// Plexus runs directly on the daemon's private registration channel.
     RegistrationChannel,
 }
@@ -1732,17 +1735,20 @@ async fn start_live_daemon_with_federation(
         NonceHandoff::Legacy | NonceHandoff::RegistrationChannel => ("legacy-test", "confirmation"),
         #[cfg(unix)]
         NonceHandoff::DescriptorOnly => ("legacy-test-fd", "confirmation-fd"),
+        #[cfg(windows)]
+        NonceHandoff::PipeDirect => ("legacy-test", "confirmation"),
     };
     let vault_args = json!([vault_mode, test_binary, "vault_route_fixture"]);
-    // Only Plexus uses the fake confirmation peer. Its registration-channel
-    // tests instead start the binary directly with the daemon's real endpoint.
-    let (plexus_program, plexus_args) = if nonce_handoff == NonceHandoff::RegistrationChannel {
-        (&binary, json!([]))
-    } else {
-        (
+    // Tests of registration channels and the Windows nonce pipe start Plexus
+    // directly. Other tests use the launcher to inject the confirmation peer.
+    let (plexus_program, plexus_args) = match nonce_handoff {
+        NonceHandoff::RegistrationChannel => (&binary, json!([])),
+        #[cfg(windows)]
+        NonceHandoff::PipeDirect => (&binary, json!([])),
+        _ => (
             &launcher,
             json!([confirmation_mode, binary, confirmation_file]),
-        )
+        ),
     };
     let daemon_config_path = directory.join("subc.jsonc");
     let mut config = json!({
@@ -1838,10 +1844,10 @@ async fn start_live_daemon_with_federation(
             let result = (&mut task).await;
             panic!("the daemon stopped before publishing its connection file: {result:?}");
         }
-        assert!(
-            std::time::Instant::now() < publish_deadline,
-            "daemon did not publish its connection file within {DAEMON_PUBLISH_BOUND:?}"
-        );
+        if std::time::Instant::now() >= publish_deadline {
+            task.abort();
+            panic!("daemon did not publish its connection file within {DAEMON_PUBLISH_BOUND:?}");
+        }
         sleep(Duration::from_millis(10)).await;
     };
     eprintln!(
@@ -1899,16 +1905,49 @@ async fn send_control_request_within(
         serde_json::to_vec(&request).expect("serialize control request"),
     )
     .expect("build control request");
-    write_frame(stream, &frame)
-        .await
-        .expect("write control request");
-    timeout(deadline, read_frame(stream))
-        .await
-        .unwrap_or_else(|_| {
-            panic!("control response deadline: no answer within {deadline:?} to {label}")
-        })
-        .expect("read control response")
-        .expect("daemon connection remains open")
+    timeout(deadline, async {
+        write_frame(stream, &frame)
+            .await
+            .expect("write control request");
+        read_frame(stream)
+            .await
+            .expect("read control response")
+            .expect("daemon connection remains open")
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("control response deadline: no answer within {deadline:?} to {label}")
+    })
+}
+
+async fn supervisor_entries(
+    stream: &mut TcpStream,
+    correlation: u64,
+    deadline: Duration,
+) -> Vec<subc_control::SupervisorEntry> {
+    let frame = send_control_request_within(
+        stream,
+        correlation,
+        ClientControlRequest::SupervisorList {},
+        deadline,
+    )
+    .await;
+    let response: ClientControlResponse = serde_json::from_slice(&frame.body)
+        .unwrap_or_else(|error| panic!("decode supervisor.list response: {error}"));
+    let ClientControlResponse::SupervisorList { modules, .. } = response else {
+        panic!("expected supervisor.list response, got {response:?}");
+    };
+    modules
+}
+
+fn assert_fixture_has_not_failed(entries: &[subc_control::SupervisorEntry], module_id: &str) {
+    if let Some(entry) = entries.iter().find(|entry| entry.module_id == module_id) {
+        assert!(
+            entry.last_exit_ms.is_none() && entry.admission_refused.is_none(),
+            "fixture {module_id} failed during startup (state: {}, exit code: {:?}, signal: {:?}, admission refusal: {:?})",
+            entry.state, entry.last_exit_code, entry.last_exit_signal, entry.admission_refused
+        );
+    }
 }
 
 /// The fixture modules every live daemon starts beside plexus, and that plexus
@@ -1957,12 +1996,14 @@ async fn wait_for_module_catalog(stream: &mut TcpStream) -> ClientControlRespons
                 "{module_id} did not register within 60s: the module is not coming up"
             );
             correlation += 1;
-            let frame = send_control_request(
+            let frame = send_control_request_within(
                 stream,
                 correlation,
                 ClientControlRequest::CatalogList {
                     module_id: Some(module_id.to_string()),
                 },
+                Duration::from_secs(5)
+                    .min(deadline.saturating_duration_since(std::time::Instant::now())),
             )
             .await;
             assert_eq!(frame.header.ty, FrameType::Response);
@@ -1976,7 +2017,18 @@ async fn wait_for_module_catalog(stream: &mut TcpStream) -> ClientControlRespons
                     break;
                 }
             }
-            sleep(Duration::from_millis(10)).await;
+            // A broken fixture is restarted by the supervisor. Its exit is
+            // visible here even if its replacement is already starting.
+            correlation += 1;
+            let entries = supervisor_entries(
+                stream,
+                correlation,
+                Duration::from_secs(5)
+                    .min(deadline.saturating_duration_since(std::time::Instant::now())),
+            )
+            .await;
+            assert_fixture_has_not_failed(&entries, module_id);
+            sleep(Duration::from_millis(100)).await;
         }
     }
     let listed_after = started.elapsed();
@@ -2761,6 +2813,33 @@ async fn descriptor_nonce_reaches_hello_provenance_and_a_later_vault_read() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(daemon.operator_peer.approvals() > 0);
+    daemon.stop();
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn windows_plexus_reads_the_nonce_pipe_and_registers_wrapped_peers() {
+    let (mut daemon, connection) =
+        start_live_daemon_with(conformance_catalog_dir(), NonceHandoff::PipeDirect).await;
+    let mut client = connect_client(&connection).await;
+    wait_for_module_catalog(&mut client).await;
+
+    // Plexus is launched directly (no way to get the nonce from a wrapper).
+    // The two required peers can only register after the wrapper forwards their
+    // nonces. The supervisor independently observes each pipe being consumed.
+    let entries = supervisor_entries(&mut client, 90, Duration::from_secs(5)).await;
+    for module_id in std::iter::once(MODULE_ID).chain(FIXTURE_MODULE_IDS) {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.module_id == module_id)
+            .unwrap_or_else(|| panic!("{module_id} missing from supervisor.list"));
+        assert_eq!(
+            entry.launch_nonce_source.as_deref(),
+            Some("pipe"),
+            "{module_id}"
+        );
+    }
+    open_live_route(&mut client).await;
     daemon.stop();
 }
 

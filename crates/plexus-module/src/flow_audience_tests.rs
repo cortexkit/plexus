@@ -87,23 +87,43 @@ impl Core {
             "modules":{(core_module):module(core_module),"plexus":module("plexus")}}),
         );
         atomic_json(&scratch.join("behavior.json"), &json!({"reply":reply}));
+        let logs = scratch.join("logs");
         let config = fixture_launcher::daemon_config(&connection, &built)
-            .with_capture_logs_dir(scratch.join("logs"))
+            .with_capture_logs_dir(&logs)
             .with_daemon_config_path(&config_path)
             .unwrap();
-        let task = tokio::spawn(subc_daemon::bootstrap::run_with_config(config));
-        let credentials = timeout(LIMIT, async {
+        let mut task = tokio::spawn(subc_daemon::bootstrap::run_with_config(config));
+        let core_ready = scratch.join(format!("{core_module}.ready.json"));
+        let plexus_ready = scratch.join("plexus.ready.json");
+        let ready = async {
             loop {
-                if scratch.join(format!("{core_module}.ready.json")).exists() {
-                    if let Ok(bytes) = fs::read(scratch.join("plexus.ready.json")) {
-                        break serde_json::from_slice::<Value>(&bytes).unwrap();
+                if core_ready.exists() {
+                    if let Ok(bytes) = fs::read(&plexus_ready) {
+                        break bytes;
                     }
                 }
                 sleep(Duration::from_millis(20)).await;
             }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("core fixture startup failed: {:?}", scratch.path()));
+        };
+        let result = tokio::select! {
+            result = &mut task => Err(format!("daemon stopped before fixture registration: {result:?}")),
+            result = timeout(LIMIT, ready) => result.map_err(|_| format!(
+                "registration did not finish within {LIMIT:?} ({core_module} ready: {}, plexus ready: {})",
+                core_ready.exists(), plexus_ready.exists()
+            )),
+        };
+        let credentials = result.unwrap_or_else(|cause| {
+            task.abort();
+            let output = |id| {
+                fs::read_to_string(logs.join(format!("{id}.stderr.log")))
+                    .unwrap_or_else(|error| format!("could not read captured output: {error}"))
+            };
+            panic!(
+                "core fixture startup failed: {cause}\n{core_module} output:\n{}\nplexus output:\n{}",
+                output(core_module),
+                output("plexus")
+            );
+        });
         let peer = SubcPrefrontalRoutePeer::connect(
             &connection,
             "prefrontal",
@@ -111,7 +131,7 @@ impl Core {
         )
         .unwrap()
         .with_call_options(subc_client_rs::CallOptions {
-            consumer_identity: Some(serde_json::from_value(credentials).unwrap()),
+            consumer_identity: Some(serde_json::from_slice(&credentials).unwrap()),
             ..Default::default()
         })
         .with_call_timeout(call_timeout);
@@ -170,8 +190,8 @@ async fn core_module_fixture() {
         .await
         .unwrap();
     let nonce = subc_client_rs::launch_nonce()
-        .unwrap()
-        .unwrap()
+        .expect("read core fixture launch nonce")
+        .expect("core fixture did not receive a launch nonce")
         .value()
         .to_string();
     let mut module_manifest = manifest::build(&id);
@@ -212,9 +232,14 @@ async fn core_module_fixture() {
     )
     .unwrap();
     write_frame(&mut stream, &frame).await.unwrap();
+    let ack = receive(&mut stream)
+        .await
+        .expect("core fixture HELLO reply");
     assert_eq!(
-        receive(&mut stream).await.unwrap().header.ty,
-        FrameType::HelloAck
+        ack.header.ty,
+        FrameType::HelloAck,
+        "{id} HELLO rejected: {}",
+        String::from_utf8_lossy(&ack.body)
     );
     atomic_json(
         &root.join(format!("{id}.ready.json")),
