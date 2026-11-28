@@ -9,13 +9,13 @@
   "comment_author": null,
   "comment_excerpt": null,
   "comment_url": null,
-  "event_key": "cccd6422820cd5741395fd9459d118a145821ec175edee5fd187c1b8d51dea98",
+  "event_key": "5650e71861369ba5b69b1cc2cce91c793df2439810e164966dd56034a5484033",
   "kind": "issue",
   "number": 7,
-  "observed_at": "2026-11-27T16:24:41.595Z",
+  "observed_at": "2026-11-27T23:58:06.170Z",
   "repo": "outside/repo",
   "state": "open",
   "title": "watched",
-  "updated_at": "2026-10-07T00:00:01Z",
+  "updated_at": "2026-11-27T23:58:06.161Z",
   "url": "https://github.com/outside/repo/issues/7"
 }

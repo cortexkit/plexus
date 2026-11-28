@@ -76,6 +76,18 @@ impl Fixture {
     async fn watch(&self, args: Value, flow: &str, agent: Option<&str>) -> Value {
         self.call(TOOL, args, flow, agent).await
     }
+
+    fn set_watch_created_at(&self, flow: &str, at_ms: i64) {
+        let db = rusqlite::Connection::open(self.scratch.as_ref() as &Path).unwrap();
+        assert_eq!(
+            db.execute(
+                "UPDATE github_outside_watches SET created_at_ms=?1 WHERE flow_id=?2",
+                rusqlite::params![at_ms, flow],
+            )
+            .unwrap(),
+            1
+        );
+    }
 }
 
 fn fixture_connection(store: &PlexusStore, connection: &str, actions: &[&str]) {
@@ -135,6 +147,12 @@ fn fixture_grant(store: &PlexusStore, connection: &str, grantee: &str, actions: 
 
 fn ensure(repository: &str, number: i64, expires_at_ms: i64) -> Value {
     json!({"action":"ensure","repository":repository,"kind":"issue","number":number,"expires_at_ms":expires_at_ms})
+}
+
+fn iso_time(millis: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(millis)
+        .unwrap()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 fn refused(reply: &Value, code: &str) {
@@ -307,7 +325,8 @@ async fn ensures_are_idempotent_and_end_retires_only_the_last_subscription() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn poll_and_events_get_reach_only_the_watched_item_for_the_same_flow() {
     let f = Fixture::new();
-    let expiry = plexus_core::now_ms() + DAY;
+    let before_watch = plexus_core::now_ms();
+    let expiry = before_watch + DAY;
     let watch = f
         .watch(ensure("outside/repo", 7, expiry), "flow-a", Some("agent-x"))
         .await;
@@ -318,16 +337,31 @@ async fn poll_and_events_get_reach_only_the_watched_item_for_the_same_flow() {
         .unwrap()
         .pop()
         .unwrap();
-    let items = json!([
-        {"number":7,"updated_at":"2026-10-07T00:00:01Z","created_at":"2026-10-01T00:00:00Z","title":"watched"},
-        {"number":8,"updated_at":"2026-10-07T00:00:02Z","created_at":"2026-10-01T00:00:00Z","title":"unwatched"}
-    ]);
+    let created = iso_time(before_watch - DAY);
+    let old = iso_time(before_watch - 1_000);
     f.mock.set_response_for_method(
         "list_issues",
         "",
-        MockResponse::Success(json!({"issues":items})),
+        MockResponse::Success(json!({"issues":[
+            {"number":7,"updated_at":old,"created_at":created,"title":"watched"}
+        ]})),
     );
     let poller = plexus_core::Poller::new(f.runtime.runtime.engine.clone());
+    let first = poller.poll_once(OWNER, &sub.subscription_id);
+    assert!(
+        matches!(first, plexus_core::PollCycle::Completed { inserted: 0, .. }),
+        "the first poll must not publish pre-existing issue activity: {first:?}"
+    );
+    assert!(f.store.drain_event_outbox(10).unwrap().is_empty());
+    let updated = iso_time(plexus_core::now_ms() + 1_000);
+    f.mock.set_response_for_method(
+        "list_issues",
+        "",
+        MockResponse::Success(json!({"issues":[
+            {"number":7,"updated_at":updated,"created_at":created,"title":"watched"},
+            {"number":8,"updated_at":updated,"created_at":created,"title":"unwatched"}
+        ]})),
+    );
     assert!(matches!(
         poller.poll_once(OWNER, &sub.subscription_id),
         plexus_core::PollCycle::Completed { inserted: 1, .. }
@@ -358,6 +392,35 @@ async fn poll_and_events_get_reach_only_the_watched_item_for_the_same_flow() {
             "{not_visible}"
         );
     }
+    f.watch(
+        json!({"action":"end","repository":"outside/repo","kind":"issue","number":7}),
+        "flow-a",
+        Some("agent-x"),
+    )
+    .await;
+    let args = json!({"event_key":event.event_key,"event_name":"github_issue_changed","version":2});
+    let ended = f
+        .call(manifest::EVENTS_GET_TOOL, args, "flow-a", Some("agent-x"))
+        .await;
+    assert_eq!(ended["error"]["code"], "event_not_visible", "{ended}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joining_watch_ignores_activity_before_its_own_creation() {
+    let f = Fixture::new();
+    let before_join = plexus_core::now_ms();
+    let expiry = before_join + DAY;
+    let first = f
+        .watch(ensure("outside/repo", 7, expiry), "flow-a", Some("agent-x"))
+        .await;
+    assert_eq!(first["result"]["watch"], "outside", "{first}");
+    f.set_watch_created_at("flow-a", before_join - 60_000);
+    let sub = f
+        .store
+        .list_subscriptions(OWNER, None, None)
+        .unwrap()
+        .pop()
+        .unwrap();
     f.mock.set_response_for_method(
         "issue_read",
         "get",
@@ -367,11 +430,30 @@ async fn poll_and_events_get_reach_only_the_watched_item_for_the_same_flow() {
         .watch(ensure("outside/repo", 8, expiry), "flow-b", Some("agent-x"))
         .await;
     assert_eq!(other["result"]["watch"], "outside", "{other}");
+    assert_eq!(
+        f.store.list_subscriptions(OWNER, None, None).unwrap().len(),
+        1
+    );
+    let created = iso_time(before_join - DAY);
     f.mock.set_response_for_method(
         "list_issues",
         "",
         MockResponse::Success(json!({"issues":[
-            {"number":8,"updated_at":"2026-10-07T00:00:03Z","created_at":"2026-10-01T00:00:00Z"}
+            {"number":8,"updated_at":iso_time(before_join - 30_000),"created_at":created}
+        ]})),
+    );
+    let poller = plexus_core::Poller::new(f.runtime.runtime.engine.clone());
+    let first = poller.poll_once(OWNER, &sub.subscription_id);
+    assert!(
+        matches!(first, plexus_core::PollCycle::Completed { inserted: 0, .. }),
+        "activity after the first watch but before the joining watch must not publish: {first:?}"
+    );
+    assert!(f.store.drain_event_outbox(10).unwrap().is_empty());
+    f.mock.set_response_for_method(
+        "list_issues",
+        "",
+        MockResponse::Success(json!({"issues":[
+            {"number":8,"updated_at":iso_time(plexus_core::now_ms() + 1_000),"created_at":created}
         ]})),
     );
     assert!(matches!(
@@ -379,10 +461,8 @@ async fn poll_and_events_get_reach_only_the_watched_item_for_the_same_flow() {
         plexus_core::PollCycle::Completed { inserted: 1, .. }
     ));
     let events = f.store.drain_event_outbox(10).unwrap();
-    let other_event = events
-        .iter()
-        .find(|row| row.event_key != event.event_key)
-        .unwrap();
+    assert_eq!(events.len(), 1);
+    let other_event = &events[0];
     let args =
         json!({"event_key":other_event.event_key,"event_name":"github_issue_changed","version":2});
     let refusal = f
@@ -398,17 +478,126 @@ async fn poll_and_events_get_reach_only_the_watched_item_for_the_same_flow() {
         .call(manifest::EVENTS_GET_TOOL, args, "flow-b", Some("agent-x"))
         .await;
     assert!(allowed.get("result").is_some(), "{allowed}");
-    f.watch(
-        json!({"action":"end","repository":"outside/repo","kind":"issue","number":7}),
-        "flow-a",
-        Some("agent-x"),
-    )
-    .await;
-    let args = json!({"event_key":event.event_key,"event_name":"github_issue_changed","version":2});
-    let ended = f
-        .call(manifest::EVENTS_GET_TOOL, args, "flow-a", Some("agent-x"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_item_watch_reads_only_activity_after_its_own_creation() {
+    let f = Fixture::new();
+    let before_join = plexus_core::now_ms();
+    let expiry = before_join + DAY;
+    for flow in ["flow-a", "flow-b"] {
+        let reply = f
+            .watch(ensure("outside/repo", 7, expiry), flow, Some("agent-x"))
+            .await;
+        assert_eq!(reply["result"]["watch"], "outside", "{reply}");
+    }
+    f.set_watch_created_at("flow-a", before_join - 60_000);
+    let subs = f.store.list_subscriptions(OWNER, None, None).unwrap();
+    assert_eq!(1, subs.len());
+    let poller = plexus_core::Poller::new(f.runtime.runtime.engine.clone());
+    for (activity, new_watch_visible) in [
+        (before_join - 30_000, false),
+        (plexus_core::now_ms() + 1_000, true),
+    ] {
+        f.mock.set_response_for_method(
+            "list_issues",
+            "",
+            MockResponse::Success(json!({"issues":[
+                {"number":7,"updated_at":iso_time(activity),"created_at":iso_time(before_join-DAY)}
+            ]})),
+        );
+        let cycle = poller.poll_once(OWNER, &subs[0].subscription_id);
+        assert!(
+            matches!(cycle, plexus_core::PollCycle::Completed { inserted: 1, .. }),
+            "the older watch is owed both changes: {cycle:?}"
+        );
+        let events = f.store.drain_event_outbox_version(10, 2).unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        let args = json!({"event_key":event.event_key,"event_name":event.event_name,"version":2});
+        for (flow, visible) in [("flow-a", true), ("flow-b", new_watch_visible)] {
+            let reply = f
+                .call(
+                    manifest::EVENTS_GET_TOOL,
+                    args.clone(),
+                    flow,
+                    Some("agent-x"),
+                )
+                .await;
+            if visible {
+                assert!(reply.get("result").is_some(), "{flow}: {reply}");
+            } else {
+                assert_eq!(
+                    reply["error"]["code"], "event_not_visible",
+                    "{flow}: {reply}"
+                );
+            }
+        }
+        assert!(f
+            .store
+            .mark_event_version_published(&event.event_key, 2, plexus_core::now_ms())
+            .unwrap());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_watch_ignores_tags_published_before_creation() {
+    let f = Fixture::new();
+    let before_watch = plexus_core::now_ms();
+    let release = |tag, id, at_ms| {
+        f.mock.set_response_for_method(
+            "get_latest_release",
+            "",
+            MockResponse::Success(json!({"tag_name":tag,"id":id,"published_at":iso_time(at_ms)})),
+        );
+    };
+    release("v2", 20, before_watch - DAY);
+    let watch = f
+        .watch(
+            json!({"action":"ensure","repository":"outside/repo","kind":"release","expires_at_ms":before_watch+DAY}),
+            "flow-a",
+            Some("agent-x"),
+        )
         .await;
-    assert_eq!(ended["error"]["code"], "event_not_visible", "{ended}");
+    assert_eq!(watch["result"]["watch"], "outside", "{watch}");
+    let sub = f
+        .store
+        .list_subscriptions(OWNER, None, None)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let poller = plexus_core::Poller::new(f.runtime.runtime.engine.clone());
+    // GitHub can fall back to an older release when the latest is removed.
+    release("v1", 19, before_watch - 2 * DAY);
+    let first = poller.poll_once(OWNER, &sub.subscription_id);
+    assert!(
+        matches!(first, plexus_core::PollCycle::Completed { inserted: 0, .. }),
+        "a change in the latest tag is not a new publication: {first:?}"
+    );
+    assert!(f.store.drain_event_outbox(10).unwrap().is_empty());
+    release("v3", 21, plexus_core::now_ms() + 1_000);
+    let later = poller.poll_once(OWNER, &sub.subscription_id);
+    assert!(
+        matches!(later, plexus_core::PollCycle::Completed { inserted: 1, .. }),
+        "{later:?}"
+    );
+    let events = f.store.drain_event_outbox(10).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_name, "github_release_published");
+    assert_eq!(
+        serde_json::from_str::<Value>(&events[0].body).unwrap()["tag_name"],
+        "v3"
+    );
+    let event = &events[0];
+    let reply = f
+        .call(
+            manifest::EVENTS_GET_TOOL,
+            json!({"event_key":event.event_key,"event_name":event.event_name,"version":2}),
+            "flow-a",
+            Some("agent-x"),
+        )
+        .await;
+    assert!(reply.get("result").is_some(), "{reply}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -533,6 +722,11 @@ async fn wire_vectors_match_the_flow_handler() {
 
     let f = Fixture::new();
     let expiry = plexus_core::now_ms() + DAY;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/github-watch-v1");
+    let regenerate = std::env::var("PLEXUS_REGENERATE_GITHUB_WATCH_FIXTURES").as_deref() == Ok("1");
+    let pinned: Option<Vec<Value>> = (!regenerate).then(|| {
+        serde_json::from_slice(&std::fs::read(directory.join("vectors.json")).unwrap()).unwrap()
+    });
     let mut vectors = Vec::new();
     async fn capture(
         vectors: &mut Vec<Value>,
@@ -564,8 +758,18 @@ async fn wire_vectors_match_the_flow_handler() {
         .unwrap()
         .pop()
         .unwrap();
+    // Replay the sample's update relative to its recorded expiry so that the
+    // timestamp and derived event key stay stable. The live call still requires
+    // a future expiry; move the stored watch start to before the sample update.
+    let sample_expiry = pinned.as_ref().map_or(expiry, |vectors| {
+        vectors[0]["reply"]["result"]["expires_at_ms"]
+            .as_i64()
+            .unwrap()
+    });
+    let update_at = sample_expiry - DAY;
+    f.set_watch_created_at("flow-a", update_at - 1_000);
     f.mock.set_response_for_method("list_issues", "", MockResponse::Success(json!({"issues":[
-        {"number":7,"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-07T00:00:01Z","title":"watched","state":"open"}
+        {"number":7,"created_at":iso_time(update_at - 2 * DAY),"updated_at":iso_time(update_at),"title":"watched","state":"open"}
     ]})));
     let poller = plexus_core::Poller::new(f.runtime.runtime.engine.clone());
     assert!(matches!(
@@ -713,12 +917,7 @@ async fn wire_vectors_match_the_flow_handler() {
             );
         }
     }
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/github-watch-v1");
-    let regenerate = std::env::var("PLEXUS_REGENERATE_GITHUB_WATCH_FIXTURES").as_deref() == Ok("1");
-    if !regenerate {
-        let pinned: Vec<Value> =
-            serde_json::from_slice(&std::fs::read(directory.join("vectors.json")).unwrap())
-                .unwrap();
+    if let Some(pinned) = pinned {
         // Real calls require a future expiry. Compare the live value to the
         // request, then substitute the recorded clock for the byte comparison.
         assert_eq!(vectors[0]["reply"]["result"]["expires_at_ms"], expiry);

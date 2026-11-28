@@ -2667,9 +2667,18 @@ where
             );
         }
         match store.outside_watch_poll(&subscription.subscription_id, now_ms()) {
-            Ok(Some(outside)) => advance
-                .events
-                .retain(|event| outside.admits(item_kind, &event.payload)),
+            Ok(Some(outside)) => {
+                advance.events.retain_mut(|event| {
+                    if item_kind == Some("release") {
+                        // A different latest tag can be an older release resurfacing.
+                        // Use the release's publication time, not when we polled.
+                        event.activity_at_ms = event.payload["published_at"]
+                            .as_str()
+                            .and_then(iso8601::parse_to_millis);
+                    }
+                    outside.admits(item_kind, &event.payload, event.activity_at_ms)
+                });
+            }
             Ok(None) => {}
             Err(error) => {
                 return PollCycle::StoreFailed {

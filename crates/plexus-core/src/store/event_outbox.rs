@@ -399,6 +399,7 @@ const OUTSIDE_FLOW_EVENT_VISIBILITY_SQL: &str = "SELECT EXISTS(
     JOIN event_outbox o ON o.event_key=?1 JOIN trigger_events e ON e.event_id=o.event_id
     WHERE w.flow_id=?2 AND w.agent_id=?3 AND w.expires_at_ms>?4 AND w.last_public_check_at_ms>?5
       AND s.status='active' AND w.repository=lower(o.repo) AND w.repo_id=o.repo_id
+      AND e.activity_at_ms>w.created_at_ms
       AND CASE o.event_name
         WHEN 'github_release_published' THEN w.kind='release'
         WHEN 'github_issue_changed' THEN w.kind='issue' AND w.number=COALESCE(

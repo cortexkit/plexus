@@ -179,6 +179,9 @@ fn emits_events(name: &str) -> Option<bool> {
         // - the webhook relay admits no reaction webhook types.
         // If either stops holding, this promise must be withdrawn.
         manifest::GITHUB_REACT_TOOL => Some(false),
+        // github_watch writes only plexus's own watch state and audit rows.
+        // A watch publishes only for GitHub activity after it was created.
+        manifest::GITHUB_WATCH_TOOL => Some(false),
         _ => None,
     }
 }
