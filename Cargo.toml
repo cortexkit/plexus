@@ -33,7 +33,7 @@ subc-transport = "=0.18.2"
 subc-control = "=0.43.1"
 subc-daemon = "=0.54.6"
 subc-jsonc = "=0.1.5"
-subc-client-rs = "=0.43.0"
+subc-client-rs = "=0.43.1"
 
 # Exact pins, moved together. cortexkit-log already depends on the registry
 # cortexkit-store-types; a second copy from anywhere else would be a distinct
