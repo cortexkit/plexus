@@ -9,7 +9,7 @@ requests through that route and compares the raw response bytes and `SHA256SUMS`
 | `head.reply.json` | `{"preset":"head"}` | `web_search`, `code_search` |
 | `worker.reply.json` | `{"preset":"worker"}` | `web_search`, `code_search` |
 | `reader.reply.json` | `{"preset":"reader"}` | `code_search` |
-| `flow.reply.json` | `{"preset":"flow"}` | `catalog`, `invoke`, `github`, `github_read`, `github_react`, `events_get`, `web_search`, `code_search` |
+| `flow.reply.json` | `{"preset":"flow"}` | `catalog`, `invoke`, `github`, `github_read`, `github_react`, `github_watch`, `events_get`, `web_search`, `code_search` |
 | `no-preset.reply.json` | `{}` | None |
 
 Consumers discover the served `presets` list from the full no-preset reply.

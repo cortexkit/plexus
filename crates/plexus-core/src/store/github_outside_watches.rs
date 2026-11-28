@@ -6,22 +6,29 @@ use crate::github_watch::{
     PUBLIC_CONNECTION,
 };
 use rusqlite::params;
+use std::collections::BTreeMap;
 
 pub(crate) struct OutsidePoll {
     pub(crate) repo_id: Option<i64>,
-    numbers: BTreeSet<i64>,
+    first_created_at_by_number: BTreeMap<i64, i64>,
 }
 
 impl OutsidePoll {
-    pub(crate) fn admits(&self, item_kind: Option<&str>, payload: &Value) -> bool {
+    pub(crate) fn admits(
+        &self,
+        item_kind: Option<&str>,
+        payload: &Value,
+        activity_at_ms: Option<i64>,
+    ) -> bool {
+        let number = if item_kind == Some("release") {
+            Some(0)
+        } else {
+            payload["number"].as_i64()
+        };
         self.repo_id.is_some()
-            && if item_kind == Some("release") {
-                self.numbers.contains(&0)
-            } else {
-                payload["number"]
-                    .as_i64()
-                    .is_some_and(|number| self.numbers.contains(&number))
-            }
+            && number
+                .and_then(|number| self.first_created_at_by_number.get(&number))
+                .is_some_and(|created_at| activity_at_ms.is_some_and(|at| at > *created_at))
     }
 }
 
@@ -33,7 +40,7 @@ pub(super) fn outside_watch_poll_on_conn(
     now: i64,
 ) -> rusqlite::Result<Option<OutsidePoll>> {
     let mut query = conn.prepare(
-        "SELECT number, expires_at_ms, last_public_check_at_ms, repo_id
+        "SELECT number, expires_at_ms, last_public_check_at_ms, repo_id, created_at_ms
         FROM github_outside_watches WHERE subscription_id=?1",
     )?;
     let mut rows = query.query([subscription])?;
@@ -41,13 +48,19 @@ pub(super) fn outside_watch_poll_on_conn(
     while let Some(row) = rows.next()? {
         let poll = data.get_or_insert_with(|| OutsidePoll {
             repo_id: None,
-            numbers: BTreeSet::new(),
+            first_created_at_by_number: BTreeMap::new(),
         });
         let expiry: i64 = row.get(1)?;
         let checked: i64 = row.get(2)?;
         if expiry > now && checked > now.saturating_sub(HOUR_MS) {
             poll.repo_id = Some(row.get(3)?);
-            poll.numbers.insert(row.get(0)?);
+            let created_at: i64 = row.get(4)?;
+            // The shared poll can publish if any watch is owed the event.
+            // Each flow's lookup checks the creation time of its own watch.
+            poll.first_created_at_by_number
+                .entry(row.get(0)?)
+                .and_modify(|first| *first = (*first).min(created_at))
+                .or_insert(created_at);
         }
     }
     Ok(data)

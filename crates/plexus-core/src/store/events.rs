@@ -603,7 +603,11 @@ impl PlexusStore {
                             event
                                 .identity
                                 .is_none_or(|identity| Some(identity.repo_id) != outside.repo_id)
-                                || !outside.admits(event.event.item_kind, event.event.payload)
+                                || !outside.admits(
+                                    event.event.item_kind,
+                                    event.event.payload,
+                                    event.event.activity_at_ms,
+                                )
                         })
                     {
                         return Ok(None);

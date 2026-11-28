@@ -115,28 +115,24 @@ fn catalog_modes_match_every_tool_contract() {
     }
 }
 
-/// The served catalog marks github_react, and no other tool, with
-/// `emits_events: false`, and the served digest covers that member.
+/// The served catalog marks only github_react and github_watch as
+/// non-emitting, and the served digest covers the declarations.
 #[test]
-fn catalog_emits_events_is_false_on_github_react_only() {
+fn catalog_emits_events_is_false_on_github_react_and_github_watch_only() {
     let all_tools = wire_tools(&catalog_tools(&advertised_tools()));
     let tools = all_tools.as_array().unwrap();
     assert_eq!(tools.len(), 12);
     for tool in tools {
-        if tool["name"] == "github_react" {
-            assert_eq!(
-                tool.get("emits_events"),
-                Some(&json!(false)),
-                "github_react must promise emits_events: false"
-            );
-        } else {
-            assert_eq!(
-                tool.get("emits_events"),
-                None,
-                "only github_react carries emits_events: {}",
-                tool["name"]
-            );
-        }
+        let expected = match tool["name"].as_str().unwrap() {
+            "github_react" | "github_watch" => Some(json!(false)),
+            _ => None,
+        };
+        assert_eq!(
+            tool.get("emits_events"),
+            expected.as_ref(),
+            "{}",
+            tool["name"]
+        );
     }
     let wire = reply(
         ops::TOOL_CATALOG,
@@ -144,6 +140,7 @@ fn catalog_emits_events_is_false_on_github_react_only() {
     )
     .unwrap();
     assert_eq!(wire["tools"][4]["emits_events"], false);
+    assert_eq!(wire["tools"][5]["emits_events"], false);
     let mut content = wire.clone();
     content.as_object_mut().unwrap().remove("catalog_digest");
     assert_eq!(
